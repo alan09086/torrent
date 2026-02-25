@@ -8,6 +8,7 @@ pub(crate) mod metadata;
 pub(crate) mod piece_selector;
 pub(crate) mod pex;
 pub(crate) mod choker;
+pub(crate) mod tracker_manager;
 pub(crate) mod peer;
 mod torrent;
 

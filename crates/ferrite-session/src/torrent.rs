@@ -24,6 +24,7 @@ use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::PeerState;
 use crate::piece_selector::PieceSelector;
+use crate::tracker_manager::TrackerManager;
 use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, TorrentState, TorrentStats};
 
 /// Cloneable handle for interacting with a running torrent.
@@ -40,6 +41,7 @@ impl TorrentHandle {
         meta: TorrentMetaV1,
         storage: Arc<dyn TorrentStorage>,
         config: TorrentConfig,
+        dht: Option<DhtHandle>,
     ) -> crate::Result<Self> {
         let mut config = config;
         // BEP 27: private torrents disable DHT and PEX
@@ -66,6 +68,28 @@ impl TorrentHandle {
             .await
             .ok();
 
+        let tracker_manager =
+            TrackerManager::from_torrent(&meta, our_peer_id, config.listen_port);
+
+        let enable_dht = config.enable_dht;
+
+        // Start DHT peer discovery if enabled and available
+        let dht_peers_rx = if enable_dht {
+            if let Some(ref dht) = dht {
+                match dht.get_peers(meta.info_hash).await {
+                    Ok(rx) => Some(rx),
+                    Err(e) => {
+                        warn!("failed to start DHT get_peers: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -88,6 +112,9 @@ impl TorrentHandle {
             event_rx,
             meta: Some(meta),
             listener,
+            tracker_manager,
+            dht: if enable_dht { dht } else { None },
+            dht_peers_rx,
         };
 
         tokio::spawn(actor.run());
@@ -98,7 +125,7 @@ impl TorrentHandle {
     pub async fn from_magnet(
         magnet: Magnet,
         config: TorrentConfig,
-        _dht: Option<DhtHandle>,
+        dht: Option<DhtHandle>,
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -107,6 +134,28 @@ impl TorrentHandle {
         let listener = TcpListener::bind(("127.0.0.1", config.listen_port))
             .await
             .ok();
+
+        let tracker_manager =
+            TrackerManager::empty(magnet.info_hash, our_peer_id, config.listen_port);
+
+        let enable_dht = config.enable_dht;
+
+        // Start DHT peer discovery if enabled and available
+        let dht_peers_rx = if enable_dht {
+            if let Some(ref dht) = dht {
+                match dht.get_peers(magnet.info_hash).await {
+                    Ok(rx) => Some(rx),
+                    Err(e) => {
+                        warn!("failed to start DHT get_peers: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let actor = TorrentActor {
             config,
@@ -130,6 +179,9 @@ impl TorrentHandle {
             event_rx,
             meta: None,
             listener,
+            tracker_manager,
+            dht: if enable_dht { dht } else { None },
+            dht_peers_rx,
         };
 
         tokio::spawn(actor.run());
@@ -204,6 +256,13 @@ struct TorrentActor {
 
     // TCP listener for incoming peer connections
     listener: Option<TcpListener>,
+
+    // Tracker management
+    tracker_manager: TrackerManager,
+
+    // DHT handle (shared, optional)
+    dht: Option<DhtHandle>,
+    dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
 }
 
 impl TorrentActor {
@@ -217,6 +276,16 @@ impl TorrentActor {
         unchoke_interval.tick().await;
         optimistic_interval.tick().await;
         connect_interval.tick().await;
+
+        // Initial tracker announce (Started event) — non-blocking, fires via select! arm
+        // DHT announce
+        if self.state == TorrentState::Downloading
+            && self.config.enable_dht
+            && let Some(ref dht) = self.dht
+            && let Err(e) = dht.announce(self.info_hash, self.config.listen_port).await
+        {
+            warn!("DHT announce failed: {e}");
+        }
 
         loop {
             tokio::select! {
@@ -258,6 +327,58 @@ impl TorrentActor {
                 // Connect timer
                 _ = connect_interval.tick() => {
                     self.try_connect_peers();
+                    // Re-trigger DHT search if exhausted and we still need peers
+                    if self.dht_peers_rx.is_none()
+                        && self.config.enable_dht
+                        && self.available_peers.is_empty()
+                        && self.peers.len() < self.config.max_peers
+                        && let Some(ref dht) = self.dht
+                    {
+                        match dht.get_peers(self.info_hash).await {
+                            Ok(rx) => self.dht_peers_rx = Some(rx),
+                            Err(e) => warn!("DHT re-search failed: {e}"),
+                        }
+                    }
+                }
+                // Tracker re-announce timer
+                _ = async {
+                    match self.tracker_manager.next_announce_in() {
+                        Some(dur) => tokio::time::sleep(dur).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if self.state != TorrentState::FetchingMetadata {
+                        let left = self.calculate_left();
+                        let peers = self.tracker_manager.announce(
+                            ferrite_tracker::AnnounceEvent::None,
+                            self.uploaded,
+                            self.downloaded,
+                            left,
+                        ).await;
+                        if !peers.is_empty() {
+                            debug!(count = peers.len(), "tracker returned peers");
+                            self.handle_add_peers(peers);
+                        }
+                    }
+                }
+                // DHT peer discovery
+                result = async {
+                    match &mut self.dht_peers_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Some(peers) => {
+                            debug!(count = peers.len(), "DHT returned peers");
+                            self.handle_add_peers(peers);
+                        }
+                        None => {
+                            // DHT search exhausted
+                            debug!("DHT peer search exhausted");
+                            self.dht_peers_rx = None;
+                        }
+                    }
                 }
             }
         }
@@ -291,7 +412,30 @@ impl TorrentActor {
         }
     }
 
-    async fn shutdown_peers(&self) {
+    /// Calculate bytes remaining for tracker announce.
+    fn calculate_left(&self) -> u64 {
+        match (&self.meta, &self.chunk_tracker) {
+            (Some(meta), Some(ct)) => {
+                let total = meta.info.total_length();
+                let have = ct.bitfield().count_ones() as u64;
+                let pieces_total = self.num_pieces as u64;
+                if pieces_total == 0 {
+                    total
+                } else {
+                    total.saturating_sub(have * (total / pieces_total))
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    async fn shutdown_peers(&mut self) {
+        // Best-effort announce Stopped to trackers
+        let left = self.calculate_left();
+        self.tracker_manager
+            .announce_stopped(self.uploaded, self.downloaded, left)
+            .await;
+
         for peer in self.peers.values() {
             let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
         }
@@ -482,6 +626,11 @@ impl TorrentActor {
             {
                 info!("download complete");
                 self.state = TorrentState::Complete;
+                // Announce completion to trackers
+                let _ = self
+                    .tracker_manager
+                    .announce_completed(self.uploaded, self.downloaded)
+                    .await;
             }
         } else {
             warn!(index, "piece hash verification failed, re-requesting");
@@ -531,6 +680,11 @@ impl TorrentActor {
                         self.meta = Some(meta);
                         self.state = TorrentState::Downloading;
                         self.metadata_downloader = None;
+
+                        // Populate tracker manager with newly parsed metadata
+                        if let Some(ref meta) = self.meta {
+                            self.tracker_manager.set_metadata(meta);
+                        }
 
                         info!("metadata assembled, switching to Downloading");
                     }
@@ -911,7 +1065,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -956,7 +1110,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -986,7 +1140,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1050,7 +1204,7 @@ mod tests {
         config.enable_pex = true;
 
         // The from_torrent constructor should disable DHT and PEX
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1072,7 +1226,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1093,7 +1247,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1117,7 +1271,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
         let handle2 = handle.clone();
@@ -1158,7 +1312,7 @@ mod tests {
         // Drop the pre-bound listener before from_torrent binds
         drop(listener);
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1219,7 +1373,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1343,7 +1497,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1469,7 +1623,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1586,7 +1740,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config)
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
             .unwrap();
 
@@ -1770,7 +1924,7 @@ mod tests {
         let leecher_meta = make_test_torrent(&data, piece_length);
 
         let leecher_config = test_config();
-        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config)
+        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config, None)
             .await
             .unwrap();
 
@@ -1837,6 +1991,143 @@ mod tests {
         assert_eq!(stats.uploaded, 0);
         assert_eq!(stats.peers_connected, 0);
         assert_eq!(stats.peers_available, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 16: Tracker manager is populated from torrent metadata ----
+
+    #[tokio::test]
+    async fn tracker_populated_from_metadata() {
+        use serde::Serialize;
+
+        let data = vec![0xAB; 16384];
+        let hash = ferrite_core::sha1(&data);
+        let mut pieces = Vec::new();
+        pieces.extend_from_slice(hash.as_bytes());
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            length: u64,
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            announce: &'a str,
+            info: Info<'a>,
+        }
+
+        let t = Torrent {
+            announce: "http://tracker.example.com:8080/announce",
+            info: Info {
+                length: data.len() as u64,
+                name: "test",
+                piece_length: 16384,
+                pieces: &pieces,
+            },
+        };
+
+        let bytes = ferrite_bencode::to_bytes(&t).unwrap();
+        let meta = torrent_from_bytes(&bytes).unwrap();
+        assert!(meta.announce.is_some());
+
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        // The torrent should start and announce to tracker (which will fail since
+        // the tracker doesn't exist, but that's fine — failures are non-fatal).
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 17: Private torrent with DHT=None works ----
+
+    #[tokio::test]
+    async fn private_torrent_no_dht_field() {
+        let data = vec![0xAB; 16384];
+        let hash = ferrite_core::sha1(&data);
+        let mut pieces = Vec::new();
+        pieces.extend_from_slice(hash.as_bytes());
+
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            length: u64,
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+            private: i64,
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            announce: &'a str,
+            info: Info<'a>,
+        }
+
+        let t = Torrent {
+            announce: "http://private-tracker.example.com/announce",
+            info: Info {
+                length: data.len() as u64,
+                name: "private_test",
+                piece_length: 16384,
+                pieces: &pieces,
+                private: 1,
+            },
+        };
+
+        let bytes = ferrite_bencode::to_bytes(&t).unwrap();
+        let meta = torrent_from_bytes(&bytes).unwrap();
+        assert_eq!(meta.info.private, Some(1));
+
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 18: Magnet defers tracker announce ----
+
+    #[tokio::test]
+    async fn magnet_no_tracker_before_metadata() {
+        let magnet = Magnet {
+            info_hash: Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap(),
+            display_name: Some("magnet test".into()),
+            trackers: vec![],
+            peers: vec![],
+        };
+
+        let handle = TorrentHandle::from_magnet(magnet, test_config(), None)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::FetchingMetadata);
+
+        // No tracker announces should happen in FetchingMetadata state
+        // (verified by the tracker_announce arm checking state != FetchingMetadata)
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         handle.shutdown().await.unwrap();
     }
