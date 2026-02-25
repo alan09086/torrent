@@ -98,6 +98,12 @@ pub(crate) enum PeerEvent {
     PexPeers {
         new_peers: Vec<SocketAddr>,
     },
+    IncomingRequest {
+        peer_addr: SocketAddr,
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
     RejectRequest {
         peer_addr: SocketAddr,
         index: u32,

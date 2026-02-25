@@ -611,14 +611,30 @@ impl TorrentActor {
                     self.handle_add_peers(new_peers);
                 }
             }
+            PeerEvent::IncomingRequest {
+                peer_addr,
+                index,
+                begin,
+                length,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.incoming_requests.push((index, begin, length));
+                }
+            }
             PeerEvent::RejectRequest {
                 peer_addr,
                 index,
-                begin: _,
+                begin,
                 length: _,
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.pending_requests = peer.pending_requests.saturating_sub(1);
+                    if let Some(pos) = peer
+                        .pending_requests
+                        .iter()
+                        .position(|&(i, b, _)| i == index && b == begin)
+                    {
+                        peer.pending_requests.swap_remove(pos);
+                    }
                 }
                 debug!(index, %peer_addr, "request rejected by peer");
             }
@@ -668,7 +684,13 @@ impl TorrentActor {
         self.downloaded += data.len() as u64;
 
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
-            peer.pending_requests = peer.pending_requests.saturating_sub(1);
+            if let Some(pos) = peer
+                .pending_requests
+                .iter()
+                .position(|&(i, b, _)| i == index && b == begin)
+            {
+                peer.pending_requests.swap_remove(pos);
+            }
             peer.download_rate += data.len() as u64;
         }
 
@@ -811,7 +833,7 @@ impl TorrentActor {
         let can_request = self
             .peers
             .get(&peer_addr)
-            .is_some_and(|p| !p.peer_choking && p.pending_requests < self.config.target_request_queue);
+            .is_some_and(|p| !p.peer_choking && p.pending_requests.len() < self.config.target_request_queue);
         if !can_request {
             return;
         }
@@ -826,7 +848,7 @@ impl TorrentActor {
 
         // Try to pick and request a piece
         if let Some(peer) = self.peers.get(&peer_addr) {
-            if peer.pending_requests >= self.config.target_request_queue {
+            if peer.pending_requests.len() >= self.config.target_request_queue {
                 return;
             }
 
@@ -859,7 +881,7 @@ impl TorrentActor {
                             length,
                         })
                         .await;
-                    peer.pending_requests += 1;
+                    peer.pending_requests.push((piece_index, begin, length));
                 }
             }
         }
@@ -919,6 +941,20 @@ impl TorrentActor {
             if let Some(peer) = self.peers.get_mut(addr)
                 && !peer.am_choking
             {
+                if peer.supports_fast {
+                    let pending: Vec<(u32, u32, u32)> =
+                        peer.incoming_requests.drain(..).collect();
+                    for (index, begin, length) in pending {
+                        let _ = peer
+                            .cmd_tx
+                            .send(PeerCommand::RejectRequest {
+                                index,
+                                begin,
+                                length,
+                            })
+                            .await;
+                    }
+                }
                 peer.am_choking = true;
                 let _ = peer.cmd_tx.send(PeerCommand::SetChoking(true)).await;
             }

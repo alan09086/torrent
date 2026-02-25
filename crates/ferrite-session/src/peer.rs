@@ -288,7 +288,18 @@ async fn handle_message(
                 warn!(%addr, ext_id, "unknown extension message");
             }
         }
-        Message::KeepAlive | Message::Request { .. } | Message::Cancel { .. } | Message::Port(_) => {
+        Message::Request { index, begin, length } => {
+            event_tx
+                .send(PeerEvent::IncomingRequest {
+                    peer_addr: addr,
+                    index,
+                    begin,
+                    length,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        Message::KeepAlive | Message::Cancel { .. } | Message::Port(_) => {
             // Ignored
         }
         Message::HaveAll => {

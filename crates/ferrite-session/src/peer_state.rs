@@ -26,8 +26,10 @@ pub(crate) struct PeerState {
     pub download_rate: u64,
     /// Upload rate in bytes/sec.
     pub upload_rate: u64,
-    /// Outstanding requests to this peer.
-    pub pending_requests: usize,
+    /// Outstanding requests to this peer (index, begin, length).
+    pub pending_requests: Vec<(u32, u32, u32)>,
+    /// Requests from this peer to us (index, begin, length).
+    pub incoming_requests: Vec<(u32, u32, u32)>,
     /// Peer's extension handshake, if received.
     pub ext_handshake: Option<ExtHandshake>,
     /// Whether the peer supports BEP 6 Fast Extension.
@@ -50,7 +52,8 @@ impl PeerState {
             bitfield: Bitfield::new(bitfield_len),
             download_rate: 0,
             upload_rate: 0,
-            pending_requests: 0,
+            pending_requests: Vec::new(),
+            incoming_requests: Vec::new(),
             ext_handshake: None,
             supports_fast: false,
             allowed_fast: HashSet::new(),
