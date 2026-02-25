@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.4.0 — 2026-02-25
+
+Session manager, BEP 6 Fast Extension, BEP 14 Local Peer Discovery. Seven crates, 331 tests.
+
+### M8b: ferrite-session (session manager + fast extension + LSD)
+- `SessionHandle` + `SessionActor` — multi-torrent session manager (actor model)
+- Add/remove/pause/resume torrents, shared DHT, duplicate rejection, capacity limits
+- Torrent info/stats queries via SessionHandle
+- BEP 6 Fast Extension wire messages: SuggestPiece, HaveAll, HaveNone, RejectRequest, AllowedFast
+- BEP 6 `allowed_fast_set()` algorithm (IP /24 mask + SHA1 chain)
+- BEP 6 handshake flag (`supports_fast()` / `with_fast()`)
+- BEP 6 peer behavior: HaveAll/HaveNone in Phase 4, message handling in peer task
+- BEP 14 Local Peer Discovery: announce formatting (batch, MTU-aware), message parsing, rate limiting
+- `TorrentState::Paused` with pause/resume on TorrentHandle
+- `SessionConfig`, `TorrentInfo`, `FileInfo`, `SessionStats`, `StorageFactory` types
+
+### ferrite-wire
+- 5 BEP 6 message variants with encode/decode
+- `allowed_fast_set()` public function
+- `supports_fast()` / `with_fast()` handshake methods
+
 ## 0.3.0 — 2026-02-25
 
 Tracker and DHT integration into TorrentActor. Seven crates, 299 tests.
