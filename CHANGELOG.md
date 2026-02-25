@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.5.0 — 2026-02-25
+
+Complete M8 gaps: magnet links, LSD actor, AllowedFast, RejectRequest. Seven crates, 337 tests.
+
+### M8c: ferrite-session (magnet/LSD/AllowedFast/RejectRequest)
+- `add_magnet()` on `SessionHandle` — magnet link support in session manager
+- `MetadataNotReady` error for torrent_info() on magnet torrents pre-BEP 9
+- `LsdHandle` + `LsdActor` — full BEP 14 Local Peer Discovery UDP multicast actor
+- LSD wired into SessionActor via `tokio::select!` loop with peer routing
+- LSD announce triggered on add_torrent/add_magnet
+- AllowedFast messages sent on peer connect (Phase 4b, BEP 6)
+- Pending requests tracked as `Vec<(u32, u32, u32)>` for precise matching
+- Incoming request tracking with `RejectRequest` on choke for fast peers
+- `IncomingRequest` PeerEvent variant for forwarding `Message::Request`
+
 ## 0.4.0 — 2026-02-25
 
 Session manager, BEP 6 Fast Extension, BEP 14 Local Peer Discovery. Seven crates, 331 tests.
