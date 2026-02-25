@@ -17,6 +17,36 @@ pub enum BencodeValue {
     Dict(BTreeMap<Vec<u8>, BencodeValue>),
 }
 
+impl BencodeValue {
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            BencodeValue::Integer(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn as_bytes_raw(&self) -> Option<&[u8]> {
+        match self {
+            BencodeValue::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub fn as_list(&self) -> Option<&[BencodeValue]> {
+        match self {
+            BencodeValue::List(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn as_dict(&self) -> Option<&BTreeMap<Vec<u8>, BencodeValue>> {
+        match self {
+            BencodeValue::Dict(map) => Some(map),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for BencodeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

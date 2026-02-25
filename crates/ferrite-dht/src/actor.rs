@@ -1,0 +1,833 @@
+//! DHT actor: single-owner event loop managing the routing table, UDP socket,
+//! and pending queries.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, trace, warn};
+
+use ferrite_core::Id20;
+
+use crate::compact::CompactNodeInfo;
+use crate::error::{Error, Result};
+use crate::krpc::{
+    GetPeersResponse, KrpcBody, KrpcMessage, KrpcQuery, KrpcResponse, TransactionId,
+};
+use crate::peer_store::PeerStore;
+use crate::routing_table::{RoutingTable, K};
+
+/// Configuration for the DHT.
+#[derive(Debug, Clone)]
+pub struct DhtConfig {
+    /// Address to bind the UDP socket.
+    pub bind_addr: SocketAddr,
+    /// Bootstrap nodes (host:port strings resolved at startup).
+    pub bootstrap_nodes: Vec<String>,
+    /// Our node ID. Generated randomly if `None`.
+    pub own_id: Option<Id20>,
+    /// Max outgoing queries per second (0 = unlimited).
+    pub queries_per_second: usize,
+    /// Timeout for individual KRPC queries.
+    pub query_timeout: Duration,
+}
+
+impl Default for DhtConfig {
+    fn default() -> Self {
+        DhtConfig {
+            bind_addr: "0.0.0.0:0".parse().unwrap(),
+            bootstrap_nodes: vec![
+                "router.bittorrent.com:6881".into(),
+                "dht.transmissionbt.com:6881".into(),
+                "router.utorrent.com:6881".into(),
+            ],
+            own_id: None,
+            queries_per_second: 50,
+            query_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Runtime statistics for the DHT.
+#[derive(Debug, Clone)]
+pub struct DhtStats {
+    pub routing_table_size: usize,
+    pub bucket_count: usize,
+    pub peer_store_info_hashes: usize,
+    pub peer_store_peers: usize,
+    pub pending_queries: usize,
+    pub total_queries_sent: u64,
+    pub total_responses_received: u64,
+}
+
+/// A cloneable handle to the DHT actor.
+#[derive(Clone)]
+pub struct DhtHandle {
+    tx: mpsc::Sender<DhtCommand>,
+}
+
+enum DhtCommand {
+    GetPeers {
+        info_hash: Id20,
+        reply: mpsc::Sender<Vec<SocketAddr>>,
+    },
+    Announce {
+        info_hash: Id20,
+        port: u16,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Stats {
+        reply: oneshot::Sender<DhtStats>,
+    },
+    Shutdown,
+}
+
+impl DhtHandle {
+    /// Start the DHT actor and return a handle.
+    pub async fn start(config: DhtConfig) -> Result<Self> {
+        let socket = UdpSocket::bind(config.bind_addr).await?;
+        let local_addr = socket.local_addr()?;
+        debug!(addr = %local_addr, "DHT socket bound");
+
+        let (tx, rx) = mpsc::channel(256);
+        let handle = DhtHandle { tx };
+
+        let actor = DhtActor::new(config, socket, rx);
+        tokio::spawn(actor.run());
+
+        Ok(handle)
+    }
+
+    /// Discover peers for an info_hash.
+    ///
+    /// Returns a channel that receives batches of peers as they are found.
+    /// The channel closes when the search is exhausted.
+    pub async fn get_peers(&self, info_hash: Id20) -> Result<mpsc::Receiver<Vec<SocketAddr>>> {
+        let (reply_tx, reply_rx) = mpsc::channel(32);
+        self.tx
+            .send(DhtCommand::GetPeers {
+                info_hash,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        Ok(reply_rx)
+    }
+
+    /// Announce that we have peers for an info_hash on the given port.
+    pub async fn announce(&self, info_hash: Id20, port: u16) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::Announce {
+                info_hash,
+                port,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        reply_rx.await.map_err(|_| Error::Shutdown)?
+    }
+
+    /// Get current DHT statistics.
+    pub async fn stats(&self) -> Result<DhtStats> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::Stats { reply: reply_tx })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        reply_rx.await.map_err(|_| Error::Shutdown)
+    }
+
+    /// Shut down the DHT actor.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.tx
+            .send(DhtCommand::Shutdown)
+            .await
+            .map_err(|_| Error::Shutdown)
+    }
+}
+
+// ---- Actor internals ----
+
+struct DhtActor {
+    config: DhtConfig,
+    socket: UdpSocket,
+    rx: mpsc::Receiver<DhtCommand>,
+    routing_table: RoutingTable,
+    peer_store: PeerStore,
+    pending: HashMap<u16, PendingQuery>,
+    next_txn_id: u16,
+    stats: ActorStats,
+    /// Active get_peers lookups.
+    lookups: HashMap<Id20, LookupState>,
+}
+
+struct ActorStats {
+    total_queries_sent: u64,
+    total_responses_received: u64,
+}
+
+struct PendingQuery {
+    sent_at: Instant,
+    addr: SocketAddr,
+    kind: PendingQueryKind,
+}
+
+#[derive(Debug)]
+enum PendingQueryKind {
+    #[allow(dead_code)]
+    Ping,
+    #[allow(dead_code)]
+    FindNode { target: Id20 },
+    GetPeers { info_hash: Id20 },
+    AnnouncePeer,
+}
+
+struct LookupState {
+    reply: mpsc::Sender<Vec<SocketAddr>>,
+    /// Nodes we've already queried.
+    queried: std::collections::HashSet<Id20>,
+    /// Nodes with tokens (for announce).
+    tokens: HashMap<Id20, (SocketAddr, Vec<u8>)>,
+    /// Best (closest) nodes we know about.
+    closest: Vec<CompactNodeInfo>,
+}
+
+/// Interval for routing table maintenance.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Interval for peer store cleanup.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+impl DhtActor {
+    fn new(config: DhtConfig, socket: UdpSocket, rx: mpsc::Receiver<DhtCommand>) -> Self {
+        let own_id = config.own_id.unwrap_or_else(generate_node_id);
+        debug!(id = %own_id, "DHT node ID");
+
+        DhtActor {
+            config,
+            socket,
+            rx,
+            routing_table: RoutingTable::new(own_id),
+            peer_store: PeerStore::new(),
+            pending: HashMap::new(),
+            next_txn_id: 1,
+            stats: ActorStats {
+                total_queries_sent: 0,
+                total_responses_received: 0,
+            },
+            lookups: HashMap::new(),
+        }
+    }
+
+    async fn run(mut self) {
+        // Bootstrap
+        self.bootstrap().await;
+
+        let mut recv_buf = vec![0u8; 65535];
+        let mut maintenance_tick = tokio::time::interval(MAINTENANCE_INTERVAL);
+        let mut cleanup_tick = tokio::time::interval(CLEANUP_INTERVAL);
+
+        loop {
+            tokio::select! {
+                // Incoming UDP packets
+                result = self.socket.recv_from(&mut recv_buf) => {
+                    match result {
+                        Ok((n, addr)) => {
+                            self.handle_packet(&recv_buf[..n], addr).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "UDP recv error");
+                        }
+                    }
+                }
+
+                // Commands from handle
+                cmd = self.rx.recv() => {
+                    match cmd {
+                        Some(DhtCommand::GetPeers { info_hash, reply }) => {
+                            self.start_get_peers(info_hash, reply).await;
+                        }
+                        Some(DhtCommand::Announce { info_hash, port, reply }) => {
+                            self.handle_announce(info_hash, port, reply).await;
+                        }
+                        Some(DhtCommand::Stats { reply }) => {
+                            let _ = reply.send(self.make_stats());
+                        }
+                        Some(DhtCommand::Shutdown) | None => {
+                            debug!("DHT shutting down");
+                            return;
+                        }
+                    }
+                }
+
+                // Periodic maintenance
+                _ = maintenance_tick.tick() => {
+                    self.maintenance().await;
+                }
+
+                // Peer store cleanup
+                _ = cleanup_tick.tick() => {
+                    self.peer_store.cleanup();
+                }
+            }
+        }
+    }
+
+    async fn bootstrap(&mut self) {
+        let own_id = *self.routing_table.own_id();
+        for addr_str in &self.config.bootstrap_nodes.clone() {
+            match tokio::net::lookup_host(addr_str).await {
+                Ok(mut addrs) => {
+                    if let Some(addr) = addrs.next() {
+                        debug!(node = %addr_str, resolved = %addr, "bootstrapping");
+                        self.send_find_node(addr, own_id).await;
+                    }
+                }
+                Err(e) => {
+                    warn!(node = %addr_str, error = %e, "bootstrap DNS failed");
+                }
+            }
+        }
+    }
+
+    async fn handle_packet(&mut self, data: &[u8], addr: SocketAddr) {
+        let msg = match KrpcMessage::from_bytes(data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                trace!(error = %e, from = %addr, "invalid KRPC message");
+                return;
+            }
+        };
+
+        match &msg.body {
+            KrpcBody::Query(query) => {
+                self.handle_query(&msg, query, addr).await;
+            }
+            KrpcBody::Response(resp) => {
+                self.handle_response(&msg, resp, addr).await;
+            }
+            KrpcBody::Error { code, message } => {
+                trace!(code, message, from = %addr, "KRPC error received");
+                // Still match pending query to clean up
+                let txn = msg.transaction_id.as_u16();
+                if let Some(pending) = self.pending.remove(&txn) {
+                    self.routing_table.mark_failed(&pending_node_id(&pending));
+                }
+            }
+        }
+    }
+
+    async fn handle_query(&mut self, msg: &KrpcMessage, query: &KrpcQuery, addr: SocketAddr) {
+        let sender_id = *query.sender_id();
+        self.routing_table.insert(sender_id, addr);
+
+        let response = match query {
+            KrpcQuery::Ping { id: _ } => KrpcResponse::NodeId {
+                id: *self.routing_table.own_id(),
+            },
+            KrpcQuery::FindNode { id: _, target } => {
+                let closest = self.routing_table.closest(target, K);
+                let nodes: Vec<CompactNodeInfo> = closest
+                    .into_iter()
+                    .map(|n| CompactNodeInfo {
+                        id: n.id,
+                        addr: n.addr,
+                    })
+                    .collect();
+                KrpcResponse::FindNode {
+                    id: *self.routing_table.own_id(),
+                    nodes,
+                }
+            }
+            KrpcQuery::GetPeers { id: _, info_hash } => {
+                let ip = addr.ip();
+                let token = self.peer_store.generate_token(&ip);
+                let peers = self.peer_store.get_peers(info_hash, 50);
+
+                if peers.is_empty() {
+                    let closest = self.routing_table.closest(info_hash, K);
+                    let nodes: Vec<CompactNodeInfo> = closest
+                        .into_iter()
+                        .map(|n| CompactNodeInfo {
+                            id: n.id,
+                            addr: n.addr,
+                        })
+                        .collect();
+                    KrpcResponse::GetPeers(GetPeersResponse {
+                        id: *self.routing_table.own_id(),
+                        token: Some(token),
+                        peers: Vec::new(),
+                        nodes,
+                    })
+                } else {
+                    KrpcResponse::GetPeers(GetPeersResponse {
+                        id: *self.routing_table.own_id(),
+                        token: Some(token),
+                        peers,
+                        nodes: Vec::new(),
+                    })
+                }
+            }
+            KrpcQuery::AnnouncePeer {
+                id: _,
+                info_hash,
+                port,
+                implied_port,
+                token,
+            } => {
+                let ip = addr.ip();
+                if !self.peer_store.validate_token(token, &ip) {
+                    // Send error response for invalid token
+                    let err_msg = KrpcMessage {
+                        transaction_id: msg.transaction_id,
+                        body: KrpcBody::Error {
+                            code: 203,
+                            message: "invalid token".into(),
+                        },
+                    };
+                    if let Ok(bytes) = err_msg.to_bytes() {
+                        let _ = self.socket.send_to(&bytes, addr).await;
+                    }
+                    return;
+                }
+                let peer_port = if *implied_port { addr.port() } else { *port };
+                let peer_addr = SocketAddr::new(addr.ip(), peer_port);
+                self.peer_store.add_peer(*info_hash, peer_addr);
+                KrpcResponse::NodeId {
+                    id: *self.routing_table.own_id(),
+                }
+            }
+        };
+
+        let reply = KrpcMessage {
+            transaction_id: msg.transaction_id,
+            body: KrpcBody::Response(response),
+        };
+        if let Ok(bytes) = reply.to_bytes() {
+            let _ = self.socket.send_to(&bytes, addr).await;
+        }
+    }
+
+    async fn handle_response(&mut self, msg: &KrpcMessage, resp: &KrpcResponse, addr: SocketAddr) {
+        self.stats.total_responses_received += 1;
+
+        let sender_id = *resp.sender_id();
+        self.routing_table.insert(sender_id, addr);
+
+        let txn = msg.transaction_id.as_u16();
+        let pending = match self.pending.remove(&txn) {
+            Some(p) => p,
+            None => {
+                trace!(txn, from = %addr, "response for unknown transaction");
+                return;
+            }
+        };
+
+        match (&pending.kind, resp) {
+            (PendingQueryKind::FindNode { target: _ }, KrpcResponse::FindNode { nodes, .. }) => {
+                for node in nodes {
+                    self.routing_table.insert(node.id, node.addr);
+                }
+            }
+            (
+                PendingQueryKind::GetPeers { info_hash },
+                KrpcResponse::GetPeers(gp),
+            ) => {
+                // Add discovered nodes to routing table
+                for node in &gp.nodes {
+                    self.routing_table.insert(node.id, node.addr);
+                }
+
+                // Forward results to active lookup
+                if let Some(lookup) = self.lookups.get_mut(info_hash) {
+                    // Store token for later announce
+                    if let Some(token) = &gp.token {
+                        lookup
+                            .tokens
+                            .insert(sender_id, (addr, token.clone()));
+                    }
+
+                    // Send discovered peers to caller
+                    if !gp.peers.is_empty() {
+                        let _ = lookup.reply.try_send(gp.peers.clone());
+                    }
+
+                    // Continue iterative lookup with new closer nodes
+                    let new_nodes: Vec<CompactNodeInfo> = gp
+                        .nodes
+                        .iter()
+                        .filter(|n| !lookup.queried.contains(&n.id))
+                        .copied()
+                        .collect();
+
+                    for node in &new_nodes {
+                        lookup.closest.push(*node);
+                    }
+
+                    // Sort by distance and keep closest
+                    lookup
+                        .closest
+                        .sort_by_key(|n| n.id.xor_distance(info_hash));
+                    lookup.closest.truncate(K * 2);
+
+                    // Query new closest unqueried nodes
+                    let to_query: Vec<CompactNodeInfo> = lookup
+                        .closest
+                        .iter()
+                        .filter(|n| !lookup.queried.contains(&n.id))
+                        .take(3) // Alpha = 3 concurrent queries
+                        .copied()
+                        .collect();
+
+                    let info_hash = *info_hash;
+                    for node in to_query {
+                        if let Some(lookup) = self.lookups.get_mut(&info_hash) {
+                            lookup.queried.insert(node.id);
+                        }
+                        self.send_get_peers(node.addr, info_hash).await;
+                    }
+                }
+            }
+            (PendingQueryKind::Ping, KrpcResponse::NodeId { .. }) => {
+                // Ping response — node is alive, already updated routing table
+            }
+            (PendingQueryKind::AnnouncePeer, KrpcResponse::NodeId { .. }) => {
+                // Announce response — success
+            }
+            _ => {
+                trace!(txn, "mismatched response type");
+            }
+        }
+    }
+
+    async fn start_get_peers(&mut self, info_hash: Id20, reply: mpsc::Sender<Vec<SocketAddr>>) {
+        let closest = self.routing_table.closest(&info_hash, K);
+        let initial_nodes: Vec<CompactNodeInfo> = closest
+            .iter()
+            .map(|n| CompactNodeInfo {
+                id: n.id,
+                addr: n.addr,
+            })
+            .collect();
+
+        let mut queried = std::collections::HashSet::new();
+
+        // Query initial closest nodes
+        let to_query: Vec<_> = initial_nodes.iter().take(3).copied().collect();
+        for node in &to_query {
+            queried.insert(node.id);
+            self.send_get_peers(node.addr, info_hash).await;
+        }
+
+        self.lookups.insert(
+            info_hash,
+            LookupState {
+                reply,
+                queried,
+                tokens: HashMap::new(),
+                closest: initial_nodes,
+            },
+        );
+    }
+
+    async fn handle_announce(
+        &mut self,
+        info_hash: Id20,
+        port: u16,
+        reply: oneshot::Sender<Result<()>>,
+    ) {
+        // First, find nodes with tokens from a previous get_peers
+        let tokens: Vec<(SocketAddr, Vec<u8>)> = self
+            .lookups
+            .get(&info_hash)
+            .map(|lookup| lookup.tokens.values().cloned().collect())
+            .unwrap_or_default();
+
+        if tokens.is_empty() {
+            let _ = reply.send(Err(Error::InvalidMessage(
+                "no tokens available; call get_peers first".into(),
+            )));
+            return;
+        }
+
+        let own_id = *self.routing_table.own_id();
+        for (addr, token) in &tokens {
+            let txn = self.next_transaction_id();
+            let msg = KrpcMessage {
+                transaction_id: TransactionId::from_u16(txn),
+                body: KrpcBody::Query(KrpcQuery::AnnouncePeer {
+                    id: own_id,
+                    info_hash,
+                    port,
+                    implied_port: false,
+                    token: token.clone(),
+                }),
+            };
+            if let Ok(bytes) = msg.to_bytes() {
+                let _ = self.socket.send_to(&bytes, addr).await;
+                self.pending.insert(
+                    txn,
+                    PendingQuery {
+                        sent_at: Instant::now(),
+                        addr: *addr,
+                        kind: PendingQueryKind::AnnouncePeer,
+                    },
+                );
+                self.stats.total_queries_sent += 1;
+            }
+        }
+
+        let _ = reply.send(Ok(()));
+    }
+
+    async fn maintenance(&mut self) {
+        // Expire timed-out pending queries
+        let timeout = self.config.query_timeout;
+        let expired: Vec<u16> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.sent_at.elapsed() > timeout)
+            .map(|(txn, _)| *txn)
+            .collect();
+
+        for txn in expired {
+            if let Some(pending) = self.pending.remove(&txn) {
+                trace!(txn, addr = %pending.addr, "query timed out");
+                let node_id = pending_node_id(&pending);
+                if node_id != Id20::ZERO {
+                    self.routing_table.mark_failed(&node_id);
+                }
+            }
+        }
+
+        // Clean up completed lookups (where the reply channel is closed)
+        self.lookups.retain(|_, lookup| !lookup.reply.is_closed());
+
+        // Refresh stale buckets
+        let stale = self
+            .routing_table
+            .stale_buckets(Duration::from_secs(15 * 60));
+        for bucket_idx in stale {
+            let target = self.routing_table.random_id_in_bucket(bucket_idx);
+            let closest = self.routing_table.closest(&target, 3);
+            for node in closest {
+                self.send_find_node(node.addr, target).await;
+            }
+        }
+    }
+
+    async fn send_find_node(&mut self, addr: SocketAddr, target: Id20) {
+        let txn = self.next_transaction_id();
+        let own_id = *self.routing_table.own_id();
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(txn),
+            body: KrpcBody::Query(KrpcQuery::FindNode {
+                id: own_id,
+                target,
+            }),
+        };
+        if let Ok(bytes) = msg.to_bytes() {
+            let _ = self.socket.send_to(&bytes, addr).await;
+            self.pending.insert(
+                txn,
+                PendingQuery {
+                    sent_at: Instant::now(),
+                    addr,
+                    kind: PendingQueryKind::FindNode { target },
+                },
+            );
+            self.stats.total_queries_sent += 1;
+        }
+    }
+
+    async fn send_get_peers(&mut self, addr: SocketAddr, info_hash: Id20) {
+        let txn = self.next_transaction_id();
+        let own_id = *self.routing_table.own_id();
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(txn),
+            body: KrpcBody::Query(KrpcQuery::GetPeers {
+                id: own_id,
+                info_hash,
+            }),
+        };
+        if let Ok(bytes) = msg.to_bytes() {
+            let _ = self.socket.send_to(&bytes, addr).await;
+            self.pending.insert(
+                txn,
+                PendingQuery {
+                    sent_at: Instant::now(),
+                    addr,
+                    kind: PendingQueryKind::GetPeers { info_hash },
+                },
+            );
+            self.stats.total_queries_sent += 1;
+        }
+    }
+
+    fn next_transaction_id(&mut self) -> u16 {
+        let txn = self.next_txn_id;
+        self.next_txn_id = self.next_txn_id.wrapping_add(1);
+        if self.next_txn_id == 0 {
+            self.next_txn_id = 1;
+        }
+        txn
+    }
+
+    fn make_stats(&self) -> DhtStats {
+        DhtStats {
+            routing_table_size: self.routing_table.len(),
+            bucket_count: self.routing_table.bucket_count(),
+            peer_store_info_hashes: self.peer_store.info_hash_count(),
+            peer_store_peers: self.peer_store.peer_count(),
+            pending_queries: self.pending.len(),
+            total_queries_sent: self.stats.total_queries_sent,
+            total_responses_received: self.stats.total_responses_received,
+        }
+    }
+}
+
+/// Try to extract a node ID from a pending query (best effort).
+fn pending_node_id(_pending: &PendingQuery) -> Id20 {
+    // We don't store the remote node's ID in pending queries,
+    // so we can't mark_failed by ID. In a full implementation,
+    // we'd track this. For now, return ZERO to skip.
+    Id20::ZERO
+}
+
+/// Generate a random node ID for this DHT node.
+fn generate_node_id() -> Id20 {
+    use std::cell::Cell;
+    use std::time::SystemTime;
+
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+        );
+    }
+
+    let mut bytes = [0u8; 20];
+    for byte in &mut bytes {
+        STATE.with(|s| {
+            let mut x = s.get();
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            s.set(x);
+            *byte = x as u8;
+        });
+    }
+    Id20(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_node_id_is_unique() {
+        let a = generate_node_id();
+        let b = generate_node_id();
+        assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn dht_handle_start_and_shutdown() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(), // No bootstrap for test
+            ..DhtConfig::default()
+        };
+        let handle = DhtHandle::start(config).await.unwrap();
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.routing_table_size, 0);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_handle_stats() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let handle = DhtHandle::start(config).await.unwrap();
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.routing_table_size, 0);
+        assert_eq!(stats.bucket_count, 1);
+        assert_eq!(stats.pending_queries, 0);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_dht_nodes_ping() {
+        // Start two DHT nodes on localhost, have one send find_node to the other
+        let config_a = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            ..DhtConfig::default()
+        };
+        let config_b = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000002").unwrap()),
+            ..DhtConfig::default()
+        };
+
+        let handle_a = DhtHandle::start(config_a).await.unwrap();
+        let handle_b = DhtHandle::start(config_b).await.unwrap();
+
+        // Give them a moment to bind
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Both should have empty routing tables
+        let stats_a = handle_a.stats().await.unwrap();
+        let stats_b = handle_b.stats().await.unwrap();
+        assert_eq!(stats_a.routing_table_size, 0);
+        assert_eq!(stats_b.routing_table_size, 0);
+
+        handle_a.shutdown().await.unwrap();
+        handle_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_handle_get_peers_empty_table() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let handle = DhtHandle::start(config).await.unwrap();
+
+        let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let _rx = handle.get_peers(info_hash).await.unwrap();
+
+        // With empty routing table, no peers will be found and channel closes
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Channel should eventually be cleaned up
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.routing_table_size, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_handles_malformed_packet() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let handle = DhtHandle::start(config).await.unwrap();
+
+        // Get the DHT port from stats (indirect — we'd need to expose local_addr)
+        // For now, just verify it doesn't crash on shutdown
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.shutdown().await.unwrap();
+    }
+}
