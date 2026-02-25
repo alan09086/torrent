@@ -35,7 +35,11 @@ ferrite           (M10 - public facade)
 | M8b | ferrite-session (session mgr) | 14, 6 | 32 | **Done** |
 | M8c | ferrite-session (magnet/LSD/AllowedFast/RejectRequest) | 6, 14 | 6 | **Done** |
 | M9 | ferrite-session (seeding & upload pipeline) | — | 5 | **Done** |
-| M10 | ferrite (facade) | — | ~10 | Needs M9 |
+| M10a | ferrite (scaffold + bencode/core re-exports) | — | ~3 | Planned |
+| M10b | ferrite (wire + tracker re-exports) | — | ~2 | Planned |
+| M10c | ferrite (dht + storage re-exports) | — | ~2 | Planned |
+| M10d | ferrite (session re-exports + ClientBuilder) | — | ~2 | Planned |
+| M10e | ferrite (prelude + unified error + integration tests) | — | ~3 | Planned |
 | M11+ | BEP 52, uTP, DHT ext, RSS, persistence | 52, 29, 42, 44, 33 | TBD | Post-MVP |
 
 ---

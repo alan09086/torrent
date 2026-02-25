@@ -73,7 +73,11 @@ See [docs/plans/2026-02-25-ferrite-roadmap.md](docs/plans/2026-02-25-ferrite-roa
 | M8b | ferrite-session (session manager) | Done |
 | M8c | ferrite-session (magnet/LSD/AllowedFast/RejectRequest) | Done |
 | M9 | ferrite-session (seeding & upload pipeline) | Done |
-| M10 | ferrite (public facade) | Planned |
+| M10a | ferrite (scaffold + bencode/core re-exports) | Planned |
+| M10b | ferrite (wire + tracker re-exports) | Planned |
+| M10c | ferrite (dht + storage re-exports) | Planned |
+| M10d | ferrite (session + ClientBuilder) | Planned |
+| M10e | ferrite (prelude + unified error + integration tests) | Planned |
 | M11+ | BEP 52, uTP, DHT extensions, RSS | Future |
 
 ## License
