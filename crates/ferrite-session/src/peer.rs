@@ -108,6 +108,20 @@ pub(crate) async fn run_peer(
             .map_err(crate::Error::Wire)?;
     }
 
+    // --- Phase 4b: Send AllowedFast set (BEP 6) ---
+    if both_support_fast && num_pieces > 0 {
+        if let std::net::IpAddr::V4(ipv4) = addr.ip() {
+            let fast_set =
+                ferrite_wire::allowed_fast_set(&info_hash, ipv4, num_pieces, 10);
+            for index in fast_set {
+                framed_write
+                    .send(Message::AllowedFast(index))
+                    .await
+                    .map_err(crate::Error::Wire)?;
+            }
+        }
+    }
+
     // Track extension ID mappings:
     // - peer_ut_*: IDs from the remote's ext handshake (used when SENDING to them)
     // - our_ut_*: IDs from OUR ext handshake (used for matching INCOMING messages)
@@ -1321,5 +1335,101 @@ mod tests {
 
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
         let _ = handle.await;
+    }
+
+    // ---- Test 16: Fast Extension — AllowedFast sent on connect ----
+
+    #[tokio::test]
+    async fn fast_extension_sends_allowed_fast_on_connect() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let num_pieces = 100u32;
+        let bitfield = Bitfield::new(num_pieces); // empty
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                num_pieces,
+                event_tx,
+                cmd_rx,
+                false,
+                true, // enable_fast
+            )
+            .await
+        });
+
+        let _our_hs =
+            do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read ext handshake
+        let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+
+        // Read HaveNone (empty bitfield + fast)
+        let msg = read_framed_message(&mut server_stream).await;
+        assert_eq!(msg, Message::HaveNone);
+
+        // Should receive 10 AllowedFast messages
+        let mut fast_indices = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let msg = read_framed_message(&mut server_stream).await;
+            match msg {
+                Message::AllowedFast(index) => {
+                    assert!(index < num_pieces, "AllowedFast index out of range");
+                    fast_indices.insert(index);
+                }
+                other => panic!("expected AllowedFast, got: {other:?}"),
+            }
+        }
+        assert_eq!(fast_indices.len(), 10, "should have 10 unique AllowedFast indices");
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    // ---- Test 17: No AllowedFast without fast extension ----
+
+    #[tokio::test]
+    async fn no_allowed_fast_without_fast_extension() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let num_pieces = 100u32;
+        let bitfield = Bitfield::new(num_pieces); // empty
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                num_pieces,
+                event_tx,
+                cmd_rx,
+                false,
+                false, // fast disabled
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read ext handshake
+        let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+
+        // No bitfield (empty + no fast = nothing sent), no AllowedFast
+        // Send shutdown and verify peer exits cleanly
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let result = handle.await.unwrap();
+        assert!(result.is_ok());
     }
 }
