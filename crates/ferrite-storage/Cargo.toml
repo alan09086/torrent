@@ -1,0 +1,14 @@
+[package]
+name = "ferrite-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Piece storage, verification, and disk I/O for BitTorrent"
+
+[dependencies]
+ferrite-core = { path = "../ferrite-core" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
