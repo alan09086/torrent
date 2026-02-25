@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info};
+use std::net::SocketAddr;
+
+use tracing::{debug, info, warn};
 
 use ferrite_core::{Id20, Lengths, Magnet, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
 use ferrite_dht::DhtHandle;
@@ -22,7 +24,6 @@ use crate::types::{
 /// Entry for a torrent managed by the session.
 struct TorrentEntry {
     handle: TorrentHandle,
-    info_hash: Id20,
     meta: Option<TorrentMetaV1>,
 }
 
@@ -77,10 +78,24 @@ impl SessionHandle {
     pub async fn start(config: SessionConfig) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
+        let (lsd, lsd_peers_rx) = if config.enable_lsd {
+            match crate::lsd::LsdHandle::start(config.listen_port).await {
+                Ok((handle, rx)) => (Some(handle), Some(rx)),
+                Err(e) => {
+                    warn!("LSD unavailable (port 6771): {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
             dht: None,
+            lsd,
+            lsd_peers_rx,
             cmd_rx,
         };
 
@@ -216,56 +231,74 @@ struct SessionActor {
     config: SessionConfig,
     torrents: HashMap<Id20, TorrentEntry>,
     dht: Option<DhtHandle>,
+    lsd: Option<crate::lsd::LsdHandle>,
+    lsd_peers_rx: Option<mpsc::Receiver<(Id20, SocketAddr)>>,
     cmd_rx: mpsc::Receiver<SessionCommand>,
 }
 
 impl SessionActor {
     async fn run(mut self) {
         loop {
-            match self.cmd_rx.recv().await {
-                Some(SessionCommand::AddTorrent {
-                    meta,
-                    storage,
-                    reply,
-                }) => {
-                    let result = self.handle_add_torrent(*meta, storage).await;
-                    let _ = reply.send(result);
+            tokio::select! {
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(SessionCommand::AddTorrent {
+                            meta,
+                            storage,
+                            reply,
+                        }) => {
+                            let result = self.handle_add_torrent(*meta, storage).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::AddMagnet { magnet, reply }) => {
+                            let result = self.handle_add_magnet(magnet).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::RemoveTorrent { info_hash, reply }) => {
+                            let result = self.handle_remove_torrent(info_hash).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::PauseTorrent { info_hash, reply }) => {
+                            let result = self.handle_pause_torrent(info_hash).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ResumeTorrent { info_hash, reply }) => {
+                            let result = self.handle_resume_torrent(info_hash).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TorrentStats { info_hash, reply }) => {
+                            let result = self.handle_torrent_stats(info_hash).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TorrentInfo { info_hash, reply }) => {
+                            let result = self.handle_torrent_info(info_hash);
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ListTorrents { reply }) => {
+                            let list: Vec<Id20> = self.torrents.keys().copied().collect();
+                            let _ = reply.send(list);
+                        }
+                        Some(SessionCommand::SessionStats { reply }) => {
+                            let stats = self.make_session_stats().await;
+                            let _ = reply.send(stats);
+                        }
+                        Some(SessionCommand::Shutdown) | None => {
+                            self.shutdown_all().await;
+                            return;
+                        }
+                    }
                 }
-                Some(SessionCommand::AddMagnet { magnet, reply }) => {
-                    let result = self.handle_add_magnet(magnet).await;
-                    let _ = reply.send(result);
-                }
-                Some(SessionCommand::RemoveTorrent { info_hash, reply }) => {
-                    let result = self.handle_remove_torrent(info_hash).await;
-                    let _ = reply.send(result);
-                }
-                Some(SessionCommand::PauseTorrent { info_hash, reply }) => {
-                    let result = self.handle_pause_torrent(info_hash).await;
-                    let _ = reply.send(result);
-                }
-                Some(SessionCommand::ResumeTorrent { info_hash, reply }) => {
-                    let result = self.handle_resume_torrent(info_hash).await;
-                    let _ = reply.send(result);
-                }
-                Some(SessionCommand::TorrentStats { info_hash, reply }) => {
-                    let result = self.handle_torrent_stats(info_hash).await;
-                    let _ = reply.send(result);
-                }
-                Some(SessionCommand::TorrentInfo { info_hash, reply }) => {
-                    let result = self.handle_torrent_info(info_hash);
-                    let _ = reply.send(result);
-                }
-                Some(SessionCommand::ListTorrents { reply }) => {
-                    let list: Vec<Id20> = self.torrents.keys().copied().collect();
-                    let _ = reply.send(list);
-                }
-                Some(SessionCommand::SessionStats { reply }) => {
-                    let stats = self.make_session_stats().await;
-                    let _ = reply.send(stats);
-                }
-                Some(SessionCommand::Shutdown) | None => {
-                    self.shutdown_all().await;
-                    return;
+                result = async {
+                    match &mut self.lsd_peers_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some((info_hash, peer_addr)) = result
+                        && let Some(entry) = self.torrents.get(&info_hash)
+                    {
+                        let _ = entry.handle.add_peers(vec![peer_addr]).await;
+                    }
                 }
             }
         }
@@ -321,12 +354,14 @@ impl SessionActor {
             info_hash,
             TorrentEntry {
                 handle,
-                info_hash,
                 meta: Some(meta),
             },
         );
 
         info!(%info_hash, "torrent added to session");
+        if let Some(ref lsd) = self.lsd {
+            lsd.announce(vec![info_hash]).await;
+        }
         Ok(info_hash)
     }
 
@@ -344,11 +379,13 @@ impl SessionActor {
             info_hash,
             TorrentEntry {
                 handle,
-                info_hash,
                 meta: None,
             },
         );
         info!(%info_hash, "magnet torrent added to session");
+        if let Some(ref lsd) = self.lsd {
+            lsd.announce(vec![info_hash]).await;
+        }
         Ok(info_hash)
     }
 
@@ -445,6 +482,9 @@ impl SessionActor {
         for (info_hash, entry) in self.torrents.drain() {
             debug!(%info_hash, "shutting down torrent");
             let _ = entry.handle.shutdown().await;
+        }
+        if let Some(ref lsd) = self.lsd {
+            lsd.shutdown().await;
         }
     }
 }
@@ -756,6 +796,39 @@ mod tests {
         let result = session.add_magnet(magnet).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate"));
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 13: Session with LSD enabled ----
+
+    #[tokio::test]
+    async fn session_with_lsd_enabled() {
+        use ferrite_core::Magnet;
+
+        // LSD may fail to bind port 6771 — session should still start
+        let mut config = test_session_config();
+        config.enable_lsd = true;
+
+        let session = SessionHandle::start(config).await.unwrap();
+
+        // Add a torrent (triggers LSD announce if available)
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        // Add a magnet (also triggers LSD announce)
+        let magnet = Magnet {
+            info_hash: Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            display_name: Some("lsd-test".into()),
+            trackers: vec![],
+            peers: vec![],
+        };
+        session.add_magnet(magnet).await.unwrap();
+
+        let list = session.list_torrents().await.unwrap();
+        assert_eq!(list.len(), 2);
 
         session.shutdown().await.unwrap();
     }

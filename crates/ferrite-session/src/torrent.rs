@@ -627,14 +627,13 @@ impl TorrentActor {
                 begin,
                 length: _,
             } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    if let Some(pos) = peer
+                if let Some(peer) = self.peers.get_mut(&peer_addr)
+                    && let Some(pos) = peer
                         .pending_requests
                         .iter()
                         .position(|&(i, b, _)| i == index && b == begin)
-                    {
-                        peer.pending_requests.swap_remove(pos);
-                    }
+                {
+                    peer.pending_requests.swap_remove(pos);
                 }
                 debug!(index, %peer_addr, "request rejected by peer");
             }

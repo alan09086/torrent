@@ -109,16 +109,17 @@ pub(crate) async fn run_peer(
     }
 
     // --- Phase 4b: Send AllowedFast set (BEP 6) ---
-    if both_support_fast && num_pieces > 0 {
-        if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-            let fast_set =
-                ferrite_wire::allowed_fast_set(&info_hash, ipv4, num_pieces, 10);
-            for index in fast_set {
-                framed_write
-                    .send(Message::AllowedFast(index))
-                    .await
-                    .map_err(crate::Error::Wire)?;
-            }
+    if both_support_fast
+        && num_pieces > 0
+        && let std::net::IpAddr::V4(ipv4) = addr.ip()
+    {
+        let fast_set =
+            ferrite_wire::allowed_fast_set(&info_hash, ipv4, num_pieces, 10);
+        for index in fast_set {
+            framed_write
+                .send(Message::AllowedFast(index))
+                .await
+                .map_err(crate::Error::Wire)?;
         }
     }
 
