@@ -136,6 +136,7 @@ pub(crate) enum PeerCommand {
     RequestMetadata { piece: u32 },
     RejectRequest { index: u32, begin: u32, length: u32 },
     AllowedFast(u32),
+    SendPiece { index: u32, begin: u32, data: Bytes },
     Shutdown,
 }
 

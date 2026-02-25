@@ -483,6 +483,9 @@ async fn handle_command(
             Message::RejectRequest { index, begin, length }
         }
         PeerCommand::AllowedFast(index) => Message::AllowedFast(index),
+        PeerCommand::SendPiece { index, begin, data } => {
+            Message::Piece { index, begin, data }
+        }
         PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());
@@ -1432,5 +1435,62 @@ mod tests {
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
         let result = handle.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    // ---- Test 18: SendPiece command sends Piece message ----
+
+    #[tokio::test]
+    async fn send_piece_command_sends_piece_message() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(65536);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read ext handshake
+        let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+
+        // Send a piece via SendPiece command
+        let piece_data = Bytes::from(vec![0xAB; 16384]);
+        cmd_tx
+            .send(PeerCommand::SendPiece {
+                index: 0,
+                begin: 0,
+                data: piece_data.clone(),
+            })
+            .await
+            .unwrap();
+
+        let msg = read_framed_message(&mut server_stream).await;
+        match msg {
+            Message::Piece { index, begin, data } => {
+                assert_eq!(index, 0);
+                assert_eq!(begin, 0);
+                assert_eq!(data, piece_data);
+            }
+            other => panic!("expected Piece, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
     }
 }
