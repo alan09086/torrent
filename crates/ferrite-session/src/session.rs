@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
-use ferrite_core::{Id20, Lengths, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
+use ferrite_core::{Id20, Lengths, Magnet, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
 use ferrite_dht::DhtHandle;
 use ferrite_storage::TorrentStorage;
 
@@ -22,7 +22,8 @@ use crate::types::{
 /// Entry for a torrent managed by the session.
 struct TorrentEntry {
     handle: TorrentHandle,
-    meta: TorrentMetaV1,
+    info_hash: Id20,
+    meta: Option<TorrentMetaV1>,
 }
 
 /// Commands sent from SessionHandle to SessionActor.
@@ -30,6 +31,10 @@ enum SessionCommand {
     AddTorrent {
         meta: Box<TorrentMetaV1>,
         storage: Option<Arc<dyn TorrentStorage>>,
+        reply: oneshot::Sender<crate::Result<Id20>>,
+    },
+    AddMagnet {
+        magnet: Magnet,
         reply: oneshot::Sender<crate::Result<Id20>>,
     },
     RemoveTorrent {
@@ -96,6 +101,16 @@ impl SessionHandle {
                 storage,
                 reply: tx,
             })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Add a torrent from a magnet link (metadata fetched via BEP 9).
+    pub async fn add_magnet(&self, magnet: Magnet) -> crate::Result<Id20> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::AddMagnet { magnet, reply: tx })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
@@ -216,6 +231,10 @@ impl SessionActor {
                     let result = self.handle_add_torrent(*meta, storage).await;
                     let _ = reply.send(result);
                 }
+                Some(SessionCommand::AddMagnet { magnet, reply }) => {
+                    let result = self.handle_add_magnet(magnet).await;
+                    let _ = reply.send(result);
+                }
                 Some(SessionCommand::RemoveTorrent { info_hash, reply }) => {
                     let result = self.handle_remove_torrent(info_hash).await;
                     let _ = reply.send(result);
@@ -302,11 +321,34 @@ impl SessionActor {
             info_hash,
             TorrentEntry {
                 handle,
-                meta,
+                info_hash,
+                meta: Some(meta),
             },
         );
 
         info!(%info_hash, "torrent added to session");
+        Ok(info_hash)
+    }
+
+    async fn handle_add_magnet(&mut self, magnet: Magnet) -> crate::Result<Id20> {
+        let info_hash = magnet.info_hash;
+        if self.torrents.contains_key(&info_hash) {
+            return Err(crate::Error::DuplicateTorrent(info_hash));
+        }
+        if self.torrents.len() >= self.config.max_torrents {
+            return Err(crate::Error::SessionAtCapacity(self.config.max_torrents));
+        }
+        let config = self.make_torrent_config();
+        let handle = TorrentHandle::from_magnet(magnet, config, self.dht.clone()).await?;
+        self.torrents.insert(
+            info_hash,
+            TorrentEntry {
+                handle,
+                info_hash,
+                meta: None,
+            },
+        );
+        info!(%info_hash, "magnet torrent added to session");
         Ok(info_hash)
     }
 
@@ -350,7 +392,10 @@ impl SessionActor {
             .get(&info_hash)
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
 
-        let meta = &entry.meta;
+        let meta = entry
+            .meta
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(info_hash))?;
         let files: Vec<FileInfo> = if let Some(ref file_list) = meta.info.files {
             file_list
                 .iter()
@@ -660,6 +705,57 @@ mod tests {
 
         let stats = session.session_stats().await.unwrap();
         assert_eq!(stats.active_torrents, 2);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 11: Add magnet and list ----
+
+    #[tokio::test]
+    async fn add_magnet_and_list() {
+        use ferrite_core::Magnet;
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let magnet = Magnet {
+            info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            display_name: Some("test-magnet".into()),
+            trackers: vec![],
+            peers: vec![],
+        };
+        let expected_hash = magnet.info_hash;
+
+        let info_hash = session.add_magnet(magnet).await.unwrap();
+        assert_eq!(info_hash, expected_hash);
+
+        let list = session.list_torrents().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list.contains(&info_hash));
+
+        // torrent_info should fail with MetadataNotReady
+        let err = session.torrent_info(info_hash).await.unwrap_err();
+        assert!(err.to_string().contains("metadata not yet available"));
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 12: Duplicate magnet rejected ----
+
+    #[tokio::test]
+    async fn add_magnet_duplicate_rejected() {
+        use ferrite_core::Magnet;
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let magnet = Magnet {
+            info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            display_name: Some("test-magnet".into()),
+            trackers: vec![],
+            peers: vec![],
+        };
+
+        session.add_magnet(magnet.clone()).await.unwrap();
+        let result = session.add_magnet(magnet).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("duplicate"));
 
         session.shutdown().await.unwrap();
     }

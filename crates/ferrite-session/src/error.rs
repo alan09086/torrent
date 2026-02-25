@@ -38,6 +38,9 @@ pub enum Error {
     #[error("session at capacity ({0} torrents)")]
     SessionAtCapacity(usize),
 
+    #[error("metadata not yet available for {0}")]
+    MetadataNotReady(ferrite_core::Id20),
+
     #[error("session shutting down")]
     Shutdown,
 
