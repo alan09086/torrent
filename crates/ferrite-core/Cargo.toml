@@ -1,0 +1,26 @@
+[package]
+name = "ferrite-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types for BitTorrent: hashes, metainfo, magnets, piece arithmetic"
+
+[dependencies]
+ferrite-bencode = { path = "../ferrite-bencode" }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+
+# Hashing
+sha1 = "0.10"
+
+# Encoding (hex, base32 for magnets)
+hex = "0.4"
+data-encoding = "2"
+
+# URL parsing for magnets
+url = "2"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

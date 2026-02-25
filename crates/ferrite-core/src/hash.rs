@@ -1,0 +1,232 @@
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
+
+/// 20-byte identifier used for SHA1 info-hashes and peer IDs.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id20(pub [u8; 20]);
+
+/// 32-byte identifier used for SHA-256 (BitTorrent v2).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id32(pub [u8; 32]);
+
+// ---- Id20 ----
+
+impl Id20 {
+    /// All zeros.
+    pub const ZERO: Self = Id20([0u8; 20]);
+
+    /// Create from a hex string (40 chars).
+    pub fn from_hex(s: &str) -> Result<Self, Error> {
+        let bytes = hex::decode(s).map_err(|e| Error::InvalidHex(e.to_string()))?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Create from a base32 string (32 chars, used in magnet links).
+    pub fn from_base32(s: &str) -> Result<Self, Error> {
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(s.as_bytes())
+            .map_err(|e| Error::InvalidHex(format!("base32: {e}")))?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Create from a byte slice, validating length.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let arr: [u8; 20] = bytes.try_into().map_err(|_| Error::InvalidHashLength {
+            expected: 20,
+            got: bytes.len(),
+        })?;
+        Ok(Id20(arr))
+    }
+
+    /// Encode as lowercase hex string.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// Encode as base32 string (no padding), used in magnet links.
+    pub fn to_base32(&self) -> String {
+        data_encoding::BASE32_NOPAD.encode(&self.0)
+    }
+
+    /// XOR distance to another Id20 (used in DHT/Kademlia).
+    pub fn xor_distance(&self, other: &Id20) -> Id20 {
+        let mut result = [0u8; 20];
+        for (i, byte) in result.iter_mut().enumerate() {
+            *byte = self.0[i] ^ other.0[i];
+        }
+        Id20(result)
+    }
+
+    /// Return the raw bytes.
+    pub fn as_bytes(&self) -> &[u8; 20] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Id20 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Id20({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for Id20 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+impl AsRef<[u8]> for Id20 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 20]> for Id20 {
+    fn from(arr: [u8; 20]) -> Self {
+        Id20(arr)
+    }
+}
+
+impl Serialize for Id20 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Id20 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes: &[u8] = serde_bytes::deserialize(deserializer)?;
+        Id20::from_bytes(bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+// ---- Id32 ----
+
+impl Id32 {
+    /// All zeros.
+    pub const ZERO: Self = Id32([0u8; 32]);
+
+    /// Create from a hex string (64 chars).
+    pub fn from_hex(s: &str) -> Result<Self, Error> {
+        let bytes = hex::decode(s).map_err(|e| Error::InvalidHex(e.to_string()))?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Create from a byte slice, validating length.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| Error::InvalidHashLength {
+            expected: 32,
+            got: bytes.len(),
+        })?;
+        Ok(Id32(arr))
+    }
+
+    /// Encode as lowercase hex string.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// Return the raw bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Id32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Id32({})", self.to_hex())
+    }
+}
+
+impl fmt::Display for Id32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+impl AsRef<[u8]> for Id32 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for Id32 {
+    fn from(arr: [u8; 32]) -> Self {
+        Id32(arr)
+    }
+}
+
+impl Serialize for Id32 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Id32 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes: &[u8] = serde_bytes::deserialize(deserializer)?;
+        Id32::from_bytes(bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id20_hex_round_trip() {
+        let hex_str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
+        let id = Id20::from_hex(hex_str).unwrap();
+        assert_eq!(id.to_hex(), hex_str);
+    }
+
+    #[test]
+    fn id20_base32_round_trip() {
+        let id = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let b32 = id.to_base32();
+        let id2 = Id20::from_base32(&b32).unwrap();
+        assert_eq!(id, id2);
+    }
+
+    #[test]
+    fn id20_xor_distance() {
+        let a = Id20::from_hex("0000000000000000000000000000000000000001").unwrap();
+        let b = Id20::from_hex("0000000000000000000000000000000000000003").unwrap();
+        let dist = a.xor_distance(&b);
+        assert_eq!(
+            dist,
+            Id20::from_hex("0000000000000000000000000000000000000002").unwrap()
+        );
+    }
+
+    #[test]
+    fn id20_xor_self_is_zero() {
+        let a = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        assert_eq!(a.xor_distance(&a), Id20::ZERO);
+    }
+
+    #[test]
+    fn id20_invalid_hex() {
+        assert!(Id20::from_hex("not_hex").is_err());
+        assert!(Id20::from_hex("aabbcc").is_err()); // too short
+    }
+
+    #[test]
+    fn id20_display() {
+        let id = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        assert_eq!(
+            format!("{id}"),
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        );
+    }
+
+    #[test]
+    fn id32_hex_round_trip() {
+        let hex_str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let id = Id32::from_hex(hex_str).unwrap();
+        assert_eq!(id.to_hex(), hex_str);
+    }
+}
