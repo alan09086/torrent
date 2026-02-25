@@ -7,6 +7,8 @@ pub(crate) struct PeerInfo {
     pub addr: SocketAddr,
     /// Bytes/sec they are uploading TO us.
     pub download_rate: u64,
+    /// Bytes/sec we are uploading TO them.
+    pub upload_rate: u64,
     /// Peer is interested in our data.
     pub interested: bool,
 }
@@ -29,6 +31,7 @@ pub(crate) struct ChokeDecision {
 pub(crate) struct Choker {
     unchoke_slots: usize,
     optimistic_peer: Option<SocketAddr>,
+    seed_mode: bool,
 }
 
 #[allow(dead_code)]
@@ -38,7 +41,12 @@ impl Choker {
         Self {
             unchoke_slots,
             optimistic_peer: None,
+            seed_mode: false,
         }
+    }
+
+    pub fn set_seed_mode(&mut self, seed_mode: bool) {
+        self.seed_mode = seed_mode;
     }
 
     /// Decide which peers to unchoke and choke.
@@ -53,9 +61,15 @@ impl Choker {
     pub fn decide(&mut self, peers: &[PeerInfo]) -> ChokeDecision {
         let all_addrs: Vec<SocketAddr> = peers.iter().map(|p| p.addr).collect();
 
-        // Interested peers sorted by download rate descending.
+        // Interested peers sorted by rate descending.
         let mut interested: Vec<&PeerInfo> = peers.iter().filter(|p| p.interested).collect();
-        interested.sort_by(|a, b| b.download_rate.cmp(&a.download_rate));
+        if self.seed_mode {
+            // Seed mode: unchoke peers we upload to fastest (maximize distribution)
+            interested.sort_by(|a, b| b.upload_rate.cmp(&a.upload_rate));
+        } else {
+            // Leech mode: unchoke peers that upload to us fastest (tit-for-tat)
+            interested.sort_by(|a, b| b.download_rate.cmp(&a.download_rate));
+        }
 
         // Regular unchokes: top N by download rate.
         let regular_count = self.unchoke_slots.min(interested.len());
@@ -139,6 +153,16 @@ mod tests {
         PeerInfo {
             addr: addr(port),
             download_rate,
+            upload_rate: 0,
+            interested,
+        }
+    }
+
+    fn seed_peer(port: u16, upload_rate: u64, interested: bool) -> PeerInfo {
+        PeerInfo {
+            addr: addr(port),
+            download_rate: 0,
+            upload_rate,
             interested,
         }
     }
@@ -263,5 +287,28 @@ mod tests {
         assert_eq!(decision.to_choke.len(), 2);
         // Uninterested peer is always choked.
         assert!(decision.to_choke.contains(&addr(6885)));
+    }
+
+    #[test]
+    fn seed_mode_unchokes_by_upload_rate() {
+        let mut choker = Choker::new(2);
+        choker.set_seed_mode(true);
+
+        // In seed mode, peers are ranked by upload_rate (how fast we upload TO them)
+        let peers = vec![
+            seed_peer(6881, 100, true),
+            seed_peer(6882, 500, true),
+            seed_peer(6883, 300, true),
+            seed_peer(6884, 200, true),
+        ];
+
+        let decision = choker.decide(&peers);
+
+        // Top 2 by upload rate: 500 (6882), 300 (6883)
+        assert!(decision.to_unchoke.contains(&addr(6882)));
+        assert!(decision.to_unchoke.contains(&addr(6883)));
+
+        // Plus one optimistic
+        assert_eq!(decision.to_unchoke.len(), 3);
     }
 }

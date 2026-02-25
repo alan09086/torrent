@@ -39,6 +39,7 @@ pub enum TorrentState {
     FetchingMetadata,
     Downloading,
     Complete,
+    Seeding,
     Paused,
     Stopped,
 }

@@ -476,7 +476,10 @@ impl TorrentActor {
         }
         self.peers.clear();
         // Announce Stopped to trackers
-        if prev_state == TorrentState::Downloading || prev_state == TorrentState::Complete {
+        if prev_state == TorrentState::Downloading
+            || prev_state == TorrentState::Seeding
+            || prev_state == TorrentState::Complete
+        {
             let left = self.calculate_left();
             self.tracker_manager
                 .announce_stopped(self.uploaded, self.downloaded, left)
@@ -492,9 +495,11 @@ impl TorrentActor {
         if let Some(ref ct) = self.chunk_tracker
             && ct.bitfield().count_ones() == self.num_pieces
         {
-            self.state = TorrentState::Complete;
+            self.state = TorrentState::Seeding;
+            self.choker.set_seed_mode(true);
         } else {
             self.state = TorrentState::Downloading;
+            self.choker.set_seed_mode(false);
         }
         // Re-announce Started
         let left = self.calculate_left();
@@ -740,8 +745,9 @@ impl TorrentActor {
             if let Some(ref ct) = self.chunk_tracker
                 && ct.bitfield().count_ones() == self.num_pieces
             {
-                info!("download complete");
-                self.state = TorrentState::Complete;
+                info!("download complete, transitioning to seeding");
+                self.state = TorrentState::Seeding;
+                self.choker.set_seed_mode(true);
                 // Announce completion to trackers
                 let _ = self
                     .tracker_manager
@@ -923,6 +929,7 @@ impl TorrentActor {
             .map(|p| PeerInfo {
                 addr: p.addr,
                 download_rate: p.download_rate,
+                upload_rate: p.upload_rate,
                 interested: p.peer_interested,
             })
             .collect();
@@ -1019,6 +1026,7 @@ impl TorrentActor {
             .map(|p| PeerInfo {
                 addr: p.addr,
                 download_rate: p.download_rate,
+                upload_rate: p.upload_rate,
                 interested: p.peer_interested,
             })
             .collect();
@@ -1645,7 +1653,7 @@ mod tests {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stats = handle.stats().await.unwrap();
-            if stats.state == TorrentState::Complete {
+            if stats.state == TorrentState::Seeding {
                 assert_eq!(stats.pieces_have, 1);
                 assert_eq!(stats.pieces_total, 1);
                 break;
@@ -1772,7 +1780,7 @@ mod tests {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stats = handle.stats().await.unwrap();
-            if stats.state == TorrentState::Complete {
+            if stats.state == TorrentState::Seeding {
                 assert_eq!(stats.pieces_have, 1);
                 break;
             }
@@ -1888,7 +1896,7 @@ mod tests {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stats = handle.stats().await.unwrap();
-            if stats.state == TorrentState::Complete {
+            if stats.state == TorrentState::Seeding {
                 assert_eq!(stats.pieces_have, 2);
                 assert_eq!(stats.pieces_total, 2);
                 break;
@@ -1999,7 +2007,7 @@ mod tests {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stats = handle.stats().await.unwrap();
-            if stats.state == TorrentState::Complete {
+            if stats.state == TorrentState::Seeding {
                 assert_eq!(stats.pieces_have, 1);
                 break;
             }
@@ -2135,7 +2143,7 @@ mod tests {
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let stats = leecher.stats().await.unwrap();
-            if stats.state == TorrentState::Complete {
+            if stats.state == TorrentState::Seeding {
                 assert_eq!(stats.pieces_have, 2);
                 assert_eq!(stats.pieces_total, 2);
                 break;
