@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.2.0 — 2026-02-25
+
+Session layer with peer management and torrent orchestration. Seven crates, 283 tests.
+
+### M7: ferrite-session (peer + torrent)
+- `PieceSelector` — rarest-first piece selection with per-piece availability tracking
+- `MetadataDownloader` — BEP 9 metadata download state machine for magnet links (16 KiB pieces, SHA1 verification)
+- `PexMessage` — BEP 11 Peer Exchange encode/decode with compact peer format
+- `Choker` — tit-for-tat choking: top-N by download rate + optimistic unchoke rotation
+- `PeerTask` — async peer connection: handshake, BEP 10 extension negotiation, framed message loop
+- `TorrentActor` + `TorrentHandle` — actor model orchestration with select! event loop
+- BEP 27 private torrent support (disable DHT/PEX when `info.private = 1`)
+- Piece download pipeline: request → write_chunk → verify → mark_verified/mark_failed
+- Integration tested with seeder/leecher on loopback TCP
+
 ## 0.1.0 — 2026-02-25
 
 Initial development release. Six crates implemented with 231 tests and zero clippy warnings.
