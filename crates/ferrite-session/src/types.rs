@@ -16,6 +16,7 @@ pub struct TorrentConfig {
     pub download_dir: PathBuf,
     pub enable_dht: bool,
     pub enable_pex: bool,
+    pub enable_fast: bool,
 }
 
 impl Default for TorrentConfig {
@@ -27,6 +28,7 @@ impl Default for TorrentConfig {
             download_dir: PathBuf::from("."),
             enable_dht: true,
             enable_pex: true,
+            enable_fast: false,
         }
     }
 }
@@ -37,6 +39,7 @@ pub enum TorrentState {
     FetchingMetadata,
     Downloading,
     Complete,
+    Paused,
     Stopped,
 }
 
@@ -95,6 +98,20 @@ pub(crate) enum PeerEvent {
     PexPeers {
         new_peers: Vec<SocketAddr>,
     },
+    RejectRequest {
+        peer_addr: SocketAddr,
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    AllowedFast {
+        peer_addr: SocketAddr,
+        index: u32,
+    },
+    SuggestPiece {
+        peer_addr: SocketAddr,
+        index: u32,
+    },
     Disconnected {
         peer_addr: SocketAddr,
         reason: Option<String>,
@@ -111,6 +128,8 @@ pub(crate) enum PeerCommand {
     SetInterested(bool),
     Have(u32),
     RequestMetadata { piece: u32 },
+    RejectRequest { index: u32, begin: u32, length: u32 },
+    AllowedFast(u32),
     Shutdown,
 }
 
@@ -120,5 +139,68 @@ pub(crate) enum PeerCommand {
 pub(crate) enum TorrentCommand {
     AddPeers { peers: Vec<SocketAddr> },
     Stats { reply: oneshot::Sender<TorrentStats> },
+    Pause,
+    Resume,
     Shutdown,
 }
+
+/// Info about a file within a torrent.
+#[derive(Debug, Clone)]
+pub struct FileInfo {
+    pub path: PathBuf,
+    pub length: u64,
+}
+
+/// Metadata about a torrent (available after metadata is fetched).
+#[derive(Debug, Clone)]
+pub struct TorrentInfo {
+    pub info_hash: ferrite_core::Id20,
+    pub name: String,
+    pub total_length: u64,
+    pub piece_length: u64,
+    pub num_pieces: u32,
+    pub files: Vec<FileInfo>,
+    pub private: bool,
+}
+
+/// Configuration for a multi-torrent session.
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    pub listen_port: u16,
+    pub download_dir: PathBuf,
+    pub max_torrents: usize,
+    pub enable_dht: bool,
+    pub enable_pex: bool,
+    pub enable_lsd: bool,
+    pub enable_fast_extension: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: 6881,
+            download_dir: PathBuf::from("."),
+            max_torrents: 100,
+            enable_dht: true,
+            enable_pex: true,
+            enable_lsd: true,
+            enable_fast_extension: true,
+        }
+    }
+}
+
+/// Aggregate statistics for the whole session.
+#[derive(Debug, Clone)]
+pub struct SessionStats {
+    pub active_torrents: usize,
+    pub total_downloaded: u64,
+    pub total_uploaded: u64,
+    pub dht_nodes: usize,
+}
+
+/// Type alias for a factory that creates per-torrent storage.
+pub type StorageFactory = Box<
+    dyn Fn(&ferrite_core::TorrentMetaV1, &std::path::Path) -> std::sync::Arc<dyn ferrite_storage::TorrentStorage>
+        + Send
+        + Sync,
+>;

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use tokio::sync::mpsc;
@@ -29,6 +30,10 @@ pub(crate) struct PeerState {
     pub pending_requests: usize,
     /// Peer's extension handshake, if received.
     pub ext_handshake: Option<ExtHandshake>,
+    /// Whether the peer supports BEP 6 Fast Extension.
+    pub supports_fast: bool,
+    /// Set of piece indices the peer is allowed to request while choked.
+    pub allowed_fast: HashSet<u32>,
     /// Channel to send commands to this peer's task.
     pub cmd_tx: mpsc::Sender<PeerCommand>,
 }
@@ -47,6 +52,8 @@ impl PeerState {
             upload_rate: 0,
             pending_requests: 0,
             ext_handshake: None,
+            supports_fast: false,
+            allowed_fast: HashSet::new(),
             cmd_tx,
         }
     }

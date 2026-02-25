@@ -13,5 +13,5 @@ pub(crate) mod peer;
 mod torrent;
 
 pub use error::{Error, Result};
-pub use types::{TorrentConfig, TorrentState, TorrentStats};
+pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;

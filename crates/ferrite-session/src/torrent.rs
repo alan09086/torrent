@@ -206,6 +206,22 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Pause the torrent session (disconnect peers, announce Stopped).
+    pub async fn pause(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::Pause)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Resume a paused torrent session (reconnect, announce Started).
+    pub async fn resume(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::Resume)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
     /// Gracefully shut down the torrent session.
     pub async fn shutdown(&self) -> crate::Result<()> {
         // Best-effort send; if the channel is already closed, that's fine.
@@ -297,6 +313,12 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::Stats { reply }) => {
                             let _ = reply.send(self.make_stats());
+                        }
+                        Some(TorrentCommand::Pause) => {
+                            self.handle_pause().await;
+                        }
+                        Some(TorrentCommand::Resume) => {
+                            self.handle_resume().await;
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_peers().await;
@@ -441,6 +463,52 @@ impl TorrentActor {
         }
     }
 
+    async fn handle_pause(&mut self) {
+        if self.state == TorrentState::Paused || self.state == TorrentState::Stopped {
+            return;
+        }
+        let prev_state = self.state;
+        self.state = TorrentState::Paused;
+        // Disconnect all peers
+        for peer in self.peers.values() {
+            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+        }
+        self.peers.clear();
+        // Announce Stopped to trackers
+        if prev_state == TorrentState::Downloading || prev_state == TorrentState::Complete {
+            let left = self.calculate_left();
+            self.tracker_manager
+                .announce_stopped(self.uploaded, self.downloaded, left)
+                .await;
+        }
+    }
+
+    async fn handle_resume(&mut self) {
+        if self.state != TorrentState::Paused {
+            return;
+        }
+        // Determine appropriate state
+        if let Some(ref ct) = self.chunk_tracker
+            && ct.bitfield().count_ones() == self.num_pieces
+        {
+            self.state = TorrentState::Complete;
+        } else {
+            self.state = TorrentState::Downloading;
+        }
+        // Re-announce Started
+        let left = self.calculate_left();
+        let peers = self.tracker_manager.announce(
+            ferrite_tracker::AnnounceEvent::Started,
+            self.uploaded,
+            self.downloaded,
+            left,
+        ).await;
+        if !peers.is_empty() {
+            self.handle_add_peers(peers);
+        }
+        self.try_connect_peers();
+    }
+
     // ----- Event handlers -----
 
     async fn handle_peer_event(&mut self, event: PeerEvent) {
@@ -542,6 +610,31 @@ impl TorrentActor {
                 if self.config.enable_pex {
                     self.handle_add_peers(new_peers);
                 }
+            }
+            PeerEvent::RejectRequest {
+                peer_addr,
+                index,
+                begin: _,
+                length: _,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.pending_requests = peer.pending_requests.saturating_sub(1);
+                }
+                debug!(index, %peer_addr, "request rejected by peer");
+            }
+            PeerEvent::AllowedFast {
+                peer_addr,
+                index,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.allowed_fast.insert(index);
+                }
+            }
+            PeerEvent::SuggestPiece {
+                peer_addr: _,
+                index: _,
+            } => {
+                // Suggestion noted; current piece selector handles rarest-first
             }
             PeerEvent::Disconnected {
                 peer_addr,
@@ -1023,6 +1116,7 @@ mod tests {
             download_dir: std::path::PathBuf::from("/tmp"),
             enable_dht: false,
             enable_pex: false,
+            enable_fast: false,
         }
     }
 
@@ -2128,6 +2222,64 @@ mod tests {
         // No tracker announces should happen in FetchingMetadata state
         // (verified by the tracker_announce arm checking state != FetchingMetadata)
         tokio::time::sleep(Duration::from_millis(50)).await;
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 19: Pause and resume ----
+
+    #[tokio::test]
+    async fn pause_and_resume() {
+        let data = vec![0u8; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = Arc::new(MemoryStorage::new(Lengths::new(
+            meta.info.total_length(),
+            meta.info.piece_length,
+            DEFAULT_CHUNK_SIZE,
+        )));
+        let config = test_config();
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+
+        handle.pause().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Paused);
+
+        handle.resume().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 20: Pause already paused is noop ----
+
+    #[tokio::test]
+    async fn pause_already_paused_is_noop() {
+        let data = vec![0u8; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = Arc::new(MemoryStorage::new(Lengths::new(
+            meta.info.total_length(),
+            meta.info.piece_length,
+            DEFAULT_CHUNK_SIZE,
+        )));
+        let config = test_config();
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        handle.pause().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.pause().await.unwrap(); // double pause is fine
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Paused);
 
         handle.shutdown().await.unwrap();
     }

@@ -265,6 +265,13 @@ async fn handle_message(
         Message::KeepAlive | Message::Request { .. } | Message::Cancel { .. } | Message::Port(_) => {
             // Ignored
         }
+        Message::SuggestPiece(_)
+        | Message::HaveAll
+        | Message::HaveNone
+        | Message::RejectRequest { .. }
+        | Message::AllowedFast(_) => {
+            // BEP 6 Fast Extension — handled in Task 5
+        }
     }
     Ok(())
 }
@@ -371,6 +378,10 @@ async fn handle_command(
                 .map_err(crate::Error::Wire)?;
             Message::Extended { ext_id, payload }
         }
+        PeerCommand::RejectRequest { index, begin, length } => {
+            Message::RejectRequest { index, begin, length }
+        }
+        PeerCommand::AllowedFast(index) => Message::AllowedFast(index),
         PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());
