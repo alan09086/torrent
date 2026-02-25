@@ -2,7 +2,7 @@
 
 ## Context
 
-Ferrite (`/mnt/TempNVME/projects/ferrite/`) is a from-scratch Rust BitTorrent library. M1-M4 are complete (148 tests, zero clippy warnings). The goal is full libtorrent-rasterbar parity, using librqbit as a research model to improve upon. Ferrite will eventually replace librqbit as the engine in `rqbit-slint`.
+Ferrite (`/mnt/TempNVME/projects/ferrite/`) is a from-scratch Rust BitTorrent library. M1-M6 are complete (231 tests, zero clippy warnings). The goal is full libtorrent-rasterbar parity, using librqbit as a research model to improve upon. Ferrite will eventually replace librqbit as the engine in `rqbit-slint`.
 
 **librqbit gaps ferrite must fix:** no tracker management, no peer client ID, no torrent metadata exposure, no queue/priority, no sequential download, no per-torrent speed limits, no seeding limits, no relocation, no rename, no recheck/reannounce.
 
@@ -15,9 +15,9 @@ ferrite-core      (M2 ✓)
      |
      +---> ferrite-wire      (M3 ✓)
      +---> ferrite-tracker   (M4 ✓)
-     +---> ferrite-dht       (M5 - NEXT)
+     +---> ferrite-dht       (M5 ✓)
      |
-ferrite-storage   (M6)
+ferrite-storage   (M6 ✓)
      |
 ferrite-session   (M7-M9)
      |
@@ -28,9 +28,9 @@ ferrite           (M10 - public facade)
 
 | MS | Crate | BEPs | Tests | Status |
 |----|-------|------|-------|--------|
-| M5 | ferrite-dht | 5, 32 prep | ~35 | **NEXT** |
-| M6 | ferrite-storage | (infra) | ~40 | Can parallel with M5 |
-| M7 | ferrite-session (peer+torrent) | 3, 9, 10, 11, 27 | ~55 | Needs M5+M6 |
+| M5 | ferrite-dht | 5 | 42 | **Done** |
+| M6 | ferrite-storage | (infra) | 41 | **Done** |
+| M7 | ferrite-session (peer+torrent) | 3, 9, 10, 11, 27 | ~55 | **NEXT** |
 | M8 | ferrite-session (session mgr) | 14, 6 | ~30 | Needs M7 |
 | M9 | ferrite-session (seeding/queue/rename) | 16, 19 | ~25 | Needs M8 |
 | M10 | ferrite (facade) | — | ~10 | Needs M9 |
@@ -109,10 +109,57 @@ ferrite-dht/src/
 
 ---
 
+## M6: ferrite-storage — Detailed Plan
+
+**Crate**: `crates/ferrite-storage`
+**Deps**: ferrite-core, thiserror, tracing
+**Pattern**: Fully synchronous — no bytes, tokio, or serde
+
+### Module Structure
+
+```
+ferrite-storage/src/
+    lib.rs              -- pub exports
+    error.rs            -- Error enum
+    bitfield.rs         -- Compact bit-vector (wire-format compatible)
+    file_map.rs         -- Piece/chunk coords → file segments
+    chunk_tracker.rs    -- Per-piece chunk state + have-bitfield
+    storage.rs          -- TorrentStorage trait
+    memory.rs           -- In-memory backend (tests + magnet pre-metadata)
+    filesystem.rs       -- Disk-backed backend (sync I/O)
+```
+
+### Key Types
+
+- `Bitfield` — MSB-first bit ordering matching BEP 3 wire format, from_bytes/as_bytes round-trip
+- `FileMap` — pre-computed cumulative offsets, binary search O(log n) file lookup
+- `ChunkTracker` — piece-level `have` Bitfield + per-piece chunk Bitfield (only active pieces)
+- `TorrentStorage` trait — `&self` (Arc-shared), `(piece, begin, length)` wire-compatible API, `verify_piece` default impl
+- `MemoryStorage` — `RwLock<Vec<u8>>` flat buffer for tests and magnet-link metadata
+- `FilesystemStorage` — `Vec<Mutex<Option<File>>>` lazy open, per-file locking, sparse files
+
+### Improvements Over librqbit
+
+1. **`from_bitfield` resume** — persist bitfield, skip re-verification on restart
+2. **Binary search file lookup** — O(log n) vs linear scan
+3. **Clean trait** — `verify_piece` default method, wire-compatible API
+4. **Lazy file handles** — reduced startup overhead
+5. **Reusable Bitfield** — same type for internal tracking and wire protocol
+
+### Test Results: 41 tests
+
+- bitfield.rs: 12 tests
+- file_map.rs: 8 tests
+- chunk_tracker.rs: 8 tests
+- memory.rs: 5 tests
+- filesystem.rs: 8 tests
+
+---
+
 ## Verification
 
 ```bash
 cd /mnt/TempNVME/projects/ferrite
-cargo test --workspace           # All tests pass (148 existing + ~35 new)
+cargo test --workspace           # 231 tests pass
 cargo clippy --workspace -- -D warnings  # Zero warnings
 ```
