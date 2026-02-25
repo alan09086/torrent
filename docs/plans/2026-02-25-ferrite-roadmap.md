@@ -2,7 +2,7 @@
 
 ## Context
 
-Ferrite (`/mnt/TempNVME/projects/ferrite/`) is a from-scratch Rust BitTorrent library. M1-M8c are complete (337 tests, zero clippy warnings). The goal is full libtorrent-rasterbar parity, using librqbit as a research model to improve upon. Ferrite will eventually replace librqbit as the engine in `rqbit-slint`.
+Ferrite (`/mnt/TempNVME/projects/ferrite/`) is a from-scratch Rust BitTorrent library. M1-M9 are complete (342 tests, zero clippy warnings). The goal is full libtorrent-rasterbar parity, using librqbit as a research model to improve upon. Ferrite will eventually replace librqbit as the engine in `rqbit-slint`.
 
 **librqbit gaps ferrite must fix:** no tracker management, no peer client ID, no torrent metadata exposure, no queue/priority, no sequential download, no per-torrent speed limits, no seeding limits, no relocation, no rename, no recheck/reannounce.
 
@@ -34,7 +34,7 @@ ferrite           (M10 - public facade)
 | M8a | ferrite-session (tracker+DHT integration) | 12, 15 | 16 | **Done** |
 | M8b | ferrite-session (session mgr) | 14, 6 | 32 | **Done** |
 | M8c | ferrite-session (magnet/LSD/AllowedFast/RejectRequest) | 6, 14 | 6 | **Done** |
-| M9 | ferrite-session (seeding/queue/rename) | 16, 19 | ~25 | Needs M8c |
+| M9 | ferrite-session (seeding & upload pipeline) | — | 5 | **Done** |
 | M10 | ferrite (facade) | — | ~10 | Needs M9 |
 | M11+ | BEP 52, uTP, DHT ext, RSS, persistence | 52, 29, 42, 44, 33 | TBD | Post-MVP |
 
@@ -162,6 +162,6 @@ ferrite-storage/src/
 
 ```bash
 cd /mnt/TempNVME/projects/ferrite
-cargo test --workspace           # 337 tests pass
+cargo test --workspace           # 342 tests pass
 cargo clippy --workspace -- -D warnings  # Zero warnings
 ```

@@ -32,9 +32,9 @@ ferrite              (planned) Public facade API
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client | 14 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table | 42 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 41 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14 | 97 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding | 102 |
 
-**Total: 337 tests, zero clippy warnings.**
+**Total: 342 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -72,7 +72,7 @@ See [docs/plans/2026-02-25-ferrite-roadmap.md](docs/plans/2026-02-25-ferrite-roa
 | M8a | ferrite-session (tracker + DHT integration) | Done |
 | M8b | ferrite-session (session manager) | Done |
 | M8c | ferrite-session (magnet/LSD/AllowedFast/RejectRequest) | Done |
-| M9 | ferrite-session (seeding/queue/rename) | Planned |
+| M9 | ferrite-session (seeding & upload pipeline) | Done |
 | M10 | ferrite (public facade) | Planned |
 | M11+ | BEP 52, uTP, DHT extensions, RSS | Future |
 

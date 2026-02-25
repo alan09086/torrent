@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.6.0 — 2026-02-25
+
+Seeding & upload pipeline. Seven crates, 342 tests.
+
+### M9: ferrite-session (seeding & upload pipeline)
+- `PeerCommand::SendPiece` — push piece data to peer TCP stream
+- `serve_incoming_requests()` — read from storage and dispatch to unchoked peers
+- `TorrentState::Seeding` — new state after download completion
+- Dual-mode choker: leech mode (download rate tit-for-tat) / seed mode (upload rate)
+- Rolling window rate tracking (10s unchoke interval) for download and upload
+- Configurable `seed_ratio_limit` on TorrentConfig/SessionConfig — stops torrent when reached
+- `verify_existing_pieces()` — scan storage on startup for resume support
+- Immediate seeding when all pieces verified on startup
+
 ## 0.5.0 — 2026-02-25
 
 Complete M8 gaps: magnet links, LSD actor, AllowedFast, RejectRequest. Seven crates, 337 tests.
