@@ -37,11 +37,15 @@ pub(crate) async fn run_peer(
     event_tx: mpsc::Sender<PeerEvent>,
     mut cmd_rx: mpsc::Receiver<PeerCommand>,
     enable_dht: bool,
+    enable_fast: bool,
 ) -> crate::Result<()> {
     // --- Phase 1: Handshake (raw read/write, not framed) ---
     let mut our_hs = Handshake::new(info_hash, our_peer_id);
     if enable_dht {
         our_hs = our_hs.with_dht();
+    }
+    if enable_fast {
+        our_hs = our_hs.with_fast();
     }
 
     stream.write_all(&our_hs.to_bytes()).await?;
@@ -74,8 +78,28 @@ pub(crate) async fn run_peer(
             .map_err(crate::Error::Wire)?;
     }
 
-    // --- Phase 4: Send our bitfield (if non-empty) ---
-    if our_bitfield.count_ones() > 0 {
+    // --- Phase 4: Send our bitfield (fast-aware) ---
+    let both_support_fast = enable_fast && their_hs.supports_fast();
+    if both_support_fast {
+        if our_bitfield.count_ones() == num_pieces {
+            framed_write
+                .send(Message::HaveAll)
+                .await
+                .map_err(crate::Error::Wire)?;
+        } else if our_bitfield.count_ones() == 0 {
+            framed_write
+                .send(Message::HaveNone)
+                .await
+                .map_err(crate::Error::Wire)?;
+        } else {
+            framed_write
+                .send(Message::Bitfield(Bytes::copy_from_slice(
+                    our_bitfield.as_bytes(),
+                )))
+                .await
+                .map_err(crate::Error::Wire)?;
+        }
+    } else if our_bitfield.count_ones() > 0 {
         framed_write
             .send(Message::Bitfield(Bytes::copy_from_slice(
                 our_bitfield.as_bytes(),
@@ -108,6 +132,7 @@ pub(crate) async fn run_peer(
                             &mut peer_ut_pex,
                             our_ut_metadata,
                             our_ut_pex,
+                            both_support_fast,
                         ).await {
                             warn!(%addr, "error handling message: {e}");
                         }
@@ -171,6 +196,7 @@ async fn handle_message(
     peer_ut_pex: &mut Option<u8>,
     our_ut_metadata: Option<u8>,
     our_ut_pex: Option<u8>,
+    both_support_fast: bool,
 ) -> crate::Result<()> {
     match msg {
         Message::Choke => {
@@ -265,12 +291,61 @@ async fn handle_message(
         Message::KeepAlive | Message::Request { .. } | Message::Cancel { .. } | Message::Port(_) => {
             // Ignored
         }
-        Message::SuggestPiece(_)
-        | Message::HaveAll
-        | Message::HaveNone
-        | Message::RejectRequest { .. }
-        | Message::AllowedFast(_) => {
-            // BEP 6 Fast Extension — handled in Task 5
+        Message::HaveAll => {
+            if both_support_fast {
+                let mut bitfield = Bitfield::new(num_pieces);
+                for i in 0..num_pieces {
+                    bitfield.set(i);
+                }
+                event_tx
+                    .send(PeerEvent::Bitfield {
+                        peer_addr: addr,
+                        bitfield,
+                    })
+                    .await
+                    .map_err(|_| crate::Error::Shutdown)?;
+            }
+        }
+        Message::HaveNone => {
+            if both_support_fast {
+                let bitfield = Bitfield::new(num_pieces);
+                event_tx
+                    .send(PeerEvent::Bitfield {
+                        peer_addr: addr,
+                        bitfield,
+                    })
+                    .await
+                    .map_err(|_| crate::Error::Shutdown)?;
+            }
+        }
+        Message::SuggestPiece(index) => {
+            event_tx
+                .send(PeerEvent::SuggestPiece {
+                    peer_addr: addr,
+                    index,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        Message::RejectRequest { index, begin, length } => {
+            event_tx
+                .send(PeerEvent::RejectRequest {
+                    peer_addr: addr,
+                    index,
+                    begin,
+                    length,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        Message::AllowedFast(index) => {
+            event_tx
+                .send(PeerEvent::AllowedFast {
+                    peer_addr: addr,
+                    index,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
         }
     }
     Ok(())
@@ -509,6 +584,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -553,6 +629,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -596,6 +673,7 @@ mod tests {
                 10,
                 event_tx,
                 cmd_rx,
+                false,
                 false,
             )
             .await
@@ -653,6 +731,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -696,6 +775,7 @@ mod tests {
                 10,
                 event_tx,
                 cmd_rx,
+                false,
                 false,
             )
             .await
@@ -750,6 +830,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -803,6 +884,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -842,6 +924,7 @@ mod tests {
                 10,
                 event_tx,
                 cmd_rx,
+                false,
                 false,
             )
             .await
@@ -922,6 +1005,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -969,6 +1053,7 @@ mod tests {
                 event_tx,
                 cmd_rx,
                 false,
+                false,
             )
             .await
         });
@@ -1014,6 +1099,7 @@ mod tests {
                 10,
                 event_tx,
                 cmd_rx,
+                false,
                 false,
             )
             .await
@@ -1073,6 +1159,7 @@ mod tests {
                 10,
                 event_tx,
                 cmd_rx,
+                false,
                 false,
             )
             .await

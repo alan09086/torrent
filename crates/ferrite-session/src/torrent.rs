@@ -967,6 +967,7 @@ impl TorrentActor {
             let num_pieces = self.num_pieces;
             let event_tx = self.event_tx.clone();
             let enable_dht = self.config.enable_dht;
+            let enable_fast = self.config.enable_fast;
 
             tokio::spawn(async move {
                 match tokio::net::TcpStream::connect(addr).await {
@@ -981,6 +982,7 @@ impl TorrentActor {
                             event_tx,
                             cmd_rx,
                             enable_dht,
+                            enable_fast,
                         )
                         .await;
                     }
@@ -1022,6 +1024,7 @@ impl TorrentActor {
         let num_pieces = self.num_pieces;
         let event_tx = self.event_tx.clone();
         let enable_dht = self.config.enable_dht;
+        let enable_fast = self.config.enable_fast;
 
         tokio::spawn(async move {
             let _ = run_peer(
@@ -1034,6 +1037,7 @@ impl TorrentActor {
                 event_tx,
                 cmd_rx,
                 enable_dht,
+                enable_fast,
             )
             .await;
         });
