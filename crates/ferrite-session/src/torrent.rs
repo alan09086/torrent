@@ -285,6 +285,9 @@ struct TorrentActor {
 impl TorrentActor {
     /// Main event loop.
     async fn run(mut self) {
+        // Verify existing pieces on startup (resume support)
+        self.verify_existing_pieces();
+
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
         let mut connect_interval = tokio::time::interval(Duration::from_secs(30));
@@ -714,6 +717,39 @@ impl TorrentActor {
 
         // Try to request more from this peer
         self.request_pieces_from_peer(peer_addr).await;
+    }
+
+    fn verify_existing_pieces(&mut self) {
+        let storage = match &self.storage {
+            Some(s) => s,
+            None => return,
+        };
+        let meta = match &self.meta {
+            Some(m) => m,
+            None => return,
+        };
+
+        let mut verified_count = 0u32;
+        for i in 0..self.num_pieces {
+            if let Some(expected) = meta.info.piece_hash(i as usize)
+                && storage.verify_piece(i, &expected).unwrap_or(false)
+            {
+                if let Some(ref mut ct) = self.chunk_tracker {
+                    ct.mark_verified(i);
+                }
+                verified_count += 1;
+            }
+        }
+
+        if verified_count > 0 {
+            info!(verified_count, total = self.num_pieces, "resumed with existing pieces");
+        }
+
+        if verified_count == self.num_pieces {
+            self.state = TorrentState::Seeding;
+            self.choker.set_seed_mode(true);
+            info!("all pieces verified, starting as seeder");
+        }
     }
 
     async fn verify_and_mark_piece(&mut self, index: u32) {
@@ -2363,13 +2399,9 @@ mod tests {
 
     #[tokio::test]
     async fn pause_and_resume() {
-        let data = vec![0u8; 32768];
+        let data = vec![0xEEu8; 32768];
         let meta = make_test_torrent(&data, 16384);
-        let storage = Arc::new(MemoryStorage::new(Lengths::new(
-            meta.info.total_length(),
-            meta.info.piece_length,
-            DEFAULT_CHUNK_SIZE,
-        )));
+        let storage = make_storage(&data, 16384);
         let config = test_config();
         let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
@@ -2395,13 +2427,9 @@ mod tests {
 
     #[tokio::test]
     async fn pause_already_paused_is_noop() {
-        let data = vec![0u8; 32768];
+        let data = vec![0xEEu8; 32768];
         let meta = make_test_torrent(&data, 16384);
-        let storage = Arc::new(MemoryStorage::new(Lengths::new(
-            meta.info.total_length(),
-            meta.info.piece_length,
-            DEFAULT_CHUNK_SIZE,
-        )));
+        let storage = make_storage(&data, 16384);
         let config = test_config();
         let handle = TorrentHandle::from_torrent(meta, storage, config, None)
             .await
@@ -2749,5 +2777,29 @@ mod tests {
         handle.shutdown().await.unwrap();
         seeder_task.abort();
         leecher_task.abort();
+    }
+
+    // ---- Test 23: Resume with seeded storage starts as seeder ----
+
+    #[tokio::test]
+    async fn resume_with_seeded_storage() {
+        let data = vec![0xDDu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        // Give the actor time to verify existing pieces
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding, "should start as seeder with all pieces verified");
+        assert_eq!(stats.pieces_have, 2);
+        assert_eq!(stats.pieces_total, 2);
+
+        handle.shutdown().await.unwrap();
     }
 }
