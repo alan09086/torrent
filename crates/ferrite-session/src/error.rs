@@ -29,6 +29,15 @@ pub enum Error {
     #[error("invalid peer data: {0}")]
     InvalidPeerData(String),
 
+    #[error("torrent not found: {0}")]
+    TorrentNotFound(ferrite_core::Id20),
+
+    #[error("duplicate torrent: {0}")]
+    DuplicateTorrent(ferrite_core::Id20),
+
+    #[error("session at capacity ({0} torrents)")]
+    SessionAtCapacity(usize),
+
     #[error("session shutting down")]
     Shutdown,
 

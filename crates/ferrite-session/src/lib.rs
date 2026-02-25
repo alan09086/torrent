@@ -12,7 +12,9 @@ pub(crate) mod tracker_manager;
 pub(crate) mod lsd;
 pub(crate) mod peer;
 mod torrent;
+mod session;
 
 pub use error::{Error, Result};
 pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;
+pub use session::SessionHandle;
