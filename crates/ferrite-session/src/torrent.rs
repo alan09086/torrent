@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -620,6 +621,7 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.incoming_requests.push((index, begin, length));
                 }
+                self.serve_incoming_requests().await;
             }
             PeerEvent::RejectRequest {
                 peer_addr,
@@ -956,6 +958,56 @@ impl TorrentActor {
                 }
                 peer.am_choking = true;
                 let _ = peer.cmd_tx.send(PeerCommand::SetChoking(true)).await;
+            }
+        }
+
+        // Serve any buffered requests from newly-unchoked peers
+        self.serve_incoming_requests().await;
+    }
+
+    async fn serve_incoming_requests(&mut self) {
+        let storage = match &self.storage {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+        let chunk_tracker = match &self.chunk_tracker {
+            Some(ct) => ct,
+            None => return,
+        };
+
+        // Collect servable requests: peer is unchoked and we have the piece
+        let mut to_serve: Vec<(SocketAddr, u32, u32, u32)> = Vec::new();
+        for peer in self.peers.values() {
+            if peer.am_choking {
+                continue;
+            }
+            for &(index, begin, length) in &peer.incoming_requests {
+                if chunk_tracker.has_piece(index) {
+                    to_serve.push((peer.addr, index, begin, length));
+                }
+            }
+        }
+
+        for (addr, index, begin, length) in to_serve {
+            match storage.read_chunk(index, begin, length) {
+                Ok(data) => {
+                    if let Some(peer) = self.peers.get_mut(&addr) {
+                        peer.incoming_requests
+                            .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
+                        let _ = peer
+                            .cmd_tx
+                            .send(PeerCommand::SendPiece {
+                                index,
+                                begin,
+                                data: Bytes::from(data),
+                            })
+                            .await;
+                        self.uploaded += length as u64;
+                    }
+                }
+                Err(e) => {
+                    warn!(index, begin, length, "failed to read chunk for upload: {e}");
+                }
             }
         }
     }
@@ -2321,5 +2373,181 @@ mod tests {
         assert_eq!(stats.state, TorrentState::Paused);
 
         handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 21: Incoming request served from storage ----
+    //
+    // Phase 1: Mock seeder feeds piece 0 to the torrent so it becomes verified.
+    // Phase 2: Mock leecher connects and requests piece 0, verifying upload pipeline.
+
+    #[tokio::test]
+    async fn incoming_request_served_from_storage() {
+        let data = vec![0xABu8; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            ..test_config()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Phase 1: Seed the torrent with piece 0
+        let seed_data = data.clone();
+        let seed_stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let seeder_task = tokio::spawn({
+            let info_hash = info_hash;
+            async move {
+                let (reader, writer) = tokio::io::split(seed_stream);
+                let mut writer = writer;
+                let mut reader = reader;
+
+                let hs = Handshake::new(info_hash, Id20::from_hex("6666666666666666666666666666666666666666").unwrap());
+                writer.write_all(&hs.to_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+                let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+                reader.read_exact(&mut hs_buf).await.unwrap();
+
+                let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+                let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+                let _msg = framed_read.next().await; // ext handshake
+                let ext_hs = ExtHandshake::new();
+                let payload = ext_hs.to_bytes().unwrap();
+                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+
+                // Send bitfield + unchoke
+                let mut bf = Bitfield::new(1);
+                bf.set(0);
+                framed_write.send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes()))).await.unwrap();
+                framed_write.send(Message::Unchoke).await.unwrap();
+
+                // Respond to requests
+                while let Some(Ok(msg)) = framed_read.next().await {
+                    match msg {
+                        Message::Request { index, begin, length } => {
+                            let start = begin as usize;
+                            let end = start + length as usize;
+                            framed_write.send(Message::Piece {
+                                index,
+                                begin,
+                                data: Bytes::copy_from_slice(&seed_data[start..end]),
+                            }).await.unwrap();
+                        }
+                        Message::Interested => {}
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        // Wait for download to complete
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.pieces_have == 1 {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("piece download did not complete within 5s");
+            }
+        }
+
+        // Phase 2: Connect a mock leecher to request piece 0 back
+        let leech_stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let expected_data = data.clone();
+        let leecher_task = tokio::spawn({
+            let info_hash = info_hash;
+            async move {
+                let (reader, writer) = tokio::io::split(leech_stream);
+                let mut writer = writer;
+                let mut reader = reader;
+
+                let hs = Handshake::new(info_hash, Id20::from_hex("7777777777777777777777777777777777777777").unwrap());
+                writer.write_all(&hs.to_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+                let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+                reader.read_exact(&mut hs_buf).await.unwrap();
+
+                let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+                let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+                let _msg = framed_read.next().await; // ext handshake
+                let ext_hs = ExtHandshake::new();
+                let payload = ext_hs.to_bytes().unwrap();
+                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+
+                // Send Interested and wait for Unchoke
+                framed_write.send(Message::Interested).await.unwrap();
+
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    tokio::select! {
+                        msg = framed_read.next() => {
+                            match msg {
+                                Some(Ok(Message::Unchoke)) => { break; }
+                                Some(Ok(_)) => {}
+                                _ => panic!("connection closed before unchoke"),
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            panic!("timed out waiting for unchoke");
+                        }
+                    }
+                }
+
+                // Request piece 0
+                framed_write.send(Message::Request { index: 0, begin: 0, length: 16384 }).await.unwrap();
+
+                // Read Piece response
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    tokio::select! {
+                        msg = framed_read.next() => {
+                            match msg {
+                                Some(Ok(Message::Piece { index, begin, data })) => {
+                                    assert_eq!(index, 0);
+                                    assert_eq!(begin, 0);
+                                    assert_eq!(data.as_ref(), expected_data.as_slice());
+                                    return; // success
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(e)) => panic!("error reading: {e}"),
+                                None => panic!("connection closed before piece"),
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            panic!("timed out waiting for piece data");
+                        }
+                    }
+                }
+            }
+        });
+
+        // Wait for leecher to complete
+        let result = tokio::time::timeout(Duration::from_secs(20), leecher_task).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("leecher task panicked: {e}"),
+            Err(_) => panic!("test timed out"),
+        }
+
+        // Verify uploaded bytes
+        let stats = handle.stats().await.unwrap();
+        assert!(stats.uploaded > 0, "expected uploaded > 0, got {}", stats.uploaded);
+
+        handle.shutdown().await.unwrap();
+        seeder_task.abort();
     }
 }
