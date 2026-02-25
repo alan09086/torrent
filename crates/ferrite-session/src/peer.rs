@@ -1205,4 +1205,110 @@ mod tests {
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
         let _ = handle.await;
     }
+
+    // ---- Test 13: Fast Extension — HaveAll sent when complete ----
+
+    /// Do the remote handshake with fast extension enabled.
+    async fn do_remote_handshake_fast(
+        stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+        info_hash: Id20,
+        remote_id: Id20,
+    ) -> Handshake {
+        let mut buf = [0u8; HANDSHAKE_SIZE];
+        stream.read_exact(&mut buf).await.unwrap();
+        let our_hs = Handshake::from_bytes(&buf).unwrap();
+
+        let remote_hs = Handshake::new(info_hash, remote_id).with_fast();
+        stream.write_all(&remote_hs.to_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+
+        our_hs
+    }
+
+    #[tokio::test]
+    async fn fast_extension_have_all_sent_when_complete() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let num_pieces = 10u32;
+
+        // Create a full bitfield (all pieces set)
+        let mut bitfield = Bitfield::new(num_pieces);
+        for i in 0..num_pieces {
+            bitfield.set(i);
+        }
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                num_pieces,
+                event_tx,
+                cmd_rx,
+                false,
+                true, // enable_fast
+            )
+            .await
+        });
+
+        let our_hs = do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
+        assert!(our_hs.supports_fast(), "our handshake should advertise fast");
+
+        // Read ext handshake
+        let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+
+        // Should receive HaveAll (not Bitfield) since both support fast and all pieces set
+        let msg = read_framed_message(&mut server_stream).await;
+        assert_eq!(msg, Message::HaveAll);
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    // ---- Test 14: Fast Extension — HaveNone sent when empty ----
+
+    #[tokio::test]
+    async fn fast_extension_have_none_sent_when_empty() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let num_pieces = 10u32;
+        let bitfield = Bitfield::new(num_pieces); // empty
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                num_pieces,
+                event_tx,
+                cmd_rx,
+                false,
+                true, // enable_fast
+            )
+            .await
+        });
+
+        let our_hs = do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
+        assert!(our_hs.supports_fast());
+
+        // Read ext handshake
+        let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+
+        // Should receive HaveNone (not nothing) since both support fast and no pieces
+        let msg = read_framed_message(&mut server_stream).await;
+        assert_eq!(msg, Message::HaveNone);
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
 }
