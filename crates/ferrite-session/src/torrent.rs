@@ -1029,6 +1029,27 @@ impl TorrentActor {
                 }
             }
         }
+
+        if self.check_seed_ratio() {
+            self.shutdown_peers().await;
+        }
+    }
+
+    fn check_seed_ratio(&mut self) -> bool {
+        if self.state != TorrentState::Seeding {
+            return false;
+        }
+        if let Some(limit) = self.config.seed_ratio_limit
+            && self.downloaded > 0
+        {
+            let ratio = self.uploaded as f64 / self.downloaded as f64;
+            if ratio >= limit {
+                info!(ratio, limit, "seed ratio reached, stopping");
+                self.state = TorrentState::Stopped;
+                return true;
+            }
+        }
+        false
     }
 
     fn rotate_optimistic(&mut self) {
@@ -1228,6 +1249,7 @@ mod tests {
             enable_dht: false,
             enable_pex: false,
             enable_fast: false,
+            seed_ratio_limit: None,
         }
     }
 
@@ -2569,5 +2591,163 @@ mod tests {
 
         handle.shutdown().await.unwrap();
         seeder_task.abort();
+    }
+
+    // ---- Test 22: Seed ratio limit stops torrent ----
+
+    #[tokio::test]
+    async fn seed_ratio_limit_stops_torrent() {
+        // 1-piece torrent, ratio limit = 1.0
+        // After downloading 16384 bytes and uploading 16384 bytes, ratio = 1.0 → stop
+        let data = vec![0xCCu8; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            seed_ratio_limit: Some(1.0),
+            ..test_config()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Phase 1: Seed the torrent with piece 0
+        let seed_data = data.clone();
+        let seed_stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let seeder_task = tokio::spawn({
+            let info_hash = info_hash;
+            async move {
+                let (reader, writer) = tokio::io::split(seed_stream);
+                let mut writer = writer;
+                let mut reader = reader;
+
+                let hs = Handshake::new(info_hash, Id20::from_hex("8888888888888888888888888888888888888888").unwrap());
+                writer.write_all(&hs.to_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+                let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+                reader.read_exact(&mut hs_buf).await.unwrap();
+
+                let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+                let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+                let _msg = framed_read.next().await;
+                let ext_hs = ExtHandshake::new();
+                let payload = ext_hs.to_bytes().unwrap();
+                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+
+                let mut bf = Bitfield::new(1);
+                bf.set(0);
+                framed_write.send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes()))).await.unwrap();
+                framed_write.send(Message::Unchoke).await.unwrap();
+
+                while let Some(Ok(msg)) = framed_read.next().await {
+                    match msg {
+                        Message::Request { index, begin, length } => {
+                            let start = begin as usize;
+                            let end = start + length as usize;
+                            framed_write.send(Message::Piece {
+                                index,
+                                begin,
+                                data: Bytes::copy_from_slice(&seed_data[start..end]),
+                            }).await.unwrap();
+                        }
+                        Message::Interested => {}
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        // Wait for download to complete (transitions to Seeding)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.state == TorrentState::Seeding {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("download did not complete within 5s");
+            }
+        }
+
+        // Phase 2: Connect leecher to request piece 0 — this should trigger ratio limit
+        let leech_stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let leecher_task = tokio::spawn({
+            let info_hash = info_hash;
+            async move {
+                let (reader, writer) = tokio::io::split(leech_stream);
+                let mut writer = writer;
+                let mut reader = reader;
+
+                let hs = Handshake::new(info_hash, Id20::from_hex("9999999999999999999999999999999999999999").unwrap());
+                writer.write_all(&hs.to_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+                let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+                reader.read_exact(&mut hs_buf).await.unwrap();
+
+                let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+                let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+                let _msg = framed_read.next().await;
+                let ext_hs = ExtHandshake::new();
+                let payload = ext_hs.to_bytes().unwrap();
+                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+
+                framed_write.send(Message::Interested).await.unwrap();
+
+                // Wait for unchoke
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    tokio::select! {
+                        msg = framed_read.next() => {
+                            match msg {
+                                Some(Ok(Message::Unchoke)) => break,
+                                Some(Ok(_)) => {}
+                                _ => return, // connection may close due to ratio shutdown
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => return,
+                    }
+                }
+
+                // Request piece 0
+                framed_write.send(Message::Request { index: 0, begin: 0, length: 16384 }).await.unwrap();
+
+                // Read until connection closes (the torrent may stop and disconnect us)
+                while let Some(Ok(_msg)) = framed_read.next().await {}
+            }
+        });
+
+        // Wait for state to become Stopped
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.state == TorrentState::Stopped {
+                assert!(stats.uploaded >= 16384, "expected uploaded >= 16384, got {}", stats.uploaded);
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                let stats = handle.stats().await.unwrap();
+                panic!(
+                    "expected Stopped, got {:?}, uploaded={}, downloaded={}",
+                    stats.state, stats.uploaded, stats.downloaded
+                );
+            }
+        }
+
+        handle.shutdown().await.unwrap();
+        seeder_task.abort();
+        leecher_task.abort();
     }
 }

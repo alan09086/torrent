@@ -313,6 +313,7 @@ impl SessionActor {
             enable_dht: self.config.enable_dht,
             enable_pex: self.config.enable_pex,
             enable_fast: self.config.enable_fast_extension,
+            seed_ratio_limit: self.config.seed_ratio_limit,
         }
     }
 
@@ -551,6 +552,7 @@ mod tests {
             enable_pex: false,
             enable_lsd: false,
             enable_fast_extension: false,
+            seed_ratio_limit: None,
         }
     }
 

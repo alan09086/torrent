@@ -17,6 +17,7 @@ pub struct TorrentConfig {
     pub enable_dht: bool,
     pub enable_pex: bool,
     pub enable_fast: bool,
+    pub seed_ratio_limit: Option<f64>,
 }
 
 impl Default for TorrentConfig {
@@ -29,6 +30,7 @@ impl Default for TorrentConfig {
             enable_dht: true,
             enable_pex: true,
             enable_fast: false,
+            seed_ratio_limit: None,
         }
     }
 }
@@ -181,6 +183,7 @@ pub struct SessionConfig {
     pub enable_pex: bool,
     pub enable_lsd: bool,
     pub enable_fast_extension: bool,
+    pub seed_ratio_limit: Option<f64>,
 }
 
 impl Default for SessionConfig {
@@ -193,6 +196,7 @@ impl Default for SessionConfig {
             enable_pex: true,
             enable_lsd: true,
             enable_fast_extension: true,
+            seed_ratio_limit: None,
         }
     }
 }
