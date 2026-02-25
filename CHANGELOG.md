@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.3.0 — 2026-02-25
+
+Tracker and DHT integration into TorrentActor. Seven crates, 299 tests.
+
+### M8a: ferrite-session (tracker + DHT integration)
+- `TrackerManager` — per-torrent tracker announce lifecycle (BEP 3/12/15)
+- BEP 12 announce_list parsing with tier support and URL deduplication
+- HTTP and UDP tracker classification with exponential backoff (30s → 30min)
+- Tracker re-announce select! arm in TorrentActor (timer-driven, immediate first fire)
+- DHT peer receiver select! arm (batched `get_peers` results → `handle_add_peers`)
+- DHT re-search on connect timer when peer pool is exhausted
+- Completed announce on download finish, Stopped announce on shutdown
+- Tracker population on metadata assembly (magnet link flow)
+- `from_torrent()` now accepts `dht: Option<DhtHandle>` parameter
+
 ## 0.2.0 — 2026-02-25
 
 Session layer with peer management and torrent orchestration. Seven crates, 283 tests.
