@@ -2,11 +2,13 @@
 //!
 //! UDP multicast announcer for discovering peers on the local network.
 
-#![allow(dead_code)] // Used by session module (Task 4)
-
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Instant;
+
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
 use ferrite_core::Id20;
 
@@ -140,6 +142,117 @@ impl LsdRateLimiter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LSD Actor (BEP 14 UDP multicast)
+// ---------------------------------------------------------------------------
+
+pub(crate) enum LsdCommand {
+    Announce { info_hashes: Vec<Id20> },
+    Shutdown,
+}
+
+#[derive(Clone)]
+pub(crate) struct LsdHandle {
+    cmd_tx: mpsc::Sender<LsdCommand>,
+}
+
+impl LsdHandle {
+    /// Start the LSD actor, binding to the multicast port.
+    pub async fn start(
+        listen_port: u16,
+    ) -> std::io::Result<(Self, mpsc::Receiver<(Id20, SocketAddr)>)> {
+        let socket =
+            UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, LSD_PORT)).await?;
+        socket.set_broadcast(true)?;
+        socket.join_multicast_v4(LSD_MULTICAST, Ipv4Addr::UNSPECIFIED)?;
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (peer_tx, peer_rx) = mpsc::channel(256);
+
+        let actor = LsdActor {
+            socket,
+            listen_port,
+            rate_limiter: LsdRateLimiter::new(),
+            cmd_rx,
+            peer_tx,
+        };
+        tokio::spawn(actor.run());
+
+        Ok((Self { cmd_tx }, peer_rx))
+    }
+
+    pub async fn announce(&self, info_hashes: Vec<Id20>) {
+        let _ = self
+            .cmd_tx
+            .send(LsdCommand::Announce { info_hashes })
+            .await;
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = self.cmd_tx.send(LsdCommand::Shutdown).await;
+    }
+}
+
+struct LsdActor {
+    socket: UdpSocket,
+    listen_port: u16,
+    rate_limiter: LsdRateLimiter,
+    cmd_rx: mpsc::Receiver<LsdCommand>,
+    peer_tx: mpsc::Sender<(Id20, SocketAddr)>,
+}
+
+impl LsdActor {
+    async fn run(mut self) {
+        let mut buf = [0u8; MAX_PACKET_SIZE];
+        loop {
+            tokio::select! {
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(LsdCommand::Announce { info_hashes }) => {
+                            self.do_announce(&info_hashes).await;
+                        }
+                        Some(LsdCommand::Shutdown) | None => return,
+                    }
+                }
+                result = self.socket.recv_from(&mut buf) => {
+                    if let Ok((len, src)) = result {
+                        self.handle_incoming(&buf[..len], src).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn do_announce(&mut self, info_hashes: &[Id20]) {
+        let eligible = self.rate_limiter.filter_eligible(info_hashes);
+        if eligible.is_empty() {
+            return;
+        }
+        let messages = format_announce(&eligible, self.listen_port);
+        let dest = LsdRateLimiter::multicast_addr();
+        for msg in &messages {
+            if let Err(e) = self.socket.send_to(msg, dest).await {
+                warn!("LSD send failed: {e}");
+                return;
+            }
+        }
+        debug!(count = eligible.len(), "LSD announce sent");
+    }
+
+    async fn handle_incoming(&self, data: &[u8], src: SocketAddr) {
+        let announce = match parse_announce(data) {
+            Some(a) => a,
+            None => return,
+        };
+        let peer_addr = SocketAddr::new(src.ip(), announce.port);
+        for ih in announce.info_hashes {
+            if self.peer_tx.send((ih, peer_addr)).await.is_err() {
+                return; // receiver dropped
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +344,20 @@ mod tests {
         let _ = limiter.filter_eligible(&[test_hash()]);
         let eligible = limiter.filter_eligible(&[test_hash()]);
         assert!(eligible.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lsd_actor_start_and_shutdown() {
+        // Port 6771 may be unavailable in CI — gracefully skip
+        let result = LsdHandle::start(6881).await;
+        match result {
+            Ok((handle, _peer_rx)) => {
+                handle.announce(vec![test_hash()]).await;
+                handle.shutdown().await;
+            }
+            Err(e) => {
+                eprintln!("LSD actor test skipped (port unavailable): {e}");
+            }
+        }
     }
 }
