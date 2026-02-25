@@ -1,0 +1,26 @@
+[package]
+name = "ferrite-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BitTorrent session management: peers, torrents, and piece selection"
+
+[dependencies]
+ferrite-bencode = { path = "../ferrite-bencode" }
+ferrite-core = { path = "../ferrite-core" }
+ferrite-wire = { path = "../ferrite-wire" }
+ferrite-tracker = { path = "../ferrite-tracker" }
+ferrite-dht = { path = "../ferrite-dht" }
+ferrite-storage = { path = "../ferrite-storage" }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
