@@ -341,6 +341,7 @@ impl TorrentActor {
                 }
                 // Unchoke timer
                 _ = unchoke_interval.tick() => {
+                    self.update_peer_rates();
                     self.run_choker().await;
                 }
                 // Optimistic unchoke timer
@@ -697,7 +698,7 @@ impl TorrentActor {
             {
                 peer.pending_requests.swap_remove(pos);
             }
-            peer.download_rate += data.len() as u64;
+            peer.download_bytes_window += data.len() as u64;
         }
 
         // Track chunk completion
@@ -922,6 +923,16 @@ impl TorrentActor {
 
     // ----- Choking -----
 
+    fn update_peer_rates(&mut self) {
+        for peer in self.peers.values_mut() {
+            // Window is 10 seconds (unchoke interval)
+            peer.download_rate = peer.download_bytes_window / 10;
+            peer.upload_rate = peer.upload_bytes_window / 10;
+            peer.download_bytes_window = 0;
+            peer.upload_bytes_window = 0;
+        }
+    }
+
     async fn run_choker(&mut self) {
         let peer_infos: Vec<PeerInfo> = self
             .peers
@@ -1010,6 +1021,7 @@ impl TorrentActor {
                             })
                             .await;
                         self.uploaded += length as u64;
+                        peer.upload_bytes_window += length as u64;
                     }
                 }
                 Err(e) => {

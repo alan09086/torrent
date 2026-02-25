@@ -26,6 +26,10 @@ pub(crate) struct PeerState {
     pub download_rate: u64,
     /// Upload rate in bytes/sec.
     pub upload_rate: u64,
+    /// Bytes downloaded from this peer in current rate window.
+    pub download_bytes_window: u64,
+    /// Bytes uploaded to this peer in current rate window.
+    pub upload_bytes_window: u64,
     /// Outstanding requests to this peer (index, begin, length).
     pub pending_requests: Vec<(u32, u32, u32)>,
     /// Requests from this peer to us (index, begin, length).
@@ -52,6 +56,8 @@ impl PeerState {
             bitfield: Bitfield::new(bitfield_len),
             download_rate: 0,
             upload_rate: 0,
+            download_bytes_window: 0,
+            upload_bytes_window: 0,
             pending_requests: Vec::new(),
             incoming_requests: Vec::new(),
             ext_handshake: None,
