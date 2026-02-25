@@ -57,6 +57,17 @@ impl Handshake {
         self
     }
 
+    /// Check if the peer supports Fast Extension (BEP 6).
+    pub fn supports_fast(&self) -> bool {
+        self.reserved[7] & 0x04 != 0
+    }
+
+    /// Enable Fast Extension flag.
+    pub fn with_fast(mut self) -> Self {
+        self.reserved[7] |= 0x04;
+        self
+    }
+
     /// Serialize to bytes.
     pub fn to_bytes(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(HANDSHAKE_SIZE);
@@ -142,5 +153,20 @@ mod tests {
     #[test]
     fn handshake_too_short() {
         assert!(Handshake::from_bytes(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn handshake_fast_flag() {
+        let hs = Handshake::new(Id20::ZERO, Id20::ZERO).with_fast();
+        assert!(hs.supports_fast());
+        assert!(hs.supports_extensions());
+        // Ensure DHT and fast don't interfere
+        let hs2 = hs.with_dht();
+        assert!(hs2.supports_fast());
+        assert!(hs2.supports_dht());
+
+        let parsed = Handshake::from_bytes(&hs2.to_bytes()).unwrap();
+        assert!(parsed.supports_fast());
+        assert!(parsed.supports_dht());
     }
 }

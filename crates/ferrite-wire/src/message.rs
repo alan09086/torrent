@@ -29,6 +29,16 @@ pub enum Message {
     Port(u16),
     /// Extension message (BEP 10). ext_id=0 is handshake.
     Extended { ext_id: u8, payload: Bytes },
+    /// BEP 6: Suggest a piece for the peer to download.
+    SuggestPiece(u32),
+    /// BEP 6: We have all pieces.
+    HaveAll,
+    /// BEP 6: We have no pieces.
+    HaveNone,
+    /// BEP 6: Reject a request from the peer.
+    RejectRequest { index: u32, begin: u32, length: u32 },
+    /// BEP 6: Piece index the peer is allowed to request while choked.
+    AllowedFast(u32),
 }
 
 // Message IDs per BEP 3
@@ -43,6 +53,13 @@ const ID_PIECE: u8 = 7;
 const ID_CANCEL: u8 = 8;
 const ID_PORT: u8 = 9;
 const ID_EXTENDED: u8 = 20;
+
+// BEP 6 Fast Extension
+const ID_SUGGEST_PIECE: u8 = 0x0D;
+const ID_HAVE_ALL: u8 = 0x0E;
+const ID_HAVE_NONE: u8 = 0x0F;
+const ID_REJECT_REQUEST: u8 = 0x10;
+const ID_ALLOWED_FAST: u8 = 0x11;
 
 impl Message {
     /// Serialize a message to bytes (length-prefix + id + payload).
@@ -107,6 +124,25 @@ impl Message {
                 buf.put_slice(payload);
                 buf.freeze()
             }
+            Message::SuggestPiece(index) => {
+                let mut buf = BytesMut::with_capacity(9);
+                buf.put_u32(5);
+                buf.put_u8(ID_SUGGEST_PIECE);
+                buf.put_u32(*index);
+                buf.freeze()
+            }
+            Message::HaveAll => fixed_msg(ID_HAVE_ALL),
+            Message::HaveNone => fixed_msg(ID_HAVE_NONE),
+            Message::RejectRequest { index, begin, length } => {
+                triple_msg(ID_REJECT_REQUEST, *index, *begin, *length)
+            }
+            Message::AllowedFast(index) => {
+                let mut buf = BytesMut::with_capacity(9);
+                buf.put_u32(5);
+                buf.put_u8(ID_ALLOWED_FAST);
+                buf.put_u32(*index);
+                buf.freeze()
+            }
         }
     }
 
@@ -167,6 +203,24 @@ impl Message {
                     payload: Bytes::copy_from_slice(&body[1..]),
                 })
             }
+            ID_SUGGEST_PIECE => {
+                ensure_len(body, 4, "SuggestPiece")?;
+                Ok(Message::SuggestPiece(read_u32(body)))
+            }
+            ID_HAVE_ALL => Ok(Message::HaveAll),
+            ID_HAVE_NONE => Ok(Message::HaveNone),
+            ID_REJECT_REQUEST => {
+                ensure_len(body, 12, "RejectRequest")?;
+                Ok(Message::RejectRequest {
+                    index: read_u32(body),
+                    begin: read_u32(&body[4..]),
+                    length: read_u32(&body[8..]),
+                })
+            }
+            ID_ALLOWED_FAST => {
+                ensure_len(body, 4, "AllowedFast")?;
+                Ok(Message::AllowedFast(read_u32(body)))
+            }
             _ => Err(Error::InvalidMessageId(id)),
         }
     }
@@ -204,6 +258,59 @@ fn ensure_len(body: &[u8], min: usize, _name: &str) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// BEP 6 Allowed-Fast set generation.
+///
+/// Generates a deterministic set of piece indices that a peer is allowed
+/// to request even while choked. Uses IP masking to /24 + info_hash + SHA1.
+pub fn allowed_fast_set(
+    info_hash: &ferrite_core::Id20,
+    peer_ip: std::net::Ipv4Addr,
+    num_pieces: u32,
+    count: usize,
+) -> Vec<u32> {
+    use ferrite_core::sha1;
+
+    if num_pieces == 0 {
+        return Vec::new();
+    }
+
+    let count = count.min(num_pieces as usize);
+    let mut result = Vec::with_capacity(count);
+
+    // Mask IP to /24 network
+    let octets = peer_ip.octets();
+    let masked = [octets[0], octets[1], octets[2], 0];
+
+    // Initial hash: SHA1(masked_ip + info_hash)
+    let mut input = Vec::with_capacity(24);
+    input.extend_from_slice(&masked);
+    input.extend_from_slice(info_hash.as_bytes());
+    let mut hash = sha1(&input);
+
+    while result.len() < count {
+        let hash_bytes = hash.as_bytes();
+        // Each 20-byte hash gives us 5 candidate indices (4 bytes each)
+        for i in (0..20).step_by(4) {
+            if result.len() >= count {
+                break;
+            }
+            let index = u32::from_be_bytes([
+                hash_bytes[i],
+                hash_bytes[i + 1],
+                hash_bytes[i + 2],
+                hash_bytes[i + 3],
+            ]) % num_pieces;
+            if !result.contains(&index) {
+                result.push(index);
+            }
+        }
+        // Re-hash for more candidates
+        hash = sha1(hash.as_bytes());
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -287,5 +394,65 @@ mod tests {
     #[test]
     fn invalid_message_id() {
         assert!(Message::from_payload(&[99]).is_err());
+    }
+
+    #[test]
+    fn suggest_piece() {
+        round_trip(Message::SuggestPiece(42));
+    }
+
+    #[test]
+    fn have_all() {
+        round_trip(Message::HaveAll);
+    }
+
+    #[test]
+    fn have_none() {
+        round_trip(Message::HaveNone);
+    }
+
+    #[test]
+    fn reject_request() {
+        round_trip(Message::RejectRequest {
+            index: 1,
+            begin: 0,
+            length: 16384,
+        });
+    }
+
+    #[test]
+    fn allowed_fast() {
+        round_trip(Message::AllowedFast(7));
+    }
+
+    #[test]
+    fn allowed_fast_set_deterministic() {
+        use ferrite_core::Id20;
+        let ih = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let ip: std::net::Ipv4Addr = "192.168.1.100".parse().unwrap();
+        let set1 = allowed_fast_set(&ih, ip, 1000, 10);
+        let set2 = allowed_fast_set(&ih, ip, 1000, 10);
+        assert_eq!(set1, set2);
+        assert_eq!(set1.len(), 10);
+        // All indices in range
+        assert!(set1.iter().all(|&i| i < 1000));
+    }
+
+    #[test]
+    fn allowed_fast_set_unique() {
+        use ferrite_core::Id20;
+        let ih = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let ip: std::net::Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let set = allowed_fast_set(&ih, ip, 50, 10);
+        let unique: std::collections::HashSet<u32> = set.iter().copied().collect();
+        assert_eq!(set.len(), unique.len(), "all indices should be unique");
+    }
+
+    #[test]
+    fn allowed_fast_set_empty_torrent() {
+        use ferrite_core::Id20;
+        let ih = Id20::ZERO;
+        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
+        assert!(allowed_fast_set(&ih, ip, 0, 10).is_empty());
     }
 }

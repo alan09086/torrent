@@ -12,4 +12,4 @@ pub use codec::MessageCodec;
 pub use error::{Error, Result};
 pub use extended::{ExtHandshake, ExtMessage, MetadataMessage, MetadataMessageType};
 pub use handshake::Handshake;
-pub use message::Message;
+pub use message::{allowed_fast_set, Message};
