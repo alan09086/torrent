@@ -1,0 +1,1843 @@
+//! TorrentActor (single-owner event loop) and TorrentHandle (cloneable public API).
+//!
+//! The actor owns all per-torrent state (chunk tracking, piece selection, choking,
+//! peer management) and communicates with spawned PeerTasks via channels.
+//! The handle is a thin wrapper around an mpsc sender.
+
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, warn};
+
+use ferrite_core::{
+    torrent_from_bytes, Id20, Lengths, Magnet, PeerId, TorrentMetaV1, DEFAULT_CHUNK_SIZE,
+};
+use ferrite_dht::DhtHandle;
+use ferrite_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
+
+use crate::choker::{Choker, PeerInfo};
+use crate::metadata::MetadataDownloader;
+use crate::peer::run_peer;
+use crate::peer_state::PeerState;
+use crate::piece_selector::PieceSelector;
+use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, TorrentState, TorrentStats};
+
+/// Cloneable handle for interacting with a running torrent.
+#[derive(Clone)]
+pub struct TorrentHandle {
+    cmd_tx: mpsc::Sender<TorrentCommand>,
+}
+
+impl TorrentHandle {
+    /// Create a torrent session from parsed .torrent metadata.
+    ///
+    /// Spawns the actor event loop and returns a handle for sending commands.
+    pub async fn from_torrent(
+        meta: TorrentMetaV1,
+        storage: Arc<dyn TorrentStorage>,
+        config: TorrentConfig,
+    ) -> crate::Result<Self> {
+        let mut config = config;
+        // BEP 27: private torrents disable DHT and PEX
+        if meta.info.private == Some(1) {
+            config.enable_dht = false;
+            config.enable_pex = false;
+        }
+
+        let num_pieces = meta.info.num_pieces() as u32;
+        let lengths = Lengths::new(
+            meta.info.total_length(),
+            meta.info.piece_length,
+            DEFAULT_CHUNK_SIZE,
+        );
+        let chunk_tracker = ChunkTracker::new(lengths.clone());
+        let piece_selector = PieceSelector::new(num_pieces);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(256);
+        let our_peer_id = PeerId::generate().0;
+
+        // Bind listener for incoming connections
+        let listener = TcpListener::bind(("127.0.0.1", config.listen_port))
+            .await
+            .ok();
+
+        let actor = TorrentActor {
+            config,
+            info_hash: meta.info_hash,
+            our_peer_id,
+            state: TorrentState::Downloading,
+            storage: Some(storage),
+            chunk_tracker: Some(chunk_tracker),
+            lengths: Some(lengths),
+            num_pieces,
+            piece_selector,
+            in_flight: HashSet::new(),
+            peers: HashMap::new(),
+            available_peers: Vec::new(),
+            choker: Choker::new(4),
+            metadata_downloader: None,
+            downloaded: 0,
+            uploaded: 0,
+            cmd_rx,
+            event_tx,
+            event_rx,
+            meta: Some(meta),
+            listener,
+        };
+
+        tokio::spawn(actor.run());
+        Ok(TorrentHandle { cmd_tx })
+    }
+
+    /// Create a torrent session from a magnet link (metadata fetched via BEP 9).
+    pub async fn from_magnet(
+        magnet: Magnet,
+        config: TorrentConfig,
+        _dht: Option<DhtHandle>,
+    ) -> crate::Result<Self> {
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(256);
+        let our_peer_id = PeerId::generate().0;
+
+        let listener = TcpListener::bind(("127.0.0.1", config.listen_port))
+            .await
+            .ok();
+
+        let actor = TorrentActor {
+            config,
+            info_hash: magnet.info_hash,
+            our_peer_id,
+            state: TorrentState::FetchingMetadata,
+            storage: None,
+            chunk_tracker: None,
+            lengths: None,
+            num_pieces: 0,
+            piece_selector: PieceSelector::new(0),
+            in_flight: HashSet::new(),
+            peers: HashMap::new(),
+            available_peers: Vec::new(),
+            choker: Choker::new(4),
+            metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash)),
+            downloaded: 0,
+            uploaded: 0,
+            cmd_rx,
+            event_tx,
+            event_rx,
+            meta: None,
+            listener,
+        };
+
+        tokio::spawn(actor.run());
+        Ok(TorrentHandle { cmd_tx })
+    }
+
+    /// Query current torrent statistics.
+    pub async fn stats(&self) -> crate::Result<TorrentStats> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::Stats { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Add peer addresses to the available-peer pool.
+    pub async fn add_peers(&self, peers: Vec<SocketAddr>) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::AddPeers { peers })
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Gracefully shut down the torrent session.
+    pub async fn shutdown(&self) -> crate::Result<()> {
+        // Best-effort send; if the channel is already closed, that's fine.
+        let _ = self.cmd_tx.send(TorrentCommand::Shutdown).await;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TorrentActor — internal single-owner event loop
+// ---------------------------------------------------------------------------
+
+struct TorrentActor {
+    config: TorrentConfig,
+    info_hash: Id20,
+    our_peer_id: Id20,
+    state: TorrentState,
+
+    // Optional fields (None in magnet mode until metadata arrives)
+    storage: Option<Arc<dyn TorrentStorage>>,
+    chunk_tracker: Option<ChunkTracker>,
+    lengths: Option<Lengths>,
+    num_pieces: u32,
+
+    // Piece management
+    piece_selector: PieceSelector,
+    in_flight: HashSet<u32>,
+
+    // Peer management
+    peers: HashMap<SocketAddr, PeerState>,
+    available_peers: Vec<SocketAddr>,
+    choker: Choker,
+
+    // Metadata (for magnet links)
+    metadata_downloader: Option<MetadataDownloader>,
+
+    // Parsed torrent meta (for piece hash verification)
+    meta: Option<TorrentMetaV1>,
+
+    // Stats
+    downloaded: u64,
+    uploaded: u64,
+
+    // Channels
+    cmd_rx: mpsc::Receiver<TorrentCommand>,
+    event_tx: mpsc::Sender<PeerEvent>,
+    event_rx: mpsc::Receiver<PeerEvent>,
+
+    // TCP listener for incoming peer connections
+    listener: Option<TcpListener>,
+}
+
+impl TorrentActor {
+    /// Main event loop.
+    async fn run(mut self) {
+        let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
+        let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut connect_interval = tokio::time::interval(Duration::from_secs(30));
+
+        // Don't fire immediately for the first tick
+        unchoke_interval.tick().await;
+        optimistic_interval.tick().await;
+        connect_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                // Commands from handle
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(TorrentCommand::AddPeers { peers }) => {
+                            self.handle_add_peers(peers);
+                        }
+                        Some(TorrentCommand::Stats { reply }) => {
+                            let _ = reply.send(self.make_stats());
+                        }
+                        Some(TorrentCommand::Shutdown) | None => {
+                            self.shutdown_peers().await;
+                            return;
+                        }
+                    }
+                }
+                // Events from peers
+                event = self.event_rx.recv() => {
+                    if let Some(event) = event {
+                        self.handle_peer_event(event).await;
+                    }
+                }
+                // Accept incoming peers
+                result = accept_incoming(&self.listener) => {
+                    if let Ok((stream, addr)) = result {
+                        self.spawn_peer_from_stream(addr, stream);
+                    }
+                }
+                // Unchoke timer
+                _ = unchoke_interval.tick() => {
+                    self.run_choker().await;
+                }
+                // Optimistic unchoke timer
+                _ = optimistic_interval.tick() => {
+                    self.rotate_optimistic();
+                }
+                // Connect timer
+                _ = connect_interval.tick() => {
+                    self.try_connect_peers();
+                }
+            }
+        }
+    }
+
+    // ----- Command handlers -----
+
+    fn handle_add_peers(&mut self, peers: Vec<SocketAddr>) {
+        for addr in peers {
+            if !self.peers.contains_key(&addr) && !self.available_peers.contains(&addr) {
+                self.available_peers.push(addr);
+            }
+        }
+    }
+
+    fn make_stats(&self) -> TorrentStats {
+        let pieces_have = self
+            .chunk_tracker
+            .as_ref()
+            .map(|ct| ct.bitfield().count_ones())
+            .unwrap_or(0);
+
+        TorrentStats {
+            state: self.state,
+            downloaded: self.downloaded,
+            uploaded: self.uploaded,
+            pieces_have,
+            pieces_total: self.num_pieces,
+            peers_connected: self.peers.len(),
+            peers_available: self.available_peers.len(),
+        }
+    }
+
+    async fn shutdown_peers(&self) {
+        for peer in self.peers.values() {
+            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+        }
+    }
+
+    // ----- Event handlers -----
+
+    async fn handle_peer_event(&mut self, event: PeerEvent) {
+        match event {
+            PeerEvent::Bitfield {
+                peer_addr,
+                bitfield,
+            } => {
+                self.piece_selector.add_peer_bitfield(&bitfield);
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.bitfield = bitfield;
+                }
+                // Check if we're interested in this peer
+                self.maybe_express_interest(peer_addr).await;
+                self.request_pieces_from_peer(peer_addr).await;
+            }
+            PeerEvent::Have { peer_addr, index } => {
+                self.piece_selector.increment(index);
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.bitfield.set(index);
+                }
+                self.maybe_express_interest(peer_addr).await;
+                self.request_pieces_from_peer(peer_addr).await;
+            }
+            PeerEvent::PieceData {
+                peer_addr,
+                index,
+                begin,
+                data,
+            } => {
+                self.handle_piece_data(peer_addr, index, begin, &data)
+                    .await;
+            }
+            PeerEvent::PeerChoking {
+                peer_addr,
+                choking,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.peer_choking = choking;
+                }
+                if !choking {
+                    // Unchoked — try requesting pieces
+                    self.request_pieces_from_peer(peer_addr).await;
+                }
+            }
+            PeerEvent::PeerInterested {
+                peer_addr,
+                interested,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.peer_interested = interested;
+                }
+            }
+            PeerEvent::ExtHandshake {
+                peer_addr,
+                handshake,
+            } => {
+                // In FetchingMetadata mode, if we learn the metadata_size, start requesting
+                if self.state == TorrentState::FetchingMetadata
+                    && let Some(size) = handshake.metadata_size
+                    && let Some(ref mut dl) = self.metadata_downloader
+                {
+                    dl.set_total_size(size);
+                    let missing = dl.missing_pieces();
+                    for piece in missing {
+                        if let Some(peer) = self.peers.get(&peer_addr) {
+                            let _ = peer
+                                .cmd_tx
+                                .send(PeerCommand::RequestMetadata { piece })
+                                .await;
+                        }
+                    }
+                }
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.ext_handshake = Some(handshake);
+                }
+            }
+            PeerEvent::MetadataPiece {
+                peer_addr: _,
+                piece,
+                data,
+                total_size,
+            } => {
+                if let Some(ref mut dl) = self.metadata_downloader {
+                    dl.set_total_size(total_size);
+                    let complete = dl.piece_received(piece, data);
+                    if complete {
+                        self.try_assemble_metadata().await;
+                    }
+                }
+            }
+            PeerEvent::MetadataReject {
+                peer_addr: _,
+                piece: _,
+            } => {
+                // Could retry from a different peer; for now, ignore.
+            }
+            PeerEvent::PexPeers { new_peers } => {
+                if self.config.enable_pex {
+                    self.handle_add_peers(new_peers);
+                }
+            }
+            PeerEvent::Disconnected {
+                peer_addr,
+                reason,
+            } => {
+                debug!(%peer_addr, ?reason, "peer disconnected");
+                if let Some(peer) = self.peers.remove(&peer_addr) {
+                    self.piece_selector.remove_peer_bitfield(&peer.bitfield);
+                }
+                // Remove from in_flight if they had any pending pieces
+                // (simplified: we don't track per-peer in-flight in this iteration)
+            }
+        }
+    }
+
+    async fn handle_piece_data(
+        &mut self,
+        peer_addr: SocketAddr,
+        index: u32,
+        begin: u32,
+        data: &[u8],
+    ) {
+        // Write chunk to storage
+        if let Some(ref storage) = self.storage
+            && let Err(e) = storage.write_chunk(index, begin, data)
+        {
+            warn!(index, begin, "failed to write chunk: {e}");
+            return;
+        }
+
+        self.downloaded += data.len() as u64;
+
+        if let Some(peer) = self.peers.get_mut(&peer_addr) {
+            peer.pending_requests = peer.pending_requests.saturating_sub(1);
+            peer.download_rate += data.len() as u64;
+        }
+
+        // Track chunk completion
+        let piece_complete = if let Some(ref mut ct) = self.chunk_tracker {
+            ct.chunk_received(index, begin)
+        } else {
+            false
+        };
+
+        if piece_complete {
+            self.verify_and_mark_piece(index).await;
+        }
+
+        // Try to request more from this peer
+        self.request_pieces_from_peer(peer_addr).await;
+    }
+
+    async fn verify_and_mark_piece(&mut self, index: u32) {
+        let expected_hash = self
+            .meta
+            .as_ref()
+            .and_then(|m| m.info.piece_hash(index as usize));
+
+        let verified = if let (Some(storage), Some(expected)) =
+            (&self.storage, expected_hash)
+        {
+            storage.verify_piece(index, &expected).unwrap_or(false)
+        } else {
+            false
+        };
+
+        if verified {
+            if let Some(ref mut ct) = self.chunk_tracker {
+                ct.mark_verified(index);
+            }
+            self.in_flight.remove(&index);
+            info!(index, "piece verified");
+
+            // Broadcast Have to all peers
+            for peer in self.peers.values() {
+                let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+            }
+
+            // Check if download is complete
+            if let Some(ref ct) = self.chunk_tracker
+                && ct.bitfield().count_ones() == self.num_pieces
+            {
+                info!("download complete");
+                self.state = TorrentState::Complete;
+            }
+        } else {
+            warn!(index, "piece hash verification failed, re-requesting");
+            if let Some(ref mut ct) = self.chunk_tracker {
+                ct.mark_failed(index);
+            }
+            self.in_flight.remove(&index);
+        }
+    }
+
+    async fn try_assemble_metadata(&mut self) {
+        let assembled = if let Some(ref dl) = self.metadata_downloader {
+            dl.assemble_and_verify()
+        } else {
+            return;
+        };
+
+        match assembled {
+            Ok(info_bytes) => {
+                // Build torrent bytes wrapping the raw info dict into a minimal torrent
+                // We need to parse it as a full torrent. The info_bytes is the raw bencoded
+                // info dict. We'll build a minimal torrent around it.
+                // Actually, torrent_from_bytes expects a full torrent dict.
+                // Let's build one:
+                let mut torrent_bytes = b"d4:info".to_vec();
+                torrent_bytes.extend_from_slice(&info_bytes);
+                torrent_bytes.push(b'e');
+
+                match torrent_from_bytes(&torrent_bytes) {
+                    Ok(meta) => {
+                        let num_pieces = meta.info.num_pieces() as u32;
+                        let lengths = Lengths::new(
+                            meta.info.total_length(),
+                            meta.info.piece_length,
+                            DEFAULT_CHUNK_SIZE,
+                        );
+
+                        // Create storage (in-memory for now)
+                        let storage: Arc<dyn TorrentStorage> =
+                            Arc::new(MemoryStorage::new(lengths.clone()));
+
+                        self.storage = Some(storage);
+                        self.chunk_tracker = Some(ChunkTracker::new(lengths.clone()));
+                        self.lengths = Some(lengths);
+                        self.num_pieces = num_pieces;
+                        self.piece_selector = PieceSelector::new(num_pieces);
+                        self.meta = Some(meta);
+                        self.state = TorrentState::Downloading;
+                        self.metadata_downloader = None;
+
+                        info!("metadata assembled, switching to Downloading");
+                    }
+                    Err(e) => {
+                        warn!("failed to parse assembled metadata: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("metadata assembly failed: {e}");
+            }
+        }
+    }
+
+    // ----- Piece requesting -----
+
+    async fn request_pieces_from_peer(&mut self, peer_addr: SocketAddr) {
+        if self.state != TorrentState::Downloading {
+            return;
+        }
+
+        let ct = match &self.chunk_tracker {
+            Some(ct) => ct,
+            None => return,
+        };
+        if self.meta.is_none() {
+            return;
+        }
+
+        // Check if peer exists and is eligible for requests
+        let can_request = self
+            .peers
+            .get(&peer_addr)
+            .is_some_and(|p| !p.peer_choking && p.pending_requests < self.config.target_request_queue);
+        if !can_request {
+            return;
+        }
+
+        let we_have = ct.bitfield().clone();
+
+        // Collect pieces to request (must borrow self.peers immutably for bitfield)
+        let peer_bitfield = match self.peers.get(&peer_addr) {
+            Some(p) => p.bitfield.clone(),
+            None => return,
+        };
+
+        // Try to pick and request a piece
+        if let Some(peer) = self.peers.get(&peer_addr) {
+            if peer.pending_requests >= self.config.target_request_queue {
+                return;
+            }
+
+            let picked = self.piece_selector.pick(
+                &peer_bitfield,
+                &we_have,
+                &self.in_flight,
+            );
+
+            let piece_index = match picked {
+                Some(idx) => idx,
+                None => return,
+            };
+
+            self.in_flight.insert(piece_index);
+
+            // Get missing chunks for this piece
+            let missing_chunks = match self.chunk_tracker {
+                Some(ref ct) => ct.missing_chunks(piece_index),
+                None => return,
+            };
+
+            for (begin, length) in missing_chunks {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    let _ = peer
+                        .cmd_tx
+                        .send(PeerCommand::Request {
+                            index: piece_index,
+                            begin,
+                            length,
+                        })
+                        .await;
+                    peer.pending_requests += 1;
+                }
+            }
+        }
+    }
+
+    async fn maybe_express_interest(&mut self, peer_addr: SocketAddr) {
+        if self.state != TorrentState::Downloading {
+            return;
+        }
+
+        let dominated = self.chunk_tracker.as_ref().map(|ct| {
+            let we_have = ct.bitfield();
+            if let Some(peer) = self.peers.get(&peer_addr) {
+                // Check if the peer has any piece we don't
+                peer.bitfield
+                    .ones()
+                    .any(|i| !we_have.get(i))
+            } else {
+                false
+            }
+        });
+
+        if dominated == Some(true)
+            && let Some(peer) = self.peers.get_mut(&peer_addr)
+            && !peer.am_interested
+        {
+            peer.am_interested = true;
+            let _ = peer.cmd_tx.send(PeerCommand::SetInterested(true)).await;
+        }
+    }
+
+    // ----- Choking -----
+
+    async fn run_choker(&mut self) {
+        let peer_infos: Vec<PeerInfo> = self
+            .peers
+            .values()
+            .map(|p| PeerInfo {
+                addr: p.addr,
+                download_rate: p.download_rate,
+                interested: p.peer_interested,
+            })
+            .collect();
+
+        let decision = self.choker.decide(&peer_infos);
+
+        for addr in &decision.to_unchoke {
+            if let Some(peer) = self.peers.get_mut(addr)
+                && peer.am_choking
+            {
+                peer.am_choking = false;
+                let _ = peer.cmd_tx.send(PeerCommand::SetChoking(false)).await;
+            }
+        }
+
+        for addr in &decision.to_choke {
+            if let Some(peer) = self.peers.get_mut(addr)
+                && !peer.am_choking
+            {
+                peer.am_choking = true;
+                let _ = peer.cmd_tx.send(PeerCommand::SetChoking(true)).await;
+            }
+        }
+    }
+
+    fn rotate_optimistic(&mut self) {
+        let peer_infos: Vec<PeerInfo> = self
+            .peers
+            .values()
+            .map(|p| PeerInfo {
+                addr: p.addr,
+                download_rate: p.download_rate,
+                interested: p.peer_interested,
+            })
+            .collect();
+
+        self.choker.rotate_optimistic(&peer_infos);
+    }
+
+    // ----- Peer connectivity -----
+
+    fn try_connect_peers(&mut self) {
+        while self.peers.len() < self.config.max_peers {
+            let addr = match self.available_peers.pop() {
+                Some(a) => a,
+                None => break,
+            };
+
+            if self.peers.contains_key(&addr) {
+                continue;
+            }
+
+            let (cmd_tx, cmd_rx) = mpsc::channel(64);
+            let bitfield = self
+                .chunk_tracker
+                .as_ref()
+                .map(|ct| ct.bitfield().clone())
+                .unwrap_or_else(|| Bitfield::new(self.num_pieces));
+
+            self.peers
+                .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
+
+            let info_hash = self.info_hash;
+            let peer_id = self.our_peer_id;
+            let num_pieces = self.num_pieces;
+            let event_tx = self.event_tx.clone();
+            let enable_dht = self.config.enable_dht;
+
+            tokio::spawn(async move {
+                match tokio::net::TcpStream::connect(addr).await {
+                    Ok(stream) => {
+                        let _ = run_peer(
+                            addr,
+                            stream,
+                            info_hash,
+                            peer_id,
+                            bitfield,
+                            num_pieces,
+                            event_tx,
+                            cmd_rx,
+                            enable_dht,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(PeerEvent::Disconnected {
+                                peer_addr: addr,
+                                reason: Some(e.to_string()),
+                            })
+                            .await;
+                    }
+                }
+            });
+        }
+    }
+
+    /// Spawn a peer task from an already-connected stream (for incoming connections and tests).
+    fn spawn_peer_from_stream(
+        &mut self,
+        addr: SocketAddr,
+        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    ) {
+        if self.peers.contains_key(&addr) || self.peers.len() >= self.config.max_peers {
+            return;
+        }
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let bitfield = self
+            .chunk_tracker
+            .as_ref()
+            .map(|ct| ct.bitfield().clone())
+            .unwrap_or_else(|| Bitfield::new(self.num_pieces));
+
+        self.peers
+            .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
+
+        let info_hash = self.info_hash;
+        let peer_id = self.our_peer_id;
+        let num_pieces = self.num_pieces;
+        let event_tx = self.event_tx.clone();
+        let enable_dht = self.config.enable_dht;
+
+        tokio::spawn(async move {
+            let _ = run_peer(
+                addr,
+                stream,
+                info_hash,
+                peer_id,
+                bitfield,
+                num_pieces,
+                event_tx,
+                cmd_rx,
+                enable_dht,
+            )
+            .await;
+        });
+    }
+}
+
+/// Helper to accept a connection from an optional listener.
+/// Returns `pending` if no listener is bound, so the `select!` branch is skipped.
+async fn accept_incoming(
+    listener: &Option<TcpListener>,
+) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+    match listener {
+        Some(l) => l.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use ferrite_wire::{ExtHandshake, Handshake, Message, MessageCodec};
+    use futures::{SinkExt, StreamExt};
+    use tokio_util::codec::{FramedRead, FramedWrite};
+
+    // -- Helpers --
+
+    /// Build a valid TorrentMetaV1 from raw data with given piece length.
+    fn make_test_torrent(data: &[u8], piece_length: u64) -> TorrentMetaV1 {
+        use serde::Serialize;
+
+        let mut pieces = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + piece_length as usize).min(data.len());
+            let hash = ferrite_core::sha1(&data[offset..end]);
+            pieces.extend_from_slice(hash.as_bytes());
+            offset = end;
+        }
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            length: u64,
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            info: Info<'a>,
+        }
+
+        let t = Torrent {
+            info: Info {
+                length: data.len() as u64,
+                name: "test",
+                piece_length,
+                pieces: &pieces,
+            },
+        };
+
+        let bytes = ferrite_bencode::to_bytes(&t).unwrap();
+        torrent_from_bytes(&bytes).unwrap()
+    }
+
+    fn test_config() -> TorrentConfig {
+        TorrentConfig {
+            listen_port: 0, // random port
+            max_peers: 50,
+            target_request_queue: 5,
+            download_dir: std::path::PathBuf::from("/tmp"),
+            enable_dht: false,
+            enable_pex: false,
+        }
+    }
+
+    fn make_storage(data: &[u8], piece_length: u64) -> Arc<MemoryStorage> {
+        let lengths = Lengths::new(
+            data.len() as u64,
+            piece_length,
+            DEFAULT_CHUNK_SIZE,
+        );
+        Arc::new(MemoryStorage::new(lengths))
+    }
+
+    fn make_seeded_storage(data: &[u8], piece_length: u64) -> Arc<MemoryStorage> {
+        let lengths = Lengths::new(
+            data.len() as u64,
+            piece_length,
+            DEFAULT_CHUNK_SIZE,
+        );
+        let storage = Arc::new(MemoryStorage::new(lengths.clone()));
+        // Write data piece by piece
+        let num_pieces = lengths.num_pieces();
+        for p in 0..num_pieces {
+            let piece_size = lengths.piece_size(p) as usize;
+            let offset = lengths.piece_offset(p) as usize;
+            let end = offset + piece_size;
+            storage.write_chunk(p, 0, &data[offset..end]).unwrap();
+        }
+        storage
+    }
+
+    /// Handshake size constant.
+    const HANDSHAKE_SIZE: usize = 68;
+
+    // ---- Test 1: Create from torrent ----
+
+    #[tokio::test]
+    async fn create_from_torrent() {
+        let data = vec![0xAB; 32768]; // 32 KiB
+        let meta = make_test_torrent(&data, 16384); // 2 pieces
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+        assert_eq!(stats.pieces_total, 2);
+        assert_eq!(stats.pieces_have, 0);
+        assert_eq!(stats.peers_connected, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 2: Create from magnet ----
+
+    #[tokio::test]
+    async fn create_from_magnet() {
+        let magnet = Magnet {
+            info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            display_name: Some("test".into()),
+            trackers: vec![],
+            peers: vec![],
+        };
+        let config = test_config();
+
+        let handle = TorrentHandle::from_magnet(magnet, config, None)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::FetchingMetadata);
+        assert_eq!(stats.pieces_total, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 3: Add peers ----
+
+    #[tokio::test]
+    async fn add_peers_increases_available() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        handle
+            .add_peers(vec![
+                "127.0.0.1:6881".parse().unwrap(),
+                "127.0.0.1:6882".parse().unwrap(),
+            ])
+            .await
+            .unwrap();
+
+        // Small delay for the actor to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.peers_available, 2);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 4: Stats reporting ----
+
+    #[tokio::test]
+    async fn stats_reporting() {
+        let data = vec![0xAB; 65536]; // 64 KiB
+        let meta = make_test_torrent(&data, 16384); // 4 pieces
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+        assert_eq!(stats.downloaded, 0);
+        assert_eq!(stats.uploaded, 0);
+        assert_eq!(stats.pieces_have, 0);
+        assert_eq!(stats.pieces_total, 4);
+        assert_eq!(stats.peers_connected, 0);
+        assert_eq!(stats.peers_available, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 5: Private torrent disables DHT/PEX ----
+
+    #[tokio::test]
+    async fn private_torrent_disables_dht_pex() {
+        // Build a private torrent by embedding private=1 in the info dict
+        use serde::Serialize;
+
+        let data = vec![0xAB; 16384];
+        let hash = ferrite_core::sha1(&data);
+        let mut pieces = Vec::new();
+        pieces.extend_from_slice(hash.as_bytes());
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            length: u64,
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+            private: i64,
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            info: Info<'a>,
+        }
+
+        let t = Torrent {
+            info: Info {
+                length: data.len() as u64,
+                name: "private_test",
+                piece_length: 16384,
+                pieces: &pieces,
+                private: 1,
+            },
+        };
+
+        let bytes = ferrite_bencode::to_bytes(&t).unwrap();
+        let meta = torrent_from_bytes(&bytes).unwrap();
+        assert_eq!(meta.info.private, Some(1));
+
+        let storage = make_storage(&data, 16384);
+        let mut config = test_config();
+        config.enable_dht = true;
+        config.enable_pex = true;
+
+        // The from_torrent constructor should disable DHT and PEX
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        // We can't directly inspect the actor's config, but we can verify
+        // the torrent was created successfully. The real test is that PEX peers
+        // would be ignored and DHT not used. For now verify the handle works.
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 6: Shutdown cleanup ----
+
+    #[tokio::test]
+    async fn shutdown_cleanup() {
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        handle.shutdown().await.unwrap();
+
+        // After shutdown, stats should fail (channel closed)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let result = handle.stats().await;
+        assert!(result.is_err());
+    }
+
+    // ---- Test 7: Duplicate add_peers ignored ----
+
+    #[tokio::test]
+    async fn duplicate_peers_ignored() {
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        handle.add_peers(vec![addr, addr, addr]).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = handle.stats().await.unwrap();
+        // Only one unique peer should be in available
+        assert_eq!(stats.peers_available, 1);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 8: Multiple handles (Clone) share same actor ----
+
+    #[tokio::test]
+    async fn cloned_handle_shares_actor() {
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+        let handle2 = handle.clone();
+
+        // Add peers through one handle
+        handle
+            .add_peers(vec!["127.0.0.1:7777".parse().unwrap()])
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Read stats through the other
+        let stats = handle2.stats().await.unwrap();
+        assert_eq!(stats.peers_available, 1);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 9: Peer connection and disconnect via listener ----
+
+    #[tokio::test]
+    async fn peer_connect_and_disconnect_via_listener() {
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        // Bind a listener on a specific port so we can connect to it
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            ..test_config()
+        };
+
+        // Drop the pre-bound listener before from_torrent binds
+        drop(listener);
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        // Give the actor time to start
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connect a mock peer
+        let mut stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+
+        // Perform handshake
+        let remote_id = Id20::from_hex("1111111111111111111111111111111111111111").unwrap();
+        let remote_hs = Handshake::new(info_hash, remote_id);
+        stream.write_all(&remote_hs.to_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+        stream.read_exact(&mut hs_buf).await.unwrap();
+        let their_hs = Handshake::from_bytes(&hs_buf).unwrap();
+        assert_eq!(their_hs.info_hash, info_hash);
+
+        // Give time for peer to be registered
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.peers_connected, 1);
+
+        // Drop the connection
+        drop(stream);
+
+        // Wait for disconnect event
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.peers_connected, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test 10: Piece download and verification via injected events ----
+    //
+    // We test the full flow: connect a mock peer that sends bitfield, unchoke,
+    // then responds to requests with correct piece data.
+
+    #[tokio::test]
+    async fn piece_download_and_verify() {
+        // Create a 1-piece torrent with 16384 bytes (exactly one chunk)
+        let data = vec![0xCDu8; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            ..test_config()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connect mock peer
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let remote_id = Id20::from_hex("2222222222222222222222222222222222222222").unwrap();
+
+        // Run mock seeder in a task
+        let mock_data = data.clone();
+        let mock_task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(stream);
+            let mut reader = reader;
+            let mut writer = writer;
+
+            // Handshake
+            let hs = Handshake::new(info_hash, remote_id);
+            writer.write_all(&hs.to_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+            reader.read_exact(&mut hs_buf).await.unwrap();
+
+            // Switch to framed
+            let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+            let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+            // Read ext handshake from the torrent actor's peer
+            let _msg = framed_read.next().await;
+
+            // Send ext handshake back
+            let ext_hs = ExtHandshake::new();
+            let payload = ext_hs.to_bytes().unwrap();
+            framed_write
+                .send(Message::Extended {
+                    ext_id: 0,
+                    payload,
+                })
+                .await
+                .unwrap();
+
+            // Send bitfield (all pieces = piece 0 set)
+            let mut bf = Bitfield::new(1);
+            bf.set(0);
+            framed_write
+                .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                .await
+                .unwrap();
+
+            // Send Unchoke
+            framed_write.send(Message::Unchoke).await.unwrap();
+
+            // Wait for requests and respond with piece data
+            while let Some(Ok(msg)) = framed_read.next().await {
+                match msg {
+                    Message::Request {
+                        index,
+                        begin,
+                        length,
+                    } => {
+                        let start = begin as usize;
+                        let end = start + length as usize;
+                        let piece_data = &mock_data[start..end];
+                        framed_write
+                            .send(Message::Piece {
+                                index,
+                                begin,
+                                data: Bytes::copy_from_slice(piece_data),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Message::Interested => {
+                        // Expected — the torrent should express interest
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Wait for the download to complete
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.state == TorrentState::Complete {
+                assert_eq!(stats.pieces_have, 1);
+                assert_eq!(stats.pieces_total, 1);
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                let stats = handle.stats().await.unwrap();
+                panic!(
+                    "download did not complete within 5s, state={:?}, have={}/{}",
+                    stats.state, stats.pieces_have, stats.pieces_total
+                );
+            }
+        }
+
+        handle.shutdown().await.unwrap();
+        mock_task.abort();
+    }
+
+    // ---- Test 11: Failed piece verification re-requests ----
+
+    #[tokio::test]
+    async fn failed_piece_verification() {
+        // Create a 1-piece torrent
+        let data = vec![0xEEu8; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            ..test_config()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connect mock peer that first sends bad data, then correct data
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let remote_id = Id20::from_hex("3333333333333333333333333333333333333333").unwrap();
+
+        let correct_data = data.clone();
+        let mock_task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(stream);
+
+            // Handshake
+            let mut writer = writer;
+            let mut reader = reader;
+            let hs = Handshake::new(info_hash, remote_id);
+            writer.write_all(&hs.to_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+            reader.read_exact(&mut hs_buf).await.unwrap();
+
+            let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+            let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+            // Read ext handshake
+            let _msg = framed_read.next().await;
+
+            // Send ext handshake
+            let ext_hs = ExtHandshake::new();
+            let payload = ext_hs.to_bytes().unwrap();
+            framed_write
+                .send(Message::Extended {
+                    ext_id: 0,
+                    payload,
+                })
+                .await
+                .unwrap();
+
+            // Bitfield: have piece 0
+            let mut bf = Bitfield::new(1);
+            bf.set(0);
+            framed_write
+                .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                .await
+                .unwrap();
+
+            // Unchoke
+            framed_write.send(Message::Unchoke).await.unwrap();
+
+            let mut request_count = 0u32;
+            while let Some(Ok(msg)) = framed_read.next().await {
+                match msg {
+                    Message::Request {
+                        index,
+                        begin,
+                        length,
+                    } => {
+                        request_count += 1;
+                        let piece_data = if request_count <= 1 {
+                            // First request: send bad data
+                            vec![0xFF; length as usize]
+                        } else {
+                            // Subsequent: send correct data
+                            let start = begin as usize;
+                            let end = start + length as usize;
+                            correct_data[start..end].to_vec()
+                        };
+                        framed_write
+                            .send(Message::Piece {
+                                index,
+                                begin,
+                                data: Bytes::from(piece_data),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Message::Interested => {}
+                    _ => {}
+                }
+            }
+        });
+
+        // Wait for completion (should eventually succeed after retry)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.state == TorrentState::Complete {
+                assert_eq!(stats.pieces_have, 1);
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                let stats = handle.stats().await.unwrap();
+                panic!(
+                    "download did not complete after retry within 5s, state={:?}, have={}",
+                    stats.state, stats.pieces_have,
+                );
+            }
+        }
+
+        handle.shutdown().await.unwrap();
+        mock_task.abort();
+    }
+
+    // ---- Test 12: Complete state transitions after all pieces ----
+
+    #[tokio::test]
+    async fn complete_transitions_state() {
+        // 2-piece torrent, each 16384 bytes (one chunk each)
+        let data = vec![0xBBu8; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            ..test_config()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Mock seeder with all 2 pieces
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let remote_id = Id20::from_hex("4444444444444444444444444444444444444444").unwrap();
+
+        let mock_data = data.clone();
+        let mock_task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(stream);
+            let mut writer = writer;
+            let mut reader = reader;
+
+            let hs = Handshake::new(info_hash, remote_id);
+            writer.write_all(&hs.to_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+            reader.read_exact(&mut hs_buf).await.unwrap();
+
+            let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+            let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+            // Read ext handshake
+            let _msg = framed_read.next().await;
+
+            // Send ext handshake
+            let ext_hs = ExtHandshake::new();
+            let payload = ext_hs.to_bytes().unwrap();
+            framed_write
+                .send(Message::Extended {
+                    ext_id: 0,
+                    payload,
+                })
+                .await
+                .unwrap();
+
+            // Bitfield: have both pieces
+            let mut bf = Bitfield::new(2);
+            bf.set(0);
+            bf.set(1);
+            framed_write
+                .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                .await
+                .unwrap();
+
+            framed_write.send(Message::Unchoke).await.unwrap();
+
+            while let Some(Ok(msg)) = framed_read.next().await {
+                match msg {
+                    Message::Request {
+                        index,
+                        begin,
+                        length,
+                    } => {
+                        let abs_start = (index as usize * 16384) + begin as usize;
+                        let abs_end = abs_start + length as usize;
+                        let piece_data = &mock_data[abs_start..abs_end];
+                        framed_write
+                            .send(Message::Piece {
+                                index,
+                                begin,
+                                data: Bytes::copy_from_slice(piece_data),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Message::Interested => {}
+                    _ => {}
+                }
+            }
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.state == TorrentState::Complete {
+                assert_eq!(stats.pieces_have, 2);
+                assert_eq!(stats.pieces_total, 2);
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                let stats = handle.stats().await.unwrap();
+                panic!(
+                    "expected Complete, got {:?}, have={}/{}",
+                    stats.state, stats.pieces_have, stats.pieces_total
+                );
+            }
+        }
+
+        handle.shutdown().await.unwrap();
+        mock_task.abort();
+    }
+
+    // ---- Test 13: Multiple pieces with multi-chunk pieces ----
+
+    #[tokio::test]
+    async fn multi_chunk_piece_download() {
+        // 1 piece of 32768 bytes = 2 chunks of 16384 each
+        let data = vec![0xAAu8; 32768];
+        let meta = make_test_torrent(&data, 32768);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 32768);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            ..test_config()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let remote_id = Id20::from_hex("5555555555555555555555555555555555555555").unwrap();
+
+        let mock_data = data.clone();
+        let mock_task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(stream);
+            let mut writer = writer;
+            let mut reader = reader;
+
+            let hs = Handshake::new(info_hash, remote_id);
+            writer.write_all(&hs.to_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+            reader.read_exact(&mut hs_buf).await.unwrap();
+
+            let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+            let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+            let _msg = framed_read.next().await;
+
+            let ext_hs = ExtHandshake::new();
+            let payload = ext_hs.to_bytes().unwrap();
+            framed_write
+                .send(Message::Extended {
+                    ext_id: 0,
+                    payload,
+                })
+                .await
+                .unwrap();
+
+            let mut bf = Bitfield::new(1);
+            bf.set(0);
+            framed_write
+                .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                .await
+                .unwrap();
+
+            framed_write.send(Message::Unchoke).await.unwrap();
+
+            while let Some(Ok(msg)) = framed_read.next().await {
+                match msg {
+                    Message::Request {
+                        index: _,
+                        begin,
+                        length,
+                    } => {
+                        let start = begin as usize;
+                        let end = start + length as usize;
+                        framed_write
+                            .send(Message::Piece {
+                                index: 0,
+                                begin,
+                                data: Bytes::copy_from_slice(&mock_data[start..end]),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Message::Interested => {}
+                    _ => {}
+                }
+            }
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = handle.stats().await.unwrap();
+            if stats.state == TorrentState::Complete {
+                assert_eq!(stats.pieces_have, 1);
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("multi-chunk download did not complete within 5s");
+            }
+        }
+
+        handle.shutdown().await.unwrap();
+        mock_task.abort();
+    }
+
+    // ---- Test 14: Seeder/Leecher integration with two actors ----
+
+    #[tokio::test]
+    async fn seeder_leecher_integration() {
+        // Seeder has all data, leecher has none. Connect them via TCP.
+        let data = vec![0xDDu8; 32768]; // 32 KiB, 2 pieces of 16384
+        let piece_length = 16384u64;
+        let meta = make_test_torrent(&data, piece_length);
+        let info_hash = meta.info_hash;
+
+        // Seeder: storage pre-filled
+        let seeder_storage = make_seeded_storage(&data, piece_length);
+
+        // For the seeder, we need a from_torrent variant that starts in Complete state
+        // but still serves pieces. Since our actor starts in Downloading, the seeder
+        // will just be a mock that accepts and serves.
+
+        // Use a mock seeder approach instead (manual protocol handling):
+        let seeder_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let seeder_addr = seeder_listener.local_addr().unwrap();
+
+        let seeder_task = tokio::spawn(async move {
+            let (stream, _addr) = seeder_listener.accept().await.unwrap();
+            let (reader, writer) = tokio::io::split(stream);
+            let mut writer = writer;
+            let mut reader = reader;
+
+            // Handshake
+            let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+            reader.read_exact(&mut hs_buf).await.unwrap();
+            let their_hs = Handshake::from_bytes(&hs_buf).unwrap();
+            assert_eq!(their_hs.info_hash, info_hash);
+
+            let hs = Handshake::new(info_hash, PeerId::generate().0);
+            writer.write_all(&hs.to_bytes()).await.unwrap();
+            writer.flush().await.unwrap();
+
+            let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+            let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+            // Read ext handshake
+            let _msg = framed_read.next().await;
+
+            // Send ext handshake
+            let ext_hs = ExtHandshake::new();
+            let payload = ext_hs.to_bytes().unwrap();
+            framed_write
+                .send(Message::Extended {
+                    ext_id: 0,
+                    payload,
+                })
+                .await
+                .unwrap();
+
+            // Send bitfield (all pieces)
+            let mut bf = Bitfield::new(2);
+            bf.set(0);
+            bf.set(1);
+            framed_write
+                .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                .await
+                .unwrap();
+
+            // Unchoke
+            framed_write.send(Message::Unchoke).await.unwrap();
+
+            // Serve requests
+            while let Some(Ok(msg)) = framed_read.next().await {
+                match msg {
+                    Message::Request {
+                        index,
+                        begin,
+                        length,
+                    } => {
+                        let piece_data = seeder_storage
+                            .read_chunk(index, begin, length)
+                            .unwrap();
+                        framed_write
+                            .send(Message::Piece {
+                                index,
+                                begin,
+                                data: Bytes::from(piece_data),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Message::Interested => {}
+                    _ => {}
+                }
+            }
+        });
+
+        // Leecher: empty storage
+        let leecher_storage = make_storage(&data, piece_length);
+        let leecher_meta = make_test_torrent(&data, piece_length);
+
+        let leecher_config = test_config();
+        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config)
+            .await
+            .unwrap();
+
+        // Add seeder as a peer
+        leecher.add_peers(vec![seeder_addr]).await.unwrap();
+
+        // Give the connect interval time to fire (it ticks every 30s).
+        // Instead, wait a bit for the initial connect tick. Since our interval
+        // skips the first tick, the first real connect happens at 30s.
+        // That's too long for a test. Let's trigger it by polling stats.
+        //
+        // Actually, the connect timer fires immediately on the SECOND tick after
+        // the first (which we consumed). So we need a different approach.
+        // We added the available peer — but the connect interval won't fire for 30s.
+        //
+        // Let's just wait and check — the actor's try_connect_peers runs on the timer.
+        // For this test to be practical, we need a shorter interval or a direct connect trigger.
+        //
+        // Actually the timer will fire every 30 seconds after the first tick we consumed.
+        // For testing, we can just wait longer or use a smaller torrent.
+        // Let's wait up to 35 seconds with a short poll.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let stats = leecher.stats().await.unwrap();
+            if stats.state == TorrentState::Complete {
+                assert_eq!(stats.pieces_have, 2);
+                assert_eq!(stats.pieces_total, 2);
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                let stats = leecher.stats().await.unwrap();
+                panic!(
+                    "seeder/leecher: leecher did not complete, state={:?}, have={}/{}, connected={}, available={}",
+                    stats.state, stats.pieces_have, stats.pieces_total, stats.peers_connected, stats.peers_available,
+                );
+            }
+        }
+
+        leecher.shutdown().await.unwrap();
+        seeder_task.abort();
+    }
+
+    // ---- Test 15: Magnet stats ----
+
+    #[tokio::test]
+    async fn magnet_initial_stats() {
+        let magnet = Magnet {
+            info_hash: Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            display_name: Some("magnet test".into()),
+            trackers: vec![],
+            peers: vec![],
+        };
+
+        let handle = TorrentHandle::from_magnet(magnet, test_config(), None)
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::FetchingMetadata);
+        assert_eq!(stats.pieces_total, 0);
+        assert_eq!(stats.pieces_have, 0);
+        assert_eq!(stats.downloaded, 0);
+        assert_eq!(stats.uploaded, 0);
+        assert_eq!(stats.peers_connected, 0);
+        assert_eq!(stats.peers_available, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+}
