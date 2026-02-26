@@ -55,4 +55,22 @@ mod tests {
         let peer_id = core::PeerId::generate();
         assert_eq!(peer_id.0 .0.len(), 20);
     }
+
+    #[test]
+    fn magnet_parse_through_facade() {
+        let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d\
+                   &dn=test%20file\
+                   &tr=http%3A%2F%2Ftracker.example.com%2Fannounce";
+        let magnet = core::Magnet::parse(uri).unwrap();
+
+        assert_eq!(magnet.display_name.as_deref(), Some("test file"));
+        assert_eq!(magnet.trackers.len(), 1);
+        assert_eq!(magnet.info_hash.to_hex(), "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
+
+        // Round-trip back to URI
+        let rebuilt = magnet.to_uri();
+        let reparsed = core::Magnet::parse(&rebuilt).unwrap();
+        assert_eq!(magnet.info_hash, reparsed.info_hash);
+        assert_eq!(magnet.display_name, reparsed.display_name);
+    }
 }
