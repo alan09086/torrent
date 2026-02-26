@@ -729,9 +729,24 @@ impl TorrentActor {
                 debug!(%peer_addr, ?reason, "peer disconnected");
                 if let Some(peer) = self.peers.remove(&peer_addr) {
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
+                    // Remove pieces that only this peer was downloading
+                    let peer_pieces: HashSet<u32> = peer
+                        .pending_requests
+                        .iter()
+                        .map(|&(idx, _, _)| idx)
+                        .collect();
+                    for piece_idx in peer_pieces {
+                        let other_has = self.peers.values().any(|p| {
+                            p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx)
+                        });
+                        if !other_has {
+                            self.in_flight.remove(&piece_idx);
+                        }
+                    }
+                    if self.end_game.is_active() {
+                        self.end_game.peer_disconnected(peer_addr);
+                    }
                 }
-                // Remove from in_flight if they had any pending pieces
-                // (simplified: we don't track per-peer in-flight in this iteration)
             }
         }
     }
@@ -956,6 +971,7 @@ impl TorrentActor {
                 && ct.bitfield().count_ones() == self.num_pieces
             {
                 info!("download complete, transitioning to seeding");
+                self.end_game.deactivate();
                 self.state = TorrentState::Seeding;
                 self.choker.set_seed_mode(true);
                 // Announce completion to trackers
@@ -970,6 +986,11 @@ impl TorrentActor {
                 ct.mark_failed(index);
             }
             self.in_flight.remove(&index);
+            // Hash failure in end-game: deactivate and resume normal mode
+            if self.end_game.is_active() {
+                self.end_game.deactivate();
+                info!(index, "end-game deactivated due to hash failure");
+            }
         }
     }
 
