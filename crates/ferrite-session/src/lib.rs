@@ -8,6 +8,7 @@ pub(crate) mod metadata;
 pub(crate) mod piece_selector;
 pub(crate) mod pex;
 pub(crate) mod choker;
+#[allow(dead_code)] // wired into TorrentActor in Task 4
 pub(crate) mod end_game;
 pub(crate) mod tracker_manager;
 pub(crate) mod lsd;
