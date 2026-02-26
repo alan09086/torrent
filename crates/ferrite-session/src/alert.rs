@@ -218,7 +218,6 @@ impl AlertStream {
 ///
 /// Called by both `SessionActor` and `TorrentActor`. The mask is an
 /// `AtomicU32` shared between the handle and actors — no command roundtrip.
-#[allow(dead_code)] // used starting in Task 3 (SessionActor/TorrentActor)
 pub(crate) fn post_alert(
     tx: &broadcast::Sender<Alert>,
     mask: &AtomicU32,

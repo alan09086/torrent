@@ -4,11 +4,12 @@
 //! SessionActor is the single-owner event loop (internal).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
-use std::net::SocketAddr;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use tracing::{debug, info, warn};
 
@@ -16,6 +17,7 @@ use ferrite_core::{Id20, Lengths, Magnet, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
 use ferrite_dht::DhtHandle;
 use ferrite_storage::TorrentStorage;
 
+use crate::alert::{post_alert, Alert, AlertCategory, AlertKind, AlertStream};
 use crate::torrent::TorrentHandle;
 use crate::types::{
     FileInfo, SessionConfig, SessionStats, TorrentConfig, TorrentInfo, TorrentStats,
@@ -81,12 +83,18 @@ enum SessionCommand {
 #[derive(Clone)]
 pub struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCommand>,
+    alert_tx: broadcast::Sender<Alert>,
+    alert_mask: Arc<AtomicU32>,
 }
 
 impl SessionHandle {
     /// Start a new session with the given configuration.
     pub async fn start(config: SessionConfig) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
+
+        // Alert broadcast channel
+        let (alert_tx, _) = broadcast::channel(config.alert_channel_size);
+        let alert_mask = Arc::new(AtomicU32::new(config.alert_mask.bits()));
 
         let (lsd, lsd_peers_rx) = if config.enable_lsd {
             match crate::lsd::LsdHandle::start(config.listen_port).await {
@@ -114,12 +122,14 @@ impl SessionHandle {
             lsd,
             lsd_peers_rx,
             cmd_rx,
+            alert_tx: alert_tx.clone(),
+            alert_mask: Arc::clone(&alert_mask),
             global_upload_bucket,
             global_download_bucket,
         };
 
         tokio::spawn(actor.run());
-        Ok(SessionHandle { cmd_tx })
+        Ok(SessionHandle { cmd_tx, alert_tx, alert_mask })
     }
 
     /// Add a torrent from parsed .torrent metadata.
@@ -235,6 +245,26 @@ impl SessionHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Subscribe to all alerts passing the session-level mask.
+    pub fn subscribe(&self) -> broadcast::Receiver<Alert> {
+        self.alert_tx.subscribe()
+    }
+
+    /// Subscribe with per-subscriber category filtering.
+    pub fn subscribe_filtered(&self, filter: AlertCategory) -> AlertStream {
+        AlertStream::new(self.alert_tx.subscribe(), filter)
+    }
+
+    /// Atomically update the session-level alert mask.
+    pub fn set_alert_mask(&self, mask: AlertCategory) {
+        self.alert_mask.store(mask.bits(), Ordering::Relaxed);
+    }
+
+    /// Read the current session-level alert mask.
+    pub fn alert_mask(&self) -> AlertCategory {
+        AlertCategory::from_bits_truncate(self.alert_mask.load(Ordering::Relaxed))
+    }
+
     /// Gracefully shut down the session and all torrents.
     pub async fn shutdown(&self) -> crate::Result<()> {
         let _ = self.cmd_tx.send(SessionCommand::Shutdown).await;
@@ -281,6 +311,8 @@ struct SessionActor {
     lsd: Option<crate::lsd::LsdHandle>,
     lsd_peers_rx: Option<mpsc::Receiver<(Id20, SocketAddr)>>,
     cmd_rx: mpsc::Receiver<SessionCommand>,
+    alert_tx: broadcast::Sender<Alert>,
+    alert_mask: Arc<AtomicU32>,
     global_upload_bucket: SharedBucket,
     global_download_bucket: SharedBucket,
 }
@@ -462,6 +494,7 @@ impl SessionActor {
         )
         .await?;
 
+        let name = meta.info.name.clone();
         self.torrents.insert(
             info_hash,
             TorrentEntry {
@@ -471,6 +504,7 @@ impl SessionActor {
         );
 
         info!(%info_hash, "torrent added to session");
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentAdded { info_hash, name });
         if let Some(ref lsd) = self.lsd {
             lsd.announce(vec![info_hash]).await;
         }
@@ -479,6 +513,7 @@ impl SessionActor {
 
     async fn handle_add_magnet(&mut self, magnet: Magnet) -> crate::Result<Id20> {
         let info_hash = magnet.info_hash;
+        let display_name = magnet.display_name.clone().unwrap_or_default();
         if self.torrents.contains_key(&info_hash) {
             return Err(crate::Error::DuplicateTorrent(info_hash));
         }
@@ -505,6 +540,7 @@ impl SessionActor {
             },
         );
         info!(%info_hash, "magnet torrent added to session");
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentAdded { info_hash, name: display_name });
         if let Some(ref lsd) = self.lsd {
             lsd.announce(vec![info_hash]).await;
         }
@@ -518,6 +554,7 @@ impl SessionActor {
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
         entry.handle.shutdown().await?;
         info!(%info_hash, "torrent removed from session");
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentRemoved { info_hash });
         Ok(())
     }
 
@@ -1054,6 +1091,57 @@ mod tests {
         let result = session.save_torrent_resume_data(fake_hash).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 17: Subscribe receives TorrentAdded alert ----
+
+    #[tokio::test]
+    async fn subscribe_receives_torrent_added_alert() {
+        use crate::alert::AlertKind;
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let mut alerts = session.subscribe();
+
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let _info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 18: Subscribe receives TorrentRemoved alert ----
+
+    #[tokio::test]
+    async fn subscribe_receives_torrent_removed_alert() {
+        use crate::alert::AlertKind;
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let mut alerts = session.subscribe();
+
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        // Drain TorrentAdded
+        let _ = tokio::time::timeout(Duration::from_secs(1), alerts.recv())
+            .await
+            .unwrap();
+
+        session.remove_torrent(info_hash).await.unwrap();
+
+        let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(alert.kind, AlertKind::TorrentRemoved { .. }));
         session.shutdown().await.unwrap();
     }
 }
