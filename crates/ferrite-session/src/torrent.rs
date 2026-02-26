@@ -21,6 +21,7 @@ use ferrite_dht::DhtHandle;
 use ferrite_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
 
 use crate::choker::{Choker, PeerInfo};
+use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::PeerState;
@@ -109,6 +110,7 @@ impl TorrentHandle {
             in_flight: HashSet::new(),
             file_priorities,
             wanted_pieces,
+            end_game: EndGame::new(),
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker: Choker::new(4),
@@ -178,6 +180,7 @@ impl TorrentHandle {
             in_flight: HashSet::new(),
             file_priorities: Vec::new(),
             wanted_pieces: Bitfield::new(0),
+            end_game: EndGame::new(),
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker: Choker::new(4),
@@ -295,6 +298,7 @@ struct TorrentActor {
     in_flight: HashSet<u32>,
     file_priorities: Vec<FilePriority>,
     wanted_pieces: Bitfield,
+    end_game: EndGame,
 
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
@@ -1055,7 +1059,10 @@ impl TorrentActor {
 
             let piece_index = match picked {
                 Some(idx) => idx,
-                None => return,
+                None => {
+                    self.check_end_game_activation();
+                    return;
+                }
             };
 
             self.in_flight.insert(piece_index);
@@ -1079,6 +1086,29 @@ impl TorrentActor {
                     peer.pending_requests.push((piece_index, begin, length));
                 }
             }
+        }
+    }
+
+    fn check_end_game_activation(&mut self) {
+        if self.end_game.is_active() || self.state != TorrentState::Downloading {
+            return;
+        }
+        let Some(ref ct) = self.chunk_tracker else {
+            return;
+        };
+        let have = ct.bitfield().count_ones();
+        let in_flight = self.in_flight.len() as u32;
+        if have + in_flight >= self.num_pieces && !self.in_flight.is_empty() {
+            let pending: Vec<_> = self
+                .peers
+                .iter()
+                .map(|(addr, p)| (*addr, p.pending_requests.clone()))
+                .collect();
+            self.end_game.activate(&pending);
+            info!(
+                blocks = self.end_game.block_count(),
+                "end-game mode activated"
+            );
         }
     }
 

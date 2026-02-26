@@ -18,11 +18,13 @@ pub(crate) struct EndGame {
     blocks: HashMap<(u32, u32), BlockEntry>,
 }
 
+#[allow(dead_code)] // length read by block_received, wired in Task 6
 struct BlockEntry {
     length: u32,
     peers: Vec<SocketAddr>,
 }
 
+#[allow(dead_code)] // remaining methods wired in Tasks 5-7
 impl EndGame {
     pub fn new() -> Self {
         Self {
