@@ -965,10 +965,15 @@ impl TorrentActor {
                 return;
             }
 
+            let mut wanted = Bitfield::new(self.num_pieces);
+            for i in 0..self.num_pieces {
+                wanted.set(i);
+            }
             let picked = self.piece_selector.pick(
                 &peer_bitfield,
                 &we_have,
                 &self.in_flight,
+                &wanted,
             );
 
             let piece_index = match picked {

@@ -66,6 +66,7 @@ impl PieceSelector {
         peer_has: &Bitfield,
         we_have: &Bitfield,
         in_flight: &HashSet<u32>,
+        wanted: &Bitfield,
     ) -> Option<u32> {
         let mut best_index: Option<u32> = None;
         let mut best_avail: u32 = u32::MAX;
@@ -81,6 +82,10 @@ impl PieceSelector {
             }
             // Must not be in flight
             if in_flight.contains(&i) {
+                continue;
+            }
+            // Must be wanted
+            if !wanted.get(i) {
                 continue;
             }
             // Must have non-zero availability
@@ -201,9 +206,13 @@ mod tests {
         }
         let we_have = Bitfield::new(4);
         let in_flight = HashSet::new();
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
 
         // Should pick piece 1 (avail=1, lowest index among ties with piece 3)
-        let picked = sel.pick(&peer_has, &we_have, &in_flight);
+        let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
         assert_eq!(picked, Some(1));
     }
 
@@ -226,9 +235,13 @@ mod tests {
         we_have.set(1);
 
         let in_flight = HashSet::new();
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
 
         // Should pick piece 2 (avail=2), since 0 and 1 are already had
-        let picked = sel.pick(&peer_has, &we_have, &in_flight);
+        let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
         assert_eq!(picked, Some(2));
     }
 
@@ -248,9 +261,13 @@ mod tests {
 
         let mut in_flight = HashSet::new();
         in_flight.insert(0);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
 
         // Piece 0 is rarest but in flight, should pick piece 1
-        let picked = sel.pick(&peer_has, &we_have, &in_flight);
+        let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
         assert_eq!(picked, Some(1));
     }
 
@@ -266,9 +283,13 @@ mod tests {
         }
         let we_have = Bitfield::new(4);
         let in_flight = HashSet::new();
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
 
         // Zero availability means no peers reported having these pieces
-        let picked = sel.pick(&peer_has, &we_have, &in_flight);
+        let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
         assert_eq!(picked, None);
 
         // Also None when we have everything
@@ -278,13 +299,61 @@ mod tests {
         for i in 0..4 {
             we_have_all.set(i);
         }
-        let picked = sel.pick(&peer_has, &we_have_all, &in_flight);
+        let picked = sel.pick(&peer_has, &we_have_all, &in_flight, &wanted);
         assert_eq!(picked, None);
 
         // Also None when peer has nothing
         let peer_empty = Bitfield::new(4);
         let we_have_none = Bitfield::new(4);
-        let picked = sel.pick(&peer_empty, &we_have_none, &in_flight);
+        let picked = sel.pick(&peer_empty, &we_have_none, &in_flight, &wanted);
         assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn pick_skips_unwanted() {
+        let mut sel = PieceSelector::new(4);
+        sel.availability[0] = 1;
+        sel.availability[1] = 1;
+        sel.availability[2] = 1;
+        sel.availability[3] = 1;
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 {
+            peer_has.set(i);
+        }
+        let we_have = Bitfield::new(4);
+        let in_flight = HashSet::new();
+
+        // Only want pieces 2 and 3
+        let mut wanted = Bitfield::new(4);
+        wanted.set(2);
+        wanted.set(3);
+
+        let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
+        assert_eq!(picked, Some(2)); // lowest-index wanted piece
+    }
+
+    #[test]
+    fn pick_all_wanted_is_normal_behavior() {
+        let mut sel = PieceSelector::new(4);
+        sel.availability[0] = 3;
+        sel.availability[1] = 1;
+        sel.availability[2] = 2;
+        sel.availability[3] = 1;
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 {
+            peer_has.set(i);
+        }
+        let we_have = Bitfield::new(4);
+        let in_flight = HashSet::new();
+
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
+
+        let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
+        assert_eq!(picked, Some(1)); // rarest first
     }
 }
