@@ -59,27 +59,17 @@ Requires Rust edition 2024 support (rustc 1.85+).
 
 ## Roadmap
 
-See [docs/plans/2026-02-25-ferrite-roadmap.md](docs/plans/2026-02-25-ferrite-roadmap.md) for detailed milestone plans.
+See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-roadmap-v2.md) for the full 35-milestone roadmap to libtorrent-rasterbar parity.
 
-| Milestone | Crate | Status |
-|-----------|-------|--------|
-| M1 | ferrite-bencode | Done |
-| M2 | ferrite-core | Done |
-| M3 | ferrite-wire | Done |
-| M4 | ferrite-tracker | Done |
-| M5 | ferrite-dht | Done |
-| M6 | ferrite-storage | Done |
-| M7 | ferrite-session (peer + torrent) | Done |
-| M8a | ferrite-session (tracker + DHT integration) | Done |
-| M8b | ferrite-session (session manager) | Done |
-| M8c | ferrite-session (magnet/LSD/AllowedFast/RejectRequest) | Done |
-| M9 | ferrite-session (seeding & upload pipeline) | Done |
-| M10a | ferrite (scaffold + bencode/core re-exports) | Done |
-| M10b | ferrite (wire + tracker re-exports) | Done |
-| M10c | ferrite (dht + storage re-exports) | Done |
-| M10d | ferrite (session + ClientBuilder) | Done |
-| M10e | ferrite (prelude + unified error + integration tests) | Done |
-| M11+ | BEP 52, uTP, DHT extensions, RSS | Future |
+| Phase | Milestones | Status |
+|-------|-----------|--------|
+| Foundation | M1-M10 (bencode → facade) | Done |
+| Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth, alerts, queue) | Planned |
+| Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Planned |
+| Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed, scrape) | Planned |
+| Phase 4: Performance | M25-M28 (smart ban, async disk, parallel hash, piece picker) | Planned |
+| Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode) | Planned |
+| Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | Planned |
 
 ## License
 
