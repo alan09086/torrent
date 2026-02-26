@@ -13,6 +13,7 @@
 //! - [`storage`] — Piece storage, verification, disk I/O
 //! - [`session`] — Session management, torrent orchestration
 //! - [`client`] — Ergonomic `ClientBuilder` and `AddTorrentParams`
+//! - [`prelude`] — Convenience re-exports for `use ferrite::prelude::*`
 
 pub mod bencode;
 
@@ -33,8 +34,12 @@ pub mod session;
 
 pub mod client;
 
+pub mod error;
+pub mod prelude;
+
 // Top-level convenience re-exports
 pub use client::{ClientBuilder, AddTorrentParams};
+pub use error::{Error, Result};
 
 #[cfg(test)]
 mod tests {
