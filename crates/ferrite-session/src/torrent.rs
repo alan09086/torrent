@@ -1027,6 +1027,12 @@ impl TorrentActor {
             return;
         }
 
+        // In end-game: request single block, no pipelining
+        if self.end_game.is_active() {
+            self.request_end_game_block(peer_addr).await;
+            return;
+        }
+
         // Check if peer exists and is eligible for requests
         let can_request = self
             .peers
@@ -1109,6 +1115,42 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
+        }
+    }
+
+    async fn request_end_game_block(&mut self, peer_addr: SocketAddr) {
+        let can_request = self
+            .peers
+            .get(&peer_addr)
+            .is_some_and(|p| !p.peer_choking && p.pending_requests.is_empty());
+        if !can_request {
+            return; // In end-game: only 1 pending request per peer (no pipelining)
+        }
+
+        let peer_bitfield = match self.peers.get(&peer_addr) {
+            Some(p) => p.bitfield.clone(),
+            None => return,
+        };
+
+        let block = if self.config.strict_end_game {
+            self.end_game.pick_block_strict(peer_addr, &peer_bitfield, &[])
+        } else {
+            self.end_game.pick_block(peer_addr, &peer_bitfield)
+        };
+
+        if let Some((index, begin, length)) = block {
+            self.end_game.register_request(index, begin, peer_addr);
+            if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                let _ = peer
+                    .cmd_tx
+                    .send(PeerCommand::Request {
+                        index,
+                        begin,
+                        length,
+                    })
+                    .await;
+                peer.pending_requests.push((index, begin, length));
+            }
         }
     }
 
