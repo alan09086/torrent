@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use ferrite_core::{FilePriority, Lengths};
 use ferrite_storage::Bitfield;
 
 /// Rarest-first piece selector with per-piece availability tracking.
@@ -107,6 +108,31 @@ impl PieceSelector {
     pub fn availability(&self) -> &[u32] {
         &self.availability
     }
+}
+
+/// Build a bitfield marking which pieces are wanted based on file priorities.
+///
+/// For each file with priority > Skip, compute its piece range via `Lengths::file_pieces()`
+/// and set those bits. Shared pieces (spanning file boundaries) are wanted if **any**
+/// overlapping file is non-Skip.
+pub fn build_wanted_pieces(
+    file_priorities: &[FilePriority],
+    file_lengths: &[u64],
+    lengths: &Lengths,
+) -> Bitfield {
+    let mut wanted = Bitfield::new(lengths.num_pieces());
+    let mut offset = 0u64;
+    for (i, &file_len) in file_lengths.iter().enumerate() {
+        if file_priorities.get(i).copied().unwrap_or_default() > FilePriority::Skip {
+            if let Some((first, last)) = lengths.file_pieces(offset, file_len) {
+                for p in first..=last {
+                    wanted.set(p);
+                }
+            }
+        }
+        offset += file_len;
+    }
+    wanted
 }
 
 #[cfg(test)]
@@ -355,5 +381,50 @@ mod tests {
 
         let picked = sel.pick(&peer_has, &we_have, &in_flight, &wanted);
         assert_eq!(picked, Some(1)); // rarest first
+    }
+
+    use ferrite_core::{FilePriority, Lengths};
+
+    #[test]
+    fn build_wanted_all_normal() {
+        let priorities = vec![FilePriority::Normal; 2];
+        let file_lengths = vec![100, 100];
+        let lengths = Lengths::new(200, 100, 50);
+        let wanted = super::build_wanted_pieces(&priorities, &file_lengths, &lengths);
+        assert_eq!(wanted.count_ones(), 2);
+        assert!(wanted.get(0));
+        assert!(wanted.get(1));
+    }
+
+    #[test]
+    fn build_wanted_skip_first_file() {
+        let priorities = vec![FilePriority::Skip, FilePriority::Normal];
+        let file_lengths = vec![100, 100];
+        let lengths = Lengths::new(200, 100, 50);
+        let wanted = super::build_wanted_pieces(&priorities, &file_lengths, &lengths);
+        assert!(!wanted.get(0));
+        assert!(wanted.get(1));
+    }
+
+    #[test]
+    fn build_wanted_shared_boundary_piece() {
+        // File 0: 80 bytes → pieces 0..0, File 1: 80 bytes → pieces 0..1
+        // piece_length=100, total=160 → 2 pieces
+        // If File 0 is Skip, File 1 is Normal: piece 0 still wanted (shared)
+        let priorities = vec![FilePriority::Skip, FilePriority::Normal];
+        let file_lengths = vec![80, 80];
+        let lengths = Lengths::new(160, 100, 50);
+        let wanted = super::build_wanted_pieces(&priorities, &file_lengths, &lengths);
+        assert!(wanted.get(0)); // shared boundary piece
+        assert!(wanted.get(1));
+    }
+
+    #[test]
+    fn build_wanted_all_skip() {
+        let priorities = vec![FilePriority::Skip; 3];
+        let file_lengths = vec![100, 100, 100];
+        let lengths = Lengths::new(300, 100, 50);
+        let wanted = super::build_wanted_pieces(&priorities, &file_lengths, &lengths);
+        assert_eq!(wanted.count_ones(), 0);
     }
 }

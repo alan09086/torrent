@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use ferrite_core::{
-    torrent_from_bytes, Id20, Lengths, Magnet, PeerId, TorrentMetaV1, DEFAULT_CHUNK_SIZE,
+    torrent_from_bytes, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1, DEFAULT_CHUNK_SIZE,
 };
 use ferrite_dht::DhtHandle;
 use ferrite_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
@@ -59,6 +59,11 @@ impl TorrentHandle {
         );
         let chunk_tracker = ChunkTracker::new(lengths.clone());
         let piece_selector = PieceSelector::new(num_pieces);
+        let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
+        let file_priorities = vec![FilePriority::Normal; file_lengths.len()];
+        let wanted_pieces = crate::piece_selector::build_wanted_pieces(
+            &file_priorities, &file_lengths, &lengths,
+        );
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -102,6 +107,8 @@ impl TorrentHandle {
             num_pieces,
             piece_selector,
             in_flight: HashSet::new(),
+            file_priorities,
+            wanted_pieces,
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker: Choker::new(4),
@@ -169,6 +176,8 @@ impl TorrentHandle {
             num_pieces: 0,
             piece_selector: PieceSelector::new(0),
             in_flight: HashSet::new(),
+            file_priorities: Vec::new(),
+            wanted_pieces: Bitfield::new(0),
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker: Choker::new(4),
@@ -260,6 +269,8 @@ struct TorrentActor {
     // Piece management
     piece_selector: PieceSelector,
     in_flight: HashSet<u32>,
+    file_priorities: Vec<FilePriority>,
+    wanted_pieces: Bitfield,
 
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
@@ -905,7 +916,12 @@ impl TorrentActor {
                         self.lengths = Some(lengths);
                         self.num_pieces = num_pieces;
                         self.piece_selector = PieceSelector::new(num_pieces);
+                        let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
                         self.meta = Some(meta);
+                        self.file_priorities = vec![FilePriority::Normal; file_lengths.len()];
+                        self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
+                            &self.file_priorities, &file_lengths, self.lengths.as_ref().unwrap(),
+                        );
                         self.state = TorrentState::Downloading;
                         self.metadata_downloader = None;
 
@@ -965,15 +981,11 @@ impl TorrentActor {
                 return;
             }
 
-            let mut wanted = Bitfield::new(self.num_pieces);
-            for i in 0..self.num_pieces {
-                wanted.set(i);
-            }
             let picked = self.piece_selector.pick(
                 &peer_bitfield,
                 &we_have,
                 &self.in_flight,
-                &wanted,
+                &self.wanted_pieces,
             );
 
             let piece_index = match picked {
