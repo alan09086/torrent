@@ -10,6 +10,7 @@ pub(crate) mod pex;
 pub(crate) mod choker;
 pub(crate) mod end_game;
 pub(crate) mod rate_limiter;
+pub(crate) mod slot_tuner;
 pub(crate) mod tracker_manager;
 pub(crate) mod lsd;
 pub(crate) mod peer;

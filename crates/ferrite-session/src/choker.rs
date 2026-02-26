@@ -49,6 +49,11 @@ impl Choker {
         self.seed_mode = seed_mode;
     }
 
+    /// Update the number of regular unchoke slots (used by auto upload slot tuner).
+    pub fn set_unchoke_slots(&mut self, n: usize) {
+        self.unchoke_slots = n;
+    }
+
     /// Decide which peers to unchoke and choke.
     ///
     /// Algorithm:
@@ -287,6 +292,28 @@ mod tests {
         assert_eq!(decision.to_choke.len(), 2);
         // Uninterested peer is always choked.
         assert!(decision.to_choke.contains(&addr(6885)));
+    }
+
+    #[test]
+    fn set_unchoke_slots_changes_capacity() {
+        let mut choker = Choker::new(2);
+        let peers = vec![
+            peer(6881, 500, true),
+            peer(6882, 400, true),
+            peer(6883, 300, true),
+            peer(6884, 200, true),
+            peer(6885, 100, true),
+        ];
+
+        let decision = choker.decide(&peers);
+        // 2 regular + 1 optimistic = 3 unchoked
+        assert_eq!(decision.to_unchoke.len(), 3);
+
+        // Increase slots to 4
+        choker.set_unchoke_slots(4);
+        let decision = choker.decide(&peers);
+        // 4 regular + 1 optimistic = 5 unchoked
+        assert_eq!(decision.to_unchoke.len(), 5);
     }
 
     #[test]
