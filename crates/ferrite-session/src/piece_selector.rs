@@ -123,11 +123,11 @@ pub fn build_wanted_pieces(
     let mut wanted = Bitfield::new(lengths.num_pieces());
     let mut offset = 0u64;
     for (i, &file_len) in file_lengths.iter().enumerate() {
-        if file_priorities.get(i).copied().unwrap_or_default() > FilePriority::Skip {
-            if let Some((first, last)) = lengths.file_pieces(offset, file_len) {
-                for p in first..=last {
-                    wanted.set(p);
-                }
+        if file_priorities.get(i).copied().unwrap_or_default() > FilePriority::Skip
+            && let Some((first, last)) = lengths.file_pieces(offset, file_len)
+        {
+            for p in first..=last {
+                wanted.set(p);
             }
         }
         offset += file_len;

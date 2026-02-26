@@ -307,6 +307,21 @@ mod tests {
     }
 
     #[test]
+    fn file_priority_accessible_through_facade() {
+        use crate::prelude::*;
+
+        // Default is Normal
+        assert_eq!(FilePriority::default(), FilePriority::Normal);
+
+        // Ordering works
+        assert!(FilePriority::Skip < FilePriority::High);
+
+        // From<u8> conversion
+        assert_eq!(FilePriority::from(0u8), FilePriority::Skip);
+        assert_eq!(FilePriority::from(7u8), FilePriority::High);
+    }
+
+    #[test]
     fn resume_data_in_prelude() {
         use crate::prelude::*;
         let _rd = FastResumeData::new(

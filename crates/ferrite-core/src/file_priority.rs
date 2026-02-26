@@ -4,20 +4,15 @@ use serde::{Deserialize, Serialize};
 ///
 /// Matches libtorrent's priority scale. `Skip` means "do not download".
 /// `PartialOrd`/`Ord` ordering: Skip < Low < Normal < High.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Serialize, Deserialize)]
 #[repr(u8)]
 pub enum FilePriority {
     Skip = 0,
     Low = 1,
+    #[default]
     Normal = 4,
     High = 7,
-}
-
-impl Default for FilePriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl From<u8> for FilePriority {

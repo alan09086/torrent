@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.13.0 — 2026-02-26
+
+Selective file download with per-file priority control. Nine crates, 390 tests.
+
+### M12: Selective File Download
+
+### Added
+- `FilePriority` enum (`Skip`, `Low`, `Normal`, `High`) with `Ord`, `Default` (Normal), serde, `From<u8>` (libtorrent-compatible mapping)
+- `PieceSelector::pick()` now accepts a `wanted` bitfield to skip unwanted pieces
+- `TorrentHandle::set_file_priority()` — set priority for individual files at runtime
+- `TorrentHandle::file_priorities()` — query current per-file priority list
+- `build_wanted_pieces()` — compute piece-level wanted bitfield from file priorities and file/piece geometry
+- `FilesystemStorage` skips creating files with `Skip` priority (no disk allocation for unwanted files)
+- `FastResumeData::file_priority` field — persists per-file priorities across sessions
+- Facade re-exports: `ferrite::core::FilePriority`, `ferrite::session::build_wanted_pieces`
+- Prelude addition: `FilePriority`
+- 16 new tests across ferrite-core (6), ferrite-session (8), ferrite-storage (1), ferrite facade (1)
+
 ## 0.12.0 — 2026-02-26
 
 Resume data and session persistence with libtorrent-compatible format. Nine crates, 374 tests.

@@ -39,10 +39,10 @@ impl FilesystemStorage {
         // Pre-create directories and sparse files.
         for (i, path) in file_paths.iter().enumerate() {
             // Skip file creation for Skip-priority files
-            if let Some(priorities) = file_priorities {
-                if priorities.get(i).copied() == Some(ferrite_core::FilePriority::Skip) {
-                    continue;
-                }
+            if let Some(priorities) = file_priorities
+                && priorities.get(i).copied() == Some(ferrite_core::FilePriority::Skip)
+            {
+                continue;
             }
 
             let full = base_dir.join(path);

@@ -20,3 +20,4 @@ pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentCo
 pub use torrent::TorrentHandle;
 pub use session::SessionHandle;
 pub use persistence::{SessionState, DhtNodeEntry, validate_resume_bitfield};
+pub use crate::piece_selector::build_wanted_pieces;

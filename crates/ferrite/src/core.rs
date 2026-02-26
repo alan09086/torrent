@@ -28,3 +28,6 @@ pub use ferrite_core::{FileInfo, InfoDict, FileEntry};
 
 // Resume data (M11)
 pub use ferrite_core::{FastResumeData, UnfinishedPiece};
+
+// File priority (M12)
+pub use ferrite_core::FilePriority;

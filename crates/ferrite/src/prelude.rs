@@ -24,3 +24,6 @@ pub use crate::error::{Error, Result};
 // Resume data
 pub use crate::core::FastResumeData;
 pub use crate::session::SessionState;
+
+// File priority (M12)
+pub use crate::core::FilePriority;

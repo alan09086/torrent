@@ -21,6 +21,8 @@ pub use ferrite_session::{
     SessionState,
     DhtNodeEntry,
     validate_resume_bitfield,
+    // Piece selection (M12)
+    build_wanted_pieces,
     // Error types
     Error,
     Result,

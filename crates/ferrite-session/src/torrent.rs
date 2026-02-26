@@ -270,7 +270,7 @@ impl TorrentHandle {
             .send(TorrentCommand::FilePriorities { reply: tx })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
-        Ok(rx.await.map_err(|_| crate::Error::Shutdown)?)
+        rx.await.map_err(|_| crate::Error::Shutdown)
     }
 }
 
