@@ -211,4 +211,64 @@ mod tests {
         // but we can verify it compiles and chains correctly)
         let _ = params;
     }
+
+    #[test]
+    fn unified_error_from_conversions() {
+        // Bencode error → unified Error
+        let bencode_err = bencode::Error::Custom("test".into());
+        let unified: crate::Error = bencode_err.into();
+        assert!(matches!(unified, crate::Error::Bencode(_)));
+        assert!(unified.to_string().contains("bencode:"));
+
+        // Core error → unified Error
+        let core_err = core::Error::InvalidHex("bad".into());
+        let unified: crate::Error = core_err.into();
+        assert!(matches!(unified, crate::Error::Core(_)));
+
+        // IO error → unified Error
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let unified: crate::Error = io_err.into();
+        assert!(matches!(unified, crate::Error::Io(_)));
+    }
+
+    #[test]
+    fn prelude_types_accessible() {
+        use crate::prelude::*;
+
+        // Verify key types are in scope from prelude
+        let _builder = ClientBuilder::new();
+        let _magnet = Magnet::parse(
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        ).unwrap();
+        let _hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+
+        // Verify TorrentState variants accessible
+        let _state = TorrentState::Downloading;
+        let _state2 = TorrentState::Seeding;
+    }
+
+    #[test]
+    fn full_type_chain_through_facade() {
+        use crate::prelude::*;
+
+        // Parse magnet → create AddTorrentParams → verify types compose
+        let magnet = Magnet::parse(
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test%20file"
+        ).unwrap();
+
+        assert_eq!(magnet.display_name.as_deref(), Some("test file"));
+
+        let _params = AddTorrentParams::from_magnet(magnet)
+            .download_dir("/tmp/test");
+
+        // Verify unified Result type works
+        let ok_result: Result<i32> = Ok(42);
+        assert_eq!(ok_result.unwrap(), 42);
+
+        // Verify error conversion chain: bencode → unified
+        let err_result: Result<()> = Err(
+            Error::Bencode(crate::bencode::Error::Custom("test".into()))
+        );
+        assert!(err_result.is_err());
+    }
 }
