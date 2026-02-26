@@ -16,7 +16,7 @@ use ferrite_storage::TorrentStorage;
 ///
 /// ```no_run
 /// # async fn example() -> ferrite::session::Result<()> {
-/// let session = ferrite::client::ClientBuilder::new()
+/// let session = ferrite::ClientBuilder::new()
 ///     .download_dir("/tmp/downloads")
 ///     .listen_port(6881)
 ///     .enable_dht(true)
@@ -103,6 +103,7 @@ impl Default for ClientBuilder {
 }
 
 /// Source for adding a torrent to a session.
+#[allow(dead_code)]
 enum TorrentSource {
     /// Parsed torrent metainfo.
     Meta(TorrentMetaV1),
@@ -120,8 +121,11 @@ enum TorrentSource {
 /// [`from_magnet()`](Self::from_magnet), [`from_file()`](Self::from_file),
 /// or [`from_bytes()`](Self::from_bytes).
 pub struct AddTorrentParams {
+    #[allow(dead_code)]
     source: TorrentSource,
+    #[allow(dead_code)]
     download_dir: Option<PathBuf>,
+    #[allow(dead_code)]
     storage: Option<Arc<dyn TorrentStorage>>,
 }
 

@@ -33,6 +33,9 @@ pub mod session;
 
 pub mod client;
 
+// Top-level convenience re-exports
+pub use client::{ClientBuilder, AddTorrentParams};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +168,42 @@ mod tests {
         assert!(bf.get(15));
         assert!(!bf.get(1));
         assert_eq!(bf.count_ones(), 3);
+    }
+
+    #[test]
+    fn client_builder_defaults_and_chaining() {
+        let builder = crate::ClientBuilder::new()
+            .listen_port(6882)
+            .download_dir("/tmp/test")
+            .max_torrents(50)
+            .enable_dht(false)
+            .enable_lsd(false)
+            .enable_pex(true)
+            .enable_fast_extension(true)
+            .seed_ratio_limit(2.0);
+
+        let config = builder.into_config();
+        assert_eq!(config.listen_port, 6882);
+        assert_eq!(config.download_dir, std::path::PathBuf::from("/tmp/test"));
+        assert_eq!(config.max_torrents, 50);
+        assert!(!config.enable_dht);
+        assert!(!config.enable_lsd);
+        assert!(config.enable_pex);
+        assert!(config.enable_fast_extension);
+        assert_eq!(config.seed_ratio_limit, Some(2.0));
+    }
+
+    #[test]
+    fn add_torrent_params_from_magnet() {
+        let magnet = core::Magnet::parse(
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test"
+        ).unwrap();
+
+        let params = crate::AddTorrentParams::from_magnet(magnet)
+            .download_dir("/tmp/downloads");
+
+        // Verify the builder pattern works (we can't inspect private fields,
+        // but we can verify it compiles and chains correctly)
+        let _ = params;
     }
 }
