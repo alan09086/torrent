@@ -7,8 +7,10 @@ mod magnet;
 mod metainfo;
 mod peer_id;
 mod resume_data;
+mod file_priority;
 
 pub use error::{Error, Result};
+pub use file_priority::FilePriority;
 pub use hash::{Id20, Id32};
 pub use lengths::{Lengths, DEFAULT_CHUNK_SIZE};
 pub use magnet::Magnet;
