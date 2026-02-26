@@ -19,7 +19,7 @@ ferrite-storage      Piece verification, chunk tracking, disk I/O
      |
 ferrite-session      Peer management, torrent orchestration
      |
-ferrite              (planned) Public facade API
+ferrite              Public facade API
 ```
 
 ## Crates
@@ -33,8 +33,9 @@ ferrite              (planned) Public facade API
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table | 42 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 41 |
 | `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding | 102 |
+| `ferrite` | Public facade: re-exports bencode + core APIs | 3 |
 
-**Total: 342 tests, zero clippy warnings.**
+**Total: 345 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -73,7 +74,7 @@ See [docs/plans/2026-02-25-ferrite-roadmap.md](docs/plans/2026-02-25-ferrite-roa
 | M8b | ferrite-session (session manager) | Done |
 | M8c | ferrite-session (magnet/LSD/AllowedFast/RejectRequest) | Done |
 | M9 | ferrite-session (seeding & upload pipeline) | Done |
-| M10a | ferrite (scaffold + bencode/core re-exports) | Planned |
+| M10a | ferrite (scaffold + bencode/core re-exports) | Done |
 | M10b | ferrite (wire + tracker re-exports) | Planned |
 | M10c | ferrite (dht + storage re-exports) | Planned |
 | M10d | ferrite (session + ClientBuilder) | Planned |

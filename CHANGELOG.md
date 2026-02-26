@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.7.0 — 2026-02-25
+
+Facade crate scaffold with bencode and core re-exports. Eight crates, 345 tests.
+
+### M10a: ferrite (scaffold + bencode/core re-exports)
+
+### Added
+- `ferrite` facade crate with workspace wiring
+- `ferrite::bencode` — re-exports `to_bytes`, `from_bytes`, `BencodeValue`, `find_dict_key_span`, `Serializer`, `Deserializer`, `Error`
+- `ferrite::core` — re-exports `Id20`, `Id32`, `PeerId`, `Magnet`, `TorrentMetaV1`, `InfoDict`, `FileEntry`, `FileInfo`, `torrent_from_bytes`, `Lengths`, `DEFAULT_CHUNK_SIZE`, `sha1`, `Error`
+- 3 facade tests: bencode round-trip, core types, magnet parse
+
 ## 0.6.0 — 2026-02-25
 
 Seeding & upload pipeline. Seven crates, 342 tests.
