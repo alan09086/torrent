@@ -507,15 +507,16 @@ impl TorrentActor {
                 } => {
                     if self.state != TorrentState::FetchingMetadata {
                         let left = self.calculate_left();
-                        let peers = self.tracker_manager.announce(
+                        let result = self.tracker_manager.announce(
                             ferrite_tracker::AnnounceEvent::None,
                             self.uploaded,
                             self.downloaded,
                             left,
                         ).await;
-                        if !peers.is_empty() {
-                            debug!(count = peers.len(), "tracker returned peers");
-                            self.handle_add_peers(peers);
+                        self.fire_tracker_alerts(&result.outcomes);
+                        if !result.peers.is_empty() {
+                            debug!(count = result.peers.len(), "tracker returned peers");
+                            self.handle_add_peers(result.peers);
                         }
                     }
                 }
@@ -573,6 +574,28 @@ impl TorrentActor {
             pieces_total: self.num_pieces,
             peers_connected: self.peers.len(),
             peers_available: self.available_peers.len(),
+        }
+    }
+
+    /// Fire TrackerReply / TrackerError alerts from announce outcomes.
+    fn fire_tracker_alerts(&self, outcomes: &[crate::tracker_manager::TrackerOutcome]) {
+        for outcome in outcomes {
+            match &outcome.result {
+                Ok(num_peers) => {
+                    post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TrackerReply {
+                        info_hash: self.info_hash,
+                        url: outcome.url.clone(),
+                        num_peers: *num_peers,
+                    });
+                }
+                Err(msg) => {
+                    post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TrackerError {
+                        info_hash: self.info_hash,
+                        url: outcome.url.clone(),
+                        message: msg.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -646,14 +669,15 @@ impl TorrentActor {
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentResumed { info_hash: self.info_hash });
         // Re-announce Started
         let left = self.calculate_left();
-        let peers = self.tracker_manager.announce(
+        let result = self.tracker_manager.announce(
             ferrite_tracker::AnnounceEvent::Started,
             self.uploaded,
             self.downloaded,
             left,
         ).await;
-        if !peers.is_empty() {
-            self.handle_add_peers(peers);
+        self.fire_tracker_alerts(&result.outcomes);
+        if !result.peers.is_empty() {
+            self.handle_add_peers(result.peers);
         }
         self.try_connect_peers();
     }
@@ -1066,10 +1090,11 @@ impl TorrentActor {
                 self.transition_state(TorrentState::Seeding);
                 self.choker.set_seed_mode(true);
                 // Announce completion to trackers
-                let _ = self
+                let result = self
                     .tracker_manager
                     .announce_completed(self.uploaded, self.downloaded)
                     .await;
+                self.fire_tracker_alerts(&result.outcomes);
             }
         } else {
             warn!(index, "piece hash verification failed, re-requesting");
