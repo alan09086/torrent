@@ -25,5 +25,8 @@ tokio = { version = "1", features = ["full"] }
 # Logging
 tracing = "0.1"
 
+# Bitmask flags
+bitflags = "2"
+
 # Testing
 pretty_assertions = "1"
