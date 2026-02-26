@@ -21,6 +21,9 @@ use crate::types::{
     FileInfo, SessionConfig, SessionStats, TorrentConfig, TorrentInfo, TorrentStats,
 };
 
+/// Shared global rate limiter bucket.
+type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
+
 /// Entry for a torrent managed by the session.
 struct TorrentEntry {
     handle: TorrentHandle,
@@ -97,6 +100,13 @@ impl SessionHandle {
             (None, None)
         };
 
+        let global_upload_bucket = Arc::new(std::sync::Mutex::new(
+            crate::rate_limiter::TokenBucket::new(config.upload_rate_limit),
+        ));
+        let global_download_bucket = Arc::new(std::sync::Mutex::new(
+            crate::rate_limiter::TokenBucket::new(config.download_rate_limit),
+        ));
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
@@ -104,6 +114,8 @@ impl SessionHandle {
             lsd,
             lsd_peers_rx,
             cmd_rx,
+            global_upload_bucket,
+            global_download_bucket,
         };
 
         tokio::spawn(actor.run());
@@ -269,10 +281,15 @@ struct SessionActor {
     lsd: Option<crate::lsd::LsdHandle>,
     lsd_peers_rx: Option<mpsc::Receiver<(Id20, SocketAddr)>>,
     cmd_rx: mpsc::Receiver<SessionCommand>,
+    global_upload_bucket: SharedBucket,
+    global_download_bucket: SharedBucket,
 }
 
 impl SessionActor {
     async fn run(mut self) {
+        let mut refill_interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        refill_interval.tick().await; // skip first immediate tick
+
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => {
@@ -343,7 +360,45 @@ impl SessionActor {
                         let _ = entry.handle.add_peers(vec![peer_addr]).await;
                     }
                 }
+                // Global rate limiter refill (100ms)
+                _ = refill_interval.tick() => {
+                    let elapsed = std::time::Duration::from_millis(100);
+                    self.global_upload_bucket.lock().unwrap().refill(elapsed);
+                    self.global_download_bucket.lock().unwrap().refill(elapsed);
+                }
             }
+        }
+    }
+
+    /// Return clones of global buckets if they have a non-zero rate, else None.
+    fn global_buckets_if_limited(
+        &self,
+    ) -> (
+        Option<SharedBucket>,
+        Option<SharedBucket>,
+    ) {
+        let up = if self.config.upload_rate_limit > 0 {
+            Some(Arc::clone(&self.global_upload_bucket))
+        } else {
+            None
+        };
+        let down = if self.config.download_rate_limit > 0 {
+            Some(Arc::clone(&self.global_download_bucket))
+        } else {
+            None
+        };
+        (up, down)
+    }
+
+    fn make_slot_tuner(&self) -> crate::slot_tuner::SlotTuner {
+        if self.config.auto_upload_slots {
+            crate::slot_tuner::SlotTuner::new(
+                4, // initial slots
+                self.config.auto_upload_slots_min,
+                self.config.auto_upload_slots_max,
+            )
+        } else {
+            crate::slot_tuner::SlotTuner::disabled(4)
         }
     }
 
@@ -393,9 +448,19 @@ impl SessionActor {
             }
         };
 
-        let handle =
-            TorrentHandle::from_torrent(meta.clone(), storage, torrent_config, self.dht.clone())
-                .await?;
+        let (global_up, global_down) = self.global_buckets_if_limited();
+        let slot_tuner = self.make_slot_tuner();
+
+        let handle = TorrentHandle::from_torrent(
+            meta.clone(),
+            storage,
+            torrent_config,
+            self.dht.clone(),
+            global_up,
+            global_down,
+            slot_tuner,
+        )
+        .await?;
 
         self.torrents.insert(
             info_hash,
@@ -421,7 +486,17 @@ impl SessionActor {
             return Err(crate::Error::SessionAtCapacity(self.config.max_torrents));
         }
         let config = self.make_torrent_config();
-        let handle = TorrentHandle::from_magnet(magnet, config, self.dht.clone()).await?;
+        let (global_up, global_down) = self.global_buckets_if_limited();
+        let slot_tuner = self.make_slot_tuner();
+        let handle = TorrentHandle::from_magnet(
+            magnet,
+            config,
+            self.dht.clone(),
+            global_up,
+            global_down,
+            slot_tuner,
+        )
+        .await?;
         self.torrents.insert(
             info_hash,
             TorrentEntry {
