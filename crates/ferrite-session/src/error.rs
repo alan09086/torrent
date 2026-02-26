@@ -41,6 +41,9 @@ pub enum Error {
     #[error("metadata not yet available for {0}")]
     MetadataNotReady(ferrite_core::Id20),
 
+    #[error("file index {index} out of range (torrent has {count} files)")]
+    InvalidFileIndex { index: usize, count: usize },
+
     #[error("session shutting down")]
     Shutdown,
 

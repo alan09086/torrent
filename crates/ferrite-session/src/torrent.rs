@@ -248,6 +248,30 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Set the download priority for a specific file.
+    pub async fn set_file_priority(
+        &self,
+        index: usize,
+        priority: ferrite_core::FilePriority,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetFilePriority { index, priority, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-file priorities.
+    pub async fn file_priorities(&self) -> crate::Result<Vec<ferrite_core::FilePriority>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FilePriorities { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        Ok(rx.await.map_err(|_| crate::Error::Shutdown)?)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +372,13 @@ impl TorrentActor {
                         Some(TorrentCommand::SaveResumeData { reply }) => {
                             let result = self.build_resume_data();
                             let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::SetFilePriority { index, priority, reply }) => {
+                            let result = self.handle_set_file_priority(index, priority);
+                            let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::FilePriorities { reply }) => {
+                            let _ = reply.send(self.file_priorities.clone());
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_peers().await;
@@ -830,6 +861,33 @@ impl TorrentActor {
         rd.peers = peers_v4;
 
         Ok(rd)
+    }
+
+    fn handle_set_file_priority(
+        &mut self,
+        index: usize,
+        priority: FilePriority,
+    ) -> crate::Result<()> {
+        if index >= self.file_priorities.len() {
+            return Err(crate::Error::InvalidFileIndex {
+                index,
+                count: self.file_priorities.len(),
+            });
+        }
+
+        self.file_priorities[index] = priority;
+
+        // Rebuild wanted_pieces bitfield
+        if let Some(ref meta) = self.meta {
+            let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
+            if let Some(ref lengths) = self.lengths {
+                self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
+                    &self.file_priorities, &file_lengths, lengths,
+                );
+            }
+        }
+
+        Ok(())
     }
 
     async fn verify_and_mark_piece(&mut self, index: u32) {
@@ -2976,5 +3034,49 @@ mod tests {
         assert_eq!(rd.seed_mode, 0);
 
         handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_file_priority and read back ----
+
+    #[tokio::test]
+    async fn set_file_priority_and_read_back() {
+        let info_bytes = b"d5:filesld6:lengthi100e4:pathl5:a.bineed6:lengthi100e4:pathl5:b.bineee4:name4:test12:piece lengthi100e6:pieces40:AAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBe";
+        let mut torrent_bytes = b"d4:info".to_vec();
+        torrent_bytes.extend_from_slice(info_bytes);
+        torrent_bytes.push(b'e');
+
+        let meta = ferrite_core::torrent_from_bytes(&torrent_bytes).unwrap();
+        let lengths = Lengths::new(200, 100, DEFAULT_CHUNK_SIZE);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let config = TorrentConfig {
+            listen_port: 0,
+            ..Default::default()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        // Default priorities should all be Normal
+        let prios = handle.file_priorities().await.unwrap();
+        assert_eq!(prios.len(), 2);
+        assert!(prios.iter().all(|p| *p == FilePriority::Normal));
+
+        // Set file 0 to Skip
+        handle
+            .set_file_priority(0, FilePriority::Skip)
+            .await
+            .unwrap();
+
+        let prios = handle.file_priorities().await.unwrap();
+        assert_eq!(prios[0], FilePriority::Skip);
+        assert_eq!(prios[1], FilePriority::Normal);
+
+        // Invalid index should error
+        let result = handle.set_file_priority(99, FilePriority::High).await;
+        assert!(result.is_err());
+
+        handle.shutdown().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

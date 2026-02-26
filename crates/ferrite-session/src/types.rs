@@ -155,6 +155,14 @@ pub(crate) enum TorrentCommand {
     SaveResumeData {
         reply: oneshot::Sender<crate::Result<ferrite_core::FastResumeData>>,
     },
+    SetFilePriority {
+        index: usize,
+        priority: ferrite_core::FilePriority,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    FilePriorities {
+        reply: oneshot::Sender<Vec<ferrite_core::FilePriority>>,
+    },
 }
 
 /// Info about a file within a torrent.
