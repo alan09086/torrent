@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::alert::Alert;
+use crate::alert::{post_alert, Alert, AlertKind};
 
 use ferrite_core::{
     torrent_from_bytes, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1, DEFAULT_CHUNK_SIZE,
@@ -370,10 +370,8 @@ struct TorrentActor {
     dht: Option<DhtHandle>,
     dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
 
-    // Alert system (M15) — used in Task 4b when alerts fire
-    #[allow(dead_code)]
+    // Alert system (M15)
     alert_tx: broadcast::Sender<Alert>,
-    #[allow(dead_code)]
     alert_mask: Arc<AtomicU32>,
 
     // Rate limiting (M14)
@@ -386,6 +384,19 @@ struct TorrentActor {
 }
 
 impl TorrentActor {
+    /// Transition to a new state, firing a StateChanged alert if different.
+    fn transition_state(&mut self, new_state: TorrentState) {
+        let prev = self.state;
+        if prev != new_state {
+            self.state = new_state;
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::StateChanged {
+                info_hash: self.info_hash,
+                prev_state: prev,
+                new_state,
+            });
+        }
+    }
+
     /// Main event loop.
     async fn run(mut self) {
         // Verify existing pieces on startup (resume support)
@@ -599,7 +610,8 @@ impl TorrentActor {
             return;
         }
         let prev_state = self.state;
-        self.state = TorrentState::Paused;
+        self.transition_state(TorrentState::Paused);
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentPaused { info_hash: self.info_hash });
         // Disconnect all peers
         for peer in self.peers.values() {
             let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
@@ -625,12 +637,13 @@ impl TorrentActor {
         if let Some(ref ct) = self.chunk_tracker
             && ct.bitfield().count_ones() == self.num_pieces
         {
-            self.state = TorrentState::Seeding;
+            self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
         } else {
-            self.state = TorrentState::Downloading;
+            self.transition_state(TorrentState::Downloading);
             self.choker.set_seed_mode(false);
         }
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentResumed { info_hash: self.info_hash });
         // Re-announce Started
         let left = self.calculate_left();
         let peers = self.tracker_manager.announce(
@@ -793,6 +806,11 @@ impl TorrentActor {
                 reason,
             } => {
                 debug!(%peer_addr, ?reason, "peer disconnected");
+                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerDisconnected {
+                    info_hash: self.info_hash,
+                    addr: peer_addr,
+                    reason: reason.clone(),
+                });
                 if let Some(peer) = self.peers.remove(&peer_addr) {
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
@@ -911,7 +929,7 @@ impl TorrentActor {
         }
 
         if verified_count == self.num_pieces {
-            self.state = TorrentState::Seeding;
+            self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
             info!("all pieces verified, starting as seeder");
         }
@@ -1026,6 +1044,10 @@ impl TorrentActor {
             }
             self.in_flight.remove(&index);
             info!(index, "piece verified");
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PieceFinished {
+                info_hash: self.info_hash,
+                piece: index,
+            });
 
             // Broadcast Have to all peers
             for peer in self.peers.values() {
@@ -1037,8 +1059,11 @@ impl TorrentActor {
                 && ct.bitfield().count_ones() == self.num_pieces
             {
                 info!("download complete, transitioning to seeding");
+                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentFinished {
+                    info_hash: self.info_hash,
+                });
                 self.end_game.deactivate();
-                self.state = TorrentState::Seeding;
+                self.transition_state(TorrentState::Seeding);
                 self.choker.set_seed_mode(true);
                 // Announce completion to trackers
                 let _ = self
@@ -1048,6 +1073,10 @@ impl TorrentActor {
             }
         } else {
             warn!(index, "piece hash verification failed, re-requesting");
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
+                info_hash: self.info_hash,
+                piece: index,
+            });
             if let Some(ref mut ct) = self.chunk_tracker {
                 ct.mark_failed(index);
             }
@@ -1102,7 +1131,7 @@ impl TorrentActor {
                         self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
                             &self.file_priorities, &file_lengths, self.lengths.as_ref().unwrap(),
                         );
-                        self.state = TorrentState::Downloading;
+                        self.transition_state(TorrentState::Downloading);
                         self.metadata_downloader = None;
 
                         // Populate tracker manager with newly parsed metadata
@@ -1110,6 +1139,11 @@ impl TorrentActor {
                             self.tracker_manager.set_metadata(meta);
                         }
 
+                        let name = self.meta.as_ref().map(|m| m.info.name.clone()).unwrap_or_default();
+                        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::MetadataReceived {
+                            info_hash: self.info_hash,
+                            name,
+                        });
                         info!("metadata assembled, switching to Downloading");
                     }
                     Err(e) => {
@@ -1450,7 +1484,7 @@ impl TorrentActor {
             let ratio = self.uploaded as f64 / self.downloaded as f64;
             if ratio >= limit {
                 info!(ratio, limit, "seed ratio reached, stopping");
-                self.state = TorrentState::Stopped;
+                self.transition_state(TorrentState::Stopped);
                 return true;
             }
         }
@@ -1494,6 +1528,10 @@ impl TorrentActor {
 
             self.peers
                 .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
+                info_hash: self.info_hash,
+                addr,
+            });
 
             let info_hash = self.info_hash;
             let peer_id = self.our_peer_id;
@@ -1551,6 +1589,10 @@ impl TorrentActor {
 
         self.peers
             .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
+            info_hash: self.info_hash,
+            addr,
+        });
 
         let info_hash = self.info_hash;
         let peer_id = self.our_peer_id;
