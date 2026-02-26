@@ -764,6 +764,30 @@ impl TorrentActor {
             peer.download_bytes_window += data.len() as u64;
         }
 
+        // End-game: cancel this block on all other peers
+        if self.end_game.is_active() {
+            let cancels = self.end_game.block_received(index, begin, peer_addr);
+            for (cancel_addr, ci, cb, cl) in cancels {
+                if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
+                    let _ = cancel_peer
+                        .cmd_tx
+                        .send(PeerCommand::Cancel {
+                            index: ci,
+                            begin: cb,
+                            length: cl,
+                        })
+                        .await;
+                    if let Some(pos) = cancel_peer
+                        .pending_requests
+                        .iter()
+                        .position(|&(i, b, _)| i == ci && b == cb)
+                    {
+                        cancel_peer.pending_requests.swap_remove(pos);
+                    }
+                }
+            }
+        }
+
         // Track chunk completion
         let piece_complete = if let Some(ref mut ct) = self.chunk_tracker {
             ct.chunk_received(index, begin)

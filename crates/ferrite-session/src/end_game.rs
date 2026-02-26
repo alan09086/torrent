@@ -18,13 +18,11 @@ pub(crate) struct EndGame {
     blocks: HashMap<(u32, u32), BlockEntry>,
 }
 
-#[allow(dead_code)] // length read by block_received, wired in Task 6
 struct BlockEntry {
     length: u32,
     peers: Vec<SocketAddr>,
 }
 
-#[allow(dead_code)] // remaining methods wired in Tasks 5-7
 impl EndGame {
     pub fn new() -> Self {
         Self {
@@ -56,12 +54,14 @@ impl EndGame {
         }
     }
 
+    #[allow(dead_code)] // wired in Task 7
     pub fn deactivate(&mut self) {
         self.active = false;
         self.blocks.clear();
     }
 
     /// Get the list of peers that have been assigned a given block.
+    #[allow(dead_code)] // used in tests, wired from TorrentActor in Task 7
     pub fn block_requesters(&self, index: u32, begin: u32) -> &[SocketAddr] {
         self.blocks
             .get(&(index, begin))
@@ -137,6 +137,7 @@ impl EndGame {
     }
 
     /// Remove all entries for a disconnected peer.
+    #[allow(dead_code)] // wired in Task 7
     pub fn peer_disconnected(&mut self, addr: SocketAddr) {
         for entry in self.blocks.values_mut() {
             entry.peers.retain(|&a| a != addr);
@@ -144,6 +145,7 @@ impl EndGame {
     }
 
     /// Remove all block entries for a given piece (e.g., after hash failure).
+    #[allow(dead_code)] // wired in Task 7
     pub fn remove_piece(&mut self, index: u32) {
         self.blocks.retain(|&(pi, _), _| pi != index);
     }
