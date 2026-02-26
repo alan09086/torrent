@@ -9,6 +9,8 @@
 //! - [`core`] — Hashes, metainfo, magnets, piece arithmetic
 //! - [`wire`] — Peer wire protocol, handshake, extensions
 //! - [`tracker`] — HTTP + UDP tracker announce
+//! - [`dht`] — Kademlia DHT peer discovery
+//! - [`storage`] — Piece storage, verification, disk I/O
 
 pub mod bencode;
 
@@ -20,6 +22,10 @@ pub mod core;
 pub mod wire;
 
 pub mod tracker;
+
+pub mod dht;
+
+pub mod storage;
 
 #[cfg(test)]
 mod tests {
