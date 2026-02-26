@@ -13,8 +13,10 @@ pub(crate) mod lsd;
 pub(crate) mod peer;
 mod torrent;
 mod session;
+mod persistence;
 
 pub use error::{Error, Result};
 pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;
 pub use session::SessionHandle;
+pub use persistence::{SessionState, DhtNodeEntry, validate_resume_bitfield};
