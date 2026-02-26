@@ -1148,4 +1148,181 @@ mod tests {
         assert!(matches!(alert.kind, AlertKind::TorrentRemoved { .. }));
         session.shutdown().await.unwrap();
     }
+
+    // ---- Test 19: Multiple subscribers each receive alerts ----
+
+    #[tokio::test]
+    async fn multiple_subscribers_each_receive_alerts() {
+        use crate::alert::AlertKind;
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let mut sub1 = session.subscribe();
+        let mut sub2 = session.subscribe();
+
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        let a1 = tokio::time::timeout(Duration::from_secs(2), sub1.recv())
+            .await.unwrap().unwrap();
+        let a2 = tokio::time::timeout(Duration::from_secs(2), sub2.recv())
+            .await.unwrap().unwrap();
+
+        assert!(matches!(a1.kind, AlertKind::TorrentAdded { .. }));
+        assert!(matches!(a2.kind, AlertKind::TorrentAdded { .. }));
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 20: set_alert_mask filters at runtime ----
+
+    #[tokio::test]
+    async fn set_alert_mask_filters_at_runtime() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let mut alerts = session.subscribe();
+
+        // Start with ALL — TorrentAdded (STATUS) should arrive
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
+            .await.unwrap().unwrap();
+        assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
+
+        // Change mask to empty — no alerts should pass
+        session.set_alert_mask(AlertCategory::empty());
+
+        let data2 = vec![0xBB; 16384];
+        let meta2 = make_test_torrent(&data2, 16384);
+        let storage2 = make_storage(&data2, 16384);
+        session.add_torrent(meta2, Some(storage2)).await.unwrap();
+
+        // Give a small window — nothing should arrive
+        let result = tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await;
+        assert!(result.is_err(), "should have timed out with empty mask");
+
+        // Restore STATUS — adding another torrent should arrive
+        session.set_alert_mask(AlertCategory::STATUS);
+
+        let data3 = vec![0xCC; 16384];
+        let meta3 = make_test_torrent(&data3, 16384);
+        let storage3 = make_storage(&data3, 16384);
+        session.add_torrent(meta3, Some(storage3)).await.unwrap();
+
+        let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
+            .await.unwrap().unwrap();
+        assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 21: AlertStream filters per subscriber ----
+
+    #[tokio::test]
+    async fn alert_stream_filters_per_subscriber() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+
+        // subscriber A: STATUS only
+        let mut status_sub = session.subscribe_filtered(AlertCategory::STATUS);
+        // subscriber B: PEER only
+        let mut peer_sub = session.subscribe_filtered(AlertCategory::PEER);
+
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        // STATUS sub gets TorrentAdded
+        let alert = tokio::time::timeout(Duration::from_secs(2), status_sub.recv())
+            .await.unwrap().unwrap();
+        assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
+
+        // PEER sub should NOT receive TorrentAdded (it's STATUS category)
+        let result = tokio::time::timeout(Duration::from_millis(200), peer_sub.recv()).await;
+        assert!(result.is_err(), "PEER subscriber should not get STATUS alerts");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 22: State changed tracks transitions ----
+
+    #[tokio::test]
+    async fn state_changed_tracks_transitions() {
+        use crate::alert::AlertKind;
+
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let mut alerts = session.subscribe();
+
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        // Drain TorrentAdded
+        let _ = tokio::time::timeout(Duration::from_secs(1), alerts.recv())
+            .await.unwrap();
+
+        // Pause — should get StateChanged(Downloading → Paused) + TorrentPaused
+        session.pause_torrent(info_hash).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Collect alerts over a short window
+        let mut state_changes = Vec::new();
+        let mut paused_alerts = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await {
+                Ok(Ok(a)) => match &a.kind {
+                    AlertKind::StateChanged { prev_state, new_state, .. } => {
+                        state_changes.push((*prev_state, *new_state));
+                    }
+                    AlertKind::TorrentPaused { .. } => {
+                        paused_alerts.push(a);
+                    }
+                    _ => {} // other alerts (PeerConnected etc)
+                },
+                _ => break,
+            }
+        }
+
+        assert!(
+            state_changes.contains(&(TorrentState::Downloading, TorrentState::Paused)),
+            "expected Downloading→Paused, got: {state_changes:?}"
+        );
+        assert!(!paused_alerts.is_empty(), "expected TorrentPaused alert");
+
+        // Resume — should get StateChanged(Paused → Downloading) + TorrentResumed
+        session.resume_torrent(info_hash).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut resume_state_changes = Vec::new();
+        let mut resumed_alerts = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await {
+                Ok(Ok(a)) => match &a.kind {
+                    AlertKind::StateChanged { prev_state, new_state, .. } => {
+                        resume_state_changes.push((*prev_state, *new_state));
+                    }
+                    AlertKind::TorrentResumed { .. } => {
+                        resumed_alerts.push(a);
+                    }
+                    _ => {}
+                },
+                _ => break,
+            }
+        }
+
+        assert!(
+            resume_state_changes.contains(&(TorrentState::Paused, TorrentState::Downloading)),
+            "expected Paused→Downloading, got: {resume_state_changes:?}"
+        );
+        assert!(!resumed_alerts.is_empty(), "expected TorrentResumed alert");
+
+        session.shutdown().await.unwrap();
+    }
 }
