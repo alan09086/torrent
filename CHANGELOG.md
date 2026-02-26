@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.10.0 — 2026-02-25
+
+Session re-exports and ergonomic client builder in facade crate. Eight crates, 352 tests.
+
+### M10d: ferrite (session + ClientBuilder)
+
+### Added
+- `ferrite::session` — re-exports `SessionHandle`, `SessionConfig`, `SessionStats`, `TorrentHandle`, `TorrentConfig`, `TorrentState`, `TorrentStats`, `TorrentInfo`, `FileInfo`, `StorageFactory`, `Error`
+- `ferrite::client` — new `ClientBuilder` (fluent builder for `SessionConfig` → `SessionHandle`) and `AddTorrentParams` (unified torrent source with `from_torrent`/`from_magnet`/`from_file`/`from_bytes`)
+- Top-level `ferrite::ClientBuilder` and `ferrite::AddTorrentParams` re-exports
+- 2 facade tests: client builder defaults + chaining, AddTorrentParams from magnet
+
 ## 0.9.0 — 2026-02-25
 
 DHT and storage re-exports in facade crate. Eight crates, 349 tests.
