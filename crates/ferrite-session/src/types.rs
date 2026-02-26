@@ -152,6 +152,9 @@ pub(crate) enum TorrentCommand {
     Pause,
     Resume,
     Shutdown,
+    SaveResumeData {
+        reply: oneshot::Sender<crate::Result<ferrite_core::FastResumeData>>,
+    },
 }
 
 /// Info about a file within a torrent.

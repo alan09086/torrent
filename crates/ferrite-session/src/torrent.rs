@@ -229,6 +229,16 @@ impl TorrentHandle {
         let _ = self.cmd_tx.send(TorrentCommand::Shutdown).await;
         Ok(())
     }
+
+    /// Snapshot current torrent state into libtorrent-compatible resume data.
+    pub async fn save_resume_data(&self) -> crate::Result<ferrite_core::FastResumeData> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SaveResumeData { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +333,10 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::Resume) => {
                             self.handle_resume().await;
+                        }
+                        Some(TorrentCommand::SaveResumeData { reply }) => {
+                            let result = self.build_resume_data();
+                            let _ = reply.send(result);
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_peers().await;
@@ -750,6 +764,61 @@ impl TorrentActor {
             self.choker.set_seed_mode(true);
             info!("all pieces verified, starting as seeder");
         }
+    }
+
+    fn build_resume_data(&self) -> crate::Result<ferrite_core::FastResumeData> {
+        let pieces_bytes = match &self.chunk_tracker {
+            Some(ct) => ct.bitfield().as_bytes().to_vec(),
+            None => Vec::new(),
+        };
+
+        let name = self
+            .meta
+            .as_ref()
+            .map(|m| m.info.name.clone())
+            .unwrap_or_default();
+
+        let save_path = self.config.download_dir.to_string_lossy().into_owned();
+
+        let mut rd = ferrite_core::FastResumeData::new(
+            self.info_hash.as_bytes().to_vec(),
+            name,
+            save_path,
+        );
+
+        rd.pieces = pieces_bytes;
+
+        rd.total_uploaded = self.uploaded as i64;
+        rd.total_downloaded = self.downloaded as i64;
+
+        rd.paused = if self.state == TorrentState::Paused { 1 } else { 0 };
+        rd.seed_mode = if self.state == TorrentState::Seeding { 1 } else { 0 };
+
+        // Collect tracker URLs from torrent metadata
+        if let Some(ref meta) = self.meta {
+            if let Some(ref announce_list) = meta.announce_list {
+                rd.trackers = announce_list.clone();
+            } else if let Some(ref announce) = meta.announce {
+                rd.trackers = vec![vec![announce.clone()]];
+            }
+        }
+
+        // Collect connected peer addresses as compact bytes
+        let mut peers_v4 = Vec::new();
+        for addr in self.peers.keys() {
+            match addr {
+                std::net::SocketAddr::V4(v4) => {
+                    peers_v4.extend_from_slice(&v4.ip().octets());
+                    peers_v4.extend_from_slice(&v4.port().to_be_bytes());
+                }
+                std::net::SocketAddr::V6(_) => {
+                    // IPv6 peers would go into peers6 — skip for now
+                }
+            }
+        }
+        rd.peers = peers_v4;
+
+        Ok(rd)
     }
 
     async fn verify_and_mark_piece(&mut self, index: u32) {
@@ -2799,6 +2868,95 @@ mod tests {
         assert_eq!(stats.state, TorrentState::Seeding, "should start as seeder with all pieces verified");
         assert_eq!(stats.pieces_have, 2);
         assert_eq!(stats.pieces_total, 2);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: save_resume_data captures state ----
+
+    #[tokio::test]
+    async fn save_resume_data_captures_state() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        // Give actor time to start
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let rd = handle.save_resume_data().await.unwrap();
+
+        assert_eq!(rd.file_format, "libtorrent resume file");
+        assert_eq!(rd.file_version, 1);
+        assert_eq!(rd.info_hash, info_hash.as_bytes().to_vec());
+        assert_eq!(rd.name, "test");
+        assert_eq!(rd.save_path, "/tmp");
+        assert_eq!(rd.paused, 0);
+        // No pieces downloaded yet — bitfield should be all zeros
+        assert!(!rd.pieces.is_empty());
+        // Stats should be zero for a freshly started torrent with no peers
+        assert_eq!(rd.total_uploaded, 0);
+        assert_eq!(rd.total_downloaded, 0);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: save_resume_data for seeder ----
+
+    #[tokio::test]
+    async fn save_resume_data_seeder() {
+        let data = vec![0xCD; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        // Give actor time to verify pieces and switch to seeding
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let rd = handle.save_resume_data().await.unwrap();
+
+        assert_eq!(rd.info_hash, info_hash.as_bytes().to_vec());
+        assert_eq!(rd.name, "test");
+        assert_eq!(rd.seed_mode, 1, "seeder should have seed_mode=1");
+        assert_eq!(rd.paused, 0);
+        // All pieces should be marked in the bitfield
+        // 2 pieces -> 1 byte, top 2 bits set = 0b1100_0000 = 0xC0
+        assert_eq!(rd.pieces.len(), 1);
+        assert_eq!(rd.pieces[0] & 0xC0, 0xC0, "both pieces should be marked complete");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: save_resume_data for paused torrent ----
+
+    #[tokio::test]
+    async fn save_resume_data_paused() {
+        let data = vec![0xEF; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.pause().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let rd = handle.save_resume_data().await.unwrap();
+        assert_eq!(rd.paused, 1, "paused torrent should have paused=1");
+        assert_eq!(rd.seed_mode, 0);
 
         handle.shutdown().await.unwrap();
     }
