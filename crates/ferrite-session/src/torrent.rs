@@ -97,6 +97,9 @@ impl TorrentHandle {
             None
         };
 
+        let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
+        let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -125,6 +128,12 @@ impl TorrentHandle {
             tracker_manager,
             dht: if enable_dht { dht } else { None },
             dht_peers_rx,
+            upload_bucket,
+            download_bucket,
+            global_upload_bucket: None,
+            global_download_bucket: None,
+            slot_tuner: crate::slot_tuner::SlotTuner::disabled(4),
+            upload_bytes_interval: 0,
         };
 
         tokio::spawn(actor.run());
@@ -167,6 +176,9 @@ impl TorrentHandle {
             None
         };
 
+        let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
+        let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
+
         let actor = TorrentActor {
             config,
             info_hash: magnet.info_hash,
@@ -195,6 +207,12 @@ impl TorrentHandle {
             tracker_manager,
             dht: if enable_dht { dht } else { None },
             dht_peers_rx,
+            upload_bucket,
+            download_bucket,
+            global_upload_bucket: None,
+            global_download_bucket: None,
+            slot_tuner: crate::slot_tuner::SlotTuner::disabled(4),
+            upload_bytes_interval: 0,
         };
 
         tokio::spawn(actor.run());
@@ -329,6 +347,14 @@ struct TorrentActor {
     // DHT handle (shared, optional)
     dht: Option<DhtHandle>,
     dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+
+    // Rate limiting (M14)
+    upload_bucket: crate::rate_limiter::TokenBucket,
+    download_bucket: crate::rate_limiter::TokenBucket,
+    global_upload_bucket: Option<Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>>,
+    global_download_bucket: Option<Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>>,
+    slot_tuner: crate::slot_tuner::SlotTuner,
+    upload_bytes_interval: u64,
 }
 
 impl TorrentActor {
@@ -340,11 +366,13 @@ impl TorrentActor {
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
         let mut connect_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
         optimistic_interval.tick().await;
         connect_interval.tick().await;
+        refill_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
         // DHT announce
@@ -405,6 +433,10 @@ impl TorrentActor {
                 // Unchoke timer
                 _ = unchoke_interval.tick() => {
                     self.update_peer_rates();
+                    // Auto upload slot tuning
+                    self.slot_tuner.observe(self.upload_bytes_interval);
+                    self.upload_bytes_interval = 0;
+                    self.choker.set_unchoke_slots(self.slot_tuner.current_slots());
                     self.run_choker().await;
                 }
                 // Optimistic unchoke timer
@@ -466,6 +498,12 @@ impl TorrentActor {
                             self.dht_peers_rx = None;
                         }
                     }
+                }
+                // Rate limiter refill (100ms)
+                _ = refill_interval.tick() => {
+                    let elapsed = Duration::from_millis(100);
+                    self.upload_bucket.refill(elapsed);
+                    self.download_bucket.refill(elapsed);
                 }
             }
         }
@@ -1072,6 +1110,11 @@ impl TorrentActor {
             return;
         }
 
+        // Rate limit: don't send new requests if download budget exhausted
+        if !self.download_bucket.is_unlimited() && self.download_bucket.available() == 0 {
+            return;
+        }
+
         // In end-game: request single block, no pipelining
         if self.end_game.is_active() {
             self.request_end_game_block(peer_addr).await;
@@ -1125,6 +1168,20 @@ impl TorrentActor {
             };
 
             for (begin, length) in missing_chunks {
+                // Check download rate limits
+                if !self.download_bucket.is_unlimited() {
+                    let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
+                    if !is_local
+                        && let Some(ref global) = self.global_download_bucket
+                        && !global.lock().unwrap().try_consume(length as u64)
+                    {
+                        break;
+                    }
+                    if !self.download_bucket.try_consume(length as u64) {
+                        break;
+                    }
+                }
+
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     let _ = peer
                         .cmd_tx
@@ -1311,6 +1368,21 @@ impl TorrentActor {
         }
 
         for (addr, index, begin, length) in to_serve {
+            let chunk_size = length as u64;
+
+            // Check global upload budget (skip for local peers)
+            if !crate::rate_limiter::is_local_network(addr.ip())
+                && let Some(ref global) = self.global_upload_bucket
+                && !global.lock().unwrap().try_consume(chunk_size)
+            {
+                break; // global budget exhausted, serve remaining next refill
+            }
+
+            // Check per-torrent upload budget
+            if !self.upload_bucket.try_consume(chunk_size) {
+                break; // per-torrent budget exhausted this cycle
+            }
+
             match storage.read_chunk(index, begin, length) {
                 Ok(data) => {
                     if let Some(peer) = self.peers.get_mut(&addr) {
@@ -1324,8 +1396,9 @@ impl TorrentActor {
                                 data: Bytes::from(data),
                             })
                             .await;
-                        self.uploaded += length as u64;
-                        peer.upload_bytes_window += length as u64;
+                        self.uploaded += chunk_size;
+                        self.upload_bytes_interval += chunk_size;
+                        peer.upload_bytes_window += chunk_size;
                     }
                 }
                 Err(e) => {
