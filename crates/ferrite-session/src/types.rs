@@ -187,6 +187,8 @@ pub struct SessionConfig {
     pub enable_lsd: bool,
     pub enable_fast_extension: bool,
     pub seed_ratio_limit: Option<f64>,
+    /// Directory for resume data files. Defaults to `<download_dir>/.ferrite/`.
+    pub resume_data_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for SessionConfig {
@@ -200,6 +202,7 @@ impl Default for SessionConfig {
             enable_lsd: true,
             enable_fast_extension: true,
             seed_ratio_limit: None,
+            resume_data_dir: None,
         }
     }
 }

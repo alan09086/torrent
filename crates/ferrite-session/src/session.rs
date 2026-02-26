@@ -64,6 +64,13 @@ enum SessionCommand {
     SessionStats {
         reply: oneshot::Sender<SessionStats>,
     },
+    SaveTorrentResumeData {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<ferrite_core::FastResumeData>>,
+    },
+    SaveSessionState {
+        reply: oneshot::Sender<crate::Result<crate::persistence::SessionState>>,
+    },
     Shutdown,
 }
 
@@ -221,6 +228,34 @@ impl SessionHandle {
         let _ = self.cmd_tx.send(SessionCommand::Shutdown).await;
         Ok(())
     }
+
+    /// Save resume data for a specific torrent.
+    pub async fn save_torrent_resume_data(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<ferrite_core::FastResumeData> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SaveTorrentResumeData {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Save full session state (all torrent resume data + DHT node cache).
+    pub async fn save_session_state(
+        &self,
+    ) -> crate::Result<crate::persistence::SessionState> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SaveSessionState { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +316,14 @@ impl SessionActor {
                         Some(SessionCommand::SessionStats { reply }) => {
                             let stats = self.make_session_stats().await;
                             let _ = reply.send(stats);
+                        }
+                        Some(SessionCommand::SaveTorrentResumeData { info_hash, reply }) => {
+                            let result = self.handle_save_torrent_resume(info_hash).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SaveSessionState { reply }) => {
+                            let result = self.handle_save_session_state().await;
+                            let _ = reply.send(result);
                         }
                         Some(SessionCommand::Shutdown) | None => {
                             self.shutdown_all().await;
@@ -479,6 +522,38 @@ impl SessionActor {
         }
     }
 
+    async fn handle_save_torrent_resume(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<ferrite_core::FastResumeData> {
+        let entry = self
+            .torrents
+            .get(&info_hash)
+            .ok_or(crate::Error::TorrentNotFound(info_hash))?;
+        entry.handle.save_resume_data().await
+    }
+
+    async fn handle_save_session_state(
+        &self,
+    ) -> crate::Result<crate::persistence::SessionState> {
+        use crate::persistence::SessionState;
+
+        let mut torrents = Vec::new();
+        for (info_hash, entry) in &self.torrents {
+            match entry.handle.save_resume_data().await {
+                Ok(rd) => torrents.push(rd),
+                Err(e) => {
+                    warn!(%info_hash, "failed to save resume data: {e}");
+                }
+            }
+        }
+
+        Ok(SessionState {
+            dht_nodes: Vec::new(), // DHT node cache — populated when DHT is wired
+            torrents,
+        })
+    }
+
     async fn shutdown_all(&mut self) {
         for (info_hash, entry) in self.torrents.drain() {
             debug!(%info_hash, "shutting down torrent");
@@ -553,6 +628,7 @@ mod tests {
             enable_lsd: false,
             enable_fast_extension: false,
             seed_ratio_limit: None,
+            resume_data_dir: None,
         }
     }
 
@@ -832,6 +908,67 @@ mod tests {
         let list = session.list_torrents().await.unwrap();
         assert_eq!(list.len(), 2);
 
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 14: Save torrent resume data via session ----
+
+    #[tokio::test]
+    async fn save_torrent_resume_data_via_session() {
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+        session.add_torrent(meta, Some(storage)).await.unwrap();
+
+        let rd = session.save_torrent_resume_data(info_hash).await.unwrap();
+        assert_eq!(rd.info_hash, info_hash.as_bytes().as_slice());
+        assert_eq!(rd.name, "test");
+        assert_eq!(rd.file_format, "libtorrent resume file");
+        assert_eq!(rd.file_version, 1);
+        assert!(!rd.pieces.is_empty());
+        assert_eq!(rd.paused, 0);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 15: Save session state captures all torrents ----
+
+    #[tokio::test]
+    async fn save_session_state_captures_all_torrents() {
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+
+        let data1 = vec![0xAA; 16384];
+        let meta1 = make_test_torrent(&data1, 16384);
+        let storage1 = make_storage(&data1, 16384);
+        session.add_torrent(meta1, Some(storage1)).await.unwrap();
+
+        let data2 = vec![0xBB; 16384];
+        let meta2 = make_test_torrent(&data2, 16384);
+        let storage2 = make_storage(&data2, 16384);
+        session.add_torrent(meta2, Some(storage2)).await.unwrap();
+
+        let state = session.save_session_state().await.unwrap();
+        assert_eq!(state.torrents.len(), 2);
+
+        for rd in &state.torrents {
+            assert_eq!(rd.file_format, "libtorrent resume file");
+            assert_eq!(rd.info_hash.len(), 20);
+        }
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test 16: Save resume data not found ----
+
+    #[tokio::test]
+    async fn save_resume_data_not_found() {
+        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let fake_hash = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let result = session.save_torrent_resume_data(fake_hash).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
         session.shutdown().await.unwrap();
     }
 }
