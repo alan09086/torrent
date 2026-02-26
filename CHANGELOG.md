@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.8.0 — 2026-02-25
+
+Wire and tracker re-exports in facade crate. Eight crates, 347 tests.
+
+### M10b: ferrite (wire + tracker re-exports)
+
+### Added
+- `ferrite::wire` — re-exports `Handshake`, `Message`, `MessageCodec`, `ExtHandshake`, `ExtMessage`, `MetadataMessage`, `MetadataMessageType`, `allowed_fast_set`, `Error`
+- `ferrite::tracker` — re-exports `HttpTracker`, `HttpAnnounceResponse`, `UdpTracker`, `UdpAnnounceResponse`, `AnnounceRequest`, `AnnounceResponse`, `AnnounceEvent`, `parse_compact_peers`, `Error`
+- 2 facade tests: handshake round-trip, announce request construction
+
 ## 0.7.0 — 2026-02-25
 
 Facade crate scaffold with bencode and core re-exports. Eight crates, 345 tests.
