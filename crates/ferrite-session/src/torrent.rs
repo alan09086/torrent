@@ -860,6 +860,13 @@ impl TorrentActor {
         }
         rd.peers = peers_v4;
 
+        // Per-file priorities
+        rd.file_priority = self
+            .file_priorities
+            .iter()
+            .map(|&p| p as u8 as i64)
+            .collect();
+
         Ok(rd)
     }
 
@@ -3075,6 +3082,42 @@ mod tests {
         // Invalid index should error
         let result = handle.set_file_priority(99, FilePriority::High).await;
         assert!(result.is_err());
+
+        handle.shutdown().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn resume_data_preserves_file_priorities() {
+        let info_bytes = b"d5:filesld6:lengthi100e4:pathl5:a.bineed6:lengthi100e4:pathl5:b.bineee4:name4:test12:piece lengthi100e6:pieces40:AAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBe";
+        let mut torrent_bytes = b"d4:info".to_vec();
+        torrent_bytes.extend_from_slice(info_bytes);
+        torrent_bytes.push(b'e');
+
+        let meta = ferrite_core::torrent_from_bytes(&torrent_bytes).unwrap();
+        let lengths = Lengths::new(200, 100, DEFAULT_CHUNK_SIZE);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let config = TorrentConfig {
+            listen_port: 0,
+            ..Default::default()
+        };
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None)
+            .await
+            .unwrap();
+
+        // Set file priorities
+        handle.set_file_priority(0, FilePriority::High).await.unwrap();
+        handle.set_file_priority(1, FilePriority::Skip).await.unwrap();
+
+        // Save resume data
+        let rd = handle.save_resume_data().await.unwrap();
+        assert_eq!(rd.file_priority, vec![7, 0]); // High=7, Skip=0
+
+        // Verify bencode round-trip
+        let encoded = ferrite_bencode::to_bytes(&rd).unwrap();
+        let decoded: ferrite_core::FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.file_priority, vec![7, 0]);
 
         handle.shutdown().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
