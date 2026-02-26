@@ -32,11 +32,19 @@ impl FilesystemStorage {
         file_paths: Vec<PathBuf>,
         file_lengths: Vec<u64>,
         lengths: Lengths,
+        file_priorities: Option<&[ferrite_core::FilePriority]>,
     ) -> Result<Self> {
         let file_map = FileMap::new(file_lengths.clone(), lengths.clone());
 
         // Pre-create directories and sparse files.
         for (i, path) in file_paths.iter().enumerate() {
+            // Skip file creation for Skip-priority files
+            if let Some(priorities) = file_priorities {
+                if priorities.get(i).copied() == Some(ferrite_core::FilePriority::Skip) {
+                    continue;
+                }
+            }
+
             let full = base_dir.join(path);
             if let Some(parent) = full.parent() {
                 fs::create_dir_all(parent)?;
@@ -141,6 +149,7 @@ mod tests {
             vec![PathBuf::from("test.bin")],
             vec![100],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -161,6 +170,7 @@ mod tests {
             vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")],
             vec![100, 100],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -184,6 +194,7 @@ mod tests {
             vec![PathBuf::from("test.bin")],
             vec![100],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -204,6 +215,7 @@ mod tests {
             vec![PathBuf::from("test.bin")],
             vec![100],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -226,6 +238,7 @@ mod tests {
             vec![PathBuf::from("sub/dir/test.bin")],
             vec![100],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -243,6 +256,7 @@ mod tests {
             vec![PathBuf::from("big.bin")],
             vec![1_000_000],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -262,6 +276,7 @@ mod tests {
             vec![PathBuf::from("test.bin")],
             vec![75],
             lengths,
+            None,
         )
         .unwrap();
 
@@ -283,6 +298,7 @@ mod tests {
                 vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")],
                 vec![100, 100],
                 lengths,
+                None,
             )
             .unwrap(),
         );
@@ -306,6 +322,35 @@ mod tests {
         let p1 = s.read_piece(1).unwrap();
         assert_eq!(p0, vec![1u8; 100]);
         assert_eq!(p1, vec![2u8; 100]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn skip_priority_file_not_created() {
+        use ferrite_core::FilePriority;
+
+        let dir = temp_dir("skip_alloc");
+        let lengths = Lengths::new(200, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("wanted.bin"), PathBuf::from("skipped.bin")],
+            vec![100, 100],
+            lengths,
+            Some(&[FilePriority::Normal, FilePriority::Skip]),
+        )
+        .unwrap();
+
+        // wanted.bin should exist
+        assert!(dir.join("wanted.bin").exists());
+        // skipped.bin should NOT exist
+        assert!(!dir.join("skipped.bin").exists());
+
+        // Writing to wanted.bin should still work
+        let data = vec![42u8; 50];
+        s.write_chunk(0, 0, &data).unwrap();
+        let read = s.read_chunk(0, 0, 50).unwrap();
+        assert_eq!(read, data);
 
         fs::remove_dir_all(&dir).unwrap();
     }
