@@ -18,6 +18,7 @@ pub struct TorrentConfig {
     pub enable_pex: bool,
     pub enable_fast: bool,
     pub seed_ratio_limit: Option<f64>,
+    pub strict_end_game: bool,
 }
 
 impl Default for TorrentConfig {
@@ -31,6 +32,7 @@ impl Default for TorrentConfig {
             enable_pex: true,
             enable_fast: false,
             seed_ratio_limit: None,
+            strict_end_game: true,
         }
     }
 }
@@ -230,3 +232,14 @@ pub type StorageFactory = Box<
         + Send
         + Sync,
 >;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn torrent_config_strict_end_game_default() {
+        let config = TorrentConfig::default();
+        assert!(config.strict_end_game);
+    }
+}

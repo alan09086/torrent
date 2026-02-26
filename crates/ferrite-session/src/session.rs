@@ -357,6 +357,7 @@ impl SessionActor {
             enable_pex: self.config.enable_pex,
             enable_fast: self.config.enable_fast_extension,
             seed_ratio_limit: self.config.seed_ratio_limit,
+            strict_end_game: true,
         }
     }
 

@@ -1437,6 +1437,7 @@ mod tests {
             enable_pex: false,
             enable_fast: false,
             seed_ratio_limit: None,
+            strict_end_game: true,
         }
     }
 
