@@ -125,4 +125,39 @@ mod tests {
         assert!(req.compact);
         assert_eq!(req.event, tracker::AnnounceEvent::Started);
     }
+
+    #[test]
+    fn dht_compact_node_round_trip_through_facade() {
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+        let node = dht::CompactNodeInfo {
+            id: core::Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881)),
+        };
+
+        let encoded = dht::encode_compact_nodes(&[node.clone()]);
+        assert_eq!(encoded.len(), 26); // 20-byte ID + 4-byte IP + 2-byte port
+
+        let decoded = dht::parse_compact_nodes(&encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].id, node.id);
+        assert_eq!(decoded[0].addr, node.addr);
+    }
+
+    #[test]
+    fn storage_bitfield_through_facade() {
+        let mut bf = storage::Bitfield::new(16);
+        assert_eq!(bf.len(), 16);
+        assert!(!bf.get(0));
+        assert_eq!(bf.count_ones(), 0);
+
+        bf.set(0);
+        bf.set(5);
+        bf.set(15);
+        assert!(bf.get(0));
+        assert!(bf.get(5));
+        assert!(bf.get(15));
+        assert!(!bf.get(1));
+        assert_eq!(bf.count_ones(), 3);
+    }
 }
