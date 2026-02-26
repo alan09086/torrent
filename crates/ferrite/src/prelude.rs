@@ -20,3 +20,7 @@ pub use crate::storage::{TorrentStorage, FilesystemStorage};
 
 // Unified error
 pub use crate::error::{Error, Result};
+
+// Resume data
+pub use crate::core::FastResumeData;
+pub use crate::session::SessionState;

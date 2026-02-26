@@ -17,6 +17,10 @@ pub use ferrite_session::{
     FileInfo,
     // Storage factory type alias
     StorageFactory,
+    // Persistence (M11)
+    SessionState,
+    DhtNodeEntry,
+    validate_resume_bitfield,
     // Error types
     Error,
     Result,

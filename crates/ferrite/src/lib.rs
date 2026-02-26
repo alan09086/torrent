@@ -271,4 +271,52 @@ mod tests {
         );
         assert!(err_result.is_err());
     }
+
+    #[test]
+    fn resume_data_accessible_through_facade() {
+        // Create resume data through facade
+        let rd = core::FastResumeData::new(
+            vec![0xAA; 20],
+            "test".into(),
+            "/tmp".into(),
+        );
+        assert_eq!(rd.file_format, "libtorrent resume file");
+        assert_eq!(rd.file_version, 1);
+        assert_eq!(rd.info_hash.len(), 20);
+
+        // Round-trip through bencode via facade
+        let encoded = bencode::to_bytes(&rd).unwrap();
+        let decoded: core::FastResumeData = bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(rd, decoded);
+
+        // SessionState accessible
+        let state = session::SessionState {
+            dht_nodes: vec![session::DhtNodeEntry {
+                host: "127.0.0.1".into(),
+                port: 6881,
+            }],
+            torrents: vec![rd],
+        };
+        let encoded = bencode::to_bytes(&state).unwrap();
+        let decoded: session::SessionState = bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(state, decoded);
+
+        // Validate bitfield helper
+        assert!(session::validate_resume_bitfield(&[0xFF], 8));
+        assert!(!session::validate_resume_bitfield(&[0xFF], 9));
+    }
+
+    #[test]
+    fn resume_data_in_prelude() {
+        use crate::prelude::*;
+        let _rd = FastResumeData::new(
+            vec![0xCC; 20],
+            "prelude-test".into(),
+            "/tmp".into(),
+        );
+        let _state = SessionState {
+            dht_nodes: Vec::new(),
+            torrents: Vec::new(),
+        };
+    }
 }

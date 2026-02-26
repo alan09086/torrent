@@ -25,3 +25,6 @@ pub use ferrite_core::{
 
 // Re-export info dict sub-types (needed to access TorrentMetaV1 fields)
 pub use ferrite_core::{FileInfo, InfoDict, FileEntry};
+
+// Resume data (M11)
+pub use ferrite_core::{FastResumeData, UnfinishedPiece};
