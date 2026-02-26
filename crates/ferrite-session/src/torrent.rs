@@ -1555,6 +1555,8 @@ mod tests {
             enable_fast: false,
             seed_ratio_limit: None,
             strict_end_game: true,
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
         }
     }
 

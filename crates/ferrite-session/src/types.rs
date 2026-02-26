@@ -19,6 +19,10 @@ pub struct TorrentConfig {
     pub enable_fast: bool,
     pub seed_ratio_limit: Option<f64>,
     pub strict_end_game: bool,
+    /// Upload rate limit in bytes/sec (0 = unlimited).
+    pub upload_rate_limit: u64,
+    /// Download rate limit in bytes/sec (0 = unlimited).
+    pub download_rate_limit: u64,
 }
 
 impl Default for TorrentConfig {
@@ -33,6 +37,8 @@ impl Default for TorrentConfig {
             enable_fast: false,
             seed_ratio_limit: None,
             strict_end_game: true,
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
         }
     }
 }
@@ -199,6 +205,16 @@ pub struct SessionConfig {
     pub seed_ratio_limit: Option<f64>,
     /// Directory for resume data files. Defaults to `<download_dir>/.ferrite/`.
     pub resume_data_dir: Option<std::path::PathBuf>,
+    /// Global upload rate limit in bytes/sec (0 = unlimited).
+    pub upload_rate_limit: u64,
+    /// Global download rate limit in bytes/sec (0 = unlimited).
+    pub download_rate_limit: u64,
+    /// Automatically adjust unchoke slot count based on upload capacity.
+    pub auto_upload_slots: bool,
+    /// Minimum unchoke slots when auto-tuning.
+    pub auto_upload_slots_min: usize,
+    /// Maximum unchoke slots when auto-tuning.
+    pub auto_upload_slots_max: usize,
 }
 
 impl Default for SessionConfig {
@@ -213,6 +229,11 @@ impl Default for SessionConfig {
             enable_fast_extension: true,
             seed_ratio_limit: None,
             resume_data_dir: None,
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
+            auto_upload_slots: true,
+            auto_upload_slots_min: 2,
+            auto_upload_slots_max: 20,
         }
     }
 }
@@ -241,5 +262,22 @@ mod tests {
     fn torrent_config_strict_end_game_default() {
         let config = TorrentConfig::default();
         assert!(config.strict_end_game);
+    }
+
+    #[test]
+    fn torrent_config_bandwidth_defaults() {
+        let config = TorrentConfig::default();
+        assert_eq!(config.upload_rate_limit, 0);
+        assert_eq!(config.download_rate_limit, 0);
+    }
+
+    #[test]
+    fn session_config_bandwidth_defaults() {
+        let config = SessionConfig::default();
+        assert_eq!(config.upload_rate_limit, 0);
+        assert_eq!(config.download_rate_limit, 0);
+        assert!(config.auto_upload_slots);
+        assert_eq!(config.auto_upload_slots_min, 2);
+        assert_eq!(config.auto_upload_slots_max, 20);
     }
 }

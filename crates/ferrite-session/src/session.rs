@@ -358,6 +358,8 @@ impl SessionActor {
             enable_fast: self.config.enable_fast_extension,
             seed_ratio_limit: self.config.seed_ratio_limit,
             strict_end_game: true,
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
         }
     }
 
@@ -630,6 +632,11 @@ mod tests {
             enable_fast_extension: false,
             seed_ratio_limit: None,
             resume_data_dir: None,
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
+            auto_upload_slots: true,
+            auto_upload_slots_min: 2,
+            auto_upload_slots_max: 20,
         }
     }
 
