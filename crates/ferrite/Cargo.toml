@@ -1,0 +1,14 @@
+[package]
+name = "ferrite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A Rust BitTorrent library — ergonomic facade for the ferrite crate family"
+
+[dependencies]
+ferrite-bencode = { path = "../ferrite-bencode" }
+ferrite-core = { path = "../ferrite-core" }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
