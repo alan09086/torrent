@@ -11,6 +11,8 @@
 //! - [`tracker`] — HTTP + UDP tracker announce
 //! - [`dht`] — Kademlia DHT peer discovery
 //! - [`storage`] — Piece storage, verification, disk I/O
+//! - [`session`] — Session management, torrent orchestration
+//! - [`client`] — Ergonomic `ClientBuilder` and `AddTorrentParams`
 
 pub mod bencode;
 
@@ -26,6 +28,10 @@ pub mod tracker;
 pub mod dht;
 
 pub mod storage;
+
+pub mod session;
+
+pub mod client;
 
 #[cfg(test)]
 mod tests {

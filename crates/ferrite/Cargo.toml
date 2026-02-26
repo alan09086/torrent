@@ -12,7 +12,9 @@ ferrite-wire = { path = "../ferrite-wire" }
 ferrite-tracker = { path = "../ferrite-tracker" }
 ferrite-dht = { path = "../ferrite-dht" }
 ferrite-storage = { path = "../ferrite-storage" }
+ferrite-session = { path = "../ferrite-session" }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
