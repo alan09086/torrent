@@ -79,4 +79,44 @@ mod tests {
         assert_eq!(magnet.info_hash, reparsed.info_hash);
         assert_eq!(magnet.display_name, reparsed.display_name);
     }
+
+    #[test]
+    fn handshake_round_trip_through_facade() {
+        let info_hash = core::Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let peer_id = core::Id20::from_hex("0102030405060708091011121314151617181920").unwrap();
+
+        let hs = wire::Handshake::new(info_hash, peer_id);
+        assert!(hs.supports_extensions());
+
+        // Encode to bytes and decode back
+        let bytes = hs.to_bytes();
+        assert_eq!(bytes.len(), 68);
+
+        let parsed = wire::Handshake::from_bytes(&bytes).unwrap();
+        assert_eq!(hs, parsed);
+        assert_eq!(parsed.info_hash, info_hash);
+    }
+
+    #[test]
+    fn announce_request_construction_through_facade() {
+        let info_hash = core::Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let peer_id = core::Id20::from_hex("0102030405060708091011121314151617181920").unwrap();
+
+        let req = tracker::AnnounceRequest {
+            info_hash,
+            peer_id,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 1048576,
+            event: tracker::AnnounceEvent::Started,
+            num_want: Some(50),
+            compact: true,
+        };
+
+        assert_eq!(req.port, 6881);
+        assert_eq!(req.left, 1048576);
+        assert!(req.compact);
+        assert_eq!(req.event, tracker::AnnounceEvent::Started);
+    }
 }
