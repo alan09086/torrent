@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.12.0 — 2026-02-26
+
+Resume data and session persistence with libtorrent-compatible format. Nine crates, 374 tests.
+
+### M11: Resume Data & Session Persistence
+
+### Added
+- `FastResumeData` struct — libtorrent-compatible bencode resume format with all standard fields (pieces, stats, trackers, peers, priorities, rate limits, embedded info dict)
+- `UnfinishedPiece` — partial piece state with per-block bitmask
+- `TorrentHandle::save_resume_data()` — snapshot torrent state to resume data
+- `SessionHandle::save_torrent_resume_data()` — save resume data for a specific torrent
+- `SessionHandle::save_session_state()` — save all torrent resume data + DHT node cache
+- `SessionState` + `DhtNodeEntry` — session-level persistence types
+- `validate_resume_bitfield()` — verify bitfield length matches piece count
+- `SessionConfig::resume_data_dir` — configurable resume data directory
+- Facade re-exports: `ferrite::core::{FastResumeData, UnfinishedPiece}`, `ferrite::session::{SessionState, DhtNodeEntry, validate_resume_bitfield}`
+- Prelude additions: `FastResumeData`, `SessionState`
+- 19 new tests across ferrite-core (6), ferrite-session (11), ferrite facade (2)
+
 ## 0.11.0 — 2026-02-26
 
 Prelude, unified error, and integration tests complete the M10 facade. Eight crates, 355 tests.
