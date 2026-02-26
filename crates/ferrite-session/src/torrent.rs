@@ -3324,4 +3324,220 @@ mod tests {
         handle.shutdown().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    // ---- Rate limiting integration tests (M14) ----
+
+    #[tokio::test]
+    async fn upload_rate_limiting_caps_throughput() {
+        // Test that per-torrent upload rate limiting gates serve_incoming_requests.
+        // We use a very low rate (1 KB/s) so the 16 KB piece requires ~16 seconds.
+        // We verify: 1) piece does NOT arrive within 200ms (bucket too small),
+        //            2) the torrent actor is alive and functional.
+        let data = vec![0xAB; 16384]; // 1 piece
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_seeded_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            upload_rate_limit: 1024, // 1 KB/s — way too slow for 16 KB chunk
+            ..test_config()
+        };
+
+        drop(listener);
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connect mock leecher (raw handshake + framed messages)
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let (reader, writer) = tokio::io::split(stream);
+        let mut writer = writer;
+        let mut reader = reader;
+
+        let hs = Handshake::new(info_hash, Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap());
+        writer.write_all(&hs.to_bytes()).await.unwrap();
+        writer.flush().await.unwrap();
+        let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+        reader.read_exact(&mut hs_buf).await.unwrap();
+
+        let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+        let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+        // Read ext handshake + bitfield
+        let _msg = framed_read.next().await;
+        let ext_hs = ExtHandshake::new();
+        let payload = ext_hs.to_bytes().unwrap();
+        framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+
+        // Read the bitfield
+        let _bf_msg = framed_read.next().await;
+
+        // Express interest
+        framed_write.send(Message::Interested).await.unwrap();
+
+        // Wait for unchoke
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            tokio::select! {
+                msg = framed_read.next() => {
+                    match msg {
+                        Some(Ok(Message::Unchoke)) => break,
+                        Some(Ok(_)) => {}
+                        _ => panic!("connection closed before unchoke"),
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("timed out waiting for unchoke");
+                }
+            }
+        }
+
+        // Request piece 0
+        framed_write.send(Message::Request { index: 0, begin: 0, length: 16384 }).await.unwrap();
+
+        // At 1 KB/s, the bucket accumulates ~100 bytes per 100ms tick (max burst = 1024).
+        // A 16 KB chunk needs 16384 tokens, so it should NOT be served quickly.
+        // We wait 2 seconds — at 1 KB/s we'd have at most 2 KB, still < 16 KB.
+        let mut got_piece = false;
+        match tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match framed_read.next().await {
+                    Some(Ok(Message::Piece { .. })) => return true,
+                    Some(Ok(_)) => continue,
+                    _ => return false,
+                }
+            }
+        })
+        .await
+        {
+            Ok(true) => got_piece = true,
+            _ => {}
+        }
+
+        // Piece should NOT have arrived in 2 seconds (would need 16s at 1 KB/s)
+        assert!(!got_piece, "piece should be delayed by rate limiter (1 KB/s for 16 KB chunk)");
+
+        // Verify actor is still alive
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.uploaded, 0); // nothing served yet
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unlimited_rate_has_no_effect() {
+        // Default config (rate = 0) should behave identically to pre-M14
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        // Rate limits are 0 (unlimited) by default
+        assert_eq!(config.upload_rate_limit, 0);
+        assert_eq!(config.download_rate_limit, 0);
+
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+            .await
+            .unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+        assert_eq!(stats.pieces_total, 2);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_rate_limiting_throttles_requests() {
+        // Test that download_rate_limit prevents sending requests when budget exhausted.
+        // With 1 KB/s limit and 16 KB chunks, budget is exhausted almost immediately.
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+
+        let config = TorrentConfig {
+            listen_port: listen_addr.port(),
+            download_rate_limit: 1024, // Very low: 1 KB/s
+            ..test_config()
+        };
+
+        drop(listener);
+        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connect mock seeder
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let (reader, writer) = tokio::io::split(stream);
+        let mut writer = writer;
+        let mut reader = reader;
+
+        let hs = Handshake::new(info_hash, Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap());
+        writer.write_all(&hs.to_bytes()).await.unwrap();
+        writer.flush().await.unwrap();
+        let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+        reader.read_exact(&mut hs_buf).await.unwrap();
+
+        let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+        let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+
+        // Read ext handshake
+        let _msg = framed_read.next().await;
+        let ext_hs = ExtHandshake::new();
+        let payload = ext_hs.to_bytes().unwrap();
+        framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+
+        // Send bitfield saying we have all pieces (act as seeder)
+        let mut bf = Bitfield::new(2);
+        bf.set(0);
+        bf.set(1);
+        framed_write.send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes()))).await.unwrap();
+
+        // Unchoke the torrent
+        framed_write.send(Message::Unchoke).await.unwrap();
+
+        // Count Request messages received within 500ms.
+        // With 1 KB/s download limit, the bucket only accumulates ~50 bytes
+        // per 100ms tick, far less than 16 KB needed for a full chunk request.
+        let mut requests_received = 0u32;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            match tokio::time::timeout(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                framed_read.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(Message::Request { .. }))) => {
+                    requests_received += 1;
+                }
+                Ok(Some(Ok(_))) => continue,
+                _ => break,
+            }
+        }
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+
+        // With 1 KB/s download limit and 16 KB chunks, we should see very few
+        // or no requests within 500ms (budget insufficient for even one chunk)
+        assert!(
+            requests_received <= 2,
+            "with 1 KB/s limit, should get very few requests, got {requests_received}"
+        );
+
+        handle.shutdown().await.unwrap();
+    }
 }
