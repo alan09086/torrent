@@ -491,6 +491,8 @@ impl SessionActor {
             global_up,
             global_down,
             slot_tuner,
+            self.alert_tx.clone(),
+            Arc::clone(&self.alert_mask),
         )
         .await?;
 
@@ -530,6 +532,8 @@ impl SessionActor {
             global_up,
             global_down,
             slot_tuner,
+            self.alert_tx.clone(),
+            Arc::clone(&self.alert_mask),
         )
         .await?;
         self.torrents.insert(

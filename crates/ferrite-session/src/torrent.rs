@@ -6,13 +6,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
+
+use crate::alert::Alert;
 
 use ferrite_core::{
     torrent_from_bytes, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1, DEFAULT_CHUNK_SIZE,
@@ -42,6 +45,7 @@ impl TorrentHandle {
     /// Create a torrent session from parsed .torrent metadata.
     ///
     /// Spawns the actor event loop and returns a handle for sending commands.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn from_torrent(
         meta: TorrentMetaV1,
         storage: Arc<dyn TorrentStorage>,
@@ -50,6 +54,8 @@ impl TorrentHandle {
         global_upload_bucket: Option<SharedBucket>,
         global_download_bucket: Option<SharedBucket>,
         slot_tuner: crate::slot_tuner::SlotTuner,
+        alert_tx: broadcast::Sender<Alert>,
+        alert_mask: Arc<AtomicU32>,
     ) -> crate::Result<Self> {
         let mut config = config;
         // BEP 27: private torrents disable DHT and PEX
@@ -134,6 +140,8 @@ impl TorrentHandle {
             tracker_manager,
             dht: if enable_dht { dht } else { None },
             dht_peers_rx,
+            alert_tx,
+            alert_mask,
             upload_bucket,
             download_bucket,
             global_upload_bucket,
@@ -147,6 +155,7 @@ impl TorrentHandle {
     }
 
     /// Create a torrent session from a magnet link (metadata fetched via BEP 9).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn from_magnet(
         magnet: Magnet,
         config: TorrentConfig,
@@ -154,6 +163,8 @@ impl TorrentHandle {
         global_upload_bucket: Option<SharedBucket>,
         global_download_bucket: Option<SharedBucket>,
         slot_tuner: crate::slot_tuner::SlotTuner,
+        alert_tx: broadcast::Sender<Alert>,
+        alert_mask: Arc<AtomicU32>,
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -216,6 +227,8 @@ impl TorrentHandle {
             tracker_manager,
             dht: if enable_dht { dht } else { None },
             dht_peers_rx,
+            alert_tx,
+            alert_mask,
             upload_bucket,
             download_bucket,
             global_upload_bucket,
@@ -356,6 +369,12 @@ struct TorrentActor {
     // DHT handle (shared, optional)
     dht: Option<DhtHandle>,
     dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+
+    // Alert system (M15) — used in Task 4b when alerts fire
+    #[allow(dead_code)]
+    alert_tx: broadcast::Sender<Alert>,
+    #[allow(dead_code)]
+    alert_mask: Arc<AtomicU32>,
 
     // Rate limiting (M14)
     upload_bucket: crate::rate_limiter::TokenBucket,
@@ -1669,6 +1688,12 @@ mod tests {
         storage
     }
 
+    fn test_alert_channel() -> (broadcast::Sender<Alert>, Arc<AtomicU32>) {
+        let (tx, _) = broadcast::channel(64);
+        let mask = Arc::new(AtomicU32::new(crate::alert::AlertCategory::ALL.bits()));
+        (tx, mask)
+    }
+
     /// Handshake size constant.
     const HANDSHAKE_SIZE: usize = 68;
 
@@ -1681,7 +1706,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1706,7 +1731,7 @@ mod tests {
         };
         let config = test_config();
 
-        let handle = TorrentHandle::from_magnet(magnet, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1726,7 +1751,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1756,7 +1781,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1820,7 +1845,7 @@ mod tests {
         config.enable_pex = true;
 
         // The from_torrent constructor should disable DHT and PEX
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1842,7 +1867,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1863,7 +1888,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1887,7 +1912,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
         let handle2 = handle.clone();
@@ -1928,7 +1953,7 @@ mod tests {
         // Drop the pre-bound listener before from_torrent binds
         drop(listener);
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -1989,7 +2014,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2113,7 +2138,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2239,7 +2264,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2356,7 +2381,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2540,7 +2565,8 @@ mod tests {
         let leecher_meta = make_test_torrent(&data, piece_length);
 
         let leecher_config = test_config();
-        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let (latx, lamask) = test_alert_channel();
+        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), latx, lamask)
             .await
             .unwrap();
 
@@ -2595,7 +2621,7 @@ mod tests {
             peers: vec![],
         };
 
-        let handle = TorrentHandle::from_magnet(magnet, test_config(), None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, test_config(), None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2657,7 +2683,7 @@ mod tests {
 
         // The torrent should start and announce to tracker (which will fail since
         // the tracker doesn't exist, but that's fine — failures are non-fatal).
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2713,7 +2739,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2734,7 +2760,7 @@ mod tests {
             peers: vec![],
         };
 
-        let handle = TorrentHandle::from_magnet(magnet, test_config(), None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, test_config(), None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2756,7 +2782,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
         let config = test_config();
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2784,7 +2810,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
         let config = test_config();
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2819,7 +2845,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -2995,7 +3021,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3141,7 +3167,7 @@ mod tests {
         let storage = make_seeded_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3166,7 +3192,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3200,7 +3226,7 @@ mod tests {
         let storage = make_seeded_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3230,7 +3256,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3262,7 +3288,7 @@ mod tests {
             ..Default::default()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3304,7 +3330,7 @@ mod tests {
             ..Default::default()
         };
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3348,7 +3374,7 @@ mod tests {
         };
 
         drop(listener);
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3442,7 +3468,7 @@ mod tests {
         assert_eq!(config.upload_rate_limit, 0);
         assert_eq!(config.download_rate_limit, 0);
 
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
@@ -3472,7 +3498,7 @@ mod tests {
         };
 
         drop(listener);
-        let handle = TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4))
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask) }
             .await
             .unwrap();
 
