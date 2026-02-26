@@ -32,10 +32,10 @@ ferrite              Public facade API
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client | 14 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table | 42 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 42 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding, persistence, selective download | 121 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding, persistence, selective download, bandwidth limiting | 153 |
 | `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 16 |
 
-**Total: 390 tests, zero clippy warnings.**
+**Total: 422 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -64,11 +64,11 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 | Phase | Milestones | Status |
 |-------|-----------|--------|
 | Foundation | M1-M10 (bencode → facade) | Done |
-| Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth, alerts, queue) | M11-M12 done |
+| Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth + auto upload slots, alerts, queue) | M11-M14 done |
 | Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Planned |
-| Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed, scrape) | Planned |
-| Phase 4: Performance | M25-M28 (smart ban, async disk, parallel hash, piece picker) | Planned |
-| Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode) | Planned |
+| Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Planned |
+| Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Planned |
+| Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode + plugin interface) | Planned |
 | Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | Planned |
 
 ## License

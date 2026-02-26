@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.15.0 — 2026-02-26
+
+Bandwidth limiting and automatic upload slot tuning. Nine crates, 422 tests.
+
+### M14: Bandwidth Limiter + Upload Slot Tuning
+
+### Added
+- `TokenBucket` — token-bucket rate limiter (bytes/sec, 1-second burst, 100ms refill granularity)
+- `is_local_network()` — RFC 1918/loopback/link-local detection for global limiter exemption
+- `SlotTuner` — hill-climbing optimizer for automatic unchoke slot count adjustment
+- Per-torrent rate limiting: `upload_rate_limit` and `download_rate_limit` on `TorrentConfig` (0 = unlimited)
+- Global rate limiting: `upload_rate_limit` and `download_rate_limit` on `SessionConfig` (shared `Arc<Mutex<TokenBucket>>`)
+- `auto_upload_slots`, `auto_upload_slots_min`, `auto_upload_slots_max` on `SessionConfig`
+- Actor-level gating: download throttled via request pipelining, upload throttled via chunk dispatch
+- Local network peers exempt from global limiter (per-torrent still applies)
+- `Choker::set_unchoke_slots()` for SlotTuner integration
+- 19 new tests: 7 rate_limiter, 6 slot_tuner, 1 choker, 2 types, 3 integration
+
+## 0.14.0 — 2026-02-26
+
+End-game mode for fast piece completion. Nine crates, 403 tests.
+
+### M13: End-Game Mode
+
+### Added
+- `EndGame` struct — block-level duplicate-request tracking for fast piece completion
+- O(1) activation check: `have + in_flight >= num_pieces`
+- Single block per peer in end-game (no pipelining) to maximize coverage
+- Cancel messages sent to all other peers on block arrival
+- Deactivation on hash failure or download completion
+- `strict_end_game` config on `TorrentConfig` (default: true)
+- 13 new tests across EndGame unit tests and TorrentActor integration
+
 ## 0.13.0 — 2026-02-26
 
 Selective file download with per-file priority control. Nine crates, 390 tests.
