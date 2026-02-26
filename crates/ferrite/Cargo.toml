@@ -8,6 +8,8 @@ description = "A Rust BitTorrent library — ergonomic facade for the ferrite cr
 [dependencies]
 ferrite-bencode = { path = "../ferrite-bencode" }
 ferrite-core = { path = "../ferrite-core" }
+ferrite-wire = { path = "../ferrite-wire" }
+ferrite-tracker = { path = "../ferrite-tracker" }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

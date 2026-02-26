@@ -7,6 +7,8 @@
 //!
 //! - [`bencode`] — Serde-based bencode serialization
 //! - [`core`] — Hashes, metainfo, magnets, piece arithmetic
+//! - [`wire`] — Peer wire protocol, handshake, extensions
+//! - [`tracker`] — HTTP + UDP tracker announce
 
 pub mod bencode;
 
@@ -14,6 +16,10 @@ pub mod bencode;
 // access it as `ferrite::core`, there's no ambiguity. Internal code that needs
 // std::core can use `::core::` path prefix.
 pub mod core;
+
+pub mod wire;
+
+pub mod tracker;
 
 #[cfg(test)]
 mod tests {
