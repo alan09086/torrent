@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.11.0 — 2026-02-26
+
+Prelude, unified error, and integration tests complete the M10 facade. Eight crates, 355 tests.
+
+### M10e: ferrite (prelude + unified error + integration tests)
+
+### Added
+- `ferrite::Error` — unified error enum wrapping all 7 per-crate error types + `std::io::Error`
+- `ferrite::Result<T>` — unified result type alias
+- `ferrite::prelude` — convenience re-exports (`ClientBuilder`, `AddTorrentParams`, `SessionHandle`, `TorrentHandle`, `TorrentState`, `TorrentStats`, `TorrentInfo`, `Id20`, `Magnet`, `TorrentMetaV1`, `TorrentStorage`, `FilesystemStorage`, `Error`, `Result`)
+- Top-level `ferrite::Error` and `ferrite::Result` re-exports
+- 3 facade tests: unified error conversions, prelude imports, full type chain
+
+### Milestone Complete
+- **M10 is now complete.** The `ferrite` crate provides a full public facade over all internal crates.
+
 ## 0.10.0 — 2026-02-25
 
 Session re-exports and ergonomic client builder in facade crate. Eight crates, 352 tests.
