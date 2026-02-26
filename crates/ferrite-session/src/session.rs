@@ -712,6 +712,8 @@ mod tests {
             auto_upload_slots: true,
             auto_upload_slots_min: 2,
             auto_upload_slots_max: 20,
+            alert_mask: crate::alert::AlertCategory::ALL,
+            alert_channel_size: 64,
         }
     }
 
