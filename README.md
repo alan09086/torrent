@@ -33,9 +33,9 @@ ferrite              Public facade API
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table | 42 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 41 |
 | `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding | 102 |
-| `ferrite` | Public facade: re-exports bencode, core, wire, tracker APIs | 5 |
+| `ferrite` | Public facade: re-exports bencode, core, wire, tracker, dht, storage APIs | 7 |
 
-**Total: 347 tests, zero clippy warnings.**
+**Total: 349 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -76,7 +76,7 @@ See [docs/plans/2026-02-25-ferrite-roadmap.md](docs/plans/2026-02-25-ferrite-roa
 | M9 | ferrite-session (seeding & upload pipeline) | Done |
 | M10a | ferrite (scaffold + bencode/core re-exports) | Done |
 | M10b | ferrite (wire + tracker re-exports) | Done |
-| M10c | ferrite (dht + storage re-exports) | Planned |
+| M10c | ferrite (dht + storage re-exports) | Done |
 | M10d | ferrite (session + ClientBuilder) | Planned |
 | M10e | ferrite (prelude + unified error + integration tests) | Planned |
 | M11+ | BEP 52, uTP, DHT extensions, RSS | Future |

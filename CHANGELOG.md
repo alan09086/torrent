@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.9.0 — 2026-02-25
+
+DHT and storage re-exports in facade crate. Eight crates, 349 tests.
+
+### M10c: ferrite (dht + storage re-exports)
+
+### Added
+- `ferrite::dht` — re-exports `DhtHandle`, `DhtConfig`, `DhtStats`, `CompactNodeInfo`, `RoutingTable`, `KrpcMessage`, `KrpcBody`, `KrpcQuery`, `KrpcResponse`, `GetPeersResponse`, `TransactionId`, `parse_compact_nodes`, `encode_compact_nodes`, `PeerStore`, `K`, `Error`
+- `ferrite::storage` — re-exports `TorrentStorage`, `Bitfield`, `ChunkTracker`, `FileMap`, `FileSegment`, `MemoryStorage`, `FilesystemStorage`, `Error`
+- 2 facade tests: DHT compact node round-trip, storage bitfield operations
+
 ## 0.8.0 — 2026-02-25
 
 Wire and tracker re-exports in facade crate. Eight crates, 347 tests.
