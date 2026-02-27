@@ -27,9 +27,21 @@ use crate::types::{
 type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
 
 /// Entry for a torrent managed by the session.
+// Queue fields are populated now but read by the queue manager (upcoming tasks).
+#[allow(dead_code)]
 struct TorrentEntry {
     handle: TorrentHandle,
     meta: Option<TorrentMetaV1>,
+    /// Queue position (-1 = not queued / not auto-managed).
+    queue_position: i32,
+    /// Whether the queue system controls this torrent.
+    auto_managed: bool,
+    /// When the torrent was last started/resumed (for startup grace period).
+    started_at: Option<tokio::time::Instant>,
+    /// Previous downloaded bytes (for rate calculation between auto-manage ticks).
+    prev_downloaded: u64,
+    /// Previous uploaded bytes (for rate calculation between auto-manage ticks).
+    prev_uploaded: u64,
 }
 
 /// Commands sent from SessionHandle to SessionActor.
@@ -450,6 +462,17 @@ impl SessionActor {
         }
     }
 
+    /// Returns the next available queue position (one past the max).
+    fn next_queue_position(&self) -> i32 {
+        self.torrents
+            .values()
+            .filter(|e| e.auto_managed)
+            .map(|e| e.queue_position)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0)
+    }
+
     async fn handle_add_torrent(
         &mut self,
         meta: TorrentMetaV1,
@@ -502,8 +525,21 @@ impl SessionActor {
             TorrentEntry {
                 handle,
                 meta: Some(meta),
+                queue_position: -1,
+                auto_managed: true,
+                started_at: Some(tokio::time::Instant::now()),
+                prev_downloaded: 0,
+                prev_uploaded: 0,
             },
         );
+
+        // Assign queue position for auto-managed torrents
+        let pos = self.next_queue_position();
+        if let Some(entry) = self.torrents.get_mut(&info_hash)
+            && entry.auto_managed
+        {
+            entry.queue_position = pos;
+        }
 
         info!(%info_hash, "torrent added to session");
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentAdded { info_hash, name });
@@ -541,8 +577,22 @@ impl SessionActor {
             TorrentEntry {
                 handle,
                 meta: None,
+                queue_position: -1,
+                auto_managed: true,
+                started_at: Some(tokio::time::Instant::now()),
+                prev_downloaded: 0,
+                prev_uploaded: 0,
             },
         );
+
+        // Assign queue position for auto-managed torrents
+        let pos = self.next_queue_position();
+        if let Some(entry) = self.torrents.get_mut(&info_hash)
+            && entry.auto_managed
+        {
+            entry.queue_position = pos;
+        }
+
         info!(%info_hash, "magnet torrent added to session");
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentAdded { info_hash, name: display_name });
         if let Some(ref lsd) = self.lsd {
