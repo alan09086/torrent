@@ -153,6 +153,23 @@ impl SessionHandle {
             crate::rate_limiter::TokenBucket::new(config.download_rate_limit),
         ));
 
+        // uTP socket (shared across all torrents)
+        let (utp_socket, utp_listener) = if config.enable_utp {
+            let utp_config = ferrite_utp::UtpConfig {
+                bind_addr: SocketAddr::from(([0, 0, 0, 0], config.listen_port)),
+                max_connections: 256,
+            };
+            match ferrite_utp::UtpSocket::bind(utp_config).await {
+                Ok((socket, listener)) => (Some(socket), Some(listener)),
+                Err(e) => {
+                    warn!("uTP bind failed: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
@@ -164,6 +181,8 @@ impl SessionHandle {
             alert_mask: Arc::clone(&alert_mask),
             global_upload_bucket,
             global_download_bucket,
+            utp_socket,
+            utp_listener,
         };
 
         tokio::spawn(actor.run());
@@ -432,6 +451,9 @@ struct SessionActor {
     alert_mask: Arc<AtomicU32>,
     global_upload_bucket: SharedBucket,
     global_download_bucket: SharedBucket,
+    utp_socket: Option<ferrite_utp::UtpSocket>,
+    #[allow(dead_code)] // used by accept loop (Task 4)
+    utp_listener: Option<ferrite_utp::UtpListener>,
 }
 
 impl SessionActor {
@@ -660,6 +682,7 @@ impl SessionActor {
             slot_tuner,
             self.alert_tx.clone(),
             Arc::clone(&self.alert_mask),
+            self.utp_socket.clone(),
         )
         .await?;
 
@@ -714,6 +737,7 @@ impl SessionActor {
             slot_tuner,
             self.alert_tx.clone(),
             Arc::clone(&self.alert_mask),
+            self.utp_socket.clone(),
         )
         .await?;
         self.torrents.insert(
