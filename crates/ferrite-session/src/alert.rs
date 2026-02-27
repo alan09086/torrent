@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::types::TorrentState;
@@ -16,7 +17,7 @@ use ferrite_core::Id20;
 
 bitflags::bitflags! {
     /// Bitmask categories for filtering alerts.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub struct AlertCategory: u32 {
         /// Torrent lifecycle: added, removed, paused, resumed, finished, state changes.
         const STATUS       = 0x001;
@@ -48,7 +49,7 @@ bitflags::bitflags! {
 // ── AlertKind ─────────────────────────────────────────────────────────
 
 /// The specific event that occurred.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertKind {
     // ── Torrent lifecycle (STATUS) ──
     TorrentAdded { info_hash: Id20, name: String },
@@ -162,7 +163,7 @@ impl AlertKind {
 // ── Alert ─────────────────────────────────────────────────────────────
 
 /// A timestamped event from the session or a torrent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
     pub timestamp: SystemTime,
     pub kind: AlertKind,
@@ -322,5 +323,24 @@ mod tests {
             name: "test".into(),
         });
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn alert_serializes_to_json() {
+        let alert = Alert::new(AlertKind::TorrentAdded {
+            info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
+            name: "test".into(),
+        });
+        let json = serde_json::to_string(&alert).unwrap();
+        let decoded: Alert = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded.kind, AlertKind::TorrentAdded { .. }));
+    }
+
+    #[test]
+    fn alert_category_serializes_as_u32() {
+        let mask = AlertCategory::STATUS | AlertCategory::ERROR;
+        let json = serde_json::to_string(&mask).unwrap();
+        let decoded: AlertCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, mask);
     }
 }

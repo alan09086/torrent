@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use ferrite_storage::Bitfield;
@@ -44,7 +45,7 @@ impl Default for TorrentConfig {
 }
 
 /// Current state of a torrent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TorrentState {
     FetchingMetadata,
     Downloading,
@@ -245,7 +246,7 @@ impl Default for SessionConfig {
 }
 
 /// Aggregate statistics for the whole session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStats {
     pub active_torrents: usize,
     pub total_downloaded: u64,

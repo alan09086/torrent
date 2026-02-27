@@ -98,8 +98,8 @@ impl Serialize for Id20 {
 
 impl<'de> Deserialize<'de> for Id20 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let bytes: &[u8] = serde_bytes::deserialize(deserializer)?;
-        Id20::from_bytes(bytes).map_err(serde::de::Error::custom)
+        let bytes: Vec<u8> = serde_bytes::deserialize(deserializer)?;
+        Id20::from_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
@@ -167,8 +167,8 @@ impl Serialize for Id32 {
 
 impl<'de> Deserialize<'de> for Id32 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let bytes: &[u8] = serde_bytes::deserialize(deserializer)?;
-        Id32::from_bytes(bytes).map_err(serde::de::Error::custom)
+        let bytes: Vec<u8> = serde_bytes::deserialize(deserializer)?;
+        Id32::from_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
