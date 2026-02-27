@@ -26,6 +26,9 @@ use crate::types::{
 /// Shared global rate limiter bucket.
 type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
 
+/// Function signature for queue move operations (move_up, move_down, etc.).
+type QueueMoveFn = fn(&mut [crate::queue::QueueEntry], Id20) -> Vec<(Id20, i32, i32)>;
+
 /// Entry for a torrent managed by the session.
 // Queue fields are populated now but read by the queue manager (upcoming tasks).
 #[allow(dead_code)]
@@ -87,6 +90,31 @@ enum SessionCommand {
     },
     SaveSessionState {
         reply: oneshot::Sender<crate::Result<crate::persistence::SessionState>>,
+    },
+    QueuePosition {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<i32>>,
+    },
+    SetQueuePosition {
+        info_hash: Id20,
+        pos: i32,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    QueuePositionUp {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    QueuePositionDown {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    QueuePositionTop {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    QueuePositionBottom {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
     },
     Shutdown,
 }
@@ -310,6 +338,85 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Get the queue position of a torrent. Returns -1 if not auto-managed.
+    pub async fn queue_position(&self, info_hash: Id20) -> crate::Result<i32> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::QueuePosition {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the absolute queue position of a torrent. Shifts other torrents.
+    pub async fn set_queue_position(&self, info_hash: Id20, pos: i32) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetQueuePosition {
+                info_hash,
+                pos,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Move a torrent one position up (lower number = higher priority).
+    pub async fn queue_position_up(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::QueuePositionUp {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Move a torrent one position down.
+    pub async fn queue_position_down(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::QueuePositionDown {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Move a torrent to position 0 (highest priority).
+    pub async fn queue_position_top(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::QueuePositionTop {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Move a torrent to the last position (lowest priority).
+    pub async fn queue_position_bottom(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::QueuePositionBottom {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +491,33 @@ impl SessionActor {
                         }
                         Some(SessionCommand::SaveSessionState { reply }) => {
                             let result = self.handle_save_session_state().await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::QueuePosition { info_hash, reply }) => {
+                            let result = match self.torrents.get(&info_hash) {
+                                Some(entry) => Ok(entry.queue_position),
+                                None => Err(crate::Error::TorrentNotFound(info_hash)),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetQueuePosition { info_hash, pos, reply }) => {
+                            let result = self.handle_set_queue_position(info_hash, pos);
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::QueuePositionUp { info_hash, reply }) => {
+                            let result = self.handle_queue_move(info_hash, crate::queue::move_up);
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::QueuePositionDown { info_hash, reply }) => {
+                            let result = self.handle_queue_move(info_hash, crate::queue::move_down);
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::QueuePositionTop { info_hash, reply }) => {
+                            let result = self.handle_queue_move(info_hash, crate::queue::move_top);
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::QueuePositionBottom { info_hash, reply }) => {
+                            let result = self.handle_queue_move(info_hash, crate::queue::move_bottom);
                             let _ = reply.send(result);
                         }
                         Some(SessionCommand::Shutdown) | None => {
@@ -606,7 +740,17 @@ impl SessionActor {
             .torrents
             .remove(&info_hash)
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
+        let was_auto_managed = entry.auto_managed;
+        let removed_position = entry.queue_position;
         entry.handle.shutdown().await?;
+
+        // Shift queue positions for remaining auto-managed torrents
+        if was_auto_managed && removed_position >= 0 {
+            let mut entries = self.queue_entries();
+            let changed = crate::queue::remove_position(&mut entries, removed_position);
+            self.apply_queue_changes(&changed);
+        }
+
         info!(%info_hash, "torrent removed from session");
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentRemoved { info_hash });
         Ok(())
@@ -721,6 +865,60 @@ impl SessionActor {
             dht_nodes: Vec::new(), // DHT node cache — populated when DHT is wired
             torrents,
         })
+    }
+
+    /// Build a QueueEntry snapshot from current auto-managed torrents.
+    fn queue_entries(&self) -> Vec<crate::queue::QueueEntry> {
+        self.torrents
+            .iter()
+            .filter(|(_, e)| e.auto_managed)
+            .map(|(&hash, e)| crate::queue::QueueEntry {
+                info_hash: hash,
+                position: e.queue_position,
+            })
+            .collect()
+    }
+
+    fn handle_set_queue_position(&mut self, info_hash: Id20, pos: i32) -> crate::Result<()> {
+        if !self.torrents.contains_key(&info_hash) {
+            return Err(crate::Error::TorrentNotFound(info_hash));
+        }
+        let mut entries = self.queue_entries();
+        let changed = crate::queue::set_position(&mut entries, info_hash, pos);
+        self.apply_queue_changes(&changed);
+        Ok(())
+    }
+
+    fn handle_queue_move(
+        &mut self,
+        info_hash: Id20,
+        op: QueueMoveFn,
+    ) -> crate::Result<()> {
+        if !self.torrents.contains_key(&info_hash) {
+            return Err(crate::Error::TorrentNotFound(info_hash));
+        }
+        let mut entries = self.queue_entries();
+        let changed = op(&mut entries, info_hash);
+        self.apply_queue_changes(&changed);
+        Ok(())
+    }
+
+    /// Apply position changes back to TorrentEntry fields and fire alerts.
+    fn apply_queue_changes(&mut self, changed: &[(Id20, i32, i32)]) {
+        for &(hash, old_pos, new_pos) in changed {
+            if let Some(entry) = self.torrents.get_mut(&hash) {
+                entry.queue_position = new_pos;
+            }
+            crate::alert::post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                crate::alert::AlertKind::TorrentQueuePositionChanged {
+                    info_hash: hash,
+                    old_pos,
+                    new_pos,
+                },
+            );
+        }
     }
 
     async fn shutdown_all(&mut self) {
