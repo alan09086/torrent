@@ -1,5 +1,6 @@
 //! BitTorrent session management: peers, torrents, and piece selection.
 
+pub mod alert;
 mod error;
 mod types;
 pub(crate) mod peer_state;
@@ -18,6 +19,7 @@ mod torrent;
 mod session;
 mod persistence;
 
+pub use alert::{Alert, AlertCategory, AlertKind, AlertStream};
 pub use error::{Error, Result};
 pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;

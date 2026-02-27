@@ -85,6 +85,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the alert category mask (default: all categories).
+    pub fn alert_mask(mut self, mask: ferrite_session::AlertCategory) -> Self {
+        self.config.alert_mask = mask;
+        self
+    }
+
+    /// Set the alert broadcast channel capacity (default: 1024).
+    pub fn alert_channel_size(mut self, size: usize) -> Self {
+        self.config.alert_channel_size = size;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config

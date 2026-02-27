@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.16.0 — 2026-02-26
+
+Alerts / events system with async broadcast channels and category filtering. Nine crates, 435 tests.
+
+### M15: Alerts / Events System
+
+### Added
+- `Alert` struct with `SystemTime` timestamp and typed `AlertKind` enum (~30 variants)
+- `AlertCategory` bitflags — STATUS, ERROR, PEER, TRACKER, STORAGE, DHT, STATS, PIECE, BLOCK, PERFORMANCE, PORT_MAPPING, ALL
+- `AlertStream` — per-subscriber category filter wrapper over `broadcast::Receiver<Alert>`
+- `post_alert()` — free function shared by SessionActor and TorrentActor (lockless atomic mask check)
+- `SessionHandle::subscribe()` — raw broadcast receiver for all alerts passing session mask
+- `SessionHandle::subscribe_filtered(filter)` — convenience wrapper returning `AlertStream`
+- `SessionHandle::set_alert_mask()` / `alert_mask()` — runtime category mask control (atomic, no roundtrip)
+- `SessionConfig::alert_mask` (default: ALL) and `alert_channel_size` (default: 1024)
+- `ClientBuilder::alert_mask()` and `alert_channel_size()` methods
+- `transition_state()` on TorrentActor — automatic `StateChanged` alerts on every state transition
+- `TrackerOutcome` and `AnnounceResult` — per-tracker announce outcomes for TrackerReply/TrackerError alerts
+- Alerts fired at: torrent add/remove/pause/resume/finish, piece complete/hash fail, peer connect/disconnect, tracker reply/error, metadata received, state transitions
+- Facade re-exports and prelude additions: `Alert`, `AlertKind`, `AlertCategory`, `AlertStream`
+- 14 new tests: 6 alert unit tests, 4 integration tests (multi-subscriber, runtime mask, per-subscriber filter, state tracking), 4 session/torrent alert tests
+
 ## 0.15.0 — 2026-02-26
 
 Bandwidth limiting and automatic upload slot tuning. Nine crates, 422 tests.

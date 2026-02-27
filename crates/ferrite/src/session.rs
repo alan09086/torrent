@@ -17,6 +17,11 @@ pub use ferrite_session::{
     FileInfo,
     // Storage factory type alias
     StorageFactory,
+    // Alert system (M15)
+    Alert,
+    AlertKind,
+    AlertCategory,
+    AlertStream,
     // Persistence (M11)
     SessionState,
     DhtNodeEntry,

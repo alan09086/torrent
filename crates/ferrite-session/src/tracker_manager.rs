@@ -51,6 +51,20 @@ struct TrackerEntry {
     backoff: Duration,
 }
 
+/// Per-tracker announce outcome (success with peer count, or error message).
+#[derive(Debug, Clone)]
+pub(crate) struct TrackerOutcome {
+    pub url: String,
+    pub result: Result<usize, String>,
+}
+
+/// Result of announcing to all trackers: aggregated peers + per-tracker outcomes.
+#[derive(Debug, Clone)]
+pub(crate) struct AnnounceResult {
+    pub peers: Vec<SocketAddr>,
+    pub outcomes: Vec<TrackerOutcome>,
+}
+
 /// Per-torrent tracker manager.
 ///
 /// Handles the announce lifecycle for all trackers associated with a torrent:
@@ -195,11 +209,12 @@ impl TrackerManager {
         uploaded: u64,
         downloaded: u64,
         left: u64,
-    ) -> Vec<SocketAddr> {
+    ) -> AnnounceResult {
         let req = self.build_request(event, uploaded, downloaded, left);
         let now = Instant::now();
         let mut all_peers = Vec::new();
         let mut seen_peers = std::collections::HashSet::new();
+        let mut outcomes = Vec::new();
 
         for tracker in &mut self.trackers {
             if tracker.next_announce > now {
@@ -217,9 +232,10 @@ impl TrackerManager {
 
             match result {
                 Ok((peers, interval, tracker_id)) => {
+                    let num_peers = peers.len();
                     debug!(
                         url = %tracker.url,
-                        peer_count = peers.len(),
+                        peer_count = num_peers,
                         interval,
                         "tracker announce success"
                     );
@@ -236,11 +252,16 @@ impl TrackerManager {
                             all_peers.push(peer);
                         }
                     }
+                    outcomes.push(TrackerOutcome {
+                        url: tracker.url.clone(),
+                        result: Ok(num_peers),
+                    });
                 }
                 Err(e) => {
-                    warn!(url = %tracker.url, error = %e, "tracker announce failed");
+                    let msg = e.to_string();
+                    warn!(url = %tracker.url, error = %msg, "tracker announce failed");
                     tracker.state = TrackerState::Failed {
-                        _error: e.to_string(),
+                        _error: msg.clone(),
                     };
                     // Exponential backoff
                     tracker.backoff = if tracker.backoff.is_zero() {
@@ -249,11 +270,15 @@ impl TrackerManager {
                         (tracker.backoff * 2).min(MAX_BACKOFF)
                     };
                     tracker.next_announce = now + tracker.backoff;
+                    outcomes.push(TrackerOutcome {
+                        url: tracker.url.clone(),
+                        result: Err(msg),
+                    });
                 }
             }
         }
 
-        all_peers
+        AnnounceResult { peers: all_peers, outcomes }
     }
 
     /// Convenience: announce with Started event.
@@ -263,7 +288,7 @@ impl TrackerManager {
         uploaded: u64,
         downloaded: u64,
         left: u64,
-    ) -> Vec<SocketAddr> {
+    ) -> AnnounceResult {
         self.announce(AnnounceEvent::Started, uploaded, downloaded, left)
             .await
     }
@@ -273,7 +298,7 @@ impl TrackerManager {
         &mut self,
         uploaded: u64,
         downloaded: u64,
-    ) -> Vec<SocketAddr> {
+    ) -> AnnounceResult {
         self.announce(AnnounceEvent::Completed, uploaded, downloaded, 0)
             .await
     }

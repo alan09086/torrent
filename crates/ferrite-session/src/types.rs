@@ -215,6 +215,10 @@ pub struct SessionConfig {
     pub auto_upload_slots_min: usize,
     /// Maximum unchoke slots when auto-tuning.
     pub auto_upload_slots_max: usize,
+    /// Bitmask of alert categories to deliver (default: all).
+    pub alert_mask: crate::alert::AlertCategory,
+    /// Capacity of the alert broadcast channel (default: 1024).
+    pub alert_channel_size: usize,
 }
 
 impl Default for SessionConfig {
@@ -234,6 +238,8 @@ impl Default for SessionConfig {
             auto_upload_slots: true,
             auto_upload_slots_min: 2,
             auto_upload_slots_max: 20,
+            alert_mask: crate::alert::AlertCategory::ALL,
+            alert_channel_size: 1024,
         }
     }
 }
@@ -269,6 +275,13 @@ mod tests {
         let config = TorrentConfig::default();
         assert_eq!(config.upload_rate_limit, 0);
         assert_eq!(config.download_rate_limit, 0);
+    }
+
+    #[test]
+    fn session_config_alert_defaults() {
+        let config = SessionConfig::default();
+        assert_eq!(config.alert_mask, crate::alert::AlertCategory::ALL);
+        assert_eq!(config.alert_channel_size, 1024);
     }
 
     #[test]
