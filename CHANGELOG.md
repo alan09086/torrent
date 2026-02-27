@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.18.0 — 2026-02-27
+
+MSE/PE connection encryption with DH key exchange and RC4 stream cipher. Nine crates, 480 tests.
+
+### M17: Connection Encryption (MSE/PE)
+
+### Added
+- `EncryptionMode` enum: `Disabled`, `Enabled` (default, fallback), `Forced` (RC4 only)
+- `MseStream<S>` — transparent `AsyncRead + AsyncWrite` wrapper with optional RC4 encryption
+- `negotiate_outbound()` / `negotiate_inbound()` — MSE/PE handshake state machines
+- `ferrite-wire::mse` submodule: `cipher` (RC4 with 1024-byte discard), `dh` (768-bit Diffie-Hellman), `crypto` (SHA1 key derivation), `handshake`, `stream`
+- `encryption_mode` config field on `SessionConfig`, `TorrentConfig`, and `ClientBuilder`
+- `ferrite_core::random_bytes()` — public RNG helper using existing xorshift64
+- `EncryptionMode` re-exported in `ferrite::prelude`
+- 21 new tests (RC4 roundtrip, DH key agreement, hash functions, encrypted stream, full handshake)
+
 ## 0.17.0 — 2026-02-27
 
 Queue management with auto-manage system and position control. Nine crates, 459 tests.
