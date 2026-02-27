@@ -45,7 +45,7 @@ impl std::fmt::Display for PeerId {
 }
 
 /// Simple random byte using thread-local state seeded from system time.
-fn random_byte() -> u8 {
+pub(crate) fn random_byte() -> u8 {
     use std::cell::Cell;
     use std::time::SystemTime;
 

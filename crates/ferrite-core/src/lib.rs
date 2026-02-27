@@ -24,3 +24,23 @@ pub fn sha1(data: &[u8]) -> Id20 {
     let hash = sha1::Sha1::digest(data);
     Id20(hash.into())
 }
+
+/// Fill a buffer with pseudo-random bytes (xorshift64, not cryptographic).
+pub fn random_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        *b = peer_id::random_byte();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_bytes_fills_buffer() {
+        let mut buf = [0u8; 32];
+        random_bytes(&mut buf);
+        // At least some bytes should be non-zero (probability of all-zero is ~0)
+        assert!(buf.iter().any(|&b| b != 0));
+    }
+}
