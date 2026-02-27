@@ -13,6 +13,7 @@
 //! - [`storage`] — Piece storage, verification, disk I/O
 //! - [`session`] — Session management, torrent orchestration
 //! - [`utp`] — uTP (BEP 29) micro transport protocol
+//! - [`nat`] — NAT port mapping (PCP / NAT-PMP / UPnP IGD)
 //! - [`client`] — Ergonomic `ClientBuilder` and `AddTorrentParams`
 //! - [`prelude`] — Convenience re-exports for `use ferrite::prelude::*`
 
@@ -34,6 +35,8 @@ pub mod storage;
 pub mod session;
 
 pub mod utp;
+
+pub mod nat;
 
 pub mod client;
 
@@ -486,5 +489,34 @@ mod tests {
     ) -> std::sync::Arc<storage::MemoryStorage> {
         let lengths = core::Lengths::new(data.len() as u64, piece_length, core::DEFAULT_CHUNK_SIZE);
         std::sync::Arc::new(storage::MemoryStorage::new(lengths))
+    }
+
+    #[test]
+    fn client_builder_nat_config() {
+        // Defaults: both enabled
+        let config = crate::ClientBuilder::new().into_config();
+        assert!(config.enable_upnp);
+        assert!(config.enable_natpmp);
+
+        // Explicitly disabled
+        let config = crate::ClientBuilder::new()
+            .enable_upnp(false)
+            .enable_natpmp(false)
+            .into_config();
+        assert!(!config.enable_upnp);
+        assert!(!config.enable_natpmp);
+    }
+
+    #[test]
+    fn nat_types_accessible_through_facade() {
+        // NatConfig accessible and has expected defaults
+        let config = nat::NatConfig::default();
+        assert!(config.enable_upnp);
+        assert!(config.enable_natpmp);
+        assert_eq!(config.upnp_lease_duration, 3600);
+
+        // Error type accessible
+        let err: nat::Error = nat::Error::Timeout;
+        assert!(err.to_string().contains("timeout"));
     }
 }

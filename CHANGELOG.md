@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.21.0 — 2026-02-27
+
+Automatic NAT port mapping — PCP, NAT-PMP, UPnP IGD. Eleven crates, 534 tests.
+
+### M20: UPnP / NAT-PMP / PCP Port Mapping
+
+### Added
+- `ferrite-nat` crate — automatic port mapping with three protocol implementations
+- PCP (RFC 6887) MAP opcode encode/decode with IPv4-mapped IPv6 addressing
+- NAT-PMP (RFC 6886) external address and port mapping request/response codec
+- UPnP IGD SSDP M-SEARCH discovery and SOAP XML control (AddPortMapping, DeletePortMapping, GetExternalIPAddress)
+- Gateway discovery via `/proc/net/route` parsing and local IP via UDP socket trick
+- `NatActor` / `NatHandle` — background port mapping lifecycle with protocol fallback chain (PCP → NAT-PMP → UPnP)
+- Automatic mapping renewal at half the granted lifetime
+- Best-effort cleanup on shutdown (delete mappings via all protocols)
+- `enable_upnp` and `enable_natpmp` config fields on `SessionConfig` (default: `true`)
+- NAT event handling in `SessionActor` select loop — fires `PortMappingSucceeded` / `PortMappingFailed` alerts
+- `ClientBuilder::enable_upnp()` and `enable_natpmp()` builder methods
+- `ferrite::nat` facade module with full re-exports
+- TCP listener bind changed from `127.0.0.1` to `0.0.0.0` for external reachability
+- 23 new tests across nat, session, and facade crates
+
+### Deferred
+- IPv6 NAT traversal (M21)
+- UPnP XML namespace-aware parsing (simple string search suffices)
+- Per-torrent port mapping (all torrents share session port)
+
 ## 0.20.0 — 2026-02-27
 
 uTP session integration — dual-protocol peer connections. Ten crates, 511 tests.

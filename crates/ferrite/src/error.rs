@@ -39,6 +39,10 @@ pub enum Error {
     #[error("utp: {0}")]
     Utp(#[from] ferrite_utp::Error),
 
+    /// NAT port mapping error.
+    #[error("nat: {0}")]
+    Nat(#[from] ferrite_nat::Error),
+
     /// Raw I/O error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

@@ -161,6 +161,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable UPnP IGD port mapping.
+    ///
+    /// When enabled, the session automatically attempts to open ports on the
+    /// router via UPnP as a last resort (after PCP and NAT-PMP).
+    pub fn enable_upnp(mut self, v: bool) -> Self {
+        self.config.enable_upnp = v;
+        self
+    }
+
+    /// Enable or disable NAT-PMP / PCP port mapping.
+    ///
+    /// When enabled, the session tries PCP first (RFC 6887), then falls back
+    /// to NAT-PMP (RFC 6886), to open ports on the router.
+    pub fn enable_natpmp(mut self, v: bool) -> Self {
+        self.config.enable_natpmp = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
