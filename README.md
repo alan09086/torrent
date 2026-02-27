@@ -73,4 +73,4 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 
 ## License
 
-MIT OR Apache-2.0
+GPL-3.0 — see [LICENSE](LICENSE).
