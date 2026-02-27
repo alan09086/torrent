@@ -26,6 +26,8 @@ pub struct TorrentConfig {
     pub download_rate_limit: u64,
     /// Connection encryption mode (MSE/PE).
     pub encryption_mode: ferrite_wire::mse::EncryptionMode,
+    /// Enable uTP (micro Transport Protocol) for peer connections.
+    pub enable_utp: bool,
 }
 
 impl Default for TorrentConfig {
@@ -43,6 +45,7 @@ impl Default for TorrentConfig {
             upload_rate_limit: 0,
             download_rate_limit: 0,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
+            enable_utp: true,
         }
     }
 }
@@ -175,6 +178,11 @@ pub(crate) enum TorrentCommand {
     FilePriorities {
         reply: oneshot::Sender<Vec<ferrite_core::FilePriority>>,
     },
+    /// Incoming uTP peer routed from the session-level accept loop.
+    IncomingPeer {
+        stream: crate::utp_routing::PrefixedStream<ferrite_utp::UtpStream>,
+        addr: SocketAddr,
+    },
 }
 
 /// Info about a file within a torrent.
@@ -245,6 +253,8 @@ pub struct SessionConfig {
     pub auto_manage_prefer_seeds: bool,
     /// Connection encryption mode (MSE/PE).
     pub encryption_mode: ferrite_wire::mse::EncryptionMode,
+    /// Enable uTP (micro Transport Protocol) for peer connections.
+    pub enable_utp: bool,
 }
 
 impl Default for SessionConfig {
@@ -277,6 +287,7 @@ impl Default for SessionConfig {
             auto_manage_startup: 60,
             auto_manage_prefer_seeds: false,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
+            enable_utp: true,
         }
     }
 }
@@ -356,5 +367,17 @@ mod tests {
         assert_eq!(cfg.auto_manage_interval, 30);
         assert_eq!(cfg.auto_manage_startup, 60);
         assert!(!cfg.auto_manage_prefer_seeds);
+    }
+
+    #[test]
+    fn session_config_utp_default() {
+        let cfg = SessionConfig::default();
+        assert!(cfg.enable_utp);
+    }
+
+    #[test]
+    fn torrent_config_utp_default() {
+        let cfg = TorrentConfig::default();
+        assert!(cfg.enable_utp);
     }
 }

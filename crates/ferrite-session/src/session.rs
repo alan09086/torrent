@@ -602,6 +602,7 @@ impl SessionActor {
             upload_rate_limit: 0,
             download_rate_limit: 0,
             encryption_mode: self.config.encryption_mode,
+            enable_utp: self.config.enable_utp,
         }
     }
 
@@ -1166,6 +1167,7 @@ mod tests {
             auto_manage_startup: 60,
             auto_manage_prefer_seeds: false,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
+            enable_utp: false,
         }
     }
 

@@ -451,6 +451,13 @@ impl TorrentActor {
                         Some(TorrentCommand::FilePriorities { reply }) => {
                             let _ = reply.send(self.file_priorities.clone());
                         }
+                        Some(TorrentCommand::IncomingPeer { stream, addr }) => {
+                            self.spawn_peer_from_stream_with_mode(
+                                addr,
+                                stream,
+                                Some(ferrite_wire::mse::EncryptionMode::Disabled),
+                            );
+                        }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_peers().await;
                             return;
@@ -1604,6 +1611,20 @@ impl TorrentActor {
         addr: SocketAddr,
         stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     ) {
+        self.spawn_peer_from_stream_with_mode(addr, stream, None);
+    }
+
+    /// Spawn a peer task with an optional encryption mode override.
+    ///
+    /// When `mode_override` is `Some`, that mode is used instead of the torrent config's
+    /// encryption mode. This is used for uTP inbound peers where MSE has already been
+    /// ruled out by the session routing layer.
+    fn spawn_peer_from_stream_with_mode(
+        &mut self,
+        addr: SocketAddr,
+        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+        mode_override: Option<ferrite_wire::mse::EncryptionMode>,
+    ) {
         if self.peers.contains_key(&addr) || self.peers.len() >= self.config.max_peers {
             return;
         }
@@ -1628,7 +1649,7 @@ impl TorrentActor {
         let event_tx = self.event_tx.clone();
         let enable_dht = self.config.enable_dht;
         let enable_fast = self.config.enable_fast;
-        let encryption_mode = self.config.encryption_mode;
+        let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
 
         tokio::spawn(async move {
             let _ = run_peer(
@@ -1732,6 +1753,7 @@ mod tests {
             upload_rate_limit: 0,
             download_rate_limit: 0,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Disabled,
+            enable_utp: false,
         }
     }
 

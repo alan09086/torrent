@@ -16,6 +16,7 @@ pub(crate) mod tracker_manager;
 pub(crate) mod lsd;
 pub(crate) mod peer;
 pub(crate) mod queue;
+pub(crate) mod utp_routing;
 mod torrent;
 mod session;
 mod persistence;

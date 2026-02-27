@@ -12,6 +12,7 @@ ferrite-wire = { path = "../ferrite-wire" }
 ferrite-tracker = { path = "../ferrite-tracker" }
 ferrite-dht = { path = "../ferrite-dht" }
 ferrite-storage = { path = "../ferrite-storage" }
+ferrite-utp = { path = "../ferrite-utp" }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
