@@ -145,6 +145,12 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the connection encryption mode (MSE/PE).
+    pub fn encryption_mode(mut self, mode: ferrite_wire::mse::EncryptionMode) -> Self {
+        self.config.encryption_mode = mode;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
@@ -236,5 +242,19 @@ impl AddTorrentParams {
     pub fn storage(mut self, s: Arc<dyn TorrentStorage>) -> Self {
         self.storage = Some(s);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_builder_encryption_mode() {
+        use ferrite_wire::mse::EncryptionMode;
+        let config = ClientBuilder::new()
+            .encryption_mode(EncryptionMode::Forced)
+            .into_config();
+        assert_eq!(config.encryption_mode, EncryptionMode::Forced);
     }
 }

@@ -21,3 +21,6 @@ pub use ferrite_wire::{
     Error,
     Result,
 };
+
+// Message Stream Encryption / Protocol Encryption (MSE/PE)
+pub use ferrite_wire::mse;
