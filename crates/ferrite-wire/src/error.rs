@@ -17,6 +17,15 @@ pub enum Error {
     #[error("invalid extended message: {0}")]
     InvalidExtended(String),
 
+    #[error("encryption handshake failed: {0}")]
+    EncryptionHandshakeFailed(String),
+
+    #[error("unsupported crypto method")]
+    UnsupportedCryptoMethod,
+
+    #[error("encryption required but peer does not support it")]
+    EncryptionRequired,
+
     #[error("bencode: {0}")]
     Bencode(#[from] ferrite_bencode::Error),
 

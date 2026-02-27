@@ -5,4 +5,5 @@
 pub(crate) mod cipher;
 pub(crate) mod crypto;
 pub(crate) mod dh;
+pub mod handshake;
 pub mod stream;
