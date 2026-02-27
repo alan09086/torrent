@@ -98,6 +98,19 @@ pub enum AlertKind {
     // ── Performance ──
     PerformanceWarning { info_hash: Id20, message: String },
 
+    // ── Queue management (STATUS) ──
+    /// Queue position changed (manual move or torrent removal shifted positions).
+    TorrentQueuePositionChanged {
+        info_hash: Id20,
+        old_pos: i32,
+        new_pos: i32,
+    },
+    /// Torrent was paused or resumed by the auto-manage system.
+    TorrentAutoManaged {
+        info_hash: Id20,
+        paused: bool,
+    },
+
     // ── Port mapping ──
     PortMappingSucceeded { port: u16, protocol: String },
     PortMappingFailed { port: u16, message: String },
@@ -152,6 +165,10 @@ impl AlertKind {
 
             // PERFORMANCE
             PerformanceWarning { .. } => AlertCategory::PERFORMANCE,
+
+            // QUEUE MANAGEMENT (STATUS)
+            TorrentQueuePositionChanged { .. } => AlertCategory::STATUS,
+            TorrentAutoManaged { .. } => AlertCategory::STATUS,
 
             // PORT_MAPPING
             PortMappingSucceeded { .. } => AlertCategory::PORT_MAPPING,
@@ -342,5 +359,24 @@ mod tests {
         let json = serde_json::to_string(&mask).unwrap();
         let decoded: AlertCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, mask);
+    }
+
+    #[test]
+    fn queue_position_changed_alert_has_status_category() {
+        let alert = Alert::new(AlertKind::TorrentQueuePositionChanged {
+            info_hash: Id20::from([0u8; 20]),
+            old_pos: 3,
+            new_pos: 0,
+        });
+        assert!(alert.category().contains(AlertCategory::STATUS));
+    }
+
+    #[test]
+    fn torrent_auto_managed_alert_has_status_category() {
+        let alert = Alert::new(AlertKind::TorrentAutoManaged {
+            info_hash: Id20::from([0u8; 20]),
+            paused: true,
+        });
+        assert!(alert.category().contains(AlertCategory::STATUS));
     }
 }
