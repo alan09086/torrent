@@ -1,0 +1,17 @@
+[package]
+name = "ferrite-utp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "uTP (BEP 29) Micro Transport Protocol for ferrite"
+
+[dependencies]
+ferrite-core = { path = "../ferrite-core" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
