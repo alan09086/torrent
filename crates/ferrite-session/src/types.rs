@@ -24,6 +24,8 @@ pub struct TorrentConfig {
     pub upload_rate_limit: u64,
     /// Download rate limit in bytes/sec (0 = unlimited).
     pub download_rate_limit: u64,
+    /// Connection encryption mode (MSE/PE).
+    pub encryption_mode: ferrite_wire::mse::EncryptionMode,
 }
 
 impl Default for TorrentConfig {
@@ -40,6 +42,7 @@ impl Default for TorrentConfig {
             strict_end_game: true,
             upload_rate_limit: 0,
             download_rate_limit: 0,
+            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
         }
     }
 }
@@ -240,6 +243,8 @@ pub struct SessionConfig {
     pub auto_manage_startup: u64,
     /// When true, seeding slots are allocated before download slots.
     pub auto_manage_prefer_seeds: bool,
+    /// Connection encryption mode (MSE/PE).
+    pub encryption_mode: ferrite_wire::mse::EncryptionMode,
 }
 
 impl Default for SessionConfig {
@@ -271,6 +276,7 @@ impl Default for SessionConfig {
             auto_manage_interval: 30,
             auto_manage_startup: 60,
             auto_manage_prefer_seeds: false,
+            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
         }
     }
 }
@@ -323,6 +329,18 @@ mod tests {
         assert!(config.auto_upload_slots);
         assert_eq!(config.auto_upload_slots_min, 2);
         assert_eq!(config.auto_upload_slots_max, 20);
+    }
+
+    #[test]
+    fn session_config_encryption_default() {
+        let cfg = SessionConfig::default();
+        assert_eq!(cfg.encryption_mode, ferrite_wire::mse::EncryptionMode::Enabled);
+    }
+
+    #[test]
+    fn torrent_config_encryption_default() {
+        let cfg = TorrentConfig::default();
+        assert_eq!(cfg.encryption_mode, ferrite_wire::mse::EncryptionMode::Enabled);
     }
 
     #[test]

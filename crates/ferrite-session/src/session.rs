@@ -601,6 +601,7 @@ impl SessionActor {
             strict_end_game: true,
             upload_rate_limit: 0,
             download_rate_limit: 0,
+            encryption_mode: self.config.encryption_mode,
         }
     }
 
@@ -1164,6 +1165,7 @@ mod tests {
             auto_manage_interval: 30,
             auto_manage_startup: 60,
             auto_manage_prefer_seeds: false,
+            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
         }
     }
 

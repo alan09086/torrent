@@ -1725,6 +1725,7 @@ mod tests {
             strict_end_game: true,
             upload_rate_limit: 0,
             download_rate_limit: 0,
+            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
         }
     }
 
