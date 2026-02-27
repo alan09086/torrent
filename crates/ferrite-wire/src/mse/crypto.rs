@@ -6,6 +6,7 @@ use sha1::Digest;
 pub(crate) const VC: [u8; 8] = [0u8; 8];
 
 /// Maximum random padding length.
+#[allow(dead_code)]
 pub(crate) const MAX_PADDING: usize = 512;
 
 /// Crypto method bitmask values.
@@ -13,6 +14,7 @@ pub(crate) const CRYPTO_PLAINTEXT: u32 = 0x01;
 pub(crate) const CRYPTO_RC4: u32 = 0x02;
 
 /// Compute HASH(data) = SHA1(data). Returns 20 bytes.
+#[allow(dead_code)]
 pub(crate) fn mse_hash(data: &[u8]) -> [u8; 20] {
     let mut hasher = sha1::Sha1::new();
     hasher.update(data);

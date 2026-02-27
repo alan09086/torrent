@@ -49,7 +49,6 @@ where
     let ka = crypto::key_a(&s, skey_bytes);
     let kb = crypto::key_b(&s, skey_bytes);
     let mut encrypt_cipher = Rc4::new(&ka);
-    let _decrypt_cipher = Rc4::new(&kb);
 
     // Build packet 3:
     // HASH("req1" + S) [20] + (HASH("req2" + SKEY) XOR HASH("req3" + S)) [20]
