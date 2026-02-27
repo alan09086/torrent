@@ -1,0 +1,16 @@
+[package]
+name = "ferrite-nat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UPnP IGD / NAT-PMP / PCP port mapping for ferrite"
+
+[dependencies]
+ferrite-core = { path = "../ferrite-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
