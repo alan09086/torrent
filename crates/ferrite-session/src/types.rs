@@ -220,6 +220,26 @@ pub struct SessionConfig {
     pub alert_mask: crate::alert::AlertCategory,
     /// Capacity of the alert broadcast channel (default: 1024).
     pub alert_channel_size: usize,
+    /// Max concurrent auto-managed downloading torrents (-1 = unlimited).
+    pub active_downloads: i32,
+    /// Max concurrent auto-managed seeding torrents (-1 = unlimited).
+    pub active_seeds: i32,
+    /// Hard cap on all active auto-managed torrents (-1 = unlimited).
+    pub active_limit: i32,
+    /// Max concurrent hash-check operations.
+    pub active_checking: i32,
+    /// Exempt inactive torrents from active_downloads/active_seeds limits.
+    pub dont_count_slow_torrents: bool,
+    /// Bytes/sec threshold — downloading torrent below this is "inactive".
+    pub inactive_down_rate: u64,
+    /// Bytes/sec threshold — seeding torrent below this is "inactive".
+    pub inactive_up_rate: u64,
+    /// Seconds between queue evaluations.
+    pub auto_manage_interval: u64,
+    /// Grace period: torrent counts as active regardless of speed for this many seconds after start.
+    pub auto_manage_startup: u64,
+    /// When true, seeding slots are allocated before download slots.
+    pub auto_manage_prefer_seeds: bool,
 }
 
 impl Default for SessionConfig {
@@ -241,6 +261,16 @@ impl Default for SessionConfig {
             auto_upload_slots_max: 20,
             alert_mask: crate::alert::AlertCategory::ALL,
             alert_channel_size: 1024,
+            active_downloads: 3,
+            active_seeds: 5,
+            active_limit: 500,
+            active_checking: 1,
+            dont_count_slow_torrents: true,
+            inactive_down_rate: 2048,
+            inactive_up_rate: 2048,
+            auto_manage_interval: 30,
+            auto_manage_startup: 60,
+            auto_manage_prefer_seeds: false,
         }
     }
 }
@@ -293,5 +323,20 @@ mod tests {
         assert!(config.auto_upload_slots);
         assert_eq!(config.auto_upload_slots_min, 2);
         assert_eq!(config.auto_upload_slots_max, 20);
+    }
+
+    #[test]
+    fn session_config_queue_defaults() {
+        let cfg = SessionConfig::default();
+        assert_eq!(cfg.active_downloads, 3);
+        assert_eq!(cfg.active_seeds, 5);
+        assert_eq!(cfg.active_limit, 500);
+        assert_eq!(cfg.active_checking, 1);
+        assert!(cfg.dont_count_slow_torrents);
+        assert_eq!(cfg.inactive_down_rate, 2048);
+        assert_eq!(cfg.inactive_up_rate, 2048);
+        assert_eq!(cfg.auto_manage_interval, 30);
+        assert_eq!(cfg.auto_manage_startup, 60);
+        assert!(!cfg.auto_manage_prefer_seeds);
     }
 }

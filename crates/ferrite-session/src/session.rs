@@ -755,6 +755,16 @@ mod tests {
             auto_upload_slots_max: 20,
             alert_mask: crate::alert::AlertCategory::ALL,
             alert_channel_size: 64,
+            active_downloads: 3,
+            active_seeds: 5,
+            active_limit: 500,
+            active_checking: 1,
+            dont_count_slow_torrents: true,
+            inactive_down_rate: 2048,
+            inactive_up_rate: 2048,
+            auto_manage_interval: 30,
+            auto_manage_startup: 60,
+            auto_manage_prefer_seeds: false,
         }
     }
 
