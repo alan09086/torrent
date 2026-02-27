@@ -12,6 +12,7 @@
 //! - [`dht`] — Kademlia DHT peer discovery
 //! - [`storage`] — Piece storage, verification, disk I/O
 //! - [`session`] — Session management, torrent orchestration
+//! - [`utp`] — uTP (BEP 29) micro transport protocol
 //! - [`client`] — Ergonomic `ClientBuilder` and `AddTorrentParams`
 //! - [`prelude`] — Convenience re-exports for `use ferrite::prelude::*`
 
@@ -31,6 +32,8 @@ pub mod dht;
 pub mod storage;
 
 pub mod session;
+
+pub mod utp;
 
 pub mod client;
 

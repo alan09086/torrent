@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.19.0 — 2026-02-27
+
+uTP (BEP 29) micro transport protocol with LEDBAT congestion control. Ten crates, 501 tests.
+
+### M18: uTP Protocol (BEP 29)
+
+### Added
+- `ferrite-utp` crate — standalone uTP implementation over UDP
+- `SeqNr` — wrapping u16 sequence number arithmetic with correct circular ordering
+- BEP 29 packet header encode/decode with SACK extension chain walking
+- `LedbatController` — LEDBAT congestion control (100ms target delay, base delay tracking, Jacobson RTT)
+- `Connection` — pure-logic state machine (SynSent → Connected → FinSent → Closed) producing `ConnAction` vectors
+- `UtpStream` — `AsyncRead + AsyncWrite + Unpin + Send` facade bridging application ↔ socket actor
+- `UtpSocket` — actor model (single UDP socket owner, per-connection dispatch, 50ms tick timer)
+- `UtpListener` — accept incoming uTP connections
+- `UtpConfig` — bind address and connection limits
+- Send buffering with congestion window gating and flush-on-ACK
+- SACK bitmask generation from receive buffer gaps
+- Duplicate ACK counting with loss detection (3 duplicates = loss event)
+- Retransmission on timeout with exponential backoff
+- Facade re-exports in `ferrite::utp` and `ferrite::error::Error::Utp` variant
+- 21 new tests: 4 seq, 4 packet, 4 congestion, 3 conn, 6 integration (1MB loopback transfer with SHA1 verification)
+
+### Changed
+- License changed from MIT OR Apache-2.0 to GPL-3.0-or-later
+
 ## 0.18.0 — 2026-02-27
 
 MSE/PE connection encryption with DH key exchange and RC4 stream cipher. Nine crates, 480 tests.
