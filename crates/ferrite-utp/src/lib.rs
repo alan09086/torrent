@@ -1,7 +1,7 @@
 pub mod error;
 pub mod seq;
 
-mod packet;
+pub mod packet;
 
 mod congestion;
 mod conn;
