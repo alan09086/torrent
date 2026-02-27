@@ -76,12 +76,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
     }
 }
 
-// Ensure PrefixedStream satisfies the trait bounds needed by run_peer()
-const _: () = {
+// Compile-time check: PrefixedStream<UtpStream> satisfies run_peer() bounds.
+const _: fn() = || {
     fn assert_bounds<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>() {}
-    fn check() {
-        assert_bounds::<PrefixedStream<ferrite_utp::UtpStream>>();
-    }
+    assert_bounds::<PrefixedStream<ferrite_utp::UtpStream>>();
 };
 
 /// Attempt to identify a plaintext BitTorrent connection by reading the 48-byte preamble.

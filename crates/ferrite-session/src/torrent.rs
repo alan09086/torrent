@@ -246,7 +246,6 @@ impl TorrentHandle {
     }
 
     /// Send an incoming uTP peer (routed by the session) to this torrent.
-    #[allow(dead_code)] // used by session accept loop (Task 4)
     pub(crate) async fn send_incoming_peer(
         &self,
         stream: crate::utp_routing::PrefixedStream<ferrite_utp::UtpStream>,

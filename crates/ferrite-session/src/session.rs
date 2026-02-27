@@ -452,7 +452,6 @@ struct SessionActor {
     global_upload_bucket: SharedBucket,
     global_download_bucket: SharedBucket,
     utp_socket: Option<ferrite_utp::UtpSocket>,
-    #[allow(dead_code)] // used by accept loop (Task 4)
     utp_listener: Option<ferrite_utp::UtpListener>,
 }
 
@@ -562,6 +561,12 @@ impl SessionActor {
                         && let Some(entry) = self.torrents.get(&info_hash)
                     {
                         let _ = entry.handle.add_peers(vec![peer_addr]).await;
+                    }
+                }
+                // uTP inbound connections
+                result = accept_utp(&mut self.utp_listener) => {
+                    if let Ok((stream, addr)) = result {
+                        self.handle_utp_inbound(stream, addr);
                     }
                 }
                 // Global rate limiter refill (100ms)
@@ -1098,6 +1103,35 @@ impl SessionActor {
         }
     }
 
+    /// Route an inbound uTP connection to the correct torrent.
+    fn handle_utp_inbound(&self, stream: ferrite_utp::UtpStream, addr: std::net::SocketAddr) {
+        // Clone torrent handles so the routing task can look up by info_hash.
+        let torrent_handles: HashMap<Id20, TorrentHandle> = self
+            .torrents
+            .iter()
+            .map(|(hash, entry)| (*hash, entry.handle.clone()))
+            .collect();
+
+        tokio::spawn(async move {
+            match crate::utp_routing::identify_plaintext_connection(stream).await {
+                Ok(Some((info_hash, prefixed_stream))) => {
+                    if let Some(handle) = torrent_handles.get(&info_hash) {
+                        debug!(%addr, %info_hash, "routing inbound uTP peer to torrent");
+                        let _ = handle.send_incoming_peer(prefixed_stream, addr).await;
+                    } else {
+                        debug!(%addr, %info_hash, "inbound uTP peer for unknown torrent, dropping");
+                    }
+                }
+                Ok(None) => {
+                    debug!(%addr, "inbound uTP peer is encrypted (MSE), dropping (deferred)");
+                }
+                Err(e) => {
+                    debug!(%addr, error = %e, "failed to identify inbound uTP peer");
+                }
+            }
+        });
+    }
+
     async fn shutdown_all(&mut self) {
         for (info_hash, entry) in self.torrents.drain() {
             debug!(%info_hash, "shutting down torrent");
@@ -1106,6 +1140,25 @@ impl SessionActor {
         if let Some(ref lsd) = self.lsd {
             lsd.shutdown().await;
         }
+        if let Some(ref socket) = self.utp_socket
+            && let Err(e) = socket.shutdown().await
+        {
+            debug!(error = %e, "uTP socket shutdown error");
+        }
+    }
+}
+
+/// Helper to accept a connection from an optional uTP listener.
+/// Returns `pending` if no listener is available, so the `select!` branch is skipped.
+async fn accept_utp(
+    listener: &mut Option<ferrite_utp::UtpListener>,
+) -> std::io::Result<(ferrite_utp::UtpStream, std::net::SocketAddr)> {
+    match listener {
+        Some(l) => l
+            .accept()
+            .await
+            .map_err(std::io::Error::other),
+        None => std::future::pending().await,
     }
 }
 
@@ -1760,6 +1813,17 @@ mod tests {
         );
         assert!(!resumed_alerts.is_empty(), "expected TorrentResumed alert");
 
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_config_creates_utp_socket() {
+        // Start session with uTP enabled — should succeed without errors
+        let mut config = test_session_config();
+        config.enable_utp = true;
+        let session = SessionHandle::start(config).await.unwrap();
+        let stats = session.session_stats().await.unwrap();
+        assert_eq!(stats.active_torrents, 0);
         session.shutdown().await.unwrap();
     }
 }
