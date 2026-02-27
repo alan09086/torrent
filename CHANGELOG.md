@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.20.0 — 2026-02-27
+
+uTP session integration — dual-protocol peer connections. Ten crates, 511 tests.
+
+### M19: uTP Session Integration
+
+### Added
+- `enable_utp` config field on `TorrentConfig` and `SessionConfig` (default: `true`)
+- `TorrentCommand::IncomingPeer` variant for session-routed uTP peers
+- `PrefixedStream<S>` — `AsyncRead + AsyncWrite` wrapper replaying consumed preamble bytes
+- `identify_plaintext_connection()` — reads 48-byte BT preamble, extracts info_hash for routing
+- `spawn_peer_from_stream_with_mode()` — encryption mode override for pre-identified uTP streams
+- Session-level `UtpSocket` (shared) and `UtpListener` with inbound accept loop
+- Dual-protocol outbound: uTP first (5s timeout), TCP fallback (matches libtorrent behavior)
+- Inbound uTP routing: session reads preamble → extracts info_hash → dispatches to correct torrent
+- `TorrentHandle::send_incoming_peer()` for session → torrent peer dispatch
+- `ClientBuilder::enable_utp()` builder method
+- 10 new tests across session, routing, and facade crates
+
+### Deferred
+- MSE-encrypted inbound uTP routing (requires multi-skey lookup; dropped with debug log)
+
 ## 0.19.0 — 2026-02-27
 
 uTP (BEP 29) micro transport protocol with LEDBAT congestion control. Ten crates, 501 tests.

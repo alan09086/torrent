@@ -151,6 +151,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable uTP (micro Transport Protocol) for peer connections.
+    ///
+    /// When enabled, outbound connections try uTP first with a 5-second timeout
+    /// before falling back to TCP. Inbound uTP connections are routed to the
+    /// correct torrent by reading the BT preamble.
+    pub fn enable_utp(mut self, v: bool) -> Self {
+        self.config.enable_utp = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
@@ -256,5 +266,16 @@ mod tests {
             .encryption_mode(EncryptionMode::Forced)
             .into_config();
         assert_eq!(config.encryption_mode, EncryptionMode::Forced);
+    }
+
+    #[test]
+    fn client_builder_utp_config() {
+        // Default: uTP enabled
+        let config = ClientBuilder::new().into_config();
+        assert!(config.enable_utp);
+
+        // Explicitly disabled
+        let config = ClientBuilder::new().enable_utp(false).into_config();
+        assert!(!config.enable_utp);
     }
 }

@@ -359,4 +359,132 @@ mod tests {
             torrents: Vec::new(),
         };
     }
+
+    #[tokio::test]
+    async fn utp_outbound_and_accept() {
+        // Create two UtpSocket instances on loopback, connect one to the other,
+        // and verify data flows through the connection.
+        let (socket_a, mut listener_a) =
+            utp::UtpSocket::bind(utp::UtpConfig {
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                max_connections: 8,
+            })
+            .await
+            .unwrap();
+
+        let addr_a = socket_a.local_addr();
+
+        let (socket_b, _listener_b) =
+            utp::UtpSocket::bind(utp::UtpConfig {
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                max_connections: 8,
+            })
+            .await
+            .unwrap();
+
+        // B connects to A (keep socket_b alive so the stream isn't dropped)
+        let connect_handle = tokio::spawn({
+            let socket_b = socket_b.clone();
+            async move { socket_b.connect(addr_a).await.unwrap() }
+        });
+
+        // A accepts
+        let (mut stream_a, _peer_addr) = listener_a.accept().await.unwrap();
+        let mut stream_b = connect_handle.await.unwrap();
+
+        // Exchange data bidirectionally
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        stream_b.write_all(b"hello from B").await.unwrap();
+        stream_b.flush().await.unwrap();
+        let mut buf = vec![0u8; 20];
+        let n = stream_a.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello from B");
+
+        stream_a.write_all(b"hello from A").await.unwrap();
+        stream_a.flush().await.unwrap();
+        let n = stream_b.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello from A");
+
+        socket_a.shutdown().await.unwrap();
+        socket_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn utp_fallback_to_tcp() {
+        // Session with uTP disabled starts successfully and operates normally via TCP.
+        let session = crate::ClientBuilder::new()
+            .listen_port(0)
+            .download_dir("/tmp")
+            .enable_utp(false)
+            .enable_dht(false)
+            .enable_lsd(false)
+            .start()
+            .await
+            .unwrap();
+
+        let stats = session.session_stats().await.unwrap();
+        assert_eq!(stats.active_torrents, 0);
+
+        // Add a torrent (proves the session works without uTP)
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent_facade(&data, 16384);
+        let info_hash = session
+            .add_torrent(meta, Some(make_storage_facade(&data, 16384)))
+            .await
+            .unwrap();
+
+        let list = session.list_torrents().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list.contains(&info_hash));
+
+        session.shutdown().await.unwrap();
+    }
+
+    fn make_test_torrent_facade(data: &[u8], piece_length: u64) -> core::TorrentMetaV1 {
+        use serde::Serialize;
+
+        let mut pieces = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + piece_length as usize).min(data.len());
+            let hash = core::sha1(&data[offset..end]);
+            pieces.extend_from_slice(hash.as_bytes());
+            offset = end;
+        }
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            length: u64,
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            info: Info<'a>,
+        }
+
+        let t = Torrent {
+            info: Info {
+                length: data.len() as u64,
+                name: "test",
+                piece_length,
+                pieces: &pieces,
+            },
+        };
+
+        let bytes = bencode::to_bytes(&t).unwrap();
+        core::torrent_from_bytes(&bytes).unwrap()
+    }
+
+    fn make_storage_facade(
+        data: &[u8],
+        piece_length: u64,
+    ) -> std::sync::Arc<storage::MemoryStorage> {
+        let lengths = core::Lengths::new(data.len() as u64, piece_length, core::DEFAULT_CHUNK_SIZE);
+        std::sync::Arc::new(storage::MemoryStorage::new(lengths))
+    }
 }
