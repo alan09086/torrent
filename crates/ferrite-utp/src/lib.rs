@@ -4,7 +4,7 @@ pub mod seq;
 pub mod packet;
 
 pub mod congestion;
-mod conn;
+pub mod conn;
 mod listener;
 mod socket;
 mod stream;
