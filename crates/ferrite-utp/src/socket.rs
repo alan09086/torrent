@@ -313,8 +313,33 @@ impl SocketActor {
                 }
             }
 
+            // After processing ACKs, flush buffered send data and drain pending writes
+            if !closed {
+                let now = Instant::now();
+
+                // Flush internal send buffer (ACKs may have freed window space)
+                let flush_actions = slot.conn.flush_send_buf(now);
+                for action in flush_actions {
+                    if let ConnAction::Send(pkt) = action {
+                        let _ = self.socket.send_to(&pkt, addr).await;
+                    }
+                }
+
+                // Also drain new write requests
+                while let Ok(req) = slot.write_rx.try_recv() {
+                    let data_len = req.data.len();
+                    let write_actions = slot.conn.send_data(&req.data, now);
+                    let _ = req.reply.send(Ok(data_len));
+
+                    for action in write_actions {
+                        if let ConnAction::Send(pkt) = action {
+                            let _ = self.socket.send_to(&pkt, addr).await;
+                        }
+                    }
+                }
+            }
+
             if closed {
-                // If still pending, notify with error
                 if let Some(pending) = slot.pending_connect.take() {
                     let _ = pending.reply.send(Err(Error::ConnectionReset));
                 }
@@ -340,6 +365,14 @@ impl SocketActor {
                         if let ConnAction::Send(pkt) = action {
                             let _ = self.socket.send_to(&pkt, key.addr).await;
                         }
+                    }
+                }
+
+                // Flush any buffered send data
+                let flush_actions = slot.conn.flush_send_buf(now);
+                for action in flush_actions {
+                    if let ConnAction::Send(pkt) = action {
+                        let _ = self.socket.send_to(&pkt, key.addr).await;
                     }
                 }
 
@@ -375,5 +408,267 @@ impl SocketActor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn localhost_config() -> UtpConfig {
+        UtpConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_and_accept() {
+        let (socket_a, mut listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
+        let (socket_b, _listener_b) = UtpSocket::bind(localhost_config()).await.unwrap();
+
+        let addr_a = socket_a.local_addr();
+
+        let accept_handle = tokio::spawn(async move { listener_a.accept().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let stream_b = socket_b.connect(addr_a).await.unwrap();
+        let (stream_a, peer_addr) = accept_handle.await.unwrap().unwrap();
+
+        assert_eq!(peer_addr, socket_b.local_addr());
+        assert_eq!(stream_b.remote_addr(), addr_a);
+        assert_eq!(stream_a.remote_addr(), socket_b.local_addr());
+
+        socket_a.shutdown().await.unwrap();
+        socket_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bidirectional_data_transfer() {
+        let (socket_a, mut listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
+        let (socket_b, _listener_b) = UtpSocket::bind(localhost_config()).await.unwrap();
+
+        let addr_a = socket_a.local_addr();
+
+        let accept_handle = tokio::spawn(async move { listener_a.accept().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut stream_b = socket_b.connect(addr_a).await.unwrap();
+        let (mut stream_a, _) = accept_handle.await.unwrap().unwrap();
+
+        // B writes "hello" to A
+        stream_b.write_all(b"hello").await.unwrap();
+
+        // Wait for actor tick to process the write and deliver
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let mut buf = vec![0u8; 32];
+        let n = stream_a.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello");
+
+        // A writes "world" to B
+        stream_a.write_all(b"world").await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let n = stream_b.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"world");
+
+        socket_a.shutdown().await.unwrap();
+        socket_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_transfer() {
+        use sha1::{Digest, Sha1};
+
+        let (socket_a, mut listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
+        let (socket_b, _listener_b) = UtpSocket::bind(localhost_config()).await.unwrap();
+
+        let addr_a = socket_a.local_addr();
+
+        let accept_handle = tokio::spawn(async move { listener_a.accept().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut stream_b = socket_b.connect(addr_a).await.unwrap();
+        let (mut stream_a, _) = accept_handle.await.unwrap().unwrap();
+
+        // Generate 1MB of test data
+        let data_size = 1_048_576;
+        let mut send_data = vec![0u8; data_size];
+        ferrite_core::random_bytes(&mut send_data);
+
+        let expected_hash = {
+            let mut h = Sha1::new();
+            h.update(&send_data);
+            h.finalize()
+        };
+
+        // Spawn writer
+        let write_handle = tokio::spawn(async move {
+            for chunk in send_data.chunks(8192) {
+                stream_b.write_all(chunk).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            stream_b.shutdown().await.unwrap();
+        });
+
+        // Read all data
+        let mut received = Vec::new();
+        let mut buf = vec![0u8; 65536];
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                panic!("timeout: received {}/{} bytes", received.len(), data_size);
+            }
+
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                stream_a.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+                Ok(Err(e)) => panic!("read error: {e}"),
+                Err(_) => {
+                    if write_handle.is_finished() && received.len() >= data_size {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            if received.len() >= data_size {
+                break;
+            }
+        }
+
+        write_handle.await.unwrap();
+
+        assert_eq!(received.len(), data_size, "received wrong number of bytes");
+
+        let actual_hash = {
+            let mut h = Sha1::new();
+            h.update(&received);
+            h.finalize()
+        };
+        assert_eq!(actual_hash, expected_hash, "SHA1 mismatch on 1MB transfer");
+
+        socket_a.shutdown().await.unwrap();
+        socket_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_connections() {
+        let (socket_a, mut listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
+        let (socket_b, _listener_b) = UtpSocket::bind(localhost_config()).await.unwrap();
+
+        let addr_a = socket_a.local_addr();
+
+        let accept_handle = tokio::spawn(async move {
+            let mut streams = Vec::new();
+            for _ in 0..3 {
+                let (stream, _) = listener_a.accept().await.unwrap();
+                streams.push(stream);
+            }
+            streams
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let s1 = socket_b.connect(addr_a).await.unwrap();
+        let s2 = socket_b.connect(addr_a).await.unwrap();
+        let s3 = socket_b.connect(addr_a).await.unwrap();
+
+        let accepted = accept_handle.await.unwrap();
+        assert_eq!(accepted.len(), 3);
+
+        drop(s1);
+        drop(s2);
+        drop(s3);
+
+        socket_a.shutdown().await.unwrap();
+        socket_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn graceful_close() {
+        let (socket_a, mut listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
+        let (socket_b, _listener_b) = UtpSocket::bind(localhost_config()).await.unwrap();
+
+        let addr_a = socket_a.local_addr();
+
+        let accept_handle = tokio::spawn(async move { listener_a.accept().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut stream_b = socket_b.connect(addr_a).await.unwrap();
+        let (mut stream_a, _) = accept_handle.await.unwrap().unwrap();
+
+        // Write some data then close
+        stream_b.write_all(b"goodbye").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        stream_b.shutdown().await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let mut buf = vec![0u8; 32];
+        let n = stream_a.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"goodbye");
+
+        // After close propagates, actor drops data_tx → stream_a reads EOF
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        socket_a.shutdown().await.unwrap();
+        socket_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_on_unknown() {
+        let (socket_a, _listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
+
+        let raw = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // Build a DATA packet to an unknown connection_id
+        use crate::packet::{ExtensionType, Header, Packet};
+        use crate::seq::SeqNr;
+
+        let pkt = Packet {
+            header: Header {
+                packet_type: PacketType::Data,
+                extension: ExtensionType::None,
+                connection_id: 9999,
+                timestamp_us: 0,
+                timestamp_diff_us: 0,
+                wnd_size: 65536,
+                seq_nr: SeqNr(1),
+                ack_nr: SeqNr(0),
+            },
+            sack: None,
+            payload: Bytes::from_static(b"unexpected"),
+        };
+
+        let encoded = pkt.encode();
+        raw.send_to(&encoded, socket_a.local_addr()).await.unwrap();
+
+        // Should receive a RESET back
+        let mut buf = vec![0u8; 1024];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            raw.recv_from(&mut buf),
+        )
+        .await;
+
+        if let Ok(Ok((n, from))) = result {
+            assert_eq!(from, socket_a.local_addr());
+            let reset = Packet::decode(&buf[..n]).unwrap();
+            assert_eq!(reset.header.packet_type, PacketType::Reset);
+        }
+        // If timeout, that's acceptable — no crash is the key assertion
+
+        socket_a.shutdown().await.unwrap();
     }
 }

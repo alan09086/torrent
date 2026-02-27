@@ -94,6 +94,8 @@ pub struct Connection {
     timeout_count: u32,
     /// Whether we initiated the close.
     fin_sent: bool,
+    /// Unsent data waiting for congestion window to open.
+    send_buf: Vec<u8>,
     /// Remote address.
     pub remote_addr: SocketAddr,
 }
@@ -124,6 +126,7 @@ impl Connection {
             dup_ack_count: 0,
             timeout_count: 0,
             fin_sent: false,
+            send_buf: Vec::new(),
             remote_addr,
         };
 
@@ -157,6 +160,7 @@ impl Connection {
             dup_ack_count: 0,
             timeout_count: 0,
             fin_sent: false,
+            send_buf: Vec::new(),
             remote_addr,
         };
 
@@ -250,23 +254,34 @@ impl Connection {
         actions
     }
 
-    /// Queue data for sending. Returns actions (Send packets).
+    /// Queue data for sending. Buffers internally; call `flush_send_buf()`
+    /// to emit Send actions when window space is available.
     pub fn send_data(&mut self, data: &[u8], now: Instant) -> Vec<ConnAction> {
+        if self.state != ConnState::Connected {
+            return Vec::new();
+        }
+
+        self.send_buf.extend_from_slice(data);
+        self.flush_send_buf(now)
+    }
+
+    /// Try to send buffered data within the congestion window.
+    pub fn flush_send_buf(&mut self, now: Instant) -> Vec<ConnAction> {
         let mut actions = Vec::new();
 
-        if self.state != ConnState::Connected {
+        if self.state != ConnState::Connected || self.send_buf.is_empty() {
             return actions;
         }
 
-        let mut offset = 0;
-        while offset < data.len() {
+        while !self.send_buf.is_empty() {
             let available = self.congestion.available_window() as usize;
-            if available < MAX_PAYLOAD {
+            let chunk_size = self.send_buf.len().min(MAX_PAYLOAD);
+            if available < chunk_size {
                 break; // Window full
             }
 
-            let end = (offset + MAX_PAYLOAD).min(data.len());
-            let chunk = Bytes::copy_from_slice(&data[offset..end]);
+            let chunk_data: Vec<u8> = self.send_buf.drain(..chunk_size).collect();
+            let chunk = Bytes::from(chunk_data);
             let seq = self.seq_nr;
             let packet_data = self.build_packet(PacketType::Data, seq, chunk.clone());
             let payload_len = chunk.len() as u32;
@@ -284,9 +299,7 @@ impl Connection {
 
             self.congestion.on_send(payload_len);
             self.seq_nr = self.seq_nr.wrapping_add(1);
-
             actions.push(ConnAction::Send(packet_data));
-            offset = end;
         }
 
         actions

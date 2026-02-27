@@ -7,8 +7,8 @@ const CCONTROL_TARGET: u32 = 100_000;
 /// Maximum congestion window increase per RTT (bytes).
 const MAX_CWND_INCREASE: u32 = 3000;
 
-/// Minimum congestion window (bytes).
-const MIN_WINDOW: u32 = 150;
+/// Minimum congestion window (bytes). Must be at least one packet.
+const MIN_WINDOW: u32 = 1500;
 
 /// Base delay history window (2 minutes).
 const BASE_DELAY_WINDOW: Duration = Duration::from_secs(120);
