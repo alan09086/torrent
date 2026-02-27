@@ -10,8 +10,8 @@ pub(crate) const VC: [u8; 8] = [0u8; 8];
 pub(crate) const MAX_PADDING: usize = 512;
 
 /// Crypto method bitmask values.
-pub(crate) const CRYPTO_PLAINTEXT: u32 = 0x01;
-pub(crate) const CRYPTO_RC4: u32 = 0x02;
+pub const CRYPTO_PLAINTEXT: u32 = 0x01;
+pub const CRYPTO_RC4: u32 = 0x02;
 
 /// Compute HASH(data) = SHA1(data). Returns 20 bytes.
 #[allow(dead_code)]

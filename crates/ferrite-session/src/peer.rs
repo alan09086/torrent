@@ -29,7 +29,7 @@ const HANDSHAKE_SIZE: usize = 68;
 #[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) async fn run_peer(
     addr: SocketAddr,
-    mut stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     info_hash: Id20,
     our_peer_id: Id20,
     our_bitfield: Bitfield,
@@ -38,7 +38,38 @@ pub(crate) async fn run_peer(
     mut cmd_rx: mpsc::Receiver<PeerCommand>,
     enable_dht: bool,
     enable_fast: bool,
+    encryption_mode: ferrite_wire::mse::EncryptionMode,
+    outbound: bool,
 ) -> crate::Result<()> {
+    use ferrite_wire::mse::{self, EncryptionMode, MseStream};
+
+    // --- Phase 0: MSE/PE encryption ---
+    let mut stream = if encryption_mode != EncryptionMode::Disabled {
+        let crypto_provide = if encryption_mode == EncryptionMode::Forced {
+            ferrite_wire::mse::CRYPTO_RC4
+        } else {
+            ferrite_wire::mse::CRYPTO_PLAINTEXT | ferrite_wire::mse::CRYPTO_RC4
+        };
+
+        let result = if outbound {
+            mse::handshake::negotiate_outbound(stream, &info_hash, crypto_provide).await
+        } else {
+            mse::handshake::negotiate_inbound(
+                stream,
+                &info_hash,
+                encryption_mode == EncryptionMode::Forced,
+            )
+            .await
+        };
+
+        match result {
+            Ok(r) => r.stream,
+            Err(e) => return Err(crate::Error::Wire(e)),
+        }
+    } else {
+        MseStream::plaintext(stream)
+    };
+
     // --- Phase 1: Handshake (raw read/write, not framed) ---
     let mut our_hs = Handshake::new(info_hash, our_peer_id);
     if enable_dht {
@@ -614,6 +645,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -659,6 +692,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -704,6 +739,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -761,6 +798,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -806,6 +845,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -860,6 +901,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -914,6 +957,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -955,6 +1000,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1035,6 +1082,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1083,6 +1132,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1130,6 +1181,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1190,6 +1243,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1281,6 +1336,8 @@ mod tests {
                 cmd_rx,
                 false,
                 true, // enable_fast
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1323,6 +1380,8 @@ mod tests {
                 cmd_rx,
                 false,
                 true, // enable_fast
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1365,6 +1424,8 @@ mod tests {
                 cmd_rx,
                 false,
                 true, // enable_fast
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1421,6 +1482,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false, // fast disabled
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });
@@ -1460,6 +1523,8 @@ mod tests {
                 cmd_rx,
                 false,
                 false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
             )
             .await
         });

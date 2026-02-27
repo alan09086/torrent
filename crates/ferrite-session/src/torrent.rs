@@ -1564,6 +1564,7 @@ impl TorrentActor {
             let event_tx = self.event_tx.clone();
             let enable_dht = self.config.enable_dht;
             let enable_fast = self.config.enable_fast;
+            let encryption_mode = self.config.encryption_mode;
 
             tokio::spawn(async move {
                 match tokio::net::TcpStream::connect(addr).await {
@@ -1579,6 +1580,8 @@ impl TorrentActor {
                             cmd_rx,
                             enable_dht,
                             enable_fast,
+                            encryption_mode,
+                            true, // outbound
                         )
                         .await;
                     }
@@ -1625,6 +1628,7 @@ impl TorrentActor {
         let event_tx = self.event_tx.clone();
         let enable_dht = self.config.enable_dht;
         let enable_fast = self.config.enable_fast;
+        let encryption_mode = self.config.encryption_mode;
 
         tokio::spawn(async move {
             let _ = run_peer(
@@ -1638,6 +1642,8 @@ impl TorrentActor {
                 cmd_rx,
                 enable_dht,
                 enable_fast,
+                encryption_mode,
+                false, // inbound
             )
             .await;
         });
@@ -1725,7 +1731,7 @@ mod tests {
             strict_end_game: true,
             upload_rate_limit: 0,
             download_rate_limit: 0,
-            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
+            encryption_mode: ferrite_wire::mse::EncryptionMode::Disabled,
         }
     }
 

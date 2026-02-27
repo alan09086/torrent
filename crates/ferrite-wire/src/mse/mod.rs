@@ -8,6 +8,7 @@ pub(crate) mod dh;
 pub mod handshake;
 pub mod stream;
 
+pub use crypto::{CRYPTO_PLAINTEXT, CRYPTO_RC4};
 pub use handshake::NegotiationResult;
 pub use stream::MseStream;
 
