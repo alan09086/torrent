@@ -32,10 +32,10 @@ ferrite              Public facade API
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client | 14 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table | 42 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 42 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding, persistence, selective download, bandwidth limiting, alerts | 166 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14, seeding, persistence, selective download, bandwidth limiting, alerts | 168 |
 | `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 16 |
 
-**Total: 435 tests, zero clippy warnings.**
+**Total: 437 tests, zero clippy warnings.**
 
 ## Design Decisions
 

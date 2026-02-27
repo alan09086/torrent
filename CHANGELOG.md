@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ## 0.16.0 — 2026-02-26
 
-Alerts / events system with async broadcast channels and category filtering. Nine crates, 435 tests.
+Alerts / events system with async broadcast channels and category filtering. Nine crates, 437 tests.
 
 ### M15: Alerts / Events System
 
@@ -23,8 +23,9 @@ Alerts / events system with async broadcast channels and category filtering. Nin
 - `transition_state()` on TorrentActor — automatic `StateChanged` alerts on every state transition
 - `TrackerOutcome` and `AnnounceResult` — per-tracker announce outcomes for TrackerReply/TrackerError alerts
 - Alerts fired at: torrent add/remove/pause/resume/finish, piece complete/hash fail, peer connect/disconnect, tracker reply/error, metadata received, state transitions
+- `Serialize` / `Deserialize` derives on `Alert`, `AlertKind`, `AlertCategory`, `TorrentState`, `SessionStats` — ready for MagneTor REST API
 - Facade re-exports and prelude additions: `Alert`, `AlertKind`, `AlertCategory`, `AlertStream`
-- 14 new tests: 6 alert unit tests, 4 integration tests (multi-subscriber, runtime mask, per-subscriber filter, state tracking), 4 session/torrent alert tests
+- 16 new tests: 6 alert unit tests, 4 integration tests (multi-subscriber, runtime mask, per-subscriber filter, state tracking), 4 session/torrent alert tests, 2 JSON serialization round-trip tests
 
 ## 0.15.0 — 2026-02-26
 
