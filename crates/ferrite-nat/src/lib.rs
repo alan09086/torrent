@@ -8,5 +8,6 @@ pub mod error;
 pub mod gateway;
 pub mod natpmp;
 pub mod pcp;
+pub mod upnp;
 
 pub use error::{Error, Result};
