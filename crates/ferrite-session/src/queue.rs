@@ -10,6 +10,7 @@ pub(crate) struct QueueEntry {
 }
 
 /// Assigns a position at the end of the queue. Returns the assigned position.
+#[allow(dead_code)] // used by tests; session uses SessionActor::next_queue_position() instead
 pub(crate) fn append_position(entries: &[QueueEntry]) -> i32 {
     entries
         .iter()
@@ -157,12 +158,14 @@ pub(crate) struct QueueDecision {
 /// Evaluate the queue and decide which torrents to start/stop.
 ///
 /// Negative limits mean "unlimited" for that category.
+/// When `prefer_seeds` is true, seeding slots are allocated before download slots.
 pub(crate) fn evaluate(
     candidates: &[QueueCandidate],
     active_downloads: i32,
     active_seeds: i32,
     active_limit: i32,
     dont_count_slow: bool,
+    prefer_seeds: bool,
 ) -> QueueDecision {
     let mut decision = QueueDecision::default();
 
@@ -180,7 +183,13 @@ pub(crate) fn evaluate(
 
     let mut total_active: i32 = 0;
 
-    for (group, limit) in [(&downloads, active_downloads), (&seeds, active_seeds)] {
+    let groups: Vec<(&[&QueueCandidate], i32)> = if prefer_seeds {
+        vec![(&seeds, active_seeds), (&downloads, active_downloads)]
+    } else {
+        vec![(&downloads, active_downloads), (&seeds, active_seeds)]
+    };
+
+    for (group, limit) in groups {
         let mut category_active: i32 = 0;
 
         for candidate in group {
@@ -364,7 +373,7 @@ mod tests {
                 is_inactive: false,
             },
         ];
-        let decision = evaluate(&candidates, 2, 5, 500, true);
+        let decision = evaluate(&candidates, 2, 5, 500, true, false);
         assert_eq!(decision.to_resume.len(), 2);
         assert_eq!(decision.to_resume[0], make_hash(0));
         assert_eq!(decision.to_resume[1], make_hash(1));
@@ -396,7 +405,7 @@ mod tests {
                 is_inactive: false,
             },
         ];
-        let decision = evaluate(&candidates, 2, 5, 500, true);
+        let decision = evaluate(&candidates, 2, 5, 500, true, false);
         assert!(decision.to_resume.is_empty());
         assert_eq!(decision.to_pause.len(), 1);
         assert_eq!(decision.to_pause[0], make_hash(2));
@@ -427,7 +436,7 @@ mod tests {
                 is_inactive: false,
             },
         ];
-        let decision = evaluate(&candidates, 2, 5, 500, true);
+        let decision = evaluate(&candidates, 2, 5, 500, true, false);
         assert!(decision.to_resume.is_empty());
         assert!(decision.to_pause.is_empty());
     }
@@ -471,7 +480,7 @@ mod tests {
                 is_inactive: false,
             },
         ];
-        let decision = evaluate(&candidates, 3, 5, 4, true);
+        let decision = evaluate(&candidates, 3, 5, 4, true, false);
         assert_eq!(decision.to_pause.len(), 1);
         assert_eq!(decision.to_pause[0], make_hash(12));
     }
@@ -494,7 +503,7 @@ mod tests {
                 is_inactive: false,
             },
         ];
-        let decision = evaluate(&candidates, -1, -1, -1, true);
+        let decision = evaluate(&candidates, -1, -1, -1, true, false);
         assert_eq!(decision.to_resume.len(), 2);
         assert!(decision.to_pause.is_empty());
     }

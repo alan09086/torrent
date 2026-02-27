@@ -15,7 +15,6 @@ pub(crate) mod slot_tuner;
 pub(crate) mod tracker_manager;
 pub(crate) mod lsd;
 pub(crate) mod peer;
-#[allow(dead_code)] // consumed by SessionActor (Tasks 5-6, M16)
 pub(crate) mod queue;
 mod torrent;
 mod session;

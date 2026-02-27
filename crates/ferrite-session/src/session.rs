@@ -20,7 +20,7 @@ use ferrite_storage::TorrentStorage;
 use crate::alert::{post_alert, Alert, AlertCategory, AlertKind, AlertStream};
 use crate::torrent::TorrentHandle;
 use crate::types::{
-    FileInfo, SessionConfig, SessionStats, TorrentConfig, TorrentInfo, TorrentStats,
+    FileInfo, SessionConfig, SessionStats, TorrentConfig, TorrentInfo, TorrentState, TorrentStats,
 };
 
 /// Shared global rate limiter bucket.
@@ -30,8 +30,6 @@ type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
 type QueueMoveFn = fn(&mut [crate::queue::QueueEntry], Id20) -> Vec<(Id20, i32, i32)>;
 
 /// Entry for a torrent managed by the session.
-// Queue fields are populated now but read by the queue manager (upcoming tasks).
-#[allow(dead_code)]
 struct TorrentEntry {
     handle: TorrentHandle,
     meta: Option<TorrentMetaV1>,
@@ -441,6 +439,12 @@ impl SessionActor {
         let mut refill_interval = tokio::time::interval(std::time::Duration::from_millis(100));
         refill_interval.tick().await; // skip first immediate tick
 
+        let auto_manage_secs = self.config.auto_manage_interval.max(1);
+        let mut auto_manage_interval = tokio::time::interval(
+            std::time::Duration::from_secs(auto_manage_secs),
+        );
+        auto_manage_interval.tick().await; // skip first immediate tick
+
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => {
@@ -543,6 +547,10 @@ impl SessionActor {
                     let elapsed = std::time::Duration::from_millis(100);
                     self.global_upload_bucket.lock().unwrap().refill(elapsed);
                     self.global_download_bucket.lock().unwrap().refill(elapsed);
+                }
+                // Auto-manage queue evaluation
+                _ = auto_manage_interval.tick() => {
+                    self.evaluate_queue().await;
                 }
             }
         }
@@ -916,6 +924,144 @@ impl SessionActor {
                     info_hash: hash,
                     old_pos,
                     new_pos,
+                },
+            );
+        }
+    }
+
+    async fn evaluate_queue(&mut self) {
+        let now = tokio::time::Instant::now();
+        let startup_duration = std::time::Duration::from_secs(self.config.auto_manage_startup);
+        let auto_manage_secs = self.config.auto_manage_interval.max(1);
+        let mut candidates = Vec::new();
+
+        // Collect info hashes first to avoid borrow issues with async calls
+        let hashes: Vec<Id20> = self.torrents.keys().copied().collect();
+
+        for &info_hash in &hashes {
+            let (auto_managed, queue_position, started_at, prev_downloaded, prev_uploaded) = {
+                let entry = match self.torrents.get(&info_hash) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if !entry.auto_managed {
+                    continue;
+                }
+                (
+                    entry.auto_managed,
+                    entry.queue_position,
+                    entry.started_at,
+                    entry.prev_downloaded,
+                    entry.prev_uploaded,
+                )
+            };
+
+            let _ = auto_managed; // used above in the guard
+
+            // Get current stats (async call — self.torrents is not borrowed here)
+            let stats = match self.torrents.get(&info_hash) {
+                Some(entry) => match entry.handle.stats().await {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                },
+                None => continue,
+            };
+
+            let category = match stats.state {
+                TorrentState::Downloading | TorrentState::FetchingMetadata => {
+                    crate::queue::QueueCategory::Downloading
+                }
+                TorrentState::Seeding | TorrentState::Complete => {
+                    crate::queue::QueueCategory::Seeding
+                }
+                TorrentState::Paused => {
+                    // Determine category based on completion
+                    if stats.pieces_have >= stats.pieces_total && stats.pieces_total > 0 {
+                        crate::queue::QueueCategory::Seeding
+                    } else {
+                        crate::queue::QueueCategory::Downloading
+                    }
+                }
+                TorrentState::Stopped => continue,
+            };
+
+            let is_active = stats.state != TorrentState::Paused;
+
+            // Compute rate from delta since last tick
+            let download_rate =
+                stats.downloaded.saturating_sub(prev_downloaded) / auto_manage_secs;
+            let upload_rate =
+                stats.uploaded.saturating_sub(prev_uploaded) / auto_manage_secs;
+
+            let past_startup = started_at
+                .map(|t| now.duration_since(t) > startup_duration)
+                .unwrap_or(true);
+
+            let is_inactive = past_startup
+                && match category {
+                    crate::queue::QueueCategory::Downloading => {
+                        download_rate < self.config.inactive_down_rate
+                    }
+                    crate::queue::QueueCategory::Seeding => {
+                        upload_rate < self.config.inactive_up_rate
+                    }
+                };
+
+            candidates.push(crate::queue::QueueCandidate {
+                info_hash,
+                position: queue_position,
+                category,
+                is_active,
+                is_inactive,
+            });
+        }
+
+        // Update cached stats for next tick's rate calculation
+        for &hash in &hashes {
+            if let Some(entry) = self.torrents.get(&hash)
+                && let Ok(stats) = entry.handle.stats().await
+                && let Some(entry) = self.torrents.get_mut(&hash)
+            {
+                entry.prev_downloaded = stats.downloaded;
+                entry.prev_uploaded = stats.uploaded;
+            }
+        }
+
+        let decision = crate::queue::evaluate(
+            &candidates,
+            self.config.active_downloads,
+            self.config.active_seeds,
+            self.config.active_limit,
+            self.config.dont_count_slow_torrents,
+            self.config.auto_manage_prefer_seeds,
+        );
+
+        // Apply decisions
+        for hash in &decision.to_pause {
+            if let Some(entry) = self.torrents.get(hash) {
+                let _ = entry.handle.pause().await;
+            }
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::TorrentAutoManaged {
+                    info_hash: *hash,
+                    paused: true,
+                },
+            );
+        }
+
+        for hash in &decision.to_resume {
+            if let Some(entry) = self.torrents.get_mut(hash) {
+                let _ = entry.handle.resume().await;
+                entry.started_at = Some(tokio::time::Instant::now());
+            }
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::TorrentAutoManaged {
+                    info_hash: *hash,
+                    paused: false,
                 },
             );
         }
