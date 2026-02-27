@@ -7,6 +7,7 @@ mod error;
 mod extended;
 mod handshake;
 mod message;
+pub mod mse;
 
 pub use codec::MessageCodec;
 pub use error::{Error, Result};
