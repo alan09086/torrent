@@ -170,6 +170,25 @@ impl SessionHandle {
             (None, None)
         };
 
+        // NAT port mapping (PCP / NAT-PMP / UPnP)
+        let (nat, nat_events_rx) = if config.enable_upnp || config.enable_natpmp {
+            let nat_config = ferrite_nat::NatConfig {
+                enable_upnp: config.enable_upnp,
+                enable_natpmp: config.enable_natpmp,
+                ..Default::default()
+            };
+            let (handle, events_rx) = ferrite_nat::NatHandle::start(nat_config);
+            let udp_port = if config.enable_utp {
+                Some(config.listen_port)
+            } else {
+                None
+            };
+            handle.map_ports(config.listen_port, udp_port).await;
+            (Some(handle), Some(events_rx))
+        } else {
+            (None, None)
+        };
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
@@ -183,6 +202,8 @@ impl SessionHandle {
             global_download_bucket,
             utp_socket,
             utp_listener,
+            nat,
+            nat_events_rx,
         };
 
         tokio::spawn(actor.run());
@@ -453,6 +474,8 @@ struct SessionActor {
     global_download_bucket: SharedBucket,
     utp_socket: Option<ferrite_utp::UtpSocket>,
     utp_listener: Option<ferrite_utp::UtpListener>,
+    nat: Option<ferrite_nat::NatHandle>,
+    nat_events_rx: Option<mpsc::Receiver<ferrite_nat::NatEvent>>,
 }
 
 impl SessionActor {
@@ -578,6 +601,27 @@ impl SessionActor {
                 // Auto-manage queue evaluation
                 _ = auto_manage_interval.tick() => {
                     self.evaluate_queue().await;
+                }
+                // NAT port mapping events
+                event = recv_nat_event(&mut self.nat_events_rx) => {
+                    match event {
+                        ferrite_nat::NatEvent::MappingSucceeded { port, protocol } => {
+                            info!(port, %protocol, "port mapping succeeded");
+                            post_alert(
+                                &self.alert_tx,
+                                &self.alert_mask,
+                                AlertKind::PortMappingSucceeded { port, protocol },
+                            );
+                        }
+                        ferrite_nat::NatEvent::MappingFailed { port, message } => {
+                            warn!(port, %message, "port mapping failed");
+                            post_alert(
+                                &self.alert_tx,
+                                &self.alert_mask,
+                                AlertKind::PortMappingFailed { port, message },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1137,6 +1181,9 @@ impl SessionActor {
             debug!(%info_hash, "shutting down torrent");
             let _ = entry.handle.shutdown().await;
         }
+        if let Some(ref nat) = self.nat {
+            nat.shutdown().await;
+        }
         if let Some(ref lsd) = self.lsd {
             lsd.shutdown().await;
         }
@@ -1158,6 +1205,20 @@ async fn accept_utp(
             .accept()
             .await
             .map_err(std::io::Error::other),
+        None => std::future::pending().await,
+    }
+}
+
+/// Helper to receive NAT events from an optional receiver.
+/// Returns `pending` if no receiver is available, so the `select!` branch is skipped.
+async fn recv_nat_event(
+    rx: &mut Option<mpsc::Receiver<ferrite_nat::NatEvent>>,
+) -> ferrite_nat::NatEvent {
+    match rx {
+        Some(r) => match r.recv().await {
+            Some(event) => event,
+            None => std::future::pending().await,
+        },
         None => std::future::pending().await,
     }
 }
@@ -1245,6 +1306,8 @@ mod tests {
             auto_manage_prefer_seeds: false,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
             enable_utp: false,
+            enable_upnp: false,
+            enable_natpmp: false,
         }
     }
 
@@ -1821,6 +1884,25 @@ mod tests {
         // Start session with uTP enabled — should succeed without errors
         let mut config = test_session_config();
         config.enable_utp = true;
+        let session = SessionHandle::start(config).await.unwrap();
+        let stats = session.session_stats().await.unwrap();
+        assert_eq!(stats.active_torrents, 0);
+        session.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn session_config_nat_defaults() {
+        let config = SessionConfig::default();
+        assert!(config.enable_upnp, "enable_upnp should default to true");
+        assert!(config.enable_natpmp, "enable_natpmp should default to true");
+    }
+
+    #[tokio::test]
+    async fn session_with_nat_disabled() {
+        let config = test_session_config();
+        // test_session_config already sets enable_upnp: false, enable_natpmp: false
+        assert!(!config.enable_upnp);
+        assert!(!config.enable_natpmp);
         let session = SessionHandle::start(config).await.unwrap();
         let stats = session.session_stats().await.unwrap();
         assert_eq!(stats.active_torrents, 0);

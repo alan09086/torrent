@@ -84,7 +84,7 @@ impl TorrentHandle {
         let our_peer_id = PeerId::generate().0;
 
         // Bind listener for incoming connections
-        let listener = TcpListener::bind(("127.0.0.1", config.listen_port))
+        let listener = TcpListener::bind(("0.0.0.0", config.listen_port))
             .await
             .ok();
 
@@ -173,7 +173,7 @@ impl TorrentHandle {
         let (event_tx, event_rx) = mpsc::channel(256);
         let our_peer_id = PeerId::generate().0;
 
-        let listener = TcpListener::bind(("127.0.0.1", config.listen_port))
+        let listener = TcpListener::bind(("0.0.0.0", config.listen_port))
             .await
             .ok();
 

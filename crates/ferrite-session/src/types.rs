@@ -255,6 +255,10 @@ pub struct SessionConfig {
     pub encryption_mode: ferrite_wire::mse::EncryptionMode,
     /// Enable uTP (micro Transport Protocol) for peer connections.
     pub enable_utp: bool,
+    /// Enable UPnP IGD port mapping.
+    pub enable_upnp: bool,
+    /// Enable NAT-PMP / PCP port mapping.
+    pub enable_natpmp: bool,
 }
 
 impl Default for SessionConfig {
@@ -288,6 +292,8 @@ impl Default for SessionConfig {
             auto_manage_prefer_seeds: false,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
             enable_utp: true,
+            enable_upnp: true,
+            enable_natpmp: true,
         }
     }
 }
