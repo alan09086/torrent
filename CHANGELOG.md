@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.17.0 — 2026-02-27
+
+Queue management with auto-manage system and position control. Nine crates, 459 tests.
+
+### M16: Queue Management
+
+### Added
+- `SessionConfig` queue fields: `active_downloads`, `active_seeds`, `active_limit`, `active_checking`, `dont_count_slow_torrents`, `inactive_down_rate`, `inactive_up_rate`, `auto_manage_interval`, `auto_manage_startup`, `auto_manage_prefer_seeds`
+- `SessionHandle` queue position API: `queue_position()`, `set_queue_position()`, `queue_position_up()`, `queue_position_down()`, `queue_position_top()`, `queue_position_bottom()`
+- Auto-manage system — periodic queue evaluation that starts/stops auto-managed torrents based on active limits and inactivity detection
+- `TorrentQueuePositionChanged` and `TorrentAutoManaged` alert variants
+- `FastResumeData::queue_position` field for queue position persistence
+- `ClientBuilder` queue config methods: 8 new builder methods for queue configuration
+- `ferrite-session::queue` module — pure-logic queue position arithmetic and evaluation algorithm
+- 22 new tests across queue unit tests, session integration, and facade tests
+
 ## 0.16.0 — 2026-02-26
 
 Alerts / events system with async broadcast channels and category filtering. Nine crates, 437 tests.
