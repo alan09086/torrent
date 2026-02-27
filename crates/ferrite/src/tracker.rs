@@ -13,8 +13,11 @@ pub use ferrite_tracker::{
     AnnounceRequest,
     AnnounceResponse,
     AnnounceEvent,
-    // Compact peer parsing
+    // Compact peer parsing/encoding
     parse_compact_peers,
+    encode_compact_peers,
+    parse_compact_peers6,
+    encode_compact_peers6,
     // Error types
     Error,
     Result,

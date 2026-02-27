@@ -31,3 +31,6 @@ pub use ferrite_core::{FastResumeData, UnfinishedPiece};
 
 // File priority (M12)
 pub use ferrite_core::FilePriority;
+
+// Address family (M21 IPv6)
+pub use ferrite_core::AddressFamily;

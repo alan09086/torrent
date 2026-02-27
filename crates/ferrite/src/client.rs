@@ -179,6 +179,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable IPv6 dual-stack support (BEP 7, 24).
+    ///
+    /// When enabled, the session binds listeners on both IPv4 and IPv6,
+    /// starts a second DHT instance for IPv6, and processes IPv6 peers
+    /// in PEX and tracker responses. Default: true.
+    pub fn enable_ipv6(mut self, v: bool) -> Self {
+        self.config.enable_ipv6 = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config

@@ -259,6 +259,8 @@ pub struct SessionConfig {
     pub enable_upnp: bool,
     /// Enable NAT-PMP / PCP port mapping.
     pub enable_natpmp: bool,
+    /// Enable IPv6 dual-stack (listeners, DHT, PEX). Default: true.
+    pub enable_ipv6: bool,
 }
 
 impl Default for SessionConfig {
@@ -294,6 +296,7 @@ impl Default for SessionConfig {
             enable_utp: true,
             enable_upnp: true,
             enable_natpmp: true,
+            enable_ipv6: true,
         }
     }
 }

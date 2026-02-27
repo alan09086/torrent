@@ -492,6 +492,52 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_types_accessible_through_facade() {
+        use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+
+        // AddressFamily enum
+        let _v4 = core::AddressFamily::V4;
+        let _v6 = core::AddressFamily::V6;
+
+        // DhtConfig::default_v6
+        let config = dht::DhtConfig::default_v6();
+        assert_eq!(config.address_family, core::AddressFamily::V6);
+
+        // CompactNodeInfo6 round-trip
+        let node = dht::CompactNodeInfo6 {
+            id: core::Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            addr: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 6881, 0, 0)),
+        };
+        let encoded = dht::encode_compact_nodes6(&[node.clone()]);
+        assert_eq!(encoded.len(), 38);
+        let decoded = dht::parse_compact_nodes6(&encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].id, node.id);
+        assert_eq!(decoded[0].addr, node.addr);
+
+        // Compact peers6 round-trip
+        let peers = vec![
+            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 6881, 0, 0)),
+        ];
+        let encoded = tracker::encode_compact_peers6(&peers);
+        assert_eq!(encoded.len(), 18);
+        let decoded = tracker::parse_compact_peers6(&encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], peers[0]);
+    }
+
+    #[test]
+    fn client_builder_ipv6_config() {
+        // Default: IPv6 enabled
+        let config = crate::ClientBuilder::new().into_config();
+        assert!(config.enable_ipv6);
+
+        // Explicitly disabled
+        let config = crate::ClientBuilder::new().enable_ipv6(false).into_config();
+        assert!(!config.enable_ipv6);
+    }
+
+    #[test]
     fn client_builder_nat_config() {
         // Defaults: both enabled
         let config = crate::ClientBuilder::new().into_config();

@@ -16,7 +16,12 @@ pub mod routing_table;
 pub mod peer_store;
 mod actor;
 
-pub use compact::CompactNodeInfo;
+pub use compact::{
+    CompactNodeInfo, CompactNodeInfo6,
+    parse_compact_nodes, encode_compact_nodes,
+    parse_compact_nodes6, encode_compact_nodes6,
+    COMPACT_NODE_SIZE, COMPACT_NODE6_SIZE,
+};
 pub use error::{Error, Result};
 pub use krpc::{KrpcMessage, KrpcBody, KrpcQuery, KrpcResponse, GetPeersResponse, TransactionId};
 pub use routing_table::RoutingTable;

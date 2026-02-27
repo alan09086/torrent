@@ -263,10 +263,25 @@ fn ensure_len(body: &[u8], min: usize, _name: &str) -> Result<()> {
 /// BEP 6 Allowed-Fast set generation.
 ///
 /// Generates a deterministic set of piece indices that a peer is allowed
-/// to request even while choked. Uses IP masking to /24 + info_hash + SHA1.
+/// to request even while choked. Uses IP masking + info_hash + SHA1.
+///
+/// For IPv4: masks to /24 (matching BEP 6 spec).
+/// For IPv6: masks to /48 (matching libtorrent convention).
 pub fn allowed_fast_set(
     info_hash: &ferrite_core::Id20,
     peer_ip: std::net::Ipv4Addr,
+    num_pieces: u32,
+    count: usize,
+) -> Vec<u32> {
+    allowed_fast_set_for_ip(info_hash, std::net::IpAddr::V4(peer_ip), num_pieces, count)
+}
+
+/// BEP 6 Allowed-Fast set generation for any IP address family.
+///
+/// IPv4: /24 prefix mask. IPv6: /48 prefix mask (libtorrent convention).
+pub fn allowed_fast_set_for_ip(
+    info_hash: &ferrite_core::Id20,
+    peer_ip: std::net::IpAddr,
     num_pieces: u32,
     count: usize,
 ) -> Vec<u32> {
@@ -279,12 +294,24 @@ pub fn allowed_fast_set(
     let count = count.min(num_pieces as usize);
     let mut result = Vec::with_capacity(count);
 
-    // Mask IP to /24 network
-    let octets = peer_ip.octets();
-    let masked = [octets[0], octets[1], octets[2], 0];
+    // Build masked IP bytes based on address family
+    let masked: Vec<u8> = match peer_ip {
+        std::net::IpAddr::V4(ipv4) => {
+            // Mask to /24
+            let o = ipv4.octets();
+            vec![o[0], o[1], o[2], 0]
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            // Mask to /48: keep first 6 bytes, zero the rest
+            let o = ipv6.octets();
+            let mut masked = [0u8; 16];
+            masked[..6].copy_from_slice(&o[..6]);
+            masked.to_vec()
+        }
+    };
 
     // Initial hash: SHA1(masked_ip + info_hash)
-    let mut input = Vec::with_capacity(24);
+    let mut input = Vec::with_capacity(masked.len() + 20);
     input.extend_from_slice(&masked);
     input.extend_from_slice(info_hash.as_bytes());
     let mut hash = sha1(&input);
@@ -454,5 +481,36 @@ mod tests {
         let ih = Id20::ZERO;
         let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
         assert!(allowed_fast_set(&ih, ip, 0, 10).is_empty());
+    }
+
+    #[test]
+    fn allowed_fast_set_ipv6() {
+        use ferrite_core::Id20;
+        let ih = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let ip: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        let set = allowed_fast_set_for_ip(&ih, ip, 1000, 10);
+        assert_eq!(set.len(), 10);
+        assert!(set.iter().all(|&i| i < 1000));
+
+        // Same /48 prefix should produce same set
+        let ip2: std::net::IpAddr = "2001:db8::ffff".parse().unwrap();
+        let set2 = allowed_fast_set_for_ip(&ih, ip2, 1000, 10);
+        assert_eq!(set, set2);
+
+        // Different /48 prefix should produce different set
+        let ip3: std::net::IpAddr = "2001:db9::1".parse().unwrap();
+        let set3 = allowed_fast_set_for_ip(&ih, ip3, 1000, 10);
+        assert_ne!(set, set3);
+    }
+
+    #[test]
+    fn allowed_fast_set_ipv4_compat() {
+        // allowed_fast_set (IPv4-only) and allowed_fast_set_for_ip with V4 should match
+        use ferrite_core::Id20;
+        let ih = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let ipv4: std::net::Ipv4Addr = "192.168.1.100".parse().unwrap();
+        let set_v4 = allowed_fast_set(&ih, ipv4, 1000, 10);
+        let set_ip = allowed_fast_set_for_ip(&ih, std::net::IpAddr::V4(ipv4), 1000, 10);
+        assert_eq!(set_v4, set_ip);
     }
 }

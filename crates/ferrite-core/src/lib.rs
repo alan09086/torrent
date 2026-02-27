@@ -18,6 +18,13 @@ pub use metainfo::{FileEntry, FileInfo, InfoDict, TorrentMetaV1, torrent_from_by
 pub use peer_id::PeerId;
 pub use resume_data::{FastResumeData, UnfinishedPiece};
 
+/// Network address family for dual-stack support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AddressFamily {
+    V4,
+    V6,
+}
+
 /// Compute SHA1 hash of input bytes.
 pub fn sha1(data: &[u8]) -> Id20 {
     use sha1::Digest;

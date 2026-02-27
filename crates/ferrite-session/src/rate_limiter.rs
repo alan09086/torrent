@@ -78,12 +78,29 @@ impl TokenBucket {
     }
 }
 
-/// Check if an IP address is on a local/private network (RFC 1918, loopback, link-local).
+/// Check if an IP address is on a local/private network.
+///
+/// IPv4: loopback, private (RFC 1918), link-local (169.254.0.0/16).
+/// IPv6: loopback (::1), link-local (fe80::/10), unique-local / ULA (fc00::/7).
 #[allow(dead_code)] // consumed by torrent module (wired in later tasks)
 pub(crate) fn is_local_network(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        IpAddr::V6(ip) => ip.is_loopback(),
+        IpAddr::V6(ip) => {
+            if ip.is_loopback() {
+                return true;
+            }
+            let octets = ip.octets();
+            // fe80::/10 — link-local
+            if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
+                return true;
+            }
+            // fc00::/7 — unique-local (ULA)
+            if (octets[0] & 0xfe) == 0xfc {
+                return true;
+            }
+            false
+        }
     }
 }
 
@@ -151,5 +168,21 @@ mod tests {
         assert!(is_local_network("::1".parse().unwrap()));
         assert!(!is_local_network("8.8.8.8".parse().unwrap()));
         assert!(!is_local_network("1.2.3.4".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_local_network_detection() {
+        // Loopback
+        assert!(is_local_network("::1".parse().unwrap()));
+        // Link-local (fe80::/10)
+        assert!(is_local_network("fe80::1".parse().unwrap()));
+        assert!(is_local_network("fe80::abcd:1234".parse().unwrap()));
+        // Unique-local / ULA (fc00::/7)
+        assert!(is_local_network("fc00::1".parse().unwrap()));
+        assert!(is_local_network("fd00::1".parse().unwrap()));
+        assert!(is_local_network("fd12:3456:789a::1".parse().unwrap()));
+        // Global unicast — not local
+        assert!(!is_local_network("2001:db8::1".parse().unwrap()));
+        assert!(!is_local_network("2607:f8b0:4004:800::200e".parse().unwrap()));
     }
 }

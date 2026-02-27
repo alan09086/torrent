@@ -13,7 +13,10 @@ use std::collections::BTreeMap;
 use ferrite_bencode::{self as bencode, BencodeValue};
 use ferrite_core::Id20;
 
-use crate::compact::{encode_compact_nodes, parse_compact_nodes, CompactNodeInfo};
+use crate::compact::{
+    encode_compact_nodes, parse_compact_nodes, CompactNodeInfo,
+    encode_compact_nodes6, parse_compact_nodes6, CompactNodeInfo6,
+};
 use crate::error::{Error, Result};
 
 /// 2-byte transaction ID for matching requests to responses.
@@ -84,7 +87,12 @@ pub enum KrpcResponse {
     /// Response to ping or announce_peer — just the node ID.
     NodeId { id: Id20 },
     /// Response to find_node.
-    FindNode { id: Id20, nodes: Vec<CompactNodeInfo> },
+    FindNode {
+        id: Id20,
+        nodes: Vec<CompactNodeInfo>,
+        /// IPv6 nodes (BEP 24): 38-byte compact format.
+        nodes6: Vec<CompactNodeInfo6>,
+    },
     /// Response to get_peers — either peers or closer nodes.
     GetPeers(GetPeersResponse),
 }
@@ -94,10 +102,12 @@ pub enum KrpcResponse {
 pub struct GetPeersResponse {
     pub id: Id20,
     pub token: Option<Vec<u8>>,
-    /// Direct peer addresses (compact: 6 bytes each).
+    /// Direct peer addresses (compact: 6 bytes each for IPv4, 18 bytes for IPv6).
     pub peers: Vec<std::net::SocketAddr>,
     /// Closer nodes (compact: 26 bytes each).
     pub nodes: Vec<CompactNodeInfo>,
+    /// Closer IPv6 nodes (BEP 24, compact: 38 bytes each).
+    pub nodes6: Vec<CompactNodeInfo6>,
 }
 
 impl KrpcQuery {
@@ -263,12 +273,18 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
         KrpcResponse::NodeId { id } => {
             values.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
         }
-        KrpcResponse::FindNode { id, nodes } => {
+        KrpcResponse::FindNode { id, nodes, nodes6 } => {
             values.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
             values.insert(
                 b"nodes".to_vec(),
                 BencodeValue::Bytes(encode_compact_nodes(nodes)),
             );
+            if !nodes6.is_empty() {
+                values.insert(
+                    b"nodes6".to_vec(),
+                    BencodeValue::Bytes(encode_compact_nodes6(nodes6)),
+                );
+            }
         }
         KrpcResponse::GetPeers(gp) => {
             values.insert(b"id".to_vec(), BencodeValue::Bytes(gp.id.0.to_vec()));
@@ -279,13 +295,19 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
                 let peer_list: Vec<BencodeValue> = gp
                     .peers
                     .iter()
-                    .map(|addr| {
-                        let mut buf = [0u8; 6];
-                        if let SocketAddr::V4(v4) = addr {
+                    .map(|addr| match addr {
+                        SocketAddr::V4(v4) => {
+                            let mut buf = [0u8; 6];
                             buf[..4].copy_from_slice(&v4.ip().octets());
                             buf[4..6].copy_from_slice(&v4.port().to_be_bytes());
+                            BencodeValue::Bytes(buf.to_vec())
                         }
-                        BencodeValue::Bytes(buf.to_vec())
+                        SocketAddr::V6(v6) => {
+                            let mut buf = [0u8; 18];
+                            buf[..16].copy_from_slice(&v6.ip().octets());
+                            buf[16..18].copy_from_slice(&v6.port().to_be_bytes());
+                            BencodeValue::Bytes(buf.to_vec())
+                        }
                     })
                     .collect();
                 values.insert(b"values".to_vec(), BencodeValue::List(peer_list));
@@ -296,6 +318,12 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
                     BencodeValue::Bytes(encode_compact_nodes(&gp.nodes)),
                 );
             }
+            if !gp.nodes6.is_empty() {
+                values.insert(
+                    b"nodes6".to_vec(),
+                    BencodeValue::Bytes(encode_compact_nodes6(&gp.nodes6)),
+                );
+            }
         }
     }
     BencodeValue::Dict(values)
@@ -303,7 +331,7 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
 
 // ---- Internal decoding helpers ----
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 fn decode_query(
     method: &[u8],
@@ -366,12 +394,20 @@ fn decode_response(
         let mut peers = Vec::new();
         if let Some(BencodeValue::List(peer_list)) = values.get(&b"values"[..]) {
             for item in peer_list {
-                if let Some(data) = item.as_bytes_raw()
-                    && data.len() == 6
-                {
-                    let ip = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
-                    let port = u16::from_be_bytes([data[4], data[5]]);
-                    peers.push(SocketAddr::V4(SocketAddrV4::new(ip, port)));
+                if let Some(data) = item.as_bytes_raw() {
+                    match data.len() {
+                        6 => {
+                            let ip = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
+                            let port = u16::from_be_bytes([data[4], data[5]]);
+                            peers.push(SocketAddr::V4(SocketAddrV4::new(ip, port)));
+                        }
+                        18 => {
+                            let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&data[..16]).unwrap());
+                            let port = u16::from_be_bytes([data[16], data[17]]);
+                            peers.push(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0)));
+                        }
+                        _ => {} // skip unknown sizes
+                    }
                 }
             }
         }
@@ -382,18 +418,39 @@ fn decode_response(
             Vec::new()
         };
 
+        let nodes6 = if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
+            parse_compact_nodes6(nodes6_bytes)?
+        } else {
+            Vec::new()
+        };
+
         return Ok(KrpcResponse::GetPeers(GetPeersResponse {
             id,
             token,
             peers,
             nodes,
+            nodes6,
         }));
     }
 
-    // find_node response: has "nodes"
-    if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
-        let nodes = parse_compact_nodes(nodes_bytes)?;
-        return Ok(KrpcResponse::FindNode { id, nodes });
+    // find_node response: has "nodes" or "nodes6"
+    let has_nodes = values.contains_key(&b"nodes"[..]);
+    let has_nodes6 = values.contains_key(&b"nodes6"[..]);
+
+    if has_nodes || has_nodes6 {
+        let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+            parse_compact_nodes(nodes_bytes)?
+        } else {
+            Vec::new()
+        };
+
+        let nodes6 = if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
+            parse_compact_nodes6(nodes6_bytes)?
+        } else {
+            Vec::new()
+        };
+
+        return Ok(KrpcResponse::FindNode { id, nodes, nodes6 });
     }
 
     // Plain ID response (ping, announce_peer)
@@ -527,6 +584,7 @@ mod tests {
             body: KrpcBody::Response(KrpcResponse::FindNode {
                 id: test_id(),
                 nodes,
+                nodes6: Vec::new(),
             }),
         };
         let bytes = msg.to_bytes().unwrap();
@@ -557,6 +615,7 @@ mod tests {
                 token: Some(b"aoeusnth".to_vec()),
                 peers: vec!["192.168.1.1:6881".parse().unwrap()],
                 nodes: Vec::new(),
+                nodes6: Vec::new(),
             })),
         };
         let bytes = msg.to_bytes().unwrap();
@@ -576,6 +635,7 @@ mod tests {
                     id: target_id(),
                     addr: "10.0.0.1:6881".parse().unwrap(),
                 }],
+                nodes6: Vec::new(),
             })),
         };
         let bytes = msg.to_bytes().unwrap();
@@ -664,5 +724,71 @@ mod tests {
             .method_name(),
             "find_node"
         );
+    }
+
+    // --- IPv6 KRPC tests ---
+
+    #[test]
+    fn find_node_response_with_nodes6_round_trip() {
+        let nodes = vec![CompactNodeInfo {
+            id: target_id(),
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        }];
+        let nodes6 = vec![CompactNodeInfo6 {
+            id: target_id(),
+            addr: "[2001:db8::1]:6881".parse().unwrap(),
+        }];
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(100),
+            body: KrpcBody::Response(KrpcResponse::FindNode {
+                id: test_id(),
+                nodes,
+                nodes6,
+            }),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_peers_response_with_nodes6_round_trip() {
+        let nodes6 = vec![CompactNodeInfo6 {
+            id: target_id(),
+            addr: "[::1]:8080".parse().unwrap(),
+        }];
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(200),
+            body: KrpcBody::Response(KrpcResponse::GetPeers(GetPeersResponse {
+                id: test_id(),
+                token: Some(b"tok".to_vec()),
+                peers: Vec::new(),
+                nodes: Vec::new(),
+                nodes6,
+            })),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_peers_response_with_ipv6_peer_values() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(200),
+            body: KrpcBody::Response(KrpcResponse::GetPeers(GetPeersResponse {
+                id: test_id(),
+                token: Some(b"tok".to_vec()),
+                peers: vec![
+                    "192.168.1.1:6881".parse().unwrap(),
+                    "[2001:db8::1]:8080".parse().unwrap(),
+                ],
+                nodes: Vec::new(),
+                nodes6: Vec::new(),
+            })),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
     }
 }

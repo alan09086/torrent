@@ -140,12 +140,9 @@ pub(crate) async fn run_peer(
     }
 
     // --- Phase 4b: Send AllowedFast set (BEP 6) ---
-    if both_support_fast
-        && num_pieces > 0
-        && let std::net::IpAddr::V4(ipv4) = addr.ip()
-    {
+    if both_support_fast && num_pieces > 0 {
         let fast_set =
-            ferrite_wire::allowed_fast_set(&info_hash, ipv4, num_pieces, 10);
+            ferrite_wire::allowed_fast_set_for_ip(&info_hash, addr.ip(), num_pieces, 10);
         for index in fast_set {
             framed_write
                 .send(Message::AllowedFast(index))
@@ -451,7 +448,8 @@ async fn handle_pex_message(
     event_tx: &mpsc::Sender<PeerEvent>,
 ) -> crate::Result<()> {
     let pex = PexMessage::from_bytes(payload)?;
-    let new_peers = pex.added_peers();
+    let mut new_peers = pex.added_peers();
+    new_peers.extend(pex.added_peers6());
     if !new_peers.is_empty() {
         event_tx
             .send(PeerEvent::PexPeers { new_peers })
@@ -1262,7 +1260,7 @@ mod tests {
         let pex = PexMessage {
             added: vec![10, 0, 0, 1, 0x1F, 0x90],
             added_flags: vec![0x00],
-            dropped: Vec::new(),
+            ..Default::default()
         };
         let pex_payload = pex.to_bytes().unwrap();
 

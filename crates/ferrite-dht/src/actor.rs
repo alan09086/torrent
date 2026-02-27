@@ -9,7 +9,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 
-use ferrite_core::Id20;
+use ferrite_core::{AddressFamily, Id20};
 
 use crate::compact::CompactNodeInfo;
 use crate::error::{Error, Result};
@@ -32,6 +32,8 @@ pub struct DhtConfig {
     pub queries_per_second: usize,
     /// Timeout for individual KRPC queries.
     pub query_timeout: Duration,
+    /// Address family for this DHT instance (determines compact format and DNS filtering).
+    pub address_family: AddressFamily,
 }
 
 impl Default for DhtConfig {
@@ -46,6 +48,24 @@ impl Default for DhtConfig {
             own_id: None,
             queries_per_second: 50,
             query_timeout: Duration::from_secs(10),
+            address_family: AddressFamily::V4,
+        }
+    }
+}
+
+impl DhtConfig {
+    /// Default configuration for an IPv6 DHT instance (BEP 24).
+    pub fn default_v6() -> Self {
+        DhtConfig {
+            bind_addr: "[::]:0".parse().unwrap(),
+            bootstrap_nodes: vec![
+                "router.bittorrent.com:6881".into(),
+                "dht.libtorrent.org:25401".into(),
+            ],
+            own_id: None,
+            queries_per_second: 50,
+            query_timeout: Duration::from_secs(10),
+            address_family: AddressFamily::V6,
         }
     }
 }
@@ -153,6 +173,7 @@ impl DhtHandle {
 
 struct DhtActor {
     config: DhtConfig,
+    address_family: AddressFamily,
     socket: UdpSocket,
     rx: mpsc::Receiver<DhtCommand>,
     routing_table: RoutingTable,
@@ -203,10 +224,12 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 impl DhtActor {
     fn new(config: DhtConfig, socket: UdpSocket, rx: mpsc::Receiver<DhtCommand>) -> Self {
         let own_id = config.own_id.unwrap_or_else(generate_node_id);
-        debug!(id = %own_id, "DHT node ID");
+        let address_family = config.address_family;
+        debug!(id = %own_id, family = ?address_family, "DHT node ID");
 
         DhtActor {
             config,
+            address_family,
             socket,
             rx,
             routing_table: RoutingTable::new(own_id),
@@ -279,9 +302,16 @@ impl DhtActor {
         let own_id = *self.routing_table.own_id();
         for addr_str in &self.config.bootstrap_nodes.clone() {
             match tokio::net::lookup_host(addr_str).await {
-                Ok(mut addrs) => {
-                    if let Some(addr) = addrs.next() {
-                        debug!(node = %addr_str, resolved = %addr, "bootstrapping");
+                Ok(addrs) => {
+                    // Filter DNS results to matching address family (A for V4, AAAA for V6)
+                    let matching: Vec<SocketAddr> = addrs
+                        .filter(|a| match self.address_family {
+                            AddressFamily::V4 => a.is_ipv4(),
+                            AddressFamily::V6 => a.is_ipv6(),
+                        })
+                        .collect();
+                    for addr in matching {
+                        debug!(node = %addr_str, resolved = %addr, family = ?self.address_family, "bootstrapping");
                         self.send_find_node(addr, own_id).await;
                     }
                 }
@@ -319,7 +349,18 @@ impl DhtActor {
         }
     }
 
+    /// Check if a socket address matches this actor's address family.
+    fn matches_family(&self, addr: &SocketAddr) -> bool {
+        match self.address_family {
+            AddressFamily::V4 => addr.is_ipv4(),
+            AddressFamily::V6 => addr.is_ipv6(),
+        }
+    }
+
     async fn handle_query(&mut self, msg: &KrpcMessage, query: &KrpcQuery, addr: SocketAddr) {
+        if !self.matches_family(&addr) {
+            return; // Reject wrong address family
+        }
         let sender_id = *query.sender_id();
         self.routing_table.insert(sender_id, addr);
 
@@ -339,6 +380,7 @@ impl DhtActor {
                 KrpcResponse::FindNode {
                     id: *self.routing_table.own_id(),
                     nodes,
+                    nodes6: Vec::new(),
                 }
             }
             KrpcQuery::GetPeers { id: _, info_hash } => {
@@ -360,6 +402,7 @@ impl DhtActor {
                         token: Some(token),
                         peers: Vec::new(),
                         nodes,
+                        nodes6: Vec::new(),
                     })
                 } else {
                     KrpcResponse::GetPeers(GetPeersResponse {
@@ -367,6 +410,7 @@ impl DhtActor {
                         token: Some(token),
                         peers,
                         nodes: Vec::new(),
+                        nodes6: Vec::new(),
                     })
                 }
             }
@@ -411,6 +455,9 @@ impl DhtActor {
     }
 
     async fn handle_response(&mut self, msg: &KrpcMessage, resp: &KrpcResponse, addr: SocketAddr) {
+        if !self.matches_family(&addr) {
+            return; // Reject wrong address family
+        }
         self.stats.total_responses_received += 1;
 
         let sender_id = *resp.sender_id();
@@ -426,18 +473,32 @@ impl DhtActor {
         };
 
         match (&pending.kind, resp) {
-            (PendingQueryKind::FindNode { target: _ }, KrpcResponse::FindNode { nodes, .. }) => {
+            (PendingQueryKind::FindNode { target: _ }, KrpcResponse::FindNode { nodes, nodes6, .. }) => {
                 for node in nodes {
-                    self.routing_table.insert(node.id, node.addr);
+                    if self.matches_family(&node.addr) {
+                        self.routing_table.insert(node.id, node.addr);
+                    }
+                }
+                for node in nodes6 {
+                    if self.matches_family(&node.addr) {
+                        self.routing_table.insert(node.id, node.addr);
+                    }
                 }
             }
             (
                 PendingQueryKind::GetPeers { info_hash },
                 KrpcResponse::GetPeers(gp),
             ) => {
-                // Add discovered nodes to routing table
+                // Add discovered nodes to routing table (filter by address family)
                 for node in &gp.nodes {
-                    self.routing_table.insert(node.id, node.addr);
+                    if self.matches_family(&node.addr) {
+                        self.routing_table.insert(node.id, node.addr);
+                    }
+                }
+                for node in &gp.nodes6 {
+                    if self.matches_family(&node.addr) {
+                        self.routing_table.insert(node.id, node.addr);
+                    }
                 }
 
                 // Forward results to active lookup
@@ -454,9 +515,27 @@ impl DhtActor {
                         let _ = lookup.reply.try_send(gp.peers.clone());
                     }
 
-                    // Continue iterative lookup with new closer nodes
-                    let new_nodes: Vec<CompactNodeInfo> = gp
+                    // Collect nodes from both nodes and nodes6 that match our family
+                    let family = self.address_family;
+                    let family_match = |addr: &SocketAddr| match family {
+                        AddressFamily::V4 => addr.is_ipv4(),
+                        AddressFamily::V6 => addr.is_ipv6(),
+                    };
+                    let all_matching_nodes: Vec<CompactNodeInfo> = gp
                         .nodes
+                        .iter()
+                        .filter(|n| family_match(&n.addr))
+                        .copied()
+                        .chain(
+                            gp.nodes6
+                                .iter()
+                                .filter(|n| family_match(&n.addr))
+                                .map(|n| CompactNodeInfo { id: n.id, addr: n.addr }),
+                        )
+                        .collect();
+
+                    // Continue iterative lookup with new closer nodes
+                    let new_nodes: Vec<CompactNodeInfo> = all_matching_nodes
                         .iter()
                         .filter(|n| !lookup.queried.contains(&n.id))
                         .copied()
@@ -829,5 +908,63 @@ mod tests {
         // For now, just verify it doesn't crash on shutdown
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn dht_config_default_is_v4() {
+        let config = DhtConfig::default();
+        assert_eq!(config.address_family, AddressFamily::V4);
+        assert!(config.bind_addr.is_ipv4());
+    }
+
+    #[test]
+    fn dht_config_default_v6() {
+        let config = DhtConfig::default_v6();
+        assert_eq!(config.address_family, AddressFamily::V6);
+        assert!(config.bind_addr.is_ipv6());
+        // Should have bootstrap nodes
+        assert!(!config.bootstrap_nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dht_v6_start_and_shutdown() {
+        let config = DhtConfig {
+            bind_addr: "[::1]:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default_v6()
+        };
+        let handle = DhtHandle::start(config).await.unwrap();
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.routing_table_size, 0);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_v6_stats_on_empty_table() {
+        let config = DhtConfig {
+            bind_addr: "[::1]:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default_v6()
+        };
+        let handle = DhtHandle::start(config).await.unwrap();
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.routing_table_size, 0);
+        assert_eq!(stats.bucket_count, 1);
+        assert_eq!(stats.pending_queries, 0);
+        assert_eq!(stats.total_queries_sent, 0);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn matches_family_helper() {
+        let actor_v4 = AddressFamily::V4;
+        let actor_v6 = AddressFamily::V6;
+        let v4_addr: SocketAddr = "1.2.3.4:6881".parse().unwrap();
+        let v6_addr: SocketAddr = "[::1]:6881".parse().unwrap();
+
+        assert!(matches!(actor_v4, AddressFamily::V4) && v4_addr.is_ipv4());
+        assert!(!v6_addr.is_ipv4());
+        assert!(matches!(actor_v6, AddressFamily::V6) && v6_addr.is_ipv6());
+        assert!(!v4_addr.is_ipv6());
     }
 }

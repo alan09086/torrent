@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::compact::parse_compact_peers;
+use crate::compact::{parse_compact_peers, parse_compact_peers6};
 use crate::error::{Error, Result};
 use crate::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
 
@@ -29,6 +29,9 @@ struct RawHttpResponse {
     incomplete: Option<u32>,
     #[serde(with = "serde_bytes")]
     peers: Vec<u8>,
+    /// Compact IPv6 peers (BEP 7): 18 bytes each (16 IP + 2 port).
+    #[serde(with = "serde_bytes", default)]
+    peers6: Vec<u8>,
     #[serde(default, rename = "failure reason")]
     failure_reason: Option<String>,
     #[serde(default, rename = "warning message")]
@@ -102,7 +105,12 @@ impl HttpTracker {
             return Err(Error::TrackerError(failure));
         }
 
-        let peers = parse_compact_peers(&raw.peers)?;
+        let mut peers = parse_compact_peers(&raw.peers)?;
+
+        // Merge IPv6 peers from peers6 key (BEP 7)
+        if let Ok(peers6) = parse_compact_peers6(&raw.peers6) {
+            peers.extend(peers6);
+        }
 
         Ok(HttpAnnounceResponse {
             response: AnnounceResponse {
@@ -183,5 +191,45 @@ mod tests {
         let unreserved = b"abcXYZ019.-_~";
         let encoded = url_encode_bytes(unreserved);
         assert_eq!(encoded, "abcXYZ019.-_~");
+    }
+
+    #[test]
+    fn parse_response_with_peers6() {
+        use std::net::Ipv6Addr;
+
+        // Build a raw bencode response with both peers and peers6
+        let mut peers = Vec::new();
+        peers.extend_from_slice(&[192, 168, 1, 1, 0x1A, 0xE1]); // 192.168.1.1:6881
+
+        let ip6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let mut peers6 = Vec::new();
+        peers6.extend_from_slice(&ip6.octets());
+        peers6.extend_from_slice(&8080u16.to_be_bytes());
+
+        let raw = RawHttpResponse {
+            interval: 1800,
+            complete: Some(10),
+            incomplete: Some(5),
+            peers,
+            peers6,
+            failure_reason: None,
+            warning_message: None,
+            tracker_id: None,
+        };
+
+        // Manually parse as the announce method would
+        let mut result = parse_compact_peers(&raw.peers).unwrap();
+        if !raw.peers6.is_empty() {
+            if let Ok(v6) = parse_compact_peers6(&raw.peers6) {
+                result.extend(v6);
+            }
+        }
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].to_string(), "192.168.1.1:6881");
+        assert_eq!(
+            result[1],
+            "[2001:db8::1]:8080".parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 }

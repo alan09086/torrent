@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use ferrite_core::{Id20, Lengths, Magnet, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
-use ferrite_dht::DhtHandle;
+use ferrite_dht::{DhtConfig, DhtHandle};
 use ferrite_storage::TorrentStorage;
 
 use crate::alert::{post_alert, Alert, AlertCategory, AlertKind, AlertStream};
@@ -170,6 +170,23 @@ impl SessionHandle {
             (None, None)
         };
 
+        // IPv6 uTP socket (dual-stack)
+        let (utp_socket_v6, utp_listener_v6) = if config.enable_utp && config.enable_ipv6 {
+            let utp_config_v6 = ferrite_utp::UtpConfig {
+                bind_addr: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)),
+                max_connections: 256,
+            };
+            match ferrite_utp::UtpSocket::bind(utp_config_v6).await {
+                Ok((socket, listener)) => (Some(socket), Some(listener)),
+                Err(e) => {
+                    debug!("uTP IPv6 bind failed (non-fatal): {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         // NAT port mapping (PCP / NAT-PMP / UPnP)
         let (nat, nat_events_rx) = if config.enable_upnp || config.enable_natpmp {
             let nat_config = ferrite_nat::NatConfig {
@@ -189,10 +206,42 @@ impl SessionHandle {
             (None, None)
         };
 
+        // Start DHT instances
+        let dht_v4 = if config.enable_dht {
+            match DhtHandle::start(DhtConfig::default()).await {
+                Ok(handle) => {
+                    info!("DHT v4 started");
+                    Some(handle)
+                }
+                Err(e) => {
+                    warn!("DHT v4 start failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let dht_v6 = if config.enable_dht && config.enable_ipv6 {
+            match DhtHandle::start(DhtConfig::default_v6()).await {
+                Ok(handle) => {
+                    info!("DHT v6 started");
+                    Some(handle)
+                }
+                Err(e) => {
+                    debug!("DHT v6 start failed (non-fatal): {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
-            dht: None,
+            dht_v4,
+            dht_v6,
             lsd,
             lsd_peers_rx,
             cmd_rx,
@@ -202,6 +251,8 @@ impl SessionHandle {
             global_download_bucket,
             utp_socket,
             utp_listener,
+            utp_socket_v6,
+            utp_listener_v6,
             nat,
             nat_events_rx,
         };
@@ -464,7 +515,8 @@ impl SessionHandle {
 struct SessionActor {
     config: SessionConfig,
     torrents: HashMap<Id20, TorrentEntry>,
-    dht: Option<DhtHandle>,
+    dht_v4: Option<DhtHandle>,
+    dht_v6: Option<DhtHandle>,
     lsd: Option<crate::lsd::LsdHandle>,
     lsd_peers_rx: Option<mpsc::Receiver<(Id20, SocketAddr)>>,
     cmd_rx: mpsc::Receiver<SessionCommand>,
@@ -474,6 +526,8 @@ struct SessionActor {
     global_download_bucket: SharedBucket,
     utp_socket: Option<ferrite_utp::UtpSocket>,
     utp_listener: Option<ferrite_utp::UtpListener>,
+    utp_socket_v6: Option<ferrite_utp::UtpSocket>,
+    utp_listener_v6: Option<ferrite_utp::UtpListener>,
     nat: Option<ferrite_nat::NatHandle>,
     nat_events_rx: Option<mpsc::Receiver<ferrite_nat::NatEvent>>,
 }
@@ -586,8 +640,14 @@ impl SessionActor {
                         let _ = entry.handle.add_peers(vec![peer_addr]).await;
                     }
                 }
-                // uTP inbound connections
+                // uTP inbound connections (IPv4)
                 result = accept_utp(&mut self.utp_listener) => {
+                    if let Ok((stream, addr)) = result {
+                        self.handle_utp_inbound(stream, addr);
+                    }
+                }
+                // uTP inbound connections (IPv6)
+                result = accept_utp(&mut self.utp_listener_v6) => {
                     if let Ok((stream, addr)) = result {
                         self.handle_utp_inbound(stream, addr);
                     }
@@ -725,13 +785,15 @@ impl SessionActor {
             meta.clone(),
             storage,
             torrent_config,
-            self.dht.clone(),
+            self.dht_v4.clone(),
+            self.dht_v6.clone(),
             global_up,
             global_down,
             slot_tuner,
             self.alert_tx.clone(),
             Arc::clone(&self.alert_mask),
             self.utp_socket.clone(),
+            self.utp_socket_v6.clone(),
         )
         .await?;
 
@@ -780,13 +842,15 @@ impl SessionActor {
         let handle = TorrentHandle::from_magnet(
             magnet,
             config,
-            self.dht.clone(),
+            self.dht_v4.clone(),
+            self.dht_v6.clone(),
             global_up,
             global_down,
             slot_tuner,
             self.alert_tx.clone(),
             Arc::clone(&self.alert_mask),
             self.utp_socket.clone(),
+            self.utp_socket_v6.clone(),
         )
         .await?;
         self.torrents.insert(
@@ -914,7 +978,7 @@ impl SessionActor {
             active_torrents: self.torrents.len(),
             total_downloaded,
             total_uploaded,
-            dht_nodes: 0, // DHT not yet wired
+            dht_nodes: self.dht_v4.is_some() as usize + self.dht_v6.is_some() as usize,
         }
     }
 
@@ -1181,6 +1245,12 @@ impl SessionActor {
             debug!(%info_hash, "shutting down torrent");
             let _ = entry.handle.shutdown().await;
         }
+        if let Some(ref dht) = self.dht_v4 {
+            let _ = dht.shutdown().await;
+        }
+        if let Some(ref dht) = self.dht_v6 {
+            let _ = dht.shutdown().await;
+        }
         if let Some(ref nat) = self.nat {
             nat.shutdown().await;
         }
@@ -1191,6 +1261,11 @@ impl SessionActor {
             && let Err(e) = socket.shutdown().await
         {
             debug!(error = %e, "uTP socket shutdown error");
+        }
+        if let Some(ref socket) = self.utp_socket_v6
+            && let Err(e) = socket.shutdown().await
+        {
+            debug!(error = %e, "uTP v6 socket shutdown error");
         }
     }
 }
@@ -1308,6 +1383,7 @@ mod tests {
             enable_utp: false,
             enable_upnp: false,
             enable_natpmp: false,
+            enable_ipv6: false,
         }
     }
 

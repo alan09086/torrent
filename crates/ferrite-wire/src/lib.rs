@@ -13,4 +13,4 @@ pub use codec::MessageCodec;
 pub use error::{Error, Result};
 pub use extended::{ExtHandshake, ExtMessage, MetadataMessage, MetadataMessageType};
 pub use handshake::Handshake;
-pub use message::{allowed_fast_set, Message};
+pub use message::{allowed_fast_set, allowed_fast_set_for_ip, Message};

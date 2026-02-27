@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
-use crate::compact::parse_compact_peers;
+use crate::compact::{parse_compact_peers, parse_compact_peers6};
 use crate::error::{Error, Result};
 use crate::{AnnounceRequest, AnnounceResponse};
 
@@ -152,6 +152,56 @@ impl UdpTracker {
         })
     }
 
+    /// Parse a UDP announce response where the tracker address is IPv6.
+    ///
+    /// Per BEP 15, the compact peer format matches the address family of the
+    /// tracker endpoint: 18-byte entries (16 IP + 2 port) for IPv6 trackers.
+    pub fn parse_announce_response_v6(
+        data: &[u8],
+        expected_transaction_id: u32,
+    ) -> Result<UdpAnnounceResponse> {
+        if data.len() < 20 {
+            return Err(Error::UdpProtocol(format!(
+                "announce response too short: {} bytes",
+                data.len()
+            )));
+        }
+
+        let action = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        if action != ACTION_ANNOUNCE {
+            if action == 3 && data.len() > 8 {
+                let msg = String::from_utf8_lossy(&data[8..]);
+                return Err(Error::TrackerError(msg.into_owned()));
+            }
+            return Err(Error::UdpProtocol(format!(
+                "expected action 1 (announce), got {action}"
+            )));
+        }
+
+        let transaction_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        if transaction_id != expected_transaction_id {
+            return Err(Error::UdpProtocol(format!(
+                "transaction ID mismatch: expected {expected_transaction_id}, got {transaction_id}"
+            )));
+        }
+
+        let interval = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+        let leechers = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
+        let seeders = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+
+        let peers = parse_compact_peers6(&data[20..])?;
+
+        Ok(UdpAnnounceResponse {
+            response: AnnounceResponse {
+                interval,
+                seeders: Some(seeders),
+                leechers: Some(leechers),
+                peers,
+            },
+            transaction_id,
+        })
+    }
+
     /// Perform a full UDP announce (connect + announce).
     pub async fn announce(
         &self,
@@ -162,7 +212,8 @@ impl UdpTracker {
             .parse()
             .map_err(|_| Error::InvalidUrl(format!("invalid socket address: {tracker_addr}")))?;
 
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let socket = UdpSocket::bind(bind_addr).await?;
         socket.connect(addr).await?;
 
         // Step 1: Connect
@@ -188,7 +239,11 @@ impl UdpTracker {
             .map_err(|_| Error::Timeout)?
             ?;
 
-        Self::parse_announce_response(&buf[..n], txn_id2)
+        if addr.is_ipv6() {
+            Self::parse_announce_response_v6(&buf[..n], txn_id2)
+        } else {
+            Self::parse_announce_response(&buf[..n], txn_id2)
+        }
     }
 }
 
@@ -311,5 +366,28 @@ mod tests {
     #[test]
     fn connect_response_too_short() {
         assert!(UdpTracker::parse_connect_response(&[0u8; 10], 0).is_err());
+    }
+
+    #[test]
+    fn announce_response_v6_parse() {
+        use std::net::Ipv6Addr;
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&1u32.to_be_bytes()); // action = announce
+        resp.extend_from_slice(&42u32.to_be_bytes()); // txn id
+        resp.extend_from_slice(&1800u32.to_be_bytes()); // interval
+        resp.extend_from_slice(&5u32.to_be_bytes()); // leechers
+        resp.extend_from_slice(&10u32.to_be_bytes()); // seeders
+        // One IPv6 peer: [2001:db8::1]:6881
+        let ip: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        resp.extend_from_slice(&ip.octets());
+        resp.extend_from_slice(&6881u16.to_be_bytes());
+
+        let parsed = UdpTracker::parse_announce_response_v6(&resp, 42).unwrap();
+        assert_eq!(parsed.response.interval, 1800);
+        assert_eq!(parsed.response.peers.len(), 1);
+        assert_eq!(
+            parsed.response.peers[0],
+            "[2001:db8::1]:6881".parse::<SocketAddr>().unwrap()
+        );
     }
 }

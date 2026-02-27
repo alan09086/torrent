@@ -2,12 +2,15 @@
 //!
 //! Supports HTTP and UDP tracker protocols for announce and scrape.
 
-mod compact;
+pub mod compact;
 mod error;
 mod http;
 mod udp;
 
-pub use compact::parse_compact_peers;
+pub use compact::{
+    parse_compact_peers, encode_compact_peers,
+    parse_compact_peers6, encode_compact_peers6,
+};
 pub use error::{Error, Result};
 pub use http::{HttpTracker, HttpAnnounceResponse};
 pub use udp::{UdpTracker, UdpAnnounceResponse};

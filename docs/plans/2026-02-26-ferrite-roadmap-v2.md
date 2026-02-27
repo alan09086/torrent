@@ -2,9 +2,9 @@
 
 **Date:** 2026-02-26
 **Target:** Complete libtorrent-rasterbar feature parity for magnetor (qBittorrent replacement)
-**Current State:** M1-M10 complete, v0.11.0, 9 crates, 355 tests
+**Current State:** M1-M13 complete, v0.13.0, 8 crates, 390 tests
 
-## Completed (M1-M10)
+## Completed (M1-M13)
 
 | # | Milestone | Status |
 |---|-----------|--------|
@@ -18,6 +18,9 @@
 | M8a-c | ferrite-session — Tracker/DHT integration, session manager, BEP 6/14 | Done |
 | M9 | ferrite-session — Seeding & upload pipeline | Done |
 | M10a-e | ferrite — Public facade, ClientBuilder, prelude, unified error | Done |
+| M11 | Resume data & session persistence (FastResumeData, bencode format) | Done |
+| M12 | Selective file download (FilePriority, wanted_pieces, skip allocation) | Done |
+| M13 | End-game mode (duplicate requests, cancel on arrival, strict mode) | Done |
 
 ### BEPs Implemented
 BEP 3, 5, 6, 9, 10, 11, 12, 14, 15, 27
@@ -86,9 +89,9 @@ Accelerate completion of the last few pieces.
 **Tests:** ~5 (activation threshold, duplicate cancel, hash failure recovery,
 deactivation)
 
-### M14: Bandwidth Limiter
+### M14: Bandwidth Limiter + Upload Slot Tuning
 
-Global and per-torrent rate control.
+Global and per-torrent rate control with automatic upload optimization.
 
 **Scope:**
 - Token bucket rate limiter (upload and download, separate buckets)
@@ -101,10 +104,17 @@ Global and per-torrent rate control.
 - Rate limiter checked before reading/writing socket data
 - Smooth distribution across peers (no single peer starves)
 - Limiter runs in session select! loop tick (e.g., every 100ms refill)
+- **Automatic upload slot optimization:** dynamically adjust the number of
+  unchoked upload slots based on total upload bandwidth capacity. Measure
+  per-slot throughput; if adding a slot doesn't improve aggregate upload,
+  remove it. Converges to the optimal number of simultaneous uploads.
+- `SessionConfig::auto_upload_slots` (default: true)
+- `SessionConfig::auto_upload_slots_min` / `auto_upload_slots_max` bounds
 
 **Crates:** ferrite-session
-**Tests:** ~6 (token bucket logic, global limit, per-torrent limit, peer
-class exemption, refill timing)
+**Tests:** ~8 (token bucket logic, global limit, per-torrent limit, peer
+class exemption, refill timing, auto-slot increase, auto-slot decrease,
+slot bounds enforcement)
 
 ### M15: Alerts / Events System
 
@@ -291,9 +301,9 @@ Download pieces from HTTP servers.
 **Tests:** ~8 (BEP 19 range calculation, BEP 17 file URL, multi-file
 boundary, retry backoff, piece picker integration)
 
-### M23: Super Seeding (BEP 16) + Upload-Only (BEP 21)
+### M23: Super Seeding (BEP 16) + Upload-Only (BEP 21) + Have Optimization
 
-Optimized initial seeding and upload-only mode.
+Optimized initial seeding, upload-only mode, and have message batching.
 
 **Scope:**
 - **Super seeding (BEP 16):**
@@ -307,10 +317,20 @@ Optimized initial seeding and upload-only mode.
   - Don't request pieces from upload-only peers
   - Advertise upload-only when in seeding state
   - Peer deprioritization for choking decisions
+- **Delayed/batched have messages:**
+  - Accumulate `Have` messages over a short window (e.g., 500ms) and send
+    in batch to reduce per-message overhead in large swarms
+  - Skip sending `Have` to peers that already have the piece (check peer
+    bitfield before sending)
+  - `SessionConfig::have_send_delay_ms` (default: 0, disabled; set >0 to
+    enable batching)
+  - When many pieces complete at once (e.g., fast connection), send
+    `Bitfield` instead of individual `Have` messages if more efficient
 
 **Crates:** ferrite-session, ferrite-wire
-**Tests:** ~6 (super seed piece tracking, selective have, upload-only
-message, choker behavior)
+**Tests:** ~8 (super seed piece tracking, selective have, upload-only
+message, choker behavior, have batching, skip redundant have, bitfield
+fallback)
 
 ### M24: Tracker Scraping + Enhanced Tracker
 
@@ -353,9 +373,9 @@ Detect and ban peers sending corrupt data.
 **Tests:** ~5 (hashfail tracking, ban threshold, parole mode, persistent ban
 list, manual ban/unban)
 
-### M26: Async Disk I/O + mmap Storage
+### M26: Async Disk I/O + mmap Storage + Disk Cache
 
-High-performance storage backend.
+High-performance storage backend with optional user-space caching.
 
 **Scope:**
 - Disk thread pool: configurable number of I/O threads (default: 4)
@@ -363,17 +383,27 @@ High-performance storage backend.
   submit via channel, completion via callback/oneshot
 - mmap-based storage backend for 64-bit systems:
   - Memory-mapped file regions
-  - Rely on kernel page cache (no user-space cache)
+  - Rely on kernel page cache (no user-space cache needed in mmap mode)
   - Automatic flush on piece completion
 - Fallback: traditional pread/pwrite for 32-bit or constrained systems
 - Sparse file allocation (default) vs full pre-allocation mode
 - Write coalescing: batch adjacent blocks before flush
 - Read-ahead: pre-read blocks likely needed soon
-- `SessionConfig::disk_io_threads`, `storage_mode` (sparse/full/mmap)
+- **Optional user-space disk read cache** (for pread/pwrite mode):
+  - ARC (Adaptive Replacement Cache) algorithm — balances recency and
+    frequency, outperforms pure LRU for mixed workloads
+  - Configurable cache size (`SessionConfig::disk_cache_size`, default: 64 MiB)
+  - Page-aligned buffers to minimize copies
+  - Cache bypassed in mmap mode (kernel page cache serves this role)
+  - Write-back cache for upload: cache recently-read pieces being served
+    to multiple peers (avoids re-reading same piece from disk)
+- `SessionConfig::disk_io_threads`, `storage_mode` (sparse/full/mmap),
+  `disk_cache_size`, `disk_cache_algorithm` (arc/lru)
 
 **Crates:** ferrite-storage
-**Tests:** ~10 (thread pool lifecycle, async read/write, mmap backend,
-sparse allocation, write coalescing, concurrent access)
+**Tests:** ~12 (thread pool lifecycle, async read/write, mmap backend,
+sparse allocation, write coalescing, concurrent access, ARC eviction
+policy, cache hit/miss, cache bypass in mmap mode)
 
 ### M27: Multi-threaded Hashing
 
@@ -393,9 +423,9 @@ Parallel piece verification for fast startup and checking.
 **Tests:** ~5 (parallel hash correctness, progress reporting, priority
 ordering, thread count config)
 
-### M28: Advanced Piece Picker
+### M28: Advanced Piece Picker + Streaming
 
-Block-level picking and priority modes.
+Block-level picking, priority modes, dynamic request queues, and file streaming.
 
 **Scope:**
 - Block-level picking: download different blocks of the same piece from
@@ -408,10 +438,31 @@ Block-level picking and priority modes.
 - `whole_pieces_threshold`: when a fast peer is detected, request whole
   pieces from them to reduce partial pieces
 - Piece request coalescing: batch adjacent blocks for efficient I/O
+- **Dynamic request queue sizing:** adjust per-peer request pipeline depth
+  based on download rate and round-trip latency. Fast peers with low
+  latency get deeper queues (more in-flight requests); slow or
+  high-latency peers get shorter queues to avoid wasted bandwidth on
+  timeout. Measured via request-to-piece-delivery timing.
+  `SessionConfig::max_request_queue_depth` (default: 250)
+- **File streaming primitive** (`TorrentHandle::open_file(file_index) -> FileStream`):
+  - `FileStream` implements `AsyncRead + AsyncSeek` over torrent file data
+  - Reads block until backing pieces are downloaded (via tokio Notify/watch)
+  - Seeking updates a "streaming cursor" — piece picker prioritizes pieces
+    in a window around the cursor position (e.g., next 8 pieces)
+  - Streaming priority coexists with rarest-first — only the streaming
+    window gets elevated priority, rest of the torrent uses normal strategy
+  - Multiple concurrent `FileStream` instances supported (different files)
+  - Graceful degradation: if stream reads faster than download, it blocks
+    transparently (no busy-spin or error)
+  - `StreamingConfig::readahead_pieces` (default: 8) — how far ahead of
+    the cursor to prioritize
 
-**Crates:** ferrite-session
-**Tests:** ~8 (block-level from multiple peers, priority pieces, sequential
-mode, initial threshold, whole piece threshold, time-critical)
+**Crates:** ferrite-session, ferrite-storage
+**Tests:** ~14 (block-level from multiple peers, priority pieces, sequential
+mode, initial threshold, whole piece threshold, time-critical, dynamic
+queue depth adjustment, queue depth bounds, FileStream sequential read,
+FileStream seek + priority update, FileStream blocks on missing piece,
+concurrent streams, readahead window)
 
 ---
 
@@ -484,9 +535,9 @@ Centralized typed configuration with runtime changes.
 **Tests:** ~6 (default settings, presets, runtime change, validation,
 serialization round-trip, alert)
 
-### M32: Share Mode + Remaining Extensions
+### M32: Share Mode + Remaining Extensions + Plugin Interface
 
-Final small features for completeness.
+Final features for completeness and extensibility.
 
 **Scope:**
 - **Share mode:** join swarm and upload without downloading (seed without
@@ -498,10 +549,20 @@ Final small features for completeness.
 - **Peer source tracking:** identify how each peer was discovered
   (tracker, DHT, PEX, LSD, incoming, resume data)
 - **Move storage:** relocate torrent files to new directory while active
+- **Extension plugin interface:** trait-based system for custom BitTorrent
+  protocol extensions, allowing third-party code to hook into the wire
+  protocol without modifying ferrite internals.
+  - `ExtensionPlugin` trait: `on_handshake()`, `on_message()`,
+    `on_peer_connected()`, `on_peer_disconnected()`, `extension_name()`
+  - Plugins register via `ClientBuilder::add_extension(Box<dyn ExtensionPlugin>)`
+  - Extension negotiation integrated with BEP 10 extended handshake
+  - Plugin receives raw extension messages and can send custom messages
+  - Plugins run in the peer task context (no separate runtime)
 
-**Crates:** ferrite-session
-**Tests:** ~6 (share mode relay, BEP 40 ordering, per-class limits, peer
-source tracking, move storage)
+**Crates:** ferrite-session, ferrite-wire, ferrite (facade re-exports)
+**Tests:** ~10 (share mode relay, BEP 40 ordering, per-class limits, peer
+source tracking, move storage, plugin registration, plugin handshake
+negotiation, plugin message dispatch, plugin lifecycle)
 
 ---
 
@@ -571,16 +632,16 @@ conflict detection)
 
 | Phase | Milestones | New Crates | Estimated Tests |
 |-------|-----------|------------|-----------------|
-| 1: Desktop Essentials | M11-M16 | — | ~43 |
+| 1: Desktop Essentials | M11-M16 | — | ~45 |
 | 2: Transport & Security | M17-M20 | ferrite-utp, ferrite-nat | ~37 |
-| 3: Protocol Extensions | M21-M24 | — | ~28 |
-| 4: Performance | M25-M28 | — | ~28 |
-| 5: Network & Tools | M29-M32 | — | ~28 |
+| 3: Protocol Extensions | M21-M24 | — | ~30 |
+| 4: Performance | M25-M28 | — | ~36 |
+| 5: Network & Tools | M29-M32 | — | ~32 |
 | 6: BitTorrent v2 | M33-M35 | — | ~28 |
-| **Total** | **M11-M35 (25 milestones)** | **2 new** | **~192** |
+| **Total** | **M11-M35 (25 milestones)** | **2 new** | **~208** |
 
-**Projected final state:** 11 crates, ~547 tests, full libtorrent-rasterbar
-feature parity, ready for magnetor.
+**Projected final state:** 11 crates, ~563 tests, full libtorrent-rasterbar
+feature parity (plus rqbit streaming parity), ready for magnetor.
 
 ### BEP Coverage After M35
 
@@ -615,15 +676,21 @@ feature parity, ready for magnetor.
 | Selective file download | M12 |
 | End-game mode | M13 |
 | Bandwidth limiter + peer classes | M14 |
+| Automatic upload slot optimization | M14 |
 | Alerts / events system | M15 |
 | Queue management + auto-manage | M16 |
 | Connection encryption (MSE/PE) | M17 |
 | UPnP / NAT-PMP / PCP | M20 |
+| Delayed/batched have messages | M23 |
 | Smart banning + parole mode | M25 |
 | Async disk I/O + mmap | M26 |
+| Disk read cache (ARC algorithm) | M26 |
 | Multi-threaded hashing | M27 |
 | Advanced piece picker (block-level) | M28 |
+| Dynamic request queue sizing | M28 |
+| File streaming (AsyncRead+AsyncSeek) | M28 |
 | IP filtering + proxy (SOCKS5/HTTP) | M29 |
 | Torrent creation (.torrent writer) | M30 |
 | Settings pack + presets | M31 |
 | Share mode | M32 |
+| Extension plugin interface | M32 |

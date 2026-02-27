@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.22.0 — 2026-02-27
+
+Full dual-stack IPv6 support — BEP 7, BEP 24, BEP 11 IPv6 extensions. Eleven crates, 566 tests.
+
+### M21: IPv6 Support (BEP 7, 24)
+
+### Added
+- IPv6 compact peer format (18-byte: 16 IP + 2 port) — `parse_compact_peers6()` / `encode_compact_peers6()`
+- IPv6 compact node format (38-byte: 20 ID + 16 IP + 2 port) — `CompactNodeInfo6` with encode/decode
+- `encode_compact_peers()` for IPv4 (previously only parse existed)
+- PEX IPv6 fields: `added6`, `added_flags6`, `dropped6` on `PexMessage` (BEP 11 extension)
+- HTTP tracker `peers6` key parsing (BEP 7)
+- KRPC `nodes6` field support in `GetPeersResponse` and `FindNode` responses (BEP 24)
+- `AddressFamily` enum (`V4`, `V6`) in ferrite-core
+- `DhtConfig::default_v6()` — IPv6 DHT bootstrap configuration (AAAA records)
+- Dual DHT instances: separate `DhtActor` for IPv4 and IPv6, merged results
+- DNS result filtering by address family in DHT bootstrap
+- Routing table address family enforcement — rejects wrong-family addresses
+- `enable_ipv6` config field on `SessionConfig` (default: `true`)
+- Dual-stack TCP listeners: `[::]:port` with fallback to separate v4+v6 binds
+- Dual-stack uTP sockets: separate v4 and v6 `UtpSocket` instances
+- `is_local_network()` extended for IPv6: `::1`, `fe80::/10`, `fc00::/7`
+- `allowed_fast_set_for_ip()` — IPv6 support with /48 prefix mask
+- `ClientBuilder::enable_ipv6()` builder method
+- Resume data `peers6` field codec wiring
+- Facade re-exports: `AddressFamily`, `CompactNodeInfo6`, compact peers6/nodes6 codecs
+- 32 new tests across tracker, dht, wire, session, and facade crates
+
+### Design Decisions
+- Two separate DhtActors (v4 and v6) rather than a single merged actor
+- NAT stays IPv4-only (IPv6 doesn't need NAT traversal)
+- Same port for both address families
+- IPv6 DHT bootstraps from `router.bittorrent.com` (AAAA) and `dht.libtorrent.org:25401`
+
 ## 0.21.0 — 2026-02-27
 
 Automatic NAT port mapping — PCP, NAT-PMP, UPnP IGD. Eleven crates, 534 tests.

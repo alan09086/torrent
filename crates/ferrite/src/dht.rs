@@ -7,8 +7,9 @@ pub use ferrite_dht::{
     DhtHandle,
     DhtConfig,
     DhtStats,
-    // Compact node encoding (26-byte format)
+    // Compact node encoding (26-byte IPv4 / 38-byte IPv6)
     CompactNodeInfo,
+    CompactNodeInfo6,
     // Routing table
     RoutingTable,
     // KRPC protocol messages
@@ -24,6 +25,9 @@ pub use ferrite_dht::{
 };
 
 // Re-export items from public sub-modules
-pub use ferrite_dht::compact::{parse_compact_nodes, encode_compact_nodes};
+pub use ferrite_dht::compact::{
+    parse_compact_nodes, encode_compact_nodes,
+    parse_compact_nodes6, encode_compact_nodes6,
+};
 pub use ferrite_dht::peer_store::PeerStore;
 pub use ferrite_dht::routing_table::K;
