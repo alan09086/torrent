@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_neg_one() -> i64 {
+    -1
+}
+
 /// A partial piece that was in progress when the torrent was paused/stopped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnfinishedPiece {
@@ -98,6 +102,11 @@ pub struct FastResumeData {
     #[serde(default)]
     pub auto_managed: i64,
 
+    /// Queue position (-1 = not queued).
+    #[serde(rename = "queue_position")]
+    #[serde(default = "default_neg_one")]
+    pub queue_position: i64,
+
     /// Whether sequential download is enabled.
     #[serde(rename = "sequential_download")]
     #[serde(default)]
@@ -185,6 +194,7 @@ impl FastResumeData {
             last_upload: 0,
             paused: 0,
             auto_managed: 0,
+            queue_position: -1,
             sequential_download: 0,
             seed_mode: 0,
             trackers: Vec::new(),
@@ -307,6 +317,12 @@ mod tests {
         assert_eq!(resume, decoded);
         assert!(decoded.info.is_some());
         assert_eq!(decoded.info.unwrap().len(), resume.info.unwrap().len());
+    }
+
+    #[test]
+    fn resume_data_queue_position_default() {
+        let rd = FastResumeData::new(vec![0; 20], "test".into(), "/tmp".into());
+        assert_eq!(rd.queue_position, -1);
     }
 
     #[test]

@@ -851,7 +851,12 @@ impl SessionActor {
             .torrents
             .get(&info_hash)
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
-        entry.handle.save_resume_data().await
+        let mut resume = entry.handle.save_resume_data().await?;
+        // Patch in queue state from SessionActor's TorrentEntry (the
+        // TorrentHandle doesn't know about queue position / auto-managed).
+        resume.queue_position = entry.queue_position as i64;
+        resume.auto_managed = if entry.auto_managed { 1 } else { 0 };
+        Ok(resume)
     }
 
     async fn handle_save_session_state(
