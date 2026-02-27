@@ -35,6 +35,10 @@ pub enum Error {
     #[error("session: {0}")]
     Session(#[from] ferrite_session::Error),
 
+    /// uTP transport error.
+    #[error("utp: {0}")]
+    Utp(#[from] ferrite_utp::Error),
+
     /// Raw I/O error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
