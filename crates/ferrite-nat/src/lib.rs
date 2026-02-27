@@ -6,5 +6,7 @@
 
 pub mod error;
 pub mod gateway;
+pub mod natpmp;
+pub mod pcp;
 
 pub use error::{Error, Result};
