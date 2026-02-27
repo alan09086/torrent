@@ -97,6 +97,54 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum number of concurrent auto-managed downloading torrents (-1 = unlimited).
+    pub fn active_downloads(mut self, n: i32) -> Self {
+        self.config.active_downloads = n;
+        self
+    }
+
+    /// Set the maximum number of concurrent auto-managed seeding torrents (-1 = unlimited).
+    pub fn active_seeds(mut self, n: i32) -> Self {
+        self.config.active_seeds = n;
+        self
+    }
+
+    /// Set the hard cap on all active auto-managed torrents (-1 = unlimited).
+    pub fn active_limit(mut self, n: i32) -> Self {
+        self.config.active_limit = n;
+        self
+    }
+
+    /// Set the maximum number of concurrent hash-check operations.
+    pub fn active_checking(mut self, n: i32) -> Self {
+        self.config.active_checking = n;
+        self
+    }
+
+    /// Set whether inactive torrents are exempt from download/seed limits.
+    pub fn dont_count_slow_torrents(mut self, v: bool) -> Self {
+        self.config.dont_count_slow_torrents = v;
+        self
+    }
+
+    /// Set the interval (seconds) between queue evaluations.
+    pub fn auto_manage_interval(mut self, secs: u64) -> Self {
+        self.config.auto_manage_interval = secs;
+        self
+    }
+
+    /// Set the startup grace period (seconds) where a torrent is considered active regardless of speed.
+    pub fn auto_manage_startup(mut self, secs: u64) -> Self {
+        self.config.auto_manage_startup = secs;
+        self
+    }
+
+    /// Set whether seeding slots are allocated before download slots.
+    pub fn auto_manage_prefer_seeds(mut self, v: bool) -> Self {
+        self.config.auto_manage_prefer_seeds = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config

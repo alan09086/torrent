@@ -322,6 +322,28 @@ mod tests {
     }
 
     #[test]
+    fn client_builder_queue_config() {
+        let builder = crate::ClientBuilder::new()
+            .active_downloads(5)
+            .active_seeds(10)
+            .active_limit(100)
+            .active_checking(2)
+            .dont_count_slow_torrents(false)
+            .auto_manage_interval(60)
+            .auto_manage_startup(120)
+            .auto_manage_prefer_seeds(true);
+        let config = builder.into_config();
+        assert_eq!(config.active_downloads, 5);
+        assert_eq!(config.active_seeds, 10);
+        assert_eq!(config.active_limit, 100);
+        assert_eq!(config.active_checking, 2);
+        assert!(!config.dont_count_slow_torrents);
+        assert_eq!(config.auto_manage_interval, 60);
+        assert_eq!(config.auto_manage_startup, 120);
+        assert!(config.auto_manage_prefer_seeds);
+    }
+
+    #[test]
     fn resume_data_in_prelude() {
         use crate::prelude::*;
         let _rd = FastResumeData::new(
