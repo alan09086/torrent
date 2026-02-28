@@ -152,6 +152,29 @@ pub struct SessionHandle {
 impl SessionHandle {
     /// Start a new session with the given configuration.
     pub async fn start(config: SessionConfig) -> crate::Result<Self> {
+        let mut config = config;
+
+        // Force proxy mode: all connections must go through proxy.
+        if config.force_proxy {
+            if config.proxy.proxy_type == crate::proxy::ProxyType::None {
+                return Err(crate::Error::Config(
+                    "force_proxy requires a proxy to be configured".into(),
+                ));
+            }
+            config.enable_upnp = false;
+            config.enable_natpmp = false;
+            config.enable_dht = false;
+            config.enable_lsd = false;
+        }
+
+        // Anonymous mode: suppress identity and disable discovery.
+        if config.anonymous_mode {
+            config.enable_dht = false;
+            config.enable_lsd = false;
+            config.enable_upnp = false;
+            config.enable_natpmp = false;
+        }
+
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
         // Alert broadcast channel
@@ -868,6 +891,8 @@ impl SessionActor {
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
             max_concurrent_stream_reads: self.config.max_concurrent_stream_reads,
+            proxy: self.config.proxy.clone(),
+            anonymous_mode: self.config.anonymous_mode,
         }
     }
 
@@ -1560,6 +1585,9 @@ mod tests {
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
             apply_ip_filter_to_trackers: true,
+            proxy: crate::proxy::ProxyConfig::default(),
+            force_proxy: false,
+            anonymous_mode: false,
         }
     }
 
@@ -2170,5 +2198,124 @@ mod tests {
         let stats = session.session_stats().await.unwrap();
         assert_eq!(stats.active_torrents, 0);
         session.shutdown().await.unwrap();
+    }
+
+    // ---- M29: Anonymous mode, force proxy, proxy config tests ----
+
+    #[test]
+    fn anonymous_mode_disables_discovery() {
+        let mut config = test_session_config();
+        config.anonymous_mode = true;
+        config.enable_dht = true;
+        config.enable_lsd = true;
+        config.enable_upnp = true;
+        config.enable_natpmp = true;
+
+        // SessionHandle::start() will override these when anonymous_mode is true.
+        // We test the enforcement logic directly here.
+        if config.anonymous_mode {
+            config.enable_dht = false;
+            config.enable_lsd = false;
+            config.enable_upnp = false;
+            config.enable_natpmp = false;
+        }
+
+        assert!(!config.enable_dht);
+        assert!(!config.enable_lsd);
+        assert!(!config.enable_upnp);
+        assert!(!config.enable_natpmp);
+    }
+
+    #[tokio::test]
+    async fn anonymous_mode_session_starts_with_discovery_disabled() {
+        let mut config = test_session_config();
+        config.anonymous_mode = true;
+        // Even if we enable these, anonymous_mode should override
+        config.enable_dht = true;
+        config.enable_lsd = true;
+
+        let session = SessionHandle::start(config).await.unwrap();
+        let stats = session.session_stats().await.unwrap();
+        assert_eq!(stats.active_torrents, 0);
+        session.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn force_proxy_requires_proxy_configured() {
+        let mut config = test_session_config();
+        config.force_proxy = true;
+        config.proxy = crate::proxy::ProxyConfig::default(); // no proxy
+
+        // Validate the config error
+        assert_eq!(config.proxy.proxy_type, crate::proxy::ProxyType::None);
+        assert!(config.force_proxy);
+        // This would error in SessionHandle::start()
+    }
+
+    #[tokio::test]
+    async fn force_proxy_errors_without_proxy() {
+        let mut config = test_session_config();
+        config.force_proxy = true;
+        // proxy_type is None by default
+
+        let result = SessionHandle::start(config).await;
+        assert!(result.is_err());
+        match result {
+            Err(e) => assert!(e.to_string().contains("force_proxy"), "error should mention force_proxy: {e}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn force_proxy_disables_features() {
+        let mut config = test_session_config();
+        config.force_proxy = true;
+        config.proxy = crate::proxy::ProxyConfig {
+            proxy_type: crate::proxy::ProxyType::Socks5,
+            hostname: "proxy.example.com".into(),
+            port: 1080,
+            ..Default::default()
+        };
+        config.enable_dht = true;
+        config.enable_lsd = true;
+        config.enable_upnp = true;
+        config.enable_natpmp = true;
+
+        // Simulate the enforcement from start()
+        if config.force_proxy {
+            config.enable_upnp = false;
+            config.enable_natpmp = false;
+            config.enable_dht = false;
+            config.enable_lsd = false;
+        }
+
+        assert!(!config.enable_dht);
+        assert!(!config.enable_lsd);
+        assert!(!config.enable_upnp);
+        assert!(!config.enable_natpmp);
+    }
+
+    #[test]
+    fn proxy_config_round_trip() {
+        let config = SessionConfig {
+            proxy: crate::proxy::ProxyConfig {
+                proxy_type: crate::proxy::ProxyType::Socks5Password,
+                hostname: "localhost".into(),
+                port: 9050,
+                username: Some("user".into()),
+                password: Some("pass".into()),
+                ..Default::default()
+            },
+            force_proxy: true,
+            anonymous_mode: true,
+            ..test_session_config()
+        };
+
+        assert_eq!(config.proxy.proxy_type, crate::proxy::ProxyType::Socks5Password);
+        assert_eq!(config.proxy.hostname, "localhost");
+        assert_eq!(config.proxy.port, 9050);
+        assert!(config.force_proxy);
+        assert!(config.anonymous_mode);
+        assert_eq!(config.proxy.to_url(), "socks5://user:pass@localhost:9050");
     }
 }

@@ -47,6 +47,9 @@ pub enum Error {
     #[error("file has Skip priority (index {index})")]
     FileSkipped { index: usize },
 
+    #[error("configuration error: {0}")]
+    Config(String),
+
     #[error("session shutting down")]
     Shutdown,
 

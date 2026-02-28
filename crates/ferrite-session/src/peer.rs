@@ -40,6 +40,7 @@ pub(crate) async fn run_peer(
     enable_fast: bool,
     encryption_mode: ferrite_wire::mse::EncryptionMode,
     outbound: bool,
+    anonymous_mode: bool,
 ) -> crate::Result<()> {
     use ferrite_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -98,7 +99,10 @@ pub(crate) async fn run_peer(
     // --- Phase 3: BEP 10 Extension Handshake ---
     let peer_supports_extensions = their_hs.supports_extensions();
     if peer_supports_extensions {
-        let ext_hs = ExtHandshake::new();
+        let mut ext_hs = ExtHandshake::new();
+        if anonymous_mode {
+            ext_hs.v = None;
+        }
         let payload = ext_hs.to_bytes().map_err(crate::Error::Wire)?;
         framed_write
             .send(Message::Extended {
@@ -676,6 +680,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -723,6 +728,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -770,6 +776,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -829,6 +836,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -876,6 +884,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -932,6 +941,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -988,6 +998,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1031,6 +1042,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1113,6 +1125,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1163,6 +1176,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1212,6 +1226,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1274,6 +1289,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1367,6 +1383,7 @@ mod tests {
                 true, // enable_fast
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1411,6 +1428,7 @@ mod tests {
                 true, // enable_fast
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1455,6 +1473,7 @@ mod tests {
                 true, // enable_fast
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1513,6 +1532,7 @@ mod tests {
                 false, // fast disabled
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });
@@ -1554,6 +1574,7 @@ mod tests {
                 false,
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
+                false, // anonymous_mode
             )
             .await
         });

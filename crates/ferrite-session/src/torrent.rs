@@ -2540,6 +2540,10 @@ impl TorrentActor {
             let enable_fast = self.config.enable_fast;
             let encryption_mode = self.config.encryption_mode;
             let enable_utp = self.config.enable_utp;
+            let proxy_config = self.config.proxy.clone();
+            let use_proxy = proxy_config.proxy_type != crate::proxy::ProxyType::None
+                && proxy_config.proxy_peer_connections;
+            let anonymous_mode = self.config.anonymous_mode;
             // Pick the uTP socket matching the peer's address family
             let utp_socket = if addr.is_ipv6() {
                 self.utp_socket_v6.clone()
@@ -2549,7 +2553,8 @@ impl TorrentActor {
 
             tokio::spawn(async move {
                 // Try uTP first (5s timeout), fall back to TCP
-                if enable_utp
+                // Note: uTP is not proxied — if proxy is active, skip uTP
+                if enable_utp && !use_proxy
                     && let Some(socket) = utp_socket
                 {
                     match tokio::time::timeout(
@@ -2573,6 +2578,7 @@ impl TorrentActor {
                                 enable_fast,
                                 encryption_mode,
                                 true, // outbound
+                                anonymous_mode,
                             )
                             .await;
                             return;
@@ -2586,8 +2592,13 @@ impl TorrentActor {
                     }
                 }
 
-                // TCP fallback (or primary if uTP disabled)
-                match tokio::net::TcpStream::connect(addr).await {
+                // TCP connection — through proxy if configured
+                let tcp_result = if use_proxy {
+                    crate::proxy::connect_through_proxy(&proxy_config, addr).await
+                } else {
+                    tokio::net::TcpStream::connect(addr).await
+                };
+                match tcp_result {
                     Ok(stream) => {
                         let _ = run_peer(
                             addr,
@@ -2602,6 +2613,7 @@ impl TorrentActor {
                             enable_fast,
                             encryption_mode,
                             true, // outbound
+                            anonymous_mode,
                         )
                         .await;
                     }
@@ -2680,6 +2692,7 @@ impl TorrentActor {
         let enable_dht = self.config.enable_dht;
         let enable_fast = self.config.enable_fast;
         let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
+        let anonymous_mode = self.config.anonymous_mode;
 
         tokio::spawn(async move {
             let _ = run_peer(
@@ -2695,6 +2708,7 @@ impl TorrentActor {
                 enable_fast,
                 encryption_mode,
                 false, // inbound
+                anonymous_mode,
             )
             .await;
         });
@@ -2797,6 +2811,8 @@ mod tests {
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
             max_concurrent_stream_reads: 8,
+            proxy: crate::proxy::ProxyConfig::default(),
+            anonymous_mode: false,
         }
     }
 

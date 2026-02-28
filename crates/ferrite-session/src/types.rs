@@ -55,6 +55,10 @@ pub struct TorrentConfig {
     pub streaming_timeout_escalation: bool,
     /// Maximum concurrent file stream readers per torrent.
     pub max_concurrent_stream_reads: usize,
+    /// Proxy configuration for outbound peer connections.
+    pub proxy: crate::proxy::ProxyConfig,
+    /// Anonymous mode: suppress client identity in peer handshakes.
+    pub anonymous_mode: bool,
 }
 
 impl Default for TorrentConfig {
@@ -86,6 +90,8 @@ impl Default for TorrentConfig {
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
             max_concurrent_stream_reads: 8,
+            proxy: crate::proxy::ProxyConfig::default(),
+            anonymous_mode: false,
         }
     }
 }
@@ -365,6 +371,14 @@ pub struct SessionConfig {
     pub max_concurrent_stream_reads: usize,
     /// Check tracker IP addresses against the IP filter (default: true).
     pub apply_ip_filter_to_trackers: bool,
+    /// Proxy configuration for peer and tracker connections.
+    pub proxy: crate::proxy::ProxyConfig,
+    /// When true, all connections must go through the proxy.
+    /// Disables listen sockets, UPnP, NAT-PMP, DHT, and LSD.
+    pub force_proxy: bool,
+    /// When true, suppress identifying information (user-agent, client version)
+    /// and disable DHT, LSD, UPnP, NAT-PMP.
+    pub anonymous_mode: bool,
 }
 
 impl Default for SessionConfig {
@@ -417,6 +431,9 @@ impl Default for SessionConfig {
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
             apply_ip_filter_to_trackers: true,
+            proxy: crate::proxy::ProxyConfig::default(),
+            force_proxy: false,
+            anonymous_mode: false,
         }
     }
 }

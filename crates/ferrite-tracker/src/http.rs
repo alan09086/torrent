@@ -54,6 +54,23 @@ impl HttpTracker {
         }
     }
 
+    /// Create an HTTP tracker client with an optional proxy.
+    ///
+    /// When `proxy_url` is provided (e.g. `"socks5://host:port"`), all
+    /// HTTP requests are routed through it.
+    pub fn with_proxy(proxy_url: Option<&str>) -> Self {
+        let mut builder = reqwest::Client::builder()
+            .user_agent("Ferrite/0.1.0");
+        if let Some(url) = proxy_url
+            && let Ok(proxy) = reqwest::Proxy::all(url)
+        {
+            builder = builder.proxy(proxy);
+        }
+        HttpTracker {
+            client: builder.build().expect("failed to build HTTP client"),
+        }
+    }
+
     /// Build the announce URL with query parameters.
     pub fn build_announce_url(
         base_url: &str,
