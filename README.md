@@ -28,18 +28,18 @@ ferrite              Public facade API
 
 | Crate | Description | Tests |
 |-------|-------------|-------|
-| `ferrite-bencode` | Serde-based bencode serialization | 66 |
-| `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority, StorageMode | 66 |
+| `ferrite-bencode` | Serde-based bencode serialization | 14 |
+| `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority, StorageMode, CreateTorrent | 69 |
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21 extensions, MSE/PE encryption | 56 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait, MmapStorage, ARC disk cache | 53 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor), BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange, smart banning, parallel hashing | 265 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor), unified Settings, runtime config, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers, smart banning, parallel hashing, IP filtering + proxy, file streaming | 336 |
 | `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 19 |
-| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 30 |
+| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 33 |
 
-**Total: 665 tests, zero clippy warnings.**
+**Total: 754 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -71,8 +71,8 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 | Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth + auto upload slots, alerts, queue) | Done |
 | Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Done |
 | Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Done |
-| Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | In Progress |
-| Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode + plugin interface) | Planned |
+| Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Done |
+| Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode + plugin interface) | In Progress |
 | Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | Planned |
 
 ## License

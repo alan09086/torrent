@@ -65,8 +65,18 @@ cargo clippy --workspace -- -D warnings
 - `FileMap::new(file_lengths, lengths)` — O(log n) piece-to-file segment mapping
 - `TorrentStorage` trait: `write_chunk()`, `read_chunk()`, `read_piece()`, `verify_piece()`
 
+### Session Configuration (`ferrite-session/src/settings.rs`)
+- `Settings` — unified 56-field session configuration (replaces former `SessionConfig`)
+- Presets: `Settings::min_memory()`, `Settings::high_performance()`
+- `Settings::validate()` — 7 checks (piece size power-of-2, thread counts, proxy config)
+- JSON serialization with `#[serde(default = "...")]` for forward-compatible config files
+- `From<&Settings>` for `DiskConfig`, `BanConfig`, `TorrentConfig`
+- Helper methods: `to_dht_config()`, `to_nat_config()`, `to_utp_config(port)`
+- `SessionHandle::settings()` / `apply_settings()` — runtime query and mutation
+- Runtime `apply_settings()` updates rate limiters + alert mask immediately; sub-actor reconfig on restart
+
 ### Facade (`ferrite`)
-- `ClientBuilder` — fluent builder → `SessionHandle`. Takes owned `self` for chaining.
+- `ClientBuilder` — fluent builder → `SessionHandle`. Takes owned `self` for chaining. `into_settings()` returns `Settings`.
 - `AddTorrentParams` — `from_torrent()`, `from_magnet()`, `from_file()`, `from_bytes()`
 - Re-exports: `ferrite/src/core.rs` (core types), `ferrite/src/session.rs` (session types), `ferrite/src/prelude.rs` (convenience)
 
