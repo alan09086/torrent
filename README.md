@@ -29,17 +29,17 @@ ferrite              Public facade API
 | Crate | Description | Tests |
 |-------|-------------|-------|
 | `ferrite-bencode` | Serde-based bencode serialization | 66 |
-| `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority | 65 |
+| `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority, StorageMode | 66 |
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21 extensions, MSE/PE encryption | 56 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
-| `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 42 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange, smart banning | 248 |
+| `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait, MmapStorage, ARC disk cache | 53 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor), BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange, smart banning | 265 |
 | `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 19 |
 | `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 30 |
 
-**Total: 637 tests, zero clippy warnings.**
+**Total: 660 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -48,7 +48,7 @@ ferrite              Public facade API
 - **Rust edition 2024** with workspace resolver 2
 - **`bytes::Bytes`** for zero-copy buffer sharing across the wire protocol
 - **Actor model** for DHT — single-owner event loop with cloneable handle, no `DashMap`
-- **Sync I/O for storage** — no async filesystem overhead, enables future `pwritev` optimization
+- **Async disk I/O** — central DiskActor with write buffering, ARC read cache, and semaphore-limited spawn_blocking
 - **Wire-compatible coordinates** — `(piece, begin, length)` used throughout, matching BEP 3 directly
 - **Binary search file lookup** — O(log n) piece-to-file mapping vs linear scan
 
