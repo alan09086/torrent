@@ -34,12 +34,12 @@ ferrite              Public facade API
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait, MmapStorage, ARC disk cache | 53 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor), BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange, smart banning | 265 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor), BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange, smart banning, parallel hashing | 265 |
 | `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 19 |
 | `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 30 |
 
-**Total: 660 tests, zero clippy warnings.**
+**Total: 665 tests, zero clippy warnings.**
 
 ## Design Decisions
 

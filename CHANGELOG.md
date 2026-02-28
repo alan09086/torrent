@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.28.0 — 2026-02-28
+
+Multi-threaded piece hashing with JoinSet, Checking state with progress reporting, configurable hashing threads. Eleven crates, 665 tests.
+
+### M27: Multi-threaded Hashing
+
+### Added
+- `TorrentState::Checking` variant — entered during piece verification on startup
+- `TorrentStats.checking_progress` field (0.0–1.0) for tracking verification progress
+- `AlertKind::TorrentChecked` — fires after piece verification with `pieces_have`/`pieces_total`
+- `AlertKind::CheckingProgress` — fires per-piece with monotonically increasing progress
+- `TorrentConfig.hashing_threads` and `SessionConfig.hashing_threads` (default: 2) — controls pipeline depth for concurrent piece verification
+- `ClientBuilder::hashing_threads()` facade method
+- 5 new tests: concurrent disk verify, config defaults, checking state + progress alerts, stats during check, partial data verification
+
+### Changed
+- `verify_existing_pieces()` now uses `tokio::task::JoinSet` for bounded-concurrency parallel hashing instead of sequential loop
+- Torrent transitions through `Checking` → `Downloading`/`Seeding` on startup instead of going directly to `Downloading`
+- Queue management handles `Checking` state as a download category
+
 ## 0.27.0 — 2026-02-28
 
 Async disk I/O with central actor, mmap storage backend, ARC disk cache. Eleven crates, 660 tests.
