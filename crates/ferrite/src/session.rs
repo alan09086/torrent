@@ -51,6 +51,8 @@ pub use ferrite_session::{
     DiskManagerHandle,
     DiskJobFlags,
     DiskStats,
+    // Peer source tracking (M32a)
+    PeerSource,
     // Error types
     Error,
     Result,

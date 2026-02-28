@@ -48,3 +48,4 @@ pub use persistence::{SessionState, DhtNodeEntry, PeerStrikeEntry, validate_resu
 pub use crate::piece_selector::build_wanted_pieces;
 pub use crate::tracker_manager::{TrackerInfo, TrackerStatus};
 pub use streaming::FileStream;
+pub use peer_state::PeerSource;
