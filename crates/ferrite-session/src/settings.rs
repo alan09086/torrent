@@ -1,0 +1,640 @@
+//! Unified settings pack for session configuration.
+//!
+//! Replaces the old `SessionConfig` with a single strongly-typed struct that
+//! consolidates all configurable knobs. Supports presets, validation, and
+//! serde serialization (bencode + JSON).
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use ferrite_core::StorageMode;
+use ferrite_wire::mse::EncryptionMode;
+
+use crate::alert::AlertCategory;
+use crate::proxy::ProxyConfig;
+
+// ── Serde default helpers ────────────────────────────────────────────
+
+fn default_true() -> bool {
+    true
+}
+fn default_listen_port() -> u16 {
+    6881
+}
+fn default_download_dir() -> PathBuf {
+    PathBuf::from(".")
+}
+fn default_max_torrents() -> usize {
+    100
+}
+fn default_encryption() -> EncryptionMode {
+    EncryptionMode::Enabled
+}
+fn default_auto_upload_slots_min() -> usize {
+    2
+}
+fn default_auto_upload_slots_max() -> usize {
+    20
+}
+fn default_active_downloads() -> i32 {
+    3
+}
+fn default_active_seeds() -> i32 {
+    5
+}
+fn default_active_limit() -> i32 {
+    500
+}
+fn default_active_checking() -> i32 {
+    1
+}
+fn default_inactive_rate() -> u64 {
+    2048
+}
+fn default_auto_manage_interval() -> u64 {
+    30
+}
+fn default_auto_manage_startup() -> u64 {
+    60
+}
+fn default_alert_mask() -> AlertCategory {
+    AlertCategory::ALL
+}
+fn default_alert_channel_size() -> usize {
+    1024
+}
+fn default_smart_ban_max_failures() -> u32 {
+    3
+}
+fn default_disk_io_threads() -> usize {
+    4
+}
+fn default_storage_mode() -> StorageMode {
+    StorageMode::Auto
+}
+fn default_disk_cache_size() -> usize {
+    64 * 1024 * 1024
+}
+fn default_disk_write_cache_ratio() -> f32 {
+    0.25
+}
+fn default_disk_channel_capacity() -> usize {
+    512
+}
+fn default_hashing_threads() -> usize {
+    2
+}
+fn default_max_request_queue_depth() -> usize {
+    250
+}
+fn default_request_queue_time() -> f64 {
+    3.0
+}
+fn default_block_request_timeout() -> u32 {
+    60
+}
+fn default_max_concurrent_streams() -> usize {
+    8
+}
+fn default_dht_qps() -> usize {
+    50
+}
+fn default_dht_timeout() -> u64 {
+    10
+}
+fn default_upnp_lease() -> u32 {
+    3600
+}
+fn default_natpmp_lifetime() -> u32 {
+    7200
+}
+fn default_utp_max_conns() -> usize {
+    256
+}
+
+// ── Settings ─────────────────────────────────────────────────────────
+
+/// Unified session settings (replaces `SessionConfig`).
+///
+/// All 56 configurable fields in a single strongly-typed struct.
+/// Supports presets via factory functions and runtime mutation via
+/// `SessionHandle::apply_settings()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    // ── General ──
+    #[serde(default = "default_listen_port")]
+    pub listen_port: u16,
+    #[serde(default = "default_download_dir")]
+    pub download_dir: PathBuf,
+    #[serde(default = "default_max_torrents")]
+    pub max_torrents: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_data_dir: Option<PathBuf>,
+
+    // ── Protocol features ──
+    #[serde(default = "default_true")]
+    pub enable_dht: bool,
+    #[serde(default = "default_true")]
+    pub enable_pex: bool,
+    #[serde(default = "default_true")]
+    pub enable_lsd: bool,
+    #[serde(default = "default_true")]
+    pub enable_fast_extension: bool,
+    #[serde(default = "default_true")]
+    pub enable_utp: bool,
+    #[serde(default = "default_true")]
+    pub enable_upnp: bool,
+    #[serde(default = "default_true")]
+    pub enable_natpmp: bool,
+    #[serde(default = "default_true")]
+    pub enable_ipv6: bool,
+    #[serde(default = "default_true")]
+    pub enable_web_seed: bool,
+    #[serde(default = "default_encryption")]
+    pub encryption_mode: EncryptionMode,
+    #[serde(default)]
+    pub anonymous_mode: bool,
+
+    // ── Seeding ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_ratio_limit: Option<f64>,
+    #[serde(default)]
+    pub default_super_seeding: bool,
+    #[serde(default = "default_true")]
+    pub upload_only_announce: bool,
+    #[serde(default)]
+    pub have_send_delay_ms: u64,
+
+    // ── Rate limiting ──
+    #[serde(default)]
+    pub upload_rate_limit: u64,
+    #[serde(default)]
+    pub download_rate_limit: u64,
+    #[serde(default = "default_true")]
+    pub auto_upload_slots: bool,
+    #[serde(default = "default_auto_upload_slots_min")]
+    pub auto_upload_slots_min: usize,
+    #[serde(default = "default_auto_upload_slots_max")]
+    pub auto_upload_slots_max: usize,
+
+    // ── Queue management ──
+    #[serde(default = "default_active_downloads")]
+    pub active_downloads: i32,
+    #[serde(default = "default_active_seeds")]
+    pub active_seeds: i32,
+    #[serde(default = "default_active_limit")]
+    pub active_limit: i32,
+    #[serde(default = "default_active_checking")]
+    pub active_checking: i32,
+    #[serde(default = "default_true")]
+    pub dont_count_slow_torrents: bool,
+    #[serde(default = "default_inactive_rate")]
+    pub inactive_down_rate: u64,
+    #[serde(default = "default_inactive_rate")]
+    pub inactive_up_rate: u64,
+    #[serde(default = "default_auto_manage_interval")]
+    pub auto_manage_interval: u64,
+    #[serde(default = "default_auto_manage_startup")]
+    pub auto_manage_startup: u64,
+    #[serde(default)]
+    pub auto_manage_prefer_seeds: bool,
+
+    // ── Alerts ──
+    #[serde(default = "default_alert_mask")]
+    pub alert_mask: AlertCategory,
+    #[serde(default = "default_alert_channel_size")]
+    pub alert_channel_size: usize,
+
+    // ── Smart banning ──
+    #[serde(default = "default_smart_ban_max_failures")]
+    pub smart_ban_max_failures: u32,
+    #[serde(default = "default_true")]
+    pub smart_ban_parole: bool,
+
+    // ── Disk I/O ──
+    #[serde(default = "default_disk_io_threads")]
+    pub disk_io_threads: usize,
+    #[serde(default = "default_storage_mode")]
+    pub storage_mode: StorageMode,
+    #[serde(default = "default_disk_cache_size")]
+    pub disk_cache_size: usize,
+    #[serde(default = "default_disk_write_cache_ratio")]
+    pub disk_write_cache_ratio: f32,
+    #[serde(default = "default_disk_channel_capacity")]
+    pub disk_channel_capacity: usize,
+
+    // ── Hashing & piece picking ──
+    #[serde(default = "default_hashing_threads")]
+    pub hashing_threads: usize,
+    #[serde(default = "default_max_request_queue_depth")]
+    pub max_request_queue_depth: usize,
+    #[serde(default = "default_request_queue_time")]
+    pub request_queue_time: f64,
+    #[serde(default = "default_block_request_timeout")]
+    pub block_request_timeout_secs: u32,
+    #[serde(default = "default_max_concurrent_streams")]
+    pub max_concurrent_stream_reads: usize,
+
+    // ── Proxy ──
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    #[serde(default)]
+    pub force_proxy: bool,
+    #[serde(default = "default_true")]
+    pub apply_ip_filter_to_trackers: bool,
+
+    // ── DHT tuning ──
+    #[serde(default = "default_dht_qps")]
+    pub dht_queries_per_second: usize,
+    #[serde(default = "default_dht_timeout")]
+    pub dht_query_timeout_secs: u64,
+
+    // ── NAT tuning ──
+    #[serde(default = "default_upnp_lease")]
+    pub upnp_lease_duration: u32,
+    #[serde(default = "default_natpmp_lifetime")]
+    pub natpmp_lifetime: u32,
+
+    // ── uTP tuning ──
+    #[serde(default = "default_utp_max_conns")]
+    pub utp_max_connections: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            // General
+            listen_port: 6881,
+            download_dir: PathBuf::from("."),
+            max_torrents: 100,
+            resume_data_dir: None,
+            // Protocol features
+            enable_dht: true,
+            enable_pex: true,
+            enable_lsd: true,
+            enable_fast_extension: true,
+            enable_utp: true,
+            enable_upnp: true,
+            enable_natpmp: true,
+            enable_ipv6: true,
+            enable_web_seed: true,
+            encryption_mode: EncryptionMode::Enabled,
+            anonymous_mode: false,
+            // Seeding
+            seed_ratio_limit: None,
+            default_super_seeding: false,
+            upload_only_announce: true,
+            have_send_delay_ms: 0,
+            // Rate limiting
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
+            auto_upload_slots: true,
+            auto_upload_slots_min: 2,
+            auto_upload_slots_max: 20,
+            // Queue management
+            active_downloads: 3,
+            active_seeds: 5,
+            active_limit: 500,
+            active_checking: 1,
+            dont_count_slow_torrents: true,
+            inactive_down_rate: 2048,
+            inactive_up_rate: 2048,
+            auto_manage_interval: 30,
+            auto_manage_startup: 60,
+            auto_manage_prefer_seeds: false,
+            // Alerts
+            alert_mask: AlertCategory::ALL,
+            alert_channel_size: 1024,
+            // Smart banning
+            smart_ban_max_failures: 3,
+            smart_ban_parole: true,
+            // Disk I/O
+            disk_io_threads: 4,
+            storage_mode: StorageMode::Auto,
+            disk_cache_size: 64 * 1024 * 1024,
+            disk_write_cache_ratio: 0.25,
+            disk_channel_capacity: 512,
+            // Hashing & piece picking
+            hashing_threads: 2,
+            max_request_queue_depth: 250,
+            request_queue_time: 3.0,
+            block_request_timeout_secs: 60,
+            max_concurrent_stream_reads: 8,
+            // Proxy
+            proxy: ProxyConfig::default(),
+            force_proxy: false,
+            apply_ip_filter_to_trackers: true,
+            // DHT tuning
+            dht_queries_per_second: 50,
+            dht_query_timeout_secs: 10,
+            // NAT tuning
+            upnp_lease_duration: 3600,
+            natpmp_lifetime: 7200,
+            // uTP tuning
+            utp_max_connections: 256,
+        }
+    }
+}
+
+impl Settings {
+    /// Preset for constrained/embedded environments.
+    pub fn min_memory() -> Self {
+        Self {
+            disk_cache_size: 8 * 1024 * 1024,
+            max_torrents: 20,
+            active_downloads: 1,
+            active_seeds: 2,
+            active_limit: 10,
+            alert_channel_size: 256,
+            utp_max_connections: 64,
+            max_request_queue_depth: 50,
+            max_concurrent_stream_reads: 2,
+            hashing_threads: 1,
+            disk_io_threads: 1,
+            ..Self::default()
+        }
+    }
+
+    /// Preset for desktop/server environments with ample resources.
+    pub fn high_performance() -> Self {
+        Self {
+            disk_cache_size: 256 * 1024 * 1024,
+            max_torrents: 2000,
+            active_downloads: 30,
+            active_seeds: 100,
+            active_limit: 2000,
+            alert_channel_size: 4096,
+            utp_max_connections: 1024,
+            max_request_queue_depth: 1000,
+            max_concurrent_stream_reads: 32,
+            hashing_threads: 4,
+            disk_io_threads: 8,
+            auto_upload_slots_max: 100,
+            ..Self::default()
+        }
+    }
+
+    /// Validate settings. Returns error on the first invalid combination found.
+    pub fn validate(&self) -> crate::Result<()> {
+        use crate::proxy::ProxyType;
+
+        if self.force_proxy && self.proxy.proxy_type == ProxyType::None {
+            return Err(crate::Error::InvalidSettings(
+                "force_proxy is enabled but no proxy type is configured".into(),
+            ));
+        }
+
+        if self.active_downloads > 0
+            && self.active_limit > 0
+            && self.active_downloads > self.active_limit
+        {
+            return Err(crate::Error::InvalidSettings(
+                "active_downloads exceeds active_limit".into(),
+            ));
+        }
+
+        if self.active_seeds > 0
+            && self.active_limit > 0
+            && self.active_seeds > self.active_limit
+        {
+            return Err(crate::Error::InvalidSettings(
+                "active_seeds exceeds active_limit".into(),
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&self.disk_write_cache_ratio) {
+            return Err(crate::Error::InvalidSettings(
+                "disk_write_cache_ratio must be between 0.0 and 1.0".into(),
+            ));
+        }
+
+        if self.disk_cache_size < 1024 * 1024 {
+            return Err(crate::Error::InvalidSettings(
+                "disk_cache_size must be at least 1 MiB".into(),
+            ));
+        }
+
+        if self.hashing_threads == 0 {
+            return Err(crate::Error::InvalidSettings(
+                "hashing_threads must be at least 1".into(),
+            ));
+        }
+
+        if self.disk_io_threads == 0 {
+            return Err(crate::Error::InvalidSettings(
+                "disk_io_threads must be at least 1".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+// ── PartialEq (manual — f32/f64 fields need special handling) ────────
+
+impl PartialEq for Settings {
+    fn eq(&self, other: &Self) -> bool {
+        self.listen_port == other.listen_port
+            && self.download_dir == other.download_dir
+            && self.max_torrents == other.max_torrents
+            && self.resume_data_dir == other.resume_data_dir
+            && self.enable_dht == other.enable_dht
+            && self.enable_pex == other.enable_pex
+            && self.enable_lsd == other.enable_lsd
+            && self.enable_fast_extension == other.enable_fast_extension
+            && self.enable_utp == other.enable_utp
+            && self.enable_upnp == other.enable_upnp
+            && self.enable_natpmp == other.enable_natpmp
+            && self.enable_ipv6 == other.enable_ipv6
+            && self.enable_web_seed == other.enable_web_seed
+            && self.encryption_mode == other.encryption_mode
+            && self.anonymous_mode == other.anonymous_mode
+            && self.seed_ratio_limit == other.seed_ratio_limit
+            && self.default_super_seeding == other.default_super_seeding
+            && self.upload_only_announce == other.upload_only_announce
+            && self.have_send_delay_ms == other.have_send_delay_ms
+            && self.upload_rate_limit == other.upload_rate_limit
+            && self.download_rate_limit == other.download_rate_limit
+            && self.auto_upload_slots == other.auto_upload_slots
+            && self.auto_upload_slots_min == other.auto_upload_slots_min
+            && self.auto_upload_slots_max == other.auto_upload_slots_max
+            && self.active_downloads == other.active_downloads
+            && self.active_seeds == other.active_seeds
+            && self.active_limit == other.active_limit
+            && self.active_checking == other.active_checking
+            && self.dont_count_slow_torrents == other.dont_count_slow_torrents
+            && self.inactive_down_rate == other.inactive_down_rate
+            && self.inactive_up_rate == other.inactive_up_rate
+            && self.auto_manage_interval == other.auto_manage_interval
+            && self.auto_manage_startup == other.auto_manage_startup
+            && self.auto_manage_prefer_seeds == other.auto_manage_prefer_seeds
+            && self.alert_mask == other.alert_mask
+            && self.alert_channel_size == other.alert_channel_size
+            && self.smart_ban_max_failures == other.smart_ban_max_failures
+            && self.smart_ban_parole == other.smart_ban_parole
+            && self.disk_io_threads == other.disk_io_threads
+            && self.storage_mode == other.storage_mode
+            && self.disk_cache_size == other.disk_cache_size
+            && self.disk_write_cache_ratio.to_bits() == other.disk_write_cache_ratio.to_bits()
+            && self.disk_channel_capacity == other.disk_channel_capacity
+            && self.hashing_threads == other.hashing_threads
+            && self.max_request_queue_depth == other.max_request_queue_depth
+            && self.request_queue_time.to_bits() == other.request_queue_time.to_bits()
+            && self.block_request_timeout_secs == other.block_request_timeout_secs
+            && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
+            && self.force_proxy == other.force_proxy
+            && self.apply_ip_filter_to_trackers == other.apply_ip_filter_to_trackers
+            && self.dht_queries_per_second == other.dht_queries_per_second
+            && self.dht_query_timeout_secs == other.dht_query_timeout_secs
+            && self.upnp_lease_duration == other.upnp_lease_duration
+            && self.natpmp_lifetime == other.natpmp_lifetime
+            && self.utp_max_connections == other.utp_max_connections
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_settings_values() {
+        let s = Settings::default();
+        assert_eq!(s.listen_port, 6881);
+        assert_eq!(s.download_dir, PathBuf::from("."));
+        assert_eq!(s.max_torrents, 100);
+        assert!(s.resume_data_dir.is_none());
+        assert!(s.enable_dht);
+        assert!(s.enable_pex);
+        assert!(s.enable_lsd);
+        assert!(s.enable_fast_extension);
+        assert!(s.enable_utp);
+        assert!(s.enable_upnp);
+        assert!(s.enable_natpmp);
+        assert!(s.enable_ipv6);
+        assert!(s.enable_web_seed);
+        assert_eq!(s.encryption_mode, EncryptionMode::Enabled);
+        assert!(!s.anonymous_mode);
+        assert!(s.seed_ratio_limit.is_none());
+        assert!(!s.default_super_seeding);
+        assert!(s.upload_only_announce);
+        assert_eq!(s.upload_rate_limit, 0);
+        assert_eq!(s.download_rate_limit, 0);
+        assert!(s.auto_upload_slots);
+        assert_eq!(s.active_downloads, 3);
+        assert_eq!(s.active_seeds, 5);
+        assert_eq!(s.active_limit, 500);
+        assert_eq!(s.active_checking, 1);
+        assert!(s.dont_count_slow_torrents);
+        assert_eq!(s.alert_mask, AlertCategory::ALL);
+        assert_eq!(s.alert_channel_size, 1024);
+        assert_eq!(s.smart_ban_max_failures, 3);
+        assert!(s.smart_ban_parole);
+        assert_eq!(s.disk_io_threads, 4);
+        assert_eq!(s.storage_mode, StorageMode::Auto);
+        assert_eq!(s.disk_cache_size, 64 * 1024 * 1024);
+        assert!((s.disk_write_cache_ratio - 0.25).abs() < f32::EPSILON);
+        assert_eq!(s.disk_channel_capacity, 512);
+        assert_eq!(s.hashing_threads, 2);
+        assert_eq!(s.max_request_queue_depth, 250);
+        assert!((s.request_queue_time - 3.0).abs() < f64::EPSILON);
+        assert_eq!(s.block_request_timeout_secs, 60);
+        assert_eq!(s.max_concurrent_stream_reads, 8);
+        assert!(!s.force_proxy);
+        assert!(s.apply_ip_filter_to_trackers);
+        assert_eq!(s.dht_queries_per_second, 50);
+        assert_eq!(s.dht_query_timeout_secs, 10);
+        assert_eq!(s.upnp_lease_duration, 3600);
+        assert_eq!(s.natpmp_lifetime, 7200);
+        assert_eq!(s.utp_max_connections, 256);
+    }
+
+    #[test]
+    fn min_memory_preset() {
+        let s = Settings::min_memory();
+        assert_eq!(s.disk_cache_size, 8 * 1024 * 1024);
+        assert_eq!(s.max_torrents, 20);
+        assert_eq!(s.active_downloads, 1);
+        assert_eq!(s.active_seeds, 2);
+        assert_eq!(s.active_limit, 10);
+        assert_eq!(s.alert_channel_size, 256);
+        assert_eq!(s.utp_max_connections, 64);
+        assert_eq!(s.max_request_queue_depth, 50);
+        assert_eq!(s.max_concurrent_stream_reads, 2);
+        assert_eq!(s.hashing_threads, 1);
+        assert_eq!(s.disk_io_threads, 1);
+    }
+
+    #[test]
+    fn high_performance_preset() {
+        let s = Settings::high_performance();
+        assert_eq!(s.disk_cache_size, 256 * 1024 * 1024);
+        assert_eq!(s.max_torrents, 2000);
+        assert_eq!(s.active_downloads, 30);
+        assert_eq!(s.active_seeds, 100);
+        assert_eq!(s.active_limit, 2000);
+        assert_eq!(s.alert_channel_size, 4096);
+        assert_eq!(s.utp_max_connections, 1024);
+        assert_eq!(s.max_request_queue_depth, 1000);
+        assert_eq!(s.max_concurrent_stream_reads, 32);
+        assert_eq!(s.hashing_threads, 4);
+        assert_eq!(s.disk_io_threads, 8);
+        assert_eq!(s.auto_upload_slots_max, 100);
+    }
+
+    #[test]
+    fn json_round_trip() {
+        let original = Settings::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn json_round_trip_presets() {
+        // Verify all presets survive JSON serialization
+        for original in [Settings::min_memory(), Settings::high_performance()] {
+            let json = serde_json::to_string(&original).unwrap();
+            let decoded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(original, decoded);
+        }
+    }
+
+    #[test]
+    fn json_missing_fields_use_defaults() {
+        // An empty JSON object should deserialize to defaults (via serde(default))
+        let decoded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded, Settings::default());
+    }
+
+    #[test]
+    fn validation_force_proxy_no_proxy() {
+        let mut s = Settings::default();
+        s.force_proxy = true;
+        // proxy_type defaults to None
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("force_proxy"));
+    }
+
+    #[test]
+    fn validation_valid_defaults() {
+        Settings::default().validate().unwrap();
+        Settings::min_memory().validate().unwrap();
+        Settings::high_performance().validate().unwrap();
+    }
+
+    #[test]
+    fn validation_zero_threads() {
+        let mut s = Settings::default();
+        s.hashing_threads = 0;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("hashing_threads"));
+
+        let mut s = Settings::default();
+        s.disk_io_threads = 0;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("disk_io_threads"));
+    }
+}

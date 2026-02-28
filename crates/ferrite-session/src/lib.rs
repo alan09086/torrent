@@ -2,6 +2,7 @@
 
 pub mod alert;
 mod error;
+mod settings;
 mod types;
 pub(crate) mod peer_state;
 pub(crate) mod metadata;
@@ -35,6 +36,7 @@ mod persistence;
 
 pub use alert::{Alert, AlertCategory, AlertKind, AlertStream};
 pub use error::{Error, Result};
+pub use settings::Settings;
 pub use disk::{DiskConfig, DiskHandle, DiskJobFlags, DiskManagerHandle, DiskStats};
 pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;

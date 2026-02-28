@@ -8,12 +8,14 @@ pub(crate) mod dh;
 pub mod handshake;
 pub mod stream;
 
+use serde::{Deserialize, Serialize};
+
 pub use crypto::{CRYPTO_PLAINTEXT, CRYPTO_RC4};
 pub use handshake::NegotiationResult;
 pub use stream::MseStream;
 
 /// Encryption mode for peer connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EncryptionMode {
     /// No encryption. Plain BitTorrent handshake.
     Disabled,

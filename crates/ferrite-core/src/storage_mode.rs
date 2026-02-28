@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 /// How torrent files are allocated on disk.
 ///
 /// Matches libtorrent's `storage_mode_t`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StorageMode {
     /// Auto-select: mmap on 64-bit, pread/pwrite on 32-bit.
     #[default]

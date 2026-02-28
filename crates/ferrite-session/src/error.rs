@@ -50,6 +50,9 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
+    #[error("invalid settings: {0}")]
+    InvalidSettings(String),
+
     #[error("session shutting down")]
     Shutdown,
 
