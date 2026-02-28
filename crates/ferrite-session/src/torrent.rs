@@ -1778,6 +1778,8 @@ impl TorrentActor {
                         self.num_pieces = num_pieces;
                         self.piece_selector = PieceSelector::new(num_pieces);
                         let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
+                        let mut meta = meta;
+                        meta.info_bytes = Some(Bytes::from(info_bytes));
                         self.meta = Some(meta);
                         self.file_priorities = vec![FilePriority::Normal; file_lengths.len()];
                         self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
