@@ -22,6 +22,7 @@ pub(crate) mod web_seed;
 pub(crate) mod super_seed;
 pub(crate) mod have_buffer;
 pub(crate) mod ban;
+pub(crate) mod pipeline;
 pub mod disk;
 pub(crate) mod write_buffer;
 mod torrent;
