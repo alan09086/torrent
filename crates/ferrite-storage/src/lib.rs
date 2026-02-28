@@ -2,6 +2,7 @@
 
 mod error;
 pub mod bitfield;
+pub mod cache;
 pub mod chunk_tracker;
 pub mod file_map;
 pub mod filesystem;
@@ -10,6 +11,7 @@ pub mod mmap;
 pub mod storage;
 
 pub use bitfield::Bitfield;
+pub use cache::ArcCache;
 pub use chunk_tracker::ChunkTracker;
 pub use error::{Error, Result};
 pub use file_map::{FileMap, FileSegment};
