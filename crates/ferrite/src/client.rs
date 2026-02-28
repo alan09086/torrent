@@ -255,6 +255,12 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the number of concurrent piece hash verifications. Default: 2.
+    pub fn hashing_threads(mut self, n: usize) -> Self {
+        self.config.hashing_threads = n;
+        self
+    }
+
     /// Set the total disk cache size in bytes. Default: 64 MiB.
     pub fn disk_cache_size(mut self, bytes: usize) -> Self {
         self.config.disk_cache_size = bytes;

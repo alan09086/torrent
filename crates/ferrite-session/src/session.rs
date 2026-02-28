@@ -815,6 +815,7 @@ impl SessionActor {
             super_seeding: self.config.default_super_seeding,
             upload_only_announce: self.config.upload_only_announce,
             have_send_delay_ms: self.config.have_send_delay_ms,
+            hashing_threads: self.config.hashing_threads,
         }
     }
 
@@ -1499,6 +1500,7 @@ mod tests {
             storage_mode: ferrite_core::StorageMode::Sparse,
             disk_cache_size: 1024 * 1024,
             disk_write_cache_ratio: 0.25,
+            hashing_threads: 2,
         }
     }
 

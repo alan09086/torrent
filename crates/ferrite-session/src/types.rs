@@ -38,6 +38,8 @@ pub struct TorrentConfig {
     pub upload_only_announce: bool,
     /// Batched Have: buffer Have messages for this many ms before sending (0 = disabled).
     pub have_send_delay_ms: u64,
+    /// Number of concurrent piece verifications during torrent checking.
+    pub hashing_threads: usize,
 }
 
 impl Default for TorrentConfig {
@@ -61,6 +63,7 @@ impl Default for TorrentConfig {
             super_seeding: false,
             upload_only_announce: true,
             have_send_delay_ms: 0,
+            hashing_threads: 2,
         }
     }
 }
@@ -323,6 +326,8 @@ pub struct SessionConfig {
     pub disk_cache_size: usize,
     /// Fraction of disk cache reserved for write buffering (default: 0.25).
     pub disk_write_cache_ratio: f32,
+    /// Number of concurrent piece hash verifications (default: 2).
+    pub hashing_threads: usize,
 }
 
 impl Default for SessionConfig {
@@ -369,6 +374,7 @@ impl Default for SessionConfig {
             storage_mode: ferrite_core::StorageMode::Auto,
             disk_cache_size: 64 * 1024 * 1024,
             disk_write_cache_ratio: 0.25,
+            hashing_threads: 2,
         }
     }
 }

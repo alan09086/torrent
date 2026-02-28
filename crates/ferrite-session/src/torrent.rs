@@ -2499,6 +2499,7 @@ mod tests {
             super_seeding: false,
             upload_only_announce: true,
             have_send_delay_ms: 0,
+            hashing_threads: 2,
         }
     }
 
