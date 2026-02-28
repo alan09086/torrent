@@ -11,29 +11,63 @@
 | Milestone Status | Not started |
 | Progress | 25/35 milestones complete |
 | Crates | 10 |
-| Last Commit | `6e211b2` feat: smart banning — peer attribution, parole mode, session-wide bans (M25) |
+| Last Commit | `1f1ae68` docs: update README test counts for v0.26.0 |
 
 ## Architecture & Patterns
 
 > Preserved across `ctx update`. Edit via `ctx arch` or manually.
 
 **Workspace:** 10 crates
-  - `ferrite` (crates/ferrite)
-  - `ferrite-bencode` (crates/ferrite-bencode)
-  - `ferrite-core` (crates/ferrite-core)
-  - `ferrite-dht` (crates/ferrite-dht)
-  - `ferrite-nat` (crates/ferrite-nat)
-  - `ferrite-session` (crates/ferrite-session)
-  - `ferrite-storage` (crates/ferrite-storage)
-  - `ferrite-tracker` (crates/ferrite-tracker)
-  - `ferrite-utp` (crates/ferrite-utp)
-  - `ferrite-wire` (crates/ferrite-wire)
 
-**Detected Patterns:**
-- Rust 2024 edition
-- `thiserror` typed errors
-- Async runtime: tokio
-- Serialization: serde
+**Dependency Graph:**
+```
+ferrite
+├── ferrite-bencode
+├── ferrite-core
+│   └── ferrite-bencode (see above)
+├── ferrite-dht
+│   ├── ferrite-bencode (see above)
+│   └── ferrite-core (see above)
+├── ferrite-nat
+│   └── ferrite-core (see above)
+├── ferrite-session
+│   ├── ferrite-bencode (see above)
+│   ├── ferrite-core (see above)
+│   ├── ferrite-dht (see above)
+│   ├── ferrite-nat (see above)
+│   ├── ferrite-storage
+│   │   └── ferrite-core (see above)
+│   ├── ferrite-tracker
+│   │   ├── ferrite-bencode (see above)
+│   │   └── ferrite-core (see above)
+│   ├── ferrite-utp
+│   │   └── ferrite-core (see above)
+│   └── ferrite-wire
+│       ├── ferrite-bencode (see above)
+│       └── ferrite-core (see above)
+├── ferrite-storage (see above)
+├── ferrite-tracker (see above)
+├── ferrite-utp (see above)
+└── ferrite-wire (see above)
+```
+
+**Key Types:**
+- **ferrite-core**: AddressFamily
+- **ferrite-tracker**: ScrapeInfo, AnnounceRequest, AnnounceResponse, AnnounceEvent
+
+**Patterns:** Rust 2024 edition · `thiserror` typed errors · Async runtime: tokio · Serialization: serde
+
+## Working State
+
+**Uncommitted changes:**
+- Modified: .gitignore
+- Modified: CONTEXT.md
+- Modified: docs/plans/2026-02-26-ferrite-roadmap-v2.md
+- New: CLAUDE.md
+- New: docs/plans/2026-02-25-ferrite-m10a-session.md
+- New: docs/plans/2026-02-25-ferrite-m10b-session.md
+- New: docs/plans/2026-02-25-ferrite-m10c-session.md
+- New: docs/plans/2026-02-26-m15-alerts-impl.md
 
 ## Next Steps
 
@@ -42,17 +76,77 @@
 2. **M27: Multi-threaded Hashing**
    - No plan file yet — design doc needed first
 
+## Project Rules
+
+> Extracted from CLAUDE.md. Edit the source file, not this section.
+
+Rust BitTorrent library targeting libtorrent-rasterbar + rqbit streaming parity.
+
+## Architecture
+
+11-crate workspace: `ferrite-bencode` → `ferrite-core` → `ferrite-wire`/`ferrite-tracker`/`ferrite-dht`/`ferrite-storage`/`ferrite-utp`/`ferrite-nat` → `ferrite-session` → `ferrite` (facade)
+
+- **ferrite-session**: Actor model — `SessionActor`/`TorrentActor` with `tokio::select!` loops and command channels
+- **ferrite** (facade): `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module
+
+## Conventions
+
+- Edition 2024, workspace resolver = "2"
+- `thiserror` typed errors per crate, no `anyhow`
+- `bytes::Bytes` throughout (not custom wrappers)
+- Manual big-endian serialization for wire protocol
+- Random bytes: thread-local xorshift64 seeded from SystemTime (avoids `rand` dep)
+- Sorted map serializer for BEP 3 key ordering
+- KRPC: `BTreeMap<Vec<u8>, BencodeValue>` for encoding, pattern-match on "y" field for decoding
+
+## Milestones
+
+- 35-milestone roadmap: `docs/plans/2026-02-26-ferrite-roadmap-v2.md`
+- Commit format: `feat: description (M24)` — milestone tag in parentheses
+- Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
+- Plan files: `docs/plans/YYYY-MM-DD-ferrite-<milestone>-<topic>.md`
+
+## Remotes
+
+- `origin` → Codeberg, `github` → GitHub
+- Push to BOTH on every push: `git push origin main && git push github main`
+
+## License
+
+GPL-3.0-or-later
+
 ## Quick Reference
 
 - **Build:** `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 - **Roadmap:** `docs/plans/2026-02-26-ferrite-roadmap-v2.md`
 - **Key crates:** ferrite, ferrite-core, ferrite-session
 
-**Recent Commits:**
-  6e211b2 feat: smart banning — peer attribution, parole mode, session-wide bans (M25)
-  cb23a9d feat: tracker scrape, lt_trackers exchange, enhanced tracker management (M24)
-  552135f docs: update roadmap current state for v0.24.0 (M23)
-  69774a5 feat: super seeding, upload-only, batched Have — BEP 16, 21 (M23)
-  5f921d7 docs: update README/changelog for v0.23.0
-  42c9b32 feat: HTTP/web seeding — BEP 19, BEP 17 (M22)
+**Recent Commits (M25):**
+  docs: c3e9977 update CONTEXT.md for v0.26.0 (M25)
+  feat: 6e211b2 smart banning — peer attribution, parole mode, session-wide bans (M25)
+
+**Recent Commits (M24):**
+  feat: cb23a9d tracker scrape, lt_trackers exchange, enhanced tracker management (M24)
+
+**Recent Commits (M23):**
+  docs: 552135f update roadmap current state for v0.24.0 (M23)
+  feat: 69774a5 super seeding, upload-only, batched Have — BEP 16, 21 (M23)
+
+**Recent Commits (M22):**
+  feat: 42c9b32 HTTP/web seeding — BEP 19, BEP 17 (M22)
+
+**Recent Commits (M21):**
+  feat: a1fe73f full dual-stack IPv6 support — BEP 7, 24, 11 (M21)
+
+**Recent Commits (M20):**
+  feat: 08c1b2b add ferrite-nat facade, version bump to 0.21.0, changelog (M20)
+  feat: a665c50 integrate NatActor for automatic port mapping on session start (M20)
+  feat: df5aefb implement NatActor with PCP→NAT-PMP→UPnP protocol orchestration (M20)
+  feat: 7f49200 implement UPnP IGD SSDP discovery and SOAP control (M20)
+  feat: 8b44204 implement NAT-PMP (RFC 6886) and PCP (RFC 6887) packet encode/decode (M20)
+  feat: 478b4fd scaffold ferrite-nat crate with error types and gateway discovery (M20)
+
+**Recent Commits (Untagged):**
+  docs: 1f1ae68 update README test counts for v0.26.0
+  docs: 5f921d7 update README/changelog for v0.23.0
 
