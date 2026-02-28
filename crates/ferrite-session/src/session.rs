@@ -259,6 +259,10 @@ impl SessionHandle {
             std::sync::RwLock::new(crate::ban::BanManager::new(ban_config)),
         );
 
+        let disk_config = config.to_disk_config();
+        let (disk_manager, disk_actor_handle) =
+            crate::disk::DiskManagerHandle::new(disk_config);
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
@@ -278,6 +282,8 @@ impl SessionHandle {
             nat,
             nat_events_rx,
             ban_manager,
+            disk_manager,
+            disk_actor_handle,
         };
 
         tokio::spawn(actor.run());
@@ -584,6 +590,9 @@ struct SessionActor {
     nat: Option<ferrite_nat::NatHandle>,
     nat_events_rx: Option<mpsc::Receiver<ferrite_nat::NatEvent>>,
     ban_manager: SharedBanManager,
+    disk_manager: crate::disk::DiskManagerHandle,
+    #[allow(dead_code)]
+    disk_actor_handle: tokio::task::JoinHandle<()>,
 }
 
 impl SessionActor {
@@ -837,10 +846,10 @@ impl SessionActor {
 
         let torrent_config = self.make_torrent_config();
 
-        let storage = match storage {
+        // Create or use provided storage, then register with disk manager
+        let storage: Arc<dyn TorrentStorage> = match storage {
             Some(s) => s,
             None => {
-                // Default: create in-memory storage
                 let lengths = Lengths::new(
                     meta.info.total_length(),
                     meta.info.piece_length,
@@ -849,13 +858,15 @@ impl SessionActor {
                 Arc::new(ferrite_storage::MemoryStorage::new(lengths))
             }
         };
+        let disk_handle = self.disk_manager.register_torrent(info_hash, storage).await;
 
         let (global_up, global_down) = self.global_buckets_if_limited();
         let slot_tuner = self.make_slot_tuner();
 
         let handle = TorrentHandle::from_torrent(
             meta.clone(),
-            storage,
+            disk_handle,
+            self.disk_manager.clone(),
             torrent_config,
             self.dht_v4.clone(),
             self.dht_v6.clone(),
@@ -914,6 +925,7 @@ impl SessionActor {
         let slot_tuner = self.make_slot_tuner();
         let handle = TorrentHandle::from_magnet(
             magnet,
+            self.disk_manager.clone(),
             config,
             self.dht_v4.clone(),
             self.dht_v6.clone(),
@@ -964,6 +976,7 @@ impl SessionActor {
         let was_auto_managed = entry.auto_managed;
         let removed_position = entry.queue_position;
         entry.handle.shutdown().await?;
+        self.disk_manager.unregister_torrent(info_hash).await;
 
         // Shift queue positions for remaining auto-managed torrents
         if was_auto_managed && removed_position >= 0 {
@@ -1358,6 +1371,7 @@ impl SessionActor {
         {
             debug!(error = %e, "uTP v6 socket shutdown error");
         }
+        self.disk_manager.shutdown().await;
     }
 }
 

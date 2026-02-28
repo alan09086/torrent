@@ -530,6 +530,9 @@ impl DiskActor {
         piece: u32,
         expected: Id20,
     ) -> ferrite_storage::Result<bool> {
+        // Flush any buffered writes for this piece before hashing
+        self.flush_piece(info_hash, piece).await?;
+
         let storage = self.get_storage(info_hash)?;
         let permit = self.semaphore.clone().acquire_owned().await.unwrap();
         let result =
