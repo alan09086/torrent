@@ -1199,34 +1199,100 @@ impl TorrentActor {
             Some(d) => d.clone(),
             None => return,
         };
-        let meta = match &self.meta {
+        let meta = match self.meta.clone() {
             Some(m) => m,
             None => return,
         };
 
+        self.transition_state(TorrentState::Checking);
+        self.checking_progress = 0.0;
+
+        let max_concurrent = self.config.hashing_threads.max(1);
         let mut verified_count = 0u32;
-        for i in 0..self.num_pieces {
-            if let Some(expected) = meta.info.piece_hash(i as usize)
-                && disk.verify_piece(i, expected, DiskJobFlags::empty()).await.unwrap_or(false)
-            {
-                if let Some(ref mut ct) = self.chunk_tracker {
-                    ct.mark_verified(i);
+        let mut checked_count = 0u32;
+        let total = self.num_pieces;
+
+        let mut in_flight = tokio::task::JoinSet::new();
+        let mut next_piece = 0u32;
+
+        // Seed the pipeline
+        while next_piece < total && in_flight.len() < max_concurrent {
+            if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
+                let d = disk.clone();
+                let piece = next_piece;
+                in_flight.spawn(async move {
+                    let valid = d
+                        .verify_piece(piece, expected, DiskJobFlags::empty())
+                        .await
+                        .unwrap_or(false);
+                    (piece, valid)
+                });
+            }
+            next_piece += 1;
+        }
+
+        // Process completions, refill pipeline
+        while let Some(result) = in_flight.join_next().await {
+            if let Ok((piece, valid)) = result {
+                checked_count += 1;
+                if valid {
+                    if let Some(ref mut ct) = self.chunk_tracker {
+                        ct.mark_verified(piece);
+                    }
+                    verified_count += 1;
                 }
-                verified_count += 1;
+
+                // Update progress
+                self.checking_progress = checked_count as f32 / total as f32;
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::CheckingProgress {
+                        info_hash: self.info_hash,
+                        progress: self.checking_progress,
+                    },
+                );
+            }
+
+            // Refill pipeline
+            while next_piece < total && in_flight.len() < max_concurrent {
+                if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
+                    let d = disk.clone();
+                    let piece = next_piece;
+                    in_flight.spawn(async move {
+                        let valid = d
+                            .verify_piece(piece, expected, DiskJobFlags::empty())
+                            .await
+                            .unwrap_or(false);
+                        (piece, valid)
+                    });
+                }
+                next_piece += 1;
             }
         }
 
+        // Fire TorrentChecked alert
+        self.checking_progress = 0.0;
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentChecked {
+                info_hash: self.info_hash,
+                pieces_have: verified_count,
+                pieces_total: total,
+            },
+        );
+
         if verified_count > 0 {
-            info!(verified_count, total = self.num_pieces, "resumed with existing pieces");
+            info!(verified_count, total, "resumed with existing pieces");
         }
 
         if verified_count == self.num_pieces {
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
-            // BEP 21: broadcast upload-only at startup if already seeding
-            // (peers haven't connected yet, so this is a no-op in practice,
-            // but matches the seeding transition logic for consistency)
             info!("all pieces verified, starting as seeder");
+        } else {
+            self.transition_state(TorrentState::Downloading);
         }
     }
 

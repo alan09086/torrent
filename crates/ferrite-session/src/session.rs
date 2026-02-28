@@ -1871,6 +1871,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_receives_torrent_removed_alert() {
         use crate::alert::AlertKind;
+        use crate::types::TorrentState;
 
         let session = SessionHandle::start(test_session_config()).await.unwrap();
         let mut alerts = session.subscribe();
@@ -1880,18 +1881,25 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
 
-        // Drain TorrentAdded
-        let _ = tokio::time::timeout(Duration::from_secs(1), alerts.recv())
-            .await
-            .unwrap();
+        // Drain TorrentAdded and any checking alerts
+        while let Ok(Ok(a)) = tokio::time::timeout(Duration::from_secs(1), alerts.recv()).await {
+            if matches!(a.kind, AlertKind::StateChanged { new_state: TorrentState::Downloading, .. }) {
+                break;
+            }
+        }
 
         session.remove_torrent(info_hash).await.unwrap();
 
-        let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(alert.kind, AlertKind::TorrentRemoved { .. }));
+        // Find TorrentRemoved (skip any interleaved alerts)
+        loop {
+            let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(alert.kind, AlertKind::TorrentRemoved { .. }) {
+                break;
+            }
+        }
         session.shutdown().await.unwrap();
     }
 
@@ -1938,6 +1946,9 @@ mod tests {
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
             .await.unwrap().unwrap();
         assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
+
+        // Drain any remaining alerts from the first torrent (StateChanged, CheckingProgress, etc.)
+        while tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await.is_ok() {}
 
         // Change mask to empty — no alerts should pass
         session.set_alert_mask(AlertCategory::empty());
