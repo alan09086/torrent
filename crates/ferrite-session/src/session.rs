@@ -1481,6 +1481,10 @@ mod tests {
             have_send_delay_ms: 0,
             smart_ban_max_failures: 3,
             smart_ban_parole: true,
+            disk_io_threads: 2,
+            storage_mode: ferrite_core::StorageMode::Sparse,
+            disk_cache_size: 1024 * 1024,
+            disk_write_cache_ratio: 0.25,
         }
     }
 

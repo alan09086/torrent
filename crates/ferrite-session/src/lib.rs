@@ -30,6 +30,7 @@ mod persistence;
 
 pub use alert::{Alert, AlertCategory, AlertKind, AlertStream};
 pub use error::{Error, Result};
+pub use disk::{DiskConfig, DiskHandle, DiskJobFlags, DiskManagerHandle, DiskStats};
 pub use types::{FileInfo, SessionConfig, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;
 pub use session::SessionHandle;

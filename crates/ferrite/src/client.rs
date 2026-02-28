@@ -243,6 +243,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the number of concurrent disk I/O threads. Default: 4.
+    pub fn disk_io_threads(mut self, n: usize) -> Self {
+        self.config.disk_io_threads = n;
+        self
+    }
+
+    /// Set the storage allocation mode. Default: Auto.
+    pub fn storage_mode(mut self, mode: ferrite_core::StorageMode) -> Self {
+        self.config.storage_mode = mode;
+        self
+    }
+
+    /// Set the total disk cache size in bytes. Default: 64 MiB.
+    pub fn disk_cache_size(mut self, bytes: usize) -> Self {
+        self.config.disk_cache_size = bytes;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config

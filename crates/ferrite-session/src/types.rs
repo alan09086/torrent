@@ -312,6 +312,14 @@ pub struct SessionConfig {
     pub smart_ban_max_failures: u32,
     /// Smart banning: use parole to isolate offending peer before striking (default: true).
     pub smart_ban_parole: bool,
+    /// Number of concurrent disk I/O threads (default: 4).
+    pub disk_io_threads: usize,
+    /// Storage allocation mode (default: Auto).
+    pub storage_mode: ferrite_core::StorageMode,
+    /// Total disk cache size in bytes (default: 64 MiB).
+    pub disk_cache_size: usize,
+    /// Fraction of disk cache reserved for write buffering (default: 0.25).
+    pub disk_write_cache_ratio: f32,
 }
 
 impl Default for SessionConfig {
@@ -354,6 +362,23 @@ impl Default for SessionConfig {
             have_send_delay_ms: 0,
             smart_ban_max_failures: 3,
             smart_ban_parole: true,
+            disk_io_threads: 4,
+            storage_mode: ferrite_core::StorageMode::Auto,
+            disk_cache_size: 64 * 1024 * 1024,
+            disk_write_cache_ratio: 0.25,
+        }
+    }
+}
+
+impl SessionConfig {
+    /// Build a `DiskConfig` from the session-level disk I/O settings.
+    pub fn to_disk_config(&self) -> crate::disk::DiskConfig {
+        crate::disk::DiskConfig {
+            io_threads: self.disk_io_threads,
+            storage_mode: self.storage_mode,
+            cache_size: self.disk_cache_size,
+            write_cache_ratio: self.disk_write_cache_ratio,
+            ..crate::disk::DiskConfig::default()
         }
     }
 }
