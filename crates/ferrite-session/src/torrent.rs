@@ -143,6 +143,13 @@ impl TorrentHandle {
         };
         let have_buffer = crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
 
+        let (piece_ready_tx, _) = broadcast::channel(64);
+        let initial_have = chunk_tracker.bitfield().clone();
+        let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(initial_have);
+        let stream_read_semaphore = crate::streaming::stream_read_semaphore(
+            config.max_concurrent_stream_reads,
+        );
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -157,6 +164,11 @@ impl TorrentHandle {
             in_flight_pieces: HashMap::new(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
+            streaming_cursors: Vec::new(),
+            piece_ready_tx,
+            have_watch_tx,
+            have_watch_rx,
+            stream_read_semaphore,
             file_priorities,
             wanted_pieces,
             end_game: EndGame::new(),
@@ -276,6 +288,12 @@ impl TorrentHandle {
         };
         let have_buffer = crate::have_buffer::HaveBuffer::new(0, config.have_send_delay_ms);
 
+        let (piece_ready_tx, _) = broadcast::channel(64);
+        let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
+        let stream_read_semaphore = crate::streaming::stream_read_semaphore(
+            config.max_concurrent_stream_reads,
+        );
+
         let actor = TorrentActor {
             config,
             info_hash: magnet.info_hash,
@@ -290,6 +308,11 @@ impl TorrentHandle {
             in_flight_pieces: HashMap::new(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
+            streaming_cursors: Vec::new(),
+            piece_ready_tx,
+            have_watch_tx,
+            have_watch_rx,
+            stream_read_semaphore,
             file_priorities: Vec::new(),
             wanted_pieces: Bitfield::new(0),
             end_game: EndGame::new(),
@@ -448,6 +471,17 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Open a streaming reader for a file within the torrent.
+    pub async fn open_file(&self, file_index: usize) -> crate::Result<crate::streaming::FileStream> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::OpenFile { file_index, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        let handle = rx.await.map_err(|_| crate::Error::Shutdown)??;
+        Ok(crate::streaming::FileStream::from_handle(handle))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +511,11 @@ struct TorrentActor {
     // Streaming (M28)
     streaming_pieces: BTreeSet<u32>,
     time_critical_pieces: BTreeSet<u32>,
+    streaming_cursors: Vec<crate::streaming::StreamingCursor>,
+    piece_ready_tx: broadcast::Sender<u32>,
+    have_watch_tx: tokio::sync::watch::Sender<Bitfield>,
+    have_watch_rx: tokio::sync::watch::Receiver<Bitfield>,
+    stream_read_semaphore: Arc<tokio::sync::Semaphore>,
 
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
@@ -647,6 +686,10 @@ impl TorrentActor {
                             }
                             let _ = reply.send(result);
                         }
+                        Some(TorrentCommand::OpenFile { file_index, reply }) => {
+                            let result = self.handle_open_file(file_index);
+                            let _ = reply.send(result);
+                        }
                         Some(TorrentCommand::IncomingPeer { stream, addr }) => {
                             self.spawn_peer_from_stream_with_mode(
                                 addr,
@@ -681,6 +724,8 @@ impl TorrentActor {
                     self.upload_bytes_interval = 0;
                     self.choker.set_unchoke_slots(self.slot_tuner.current_slots());
                     self.run_choker().await;
+                    // Update streaming cursors and piece priorities
+                    self.update_streaming_cursors();
                 }
                 // Optimistic unchoke timer
                 _ = optimistic_interval.tick() => {
@@ -1406,6 +1451,62 @@ impl TorrentActor {
         Ok(())
     }
 
+    fn handle_open_file(
+        &mut self,
+        file_index: usize,
+    ) -> crate::Result<crate::streaming::FileStreamHandle> {
+        let meta = self.meta.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let files = meta.info.files();
+        if file_index >= files.len() {
+            return Err(crate::Error::InvalidFileIndex {
+                index: file_index,
+                count: files.len(),
+            });
+        }
+        if self.file_priorities.get(file_index).copied() == Some(FilePriority::Skip) {
+            return Err(crate::Error::FileSkipped { index: file_index });
+        }
+
+        let lengths = self.lengths.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+
+        // Compute file offset within torrent data
+        let mut file_offset = 0u64;
+        for f in &files[..file_index] {
+            file_offset += f.length;
+        }
+        let file_length = files[file_index].length;
+
+        let (cursor_tx, cursor_rx) = tokio::sync::watch::channel(0u64);
+
+        let permit = self.stream_read_semaphore.clone()
+            .try_acquire_owned()
+            .map_err(|_| crate::Error::Connection(
+                "too many concurrent stream readers".into(),
+            ))?;
+
+        // Add streaming cursor for the actor to track
+        self.streaming_cursors.push(crate::streaming::StreamingCursor {
+            file_index,
+            file_offset,
+            cursor_piece: (file_offset / lengths.piece_length()) as u32,
+            readahead_pieces: self.config.readahead_pieces,
+            cursor_rx,
+        });
+
+        Ok(crate::streaming::FileStreamHandle {
+            disk: disk.clone(),
+            lengths: lengths.clone(),
+            file_index,
+            file_offset,
+            file_length,
+            cursor_tx,
+            piece_ready_rx: self.piece_ready_tx.subscribe(),
+            have: self.have_watch_rx.clone(),
+            read_permit: permit,
+        })
+    }
+
     async fn verify_and_mark_piece(&mut self, index: u32) {
         let expected_hash = self
             .meta
@@ -1431,6 +1532,12 @@ impl TorrentActor {
                 info_hash: self.info_hash,
                 piece: index,
             });
+
+            // Notify FileStream consumers of piece completion
+            let _ = self.piece_ready_tx.send(index);
+            if let Some(ref ct) = self.chunk_tracker {
+                let _ = self.have_watch_tx.send(ct.bitfield().clone());
+            }
 
             // Handle parole success: the parole peer delivered a good piece,
             // so the original contributors are the likely offenders.
@@ -2115,6 +2222,49 @@ impl TorrentActor {
         }
     }
 
+    fn update_streaming_cursors(&mut self) {
+        // Remove cursors whose receiver has been dropped (FileStream dropped)
+        self.streaming_cursors.retain(|c| c.cursor_rx.has_changed().is_ok());
+
+        self.streaming_pieces.clear();
+        for cursor in &mut self.streaming_cursors {
+            // Update cursor piece from position changes
+            if cursor.cursor_rx.has_changed().unwrap_or(false) {
+                let file_pos = *cursor.cursor_rx.borrow_and_update();
+                if let Some(ref lengths) = self.lengths {
+                    let abs = cursor.file_offset + file_pos;
+                    if abs < lengths.total_length() {
+                        cursor.cursor_piece = (abs / lengths.piece_length()) as u32;
+                    }
+                }
+            }
+
+            let end = cursor.cursor_piece + cursor.readahead_pieces;
+            for p in cursor.cursor_piece..end.min(self.num_pieces) {
+                self.streaming_pieces.insert(p);
+            }
+        }
+
+        // Build time_critical_pieces from first+last piece of High-priority files
+        self.time_critical_pieces.clear();
+        if let Some(ref meta) = self.meta
+            && let Some(ref lengths) = self.lengths
+        {
+            let mut offset = 0u64;
+            for (i, file) in meta.info.files().iter().enumerate() {
+                if self.file_priorities.get(i).copied() == Some(FilePriority::High)
+                    && let Some((first, last)) = lengths.file_pieces(offset, file.length)
+                {
+                    self.time_critical_pieces.insert(first);
+                    if last != first {
+                        self.time_critical_pieces.insert(last);
+                    }
+                }
+                offset += file.length;
+            }
+        }
+    }
+
     async fn maybe_express_interest(&mut self, peer_addr: SocketAddr) {
         if self.state != TorrentState::Downloading {
             return;
@@ -2622,6 +2772,7 @@ mod tests {
             snub_timeout_secs: 60,
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
+            max_concurrent_stream_reads: 8,
         }
     }
 

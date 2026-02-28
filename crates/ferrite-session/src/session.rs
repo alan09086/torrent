@@ -822,6 +822,7 @@ impl SessionActor {
             snub_timeout_secs: 60,
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
+            max_concurrent_stream_reads: self.config.max_concurrent_stream_reads,
         }
     }
 

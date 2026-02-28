@@ -44,6 +44,9 @@ pub enum Error {
     #[error("file index {index} out of range (torrent has {count} files)")]
     InvalidFileIndex { index: usize, count: usize },
 
+    #[error("file has Skip priority (index {index})")]
+    FileSkipped { index: usize },
+
     #[error("session shutting down")]
     Shutdown,
 

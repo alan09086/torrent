@@ -53,6 +53,8 @@ pub struct TorrentConfig {
     pub readahead_pieces: u32,
     /// When true, escalate streaming piece requests that exceed the mean RTT.
     pub streaming_timeout_escalation: bool,
+    /// Maximum concurrent file stream readers per torrent.
+    pub max_concurrent_stream_reads: usize,
 }
 
 impl Default for TorrentConfig {
@@ -83,6 +85,7 @@ impl Default for TorrentConfig {
             snub_timeout_secs: 60,
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
+            max_concurrent_stream_reads: 8,
         }
     }
 }
@@ -246,6 +249,11 @@ pub(crate) enum TorrentCommand {
     IncomingPeer {
         stream: crate::utp_routing::PrefixedStream<ferrite_utp::UtpStream>,
         addr: SocketAddr,
+    },
+    /// Open a streaming reader for a file within the torrent.
+    OpenFile {
+        file_index: usize,
+        reply: oneshot::Sender<crate::Result<crate::streaming::FileStreamHandle>>,
     },
 }
 

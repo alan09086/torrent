@@ -189,6 +189,12 @@ pub struct DiskHandle {
 }
 
 impl DiskHandle {
+    /// Create a DiskHandle from raw parts (for internal/test use).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(tx: mpsc::Sender<DiskJob>, info_hash: Id20) -> Self {
+        Self { tx, info_hash }
+    }
+
     /// Write a chunk to disk (may be buffered).
     pub async fn write_chunk(
         &self,
