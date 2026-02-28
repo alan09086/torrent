@@ -1216,7 +1216,7 @@ impl SessionActor {
             };
 
             let category = match stats.state {
-                TorrentState::Downloading | TorrentState::FetchingMetadata => {
+                TorrentState::Downloading | TorrentState::FetchingMetadata | TorrentState::Checking => {
                     crate::queue::QueueCategory::Downloading
                 }
                 TorrentState::Seeding | TorrentState::Complete => {

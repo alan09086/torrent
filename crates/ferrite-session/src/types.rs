@@ -69,6 +69,7 @@ impl Default for TorrentConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TorrentState {
     FetchingMetadata,
+    Checking,
     Downloading,
     Complete,
     Seeding,
@@ -86,6 +87,8 @@ pub struct TorrentStats {
     pub pieces_total: u32,
     pub peers_connected: usize,
     pub peers_available: usize,
+    /// Progress of piece checking (0.0–1.0), meaningful when state is `Checking`.
+    pub checking_progress: f32,
 }
 
 /// Events sent from a `PeerTask` back to the `TorrentActor`.

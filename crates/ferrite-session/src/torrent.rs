@@ -164,6 +164,7 @@ impl TorrentHandle {
             metadata_downloader: None,
             downloaded: 0,
             uploaded: 0,
+            checking_progress: 0.0,
             cmd_rx,
             event_tx,
             event_rx,
@@ -294,6 +295,7 @@ impl TorrentHandle {
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash)),
             downloaded: 0,
             uploaded: 0,
+            checking_progress: 0.0,
             cmd_rx,
             event_tx,
             event_rx,
@@ -482,6 +484,7 @@ struct TorrentActor {
     // Stats
     downloaded: u64,
     uploaded: u64,
+    checking_progress: f32,
 
     // Channels
     cmd_rx: mpsc::Receiver<TorrentCommand>,
@@ -808,6 +811,7 @@ impl TorrentActor {
             pieces_total: self.num_pieces,
             peers_connected: self.peers.len(),
             peers_available: self.available_peers.len(),
+            checking_progress: self.checking_progress,
         }
     }
 
