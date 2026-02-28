@@ -35,3 +35,6 @@ pub use crate::wire::mse::EncryptionMode;
 
 // Smart banning (M25)
 pub use crate::session::BanConfig;
+
+// File streaming (M28)
+pub use crate::session::FileStream;

@@ -267,6 +267,30 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum per-peer request queue depth. Default: 250.
+    pub fn max_request_queue_depth(mut self, n: usize) -> Self {
+        self.config.max_request_queue_depth = n;
+        self
+    }
+
+    /// Set the request queue time multiplier (seconds). Default: 3.0.
+    pub fn request_queue_time(mut self, secs: f64) -> Self {
+        self.config.request_queue_time = secs;
+        self
+    }
+
+    /// Set the block request timeout in seconds. Default: 60.
+    pub fn block_request_timeout_secs(mut self, secs: u32) -> Self {
+        self.config.block_request_timeout_secs = secs;
+        self
+    }
+
+    /// Set the maximum concurrent file stream readers. Default: 8.
+    pub fn max_concurrent_stream_reads(mut self, n: usize) -> Self {
+        self.config.max_concurrent_stream_reads = n;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config

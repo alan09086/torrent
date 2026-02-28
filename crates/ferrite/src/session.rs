@@ -34,6 +34,8 @@ pub use ferrite_session::{
     // Tracker management (M24)
     TrackerInfo,
     TrackerStatus,
+    // File streaming (M28)
+    FileStream,
     // Disk I/O (M26)
     DiskConfig,
     DiskHandle,

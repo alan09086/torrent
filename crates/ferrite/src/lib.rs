@@ -542,6 +542,27 @@ mod tests {
     }
 
     #[test]
+    fn client_builder_pipeline_config() {
+        let config = crate::ClientBuilder::new()
+            .max_request_queue_depth(100)
+            .request_queue_time(5.0)
+            .block_request_timeout_secs(30)
+            .max_concurrent_stream_reads(4)
+            .into_config();
+        assert_eq!(config.max_request_queue_depth, 100);
+        assert!((config.request_queue_time - 5.0).abs() < f64::EPSILON);
+        assert_eq!(config.block_request_timeout_secs, 30);
+        assert_eq!(config.max_concurrent_stream_reads, 4);
+    }
+
+    #[test]
+    fn file_stream_in_prelude() {
+        // Verify FileStream is accessible via the prelude
+        use crate::prelude::*;
+        let _: fn() -> &'static str = || std::any::type_name::<FileStream>();
+    }
+
+    #[test]
     fn client_builder_nat_config() {
         // Defaults: both enabled
         let config = crate::ClientBuilder::new().into_config();
