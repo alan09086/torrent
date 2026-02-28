@@ -6,9 +6,14 @@ pub use ferrite_tracker::{
     // HTTP tracker
     HttpTracker,
     HttpAnnounceResponse,
+    HttpScrapeResponse,
     // UDP tracker
     UdpTracker,
     UdpAnnounceResponse,
+    UdpScrapeResponse,
+    // Scrape
+    ScrapeInfo,
+    announce_url_to_scrape,
     // Common request/response types
     AnnounceRequest,
     AnnounceResponse,

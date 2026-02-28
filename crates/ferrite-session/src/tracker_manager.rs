@@ -49,6 +49,29 @@ struct TrackerEntry {
     next_announce: Instant,
     interval: Duration,
     backoff: Duration,
+    scrape_info: Option<ferrite_tracker::ScrapeInfo>,
+    consecutive_failures: u32,
+}
+
+/// Public tracker status (simplified view of internal TrackerState).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackerStatus {
+    NotContacted,
+    Working,
+    Error,
+}
+
+/// Public info about a single tracker.
+#[derive(Debug, Clone)]
+pub struct TrackerInfo {
+    pub url: String,
+    pub tier: usize,
+    pub status: TrackerStatus,
+    pub seeders: Option<u32>,
+    pub leechers: Option<u32>,
+    pub downloaded: Option<u32>,
+    pub next_announce_secs: u64,
+    pub consecutive_failures: u32,
 }
 
 /// Per-tracker announce outcome (success with peer count, or error message).
@@ -105,6 +128,8 @@ impl TrackerManager {
                             next_announce: Instant::now(),
                             interval: DEFAULT_INTERVAL,
                             backoff: Duration::ZERO,
+                            scrape_info: None,
+                            consecutive_failures: 0,
                         });
                     }
                 }
@@ -131,6 +156,8 @@ impl TrackerManager {
                     next_announce: Instant::now(),
                     interval: DEFAULT_INTERVAL,
                     backoff: Duration::ZERO,
+                    scrape_info: None,
+                    consecutive_failures: 0,
                 });
             }
         }
@@ -231,7 +258,7 @@ impl TrackerManager {
             };
 
             match result {
-                Ok((peers, interval, tracker_id)) => {
+                Ok((peers, interval, tracker_id, seeders, leechers)) => {
                     let num_peers = peers.len();
                     debug!(
                         url = %tracker.url,
@@ -243,8 +270,18 @@ impl TrackerManager {
                     tracker.interval = Duration::from_secs(interval as u64);
                     tracker.next_announce = now + tracker.interval;
                     tracker.backoff = Duration::ZERO;
+                    tracker.consecutive_failures = 0;
                     if let Some(id) = tracker_id {
                         tracker.tracker_id = Some(id);
+                    }
+                    // Store seeders/leechers from announce response
+                    if seeders.is_some() || leechers.is_some() {
+                        let prev_downloaded = tracker.scrape_info.map(|s| s.downloaded).unwrap_or(0);
+                        tracker.scrape_info = Some(ferrite_tracker::ScrapeInfo {
+                            complete: seeders.unwrap_or(0),
+                            incomplete: leechers.unwrap_or(0),
+                            downloaded: prev_downloaded,
+                        });
                     }
 
                     for peer in peers {
@@ -263,6 +300,7 @@ impl TrackerManager {
                     tracker.state = TrackerState::Failed {
                         _error: msg.clone(),
                     };
+                    tracker.consecutive_failures += 1;
                     // Exponential backoff
                     tracker.backoff = if tracker.backoff.is_zero() {
                         INITIAL_BACKOFF
@@ -316,12 +354,14 @@ impl TrackerManager {
         client: &HttpTracker,
         url: &str,
         req: &AnnounceRequest,
-    ) -> std::result::Result<(Vec<SocketAddr>, u32, Option<String>), ferrite_tracker::Error> {
+    ) -> std::result::Result<(Vec<SocketAddr>, u32, Option<String>, Option<u32>, Option<u32>), ferrite_tracker::Error> {
         let resp = client.announce(url, req).await?;
         Ok((
             resp.response.peers,
             resp.response.interval,
             resp.tracker_id,
+            resp.response.seeders,
+            resp.response.leechers,
         ))
     }
 
@@ -329,12 +369,112 @@ impl TrackerManager {
         client: &UdpTracker,
         url: &str,
         req: &AnnounceRequest,
-    ) -> std::result::Result<(Vec<SocketAddr>, u32, Option<String>), ferrite_tracker::Error> {
+    ) -> std::result::Result<(Vec<SocketAddr>, u32, Option<String>, Option<u32>, Option<u32>), ferrite_tracker::Error> {
         // UDP tracker URLs are like "udp://tracker.example.com:6969/announce"
         // UdpTracker::announce expects "host:port"
         let addr = parse_udp_addr(url);
         let resp = client.announce(&addr, req).await?;
-        Ok((resp.response.peers, resp.response.interval, None))
+        Ok((
+            resp.response.peers,
+            resp.response.interval,
+            None,
+            resp.response.seeders,
+            resp.response.leechers,
+        ))
+    }
+
+    // ---- New public methods ----
+
+    /// Get a list of all configured trackers with their status.
+    pub fn tracker_list(&self) -> Vec<TrackerInfo> {
+        self.trackers
+            .iter()
+            .map(|t| {
+                let status = match t.state {
+                    TrackerState::NeedsAnnounce => TrackerStatus::NotContacted,
+                    TrackerState::Active => TrackerStatus::Working,
+                    TrackerState::Failed { .. } => TrackerStatus::Error,
+                };
+                TrackerInfo {
+                    url: t.url.clone(),
+                    tier: t.tier,
+                    status,
+                    seeders: t.scrape_info.map(|s| s.complete),
+                    leechers: t.scrape_info.map(|s| s.incomplete),
+                    downloaded: t.scrape_info.map(|s| s.downloaded),
+                    next_announce_secs: t.next_announce.saturating_duration_since(Instant::now()).as_secs(),
+                    consecutive_failures: t.consecutive_failures,
+                }
+            })
+            .collect()
+    }
+
+    /// Force all trackers to re-announce immediately.
+    pub fn force_reannounce(&mut self) {
+        let now = Instant::now();
+        for tracker in &mut self.trackers {
+            tracker.next_announce = now;
+        }
+    }
+
+    /// Add a new tracker URL (e.g. from lt_trackers exchange).
+    ///
+    /// Returns `true` if the URL was added, `false` if empty, unknown protocol, or duplicate.
+    pub fn add_tracker_url(&mut self, url: &str) -> bool {
+        let url = url.trim();
+        if url.is_empty() {
+            return false;
+        }
+        let Some(protocol) = classify_url(url) else {
+            return false;
+        };
+        // Deduplicate
+        if self.trackers.iter().any(|t| t.url == url) {
+            return false;
+        }
+        let new_tier = self.trackers.last().map(|t| t.tier + 1).unwrap_or(0);
+        self.trackers.push(TrackerEntry {
+            url: url.to_string(),
+            tier: new_tier,
+            protocol,
+            state: TrackerState::NeedsAnnounce,
+            tracker_id: None,
+            next_announce: Instant::now(),
+            interval: DEFAULT_INTERVAL,
+            backoff: Duration::ZERO,
+            scrape_info: None,
+            consecutive_failures: 0,
+        });
+        true
+    }
+
+    /// Scrape trackers to get seeder/leecher counts.
+    ///
+    /// Tries each tracker until one succeeds. Returns `(url, ScrapeInfo)` from first success.
+    pub async fn scrape(&self) -> Option<(String, ferrite_tracker::ScrapeInfo)> {
+        for tracker in &self.trackers {
+            let result = match tracker.protocol {
+                TrackerProtocol::Http => {
+                    self.http_client
+                        .scrape(&tracker.url, &[self.info_hash])
+                        .await
+                        .ok()
+                        .and_then(|resp| resp.files.get(&self.info_hash).copied())
+                }
+                TrackerProtocol::Udp => {
+                    let addr = parse_udp_addr(&tracker.url);
+                    self.udp_client
+                        .scrape(&addr, &[self.info_hash])
+                        .await
+                        .ok()
+                        .and_then(|resp| resp.results.into_iter().next())
+                }
+            };
+            if let Some(info) = result {
+                return Some((tracker.url.clone(), info));
+            }
+        }
+        None
     }
 }
 
@@ -557,6 +697,65 @@ mod tests {
 
         let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
         mgr.set_metadata(&meta);
+        assert_eq!(mgr.tracker_count(), 1);
+    }
+
+    #[test]
+    fn tracker_list_returns_info() {
+        let meta = torrent_with_trackers(
+            None,
+            Some(vec![
+                vec!["http://tracker1.example.com/announce"],
+                vec!["udp://tracker2.example.com:6969/announce"],
+            ]),
+        );
+        let mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        let list = mgr.tracker_list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].status, TrackerStatus::NotContacted);
+        assert_eq!(list[0].seeders, None);
+        assert_eq!(list[0].tier, 0);
+        assert_eq!(list[1].tier, 1);
+    }
+
+    #[test]
+    fn force_reannounce_resets_timers() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let mut mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        // Push next_announce far into the future
+        mgr.trackers[0].next_announce = Instant::now() + Duration::from_secs(3600);
+        assert!(mgr.next_announce_in().unwrap() > Duration::from_secs(3500));
+        mgr.force_reannounce();
+        let next = mgr.next_announce_in().unwrap();
+        assert!(next <= Duration::from_millis(10));
+    }
+
+    #[test]
+    fn add_tracker_url_new() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let mut mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        assert_eq!(mgr.tracker_count(), 1);
+        let added = mgr.add_tracker_url("http://new-tracker.example.com/announce");
+        assert!(added);
+        assert_eq!(mgr.tracker_count(), 2);
+        assert_eq!(mgr.trackers[1].tier, 1); // new tier
+    }
+
+    #[test]
+    fn add_tracker_url_duplicate() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let mut mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        let added = mgr.add_tracker_url("http://tracker.example.com/announce");
+        assert!(!added);
+        assert_eq!(mgr.tracker_count(), 1);
+    }
+
+    #[test]
+    fn add_tracker_url_empty() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let mut mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        assert!(!mgr.add_tracker_url(""));
+        assert!(!mgr.add_tracker_url("   "));
         assert_eq!(mgr.tracker_count(), 1);
     }
 }

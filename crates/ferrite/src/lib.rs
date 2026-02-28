@@ -565,4 +565,24 @@ mod tests {
         let err: nat::Error = nat::Error::Timeout;
         assert!(err.to_string().contains("timeout"));
     }
+
+    #[test]
+    fn tracker_scrape_types_accessible_through_facade() {
+        // ScrapeInfo construction
+        let info = tracker::ScrapeInfo {
+            complete: 10,
+            incomplete: 3,
+            downloaded: 50,
+        };
+        assert_eq!(info.complete, 10);
+
+        // announce_url_to_scrape
+        let scrape = tracker::announce_url_to_scrape("http://t.co/announce");
+        assert_eq!(scrape, Some("http://t.co/scrape".into()));
+
+        // TrackerStatus enum accessible
+        let _status = session::TrackerStatus::NotContacted;
+        let _working = session::TrackerStatus::Working;
+        let _error = session::TrackerStatus::Error;
+    }
 }

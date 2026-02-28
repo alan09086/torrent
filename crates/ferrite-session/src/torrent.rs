@@ -401,6 +401,34 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Get the list of all configured trackers with their status.
+    pub async fn tracker_list(&self) -> crate::Result<Vec<crate::tracker_manager::TrackerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::TrackerList { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Force all trackers to re-announce immediately.
+    pub async fn force_reannounce(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ForceReannounce)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Scrape trackers for seeder/leecher counts.
+    pub async fn scrape(&self) -> crate::Result<Option<(String, ferrite_tracker::ScrapeInfo)>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::Scrape { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +597,25 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::FilePriorities { reply }) => {
                             let _ = reply.send(self.file_priorities.clone());
+                        }
+                        Some(TorrentCommand::ForceReannounce) => {
+                            self.tracker_manager.force_reannounce();
+                        }
+                        Some(TorrentCommand::TrackerList { reply }) => {
+                            let _ = reply.send(self.tracker_manager.tracker_list());
+                        }
+                        Some(TorrentCommand::Scrape { reply }) => {
+                            let result = self.tracker_manager.scrape().await;
+                            if let Some((ref url, ref info)) = result {
+                                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::ScrapeReply {
+                                    info_hash: self.info_hash,
+                                    url: url.clone(),
+                                    complete: info.complete,
+                                    incomplete: info.incomplete,
+                                    downloaded: info.downloaded,
+                                });
+                            }
+                            let _ = reply.send(result);
                         }
                         Some(TorrentCommand::IncomingPeer { stream, addr }) => {
                             self.spawn_peer_from_stream_with_mode(
@@ -956,6 +1003,13 @@ impl TorrentActor {
             PeerEvent::PexPeers { new_peers } => {
                 if self.config.enable_pex {
                     self.handle_add_peers(new_peers);
+                }
+            }
+            PeerEvent::TrackersReceived { tracker_urls } => {
+                for url in tracker_urls {
+                    if self.tracker_manager.add_tracker_url(&url) {
+                        debug!(url = %url, "added tracker from lt_trackers");
+                    }
                 }
             }
             PeerEvent::IncomingRequest {

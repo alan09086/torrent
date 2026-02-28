@@ -36,6 +36,7 @@ impl ExtHandshake {
         let mut m = BTreeMap::new();
         m.insert("ut_metadata".into(), 1);
         m.insert("ut_pex".into(), 2);
+        m.insert("lt_trackers".into(), 3);
 
         ExtHandshake {
             m,
@@ -250,6 +251,7 @@ mod tests {
         let hs = ExtHandshake::new();
         assert_eq!(hs.ext_id("ut_metadata"), Some(1));
         assert_eq!(hs.ext_id("ut_pex"), Some(2));
+        assert_eq!(hs.ext_id("lt_trackers"), Some(3));
         assert_eq!(hs.ext_id("unknown"), None);
     }
 

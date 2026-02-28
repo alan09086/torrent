@@ -28,6 +28,9 @@ pub use ferrite_session::{
     validate_resume_bitfield,
     // Piece selection (M12)
     build_wanted_pieces,
+    // Tracker management (M24)
+    TrackerInfo,
+    TrackerStatus,
     // Error types
     Error,
     Result,

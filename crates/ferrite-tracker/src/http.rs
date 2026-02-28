@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
+
+use ferrite_core::Id20;
 
 use crate::compact::{parse_compact_peers, parse_compact_peers6};
 use crate::error::{Error, Result};
-use crate::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
+use crate::{AnnounceEvent, AnnounceRequest, AnnounceResponse, ScrapeInfo};
 
 /// HTTP tracker client (BEP 3).
 pub struct HttpTracker {
@@ -125,6 +129,79 @@ impl HttpTracker {
     }
 }
 
+/// HTTP scrape response containing per-torrent stats.
+#[derive(Debug, Clone)]
+pub struct HttpScrapeResponse {
+    pub files: HashMap<Id20, ScrapeInfo>,
+}
+
+impl HttpTracker {
+    /// Build a scrape URL from an announce URL and a list of info_hashes.
+    pub fn build_scrape_url(announce_url: &str, info_hashes: &[Id20]) -> Result<String> {
+        let base = crate::announce_url_to_scrape(announce_url)
+            .ok_or_else(|| Error::InvalidUrl("no 'announce' in URL to convert to scrape".into()))?;
+        let mut url = base;
+        for (i, hash) in info_hashes.iter().enumerate() {
+            let encoded = url_encode_bytes(hash.as_bytes());
+            url.push(if i == 0 { '?' } else { '&' });
+            url.push_str("info_hash=");
+            url.push_str(&encoded);
+        }
+        Ok(url)
+    }
+
+    /// Send a scrape request to an HTTP tracker.
+    pub async fn scrape(
+        &self,
+        announce_url: &str,
+        info_hashes: &[Id20],
+    ) -> Result<HttpScrapeResponse> {
+        let url = Self::build_scrape_url(announce_url, info_hashes)?;
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await?
+            .bytes()
+            .await?;
+
+        // Parse using BencodeValue since keys are raw 20-byte hashes
+        let value: ferrite_bencode::BencodeValue = ferrite_bencode::from_bytes(&response)?;
+        let root = value.as_dict()
+            .ok_or_else(|| Error::InvalidResponse("scrape response is not a dict".into()))?;
+
+        let files_val = root.get(b"files".as_slice())
+            .and_then(|v| v.as_dict())
+            .ok_or_else(|| Error::InvalidResponse("scrape response missing 'files' dict".into()))?;
+
+        let mut files = HashMap::new();
+        for (key, val) in files_val {
+            if key.len() != 20 {
+                continue;
+            }
+            let hash = Id20::from_bytes(key)
+                .map_err(|_| Error::InvalidResponse("invalid info_hash in scrape response".into()))?;
+            let entry = val.as_dict()
+                .ok_or_else(|| Error::InvalidResponse("scrape file entry is not a dict".into()))?;
+
+            let complete = entry.get(b"complete".as_slice())
+                .and_then(|v| v.as_int())
+                .unwrap_or(0) as u32;
+            let incomplete = entry.get(b"incomplete".as_slice())
+                .and_then(|v| v.as_int())
+                .unwrap_or(0) as u32;
+            let downloaded = entry.get(b"downloaded".as_slice())
+                .and_then(|v| v.as_int())
+                .unwrap_or(0) as u32;
+
+            files.insert(hash, ScrapeInfo { complete, incomplete, downloaded });
+        }
+
+        Ok(HttpScrapeResponse { files })
+    }
+}
+
 impl Default for HttpTracker {
     fn default() -> Self {
         Self::new()
@@ -178,6 +255,26 @@ mod tests {
         assert!(url.contains("event=started"));
         assert!(url.contains("numwant=50"));
         assert!(url.contains("compact=1"));
+    }
+
+    #[test]
+    fn build_scrape_url_basic() {
+        let hash = Id20::ZERO;
+        let url = HttpTracker::build_scrape_url(
+            "http://tracker.example.com/announce",
+            &[hash],
+        ).unwrap();
+        assert!(url.starts_with("http://tracker.example.com/scrape?info_hash="));
+    }
+
+    #[test]
+    fn build_scrape_url_no_announce_in_url() {
+        let hash = Id20::ZERO;
+        let result = HttpTracker::build_scrape_url(
+            "http://tracker.example.com/track",
+            &[hash],
+        );
+        assert!(result.is_err());
     }
 
     #[test]

@@ -131,6 +131,9 @@ pub(crate) enum PeerEvent {
     PexPeers {
         new_peers: Vec<SocketAddr>,
     },
+    TrackersReceived {
+        tracker_urls: Vec<String>,
+    },
     IncomingRequest {
         peer_addr: SocketAddr,
         index: u32,
@@ -206,6 +209,13 @@ pub(crate) enum TorrentCommand {
     },
     FilePriorities {
         reply: oneshot::Sender<Vec<ferrite_core::FilePriority>>,
+    },
+    ForceReannounce,
+    TrackerList {
+        reply: oneshot::Sender<Vec<crate::tracker_manager::TrackerInfo>>,
+    },
+    Scrape {
+        reply: oneshot::Sender<Option<(String, ferrite_tracker::ScrapeInfo)>>,
     },
     /// Incoming uTP peer routed from the session-level accept loop.
     IncomingPeer {

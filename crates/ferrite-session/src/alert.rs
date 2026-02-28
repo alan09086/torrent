@@ -74,6 +74,8 @@ pub enum AlertKind {
     TrackerReply { info_hash: Id20, url: String, num_peers: usize },
     TrackerWarning { info_hash: Id20, url: String, message: String },
     TrackerError { info_hash: Id20, url: String, message: String },
+    ScrapeReply { info_hash: Id20, url: String, complete: u32, incomplete: u32, downloaded: u32 },
+    ScrapeError { info_hash: Id20, url: String, message: String },
 
     // ── DHT ──
     DhtBootstrapComplete,
@@ -154,6 +156,8 @@ impl AlertKind {
             TrackerReply { .. } => AlertCategory::TRACKER,
             TrackerWarning { .. } => AlertCategory::TRACKER,
             TrackerError { .. } => AlertCategory::TRACKER | AlertCategory::ERROR,
+            ScrapeReply { .. } => AlertCategory::TRACKER,
+            ScrapeError { .. } => AlertCategory::TRACKER | AlertCategory::ERROR,
 
             // DHT
             DhtBootstrapComplete | DhtGetPeers { .. } => AlertCategory::DHT,
@@ -384,6 +388,29 @@ mod tests {
             paused: true,
         });
         assert!(alert.category().contains(AlertCategory::STATUS));
+    }
+
+    #[test]
+    fn scrape_reply_alert_has_tracker_category() {
+        let alert = Alert::new(AlertKind::ScrapeReply {
+            info_hash: Id20::from([0u8; 20]),
+            url: "http://tracker.example.com/announce".into(),
+            complete: 10,
+            incomplete: 3,
+            downloaded: 50,
+        });
+        assert!(alert.category().contains(AlertCategory::TRACKER));
+    }
+
+    #[test]
+    fn scrape_error_alert_has_tracker_and_error_category() {
+        let alert = Alert::new(AlertKind::ScrapeError {
+            info_hash: Id20::from([0u8; 20]),
+            url: "http://tracker.example.com/announce".into(),
+            message: "connection refused".into(),
+        });
+        assert!(alert.category().contains(AlertCategory::TRACKER));
+        assert!(alert.category().contains(AlertCategory::ERROR));
     }
 
     #[test]

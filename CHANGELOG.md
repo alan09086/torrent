@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.25.0 — 2026-02-28
+
+Tracker scraping, tracker exchange, enhanced tracker management. Eleven crates, 621 tests.
+
+### M24: Tracker Scrape + Enhanced Tracker Management
+
+### Added
+- BEP 48 scrape: `ScrapeInfo` type shared between HTTP and UDP, `announce_url_to_scrape()` URL conversion
+- HTTP scrape: `HttpScrapeResponse`, `HttpTracker::build_scrape_url()`, `HttpTracker::scrape()` — parses bencode response with raw 20-byte hash keys
+- UDP scrape: `UdpScrapeResponse`, `UdpTracker::build_scrape_request()`, `UdpTracker::parse_scrape_response()`, `UdpTracker::scrape()` — BEP 15 action=2 protocol
+- `TrackerInfo` and `TrackerStatus` public types for tracker status reporting
+- `TrackerManager::tracker_list()` — snapshot of all trackers with status, seeders/leechers, next announce time
+- `TrackerManager::force_reannounce()` — reset all announce timers to now
+- `TrackerManager::add_tracker_url()` — deduplicated tracker addition (used by lt_trackers exchange)
+- `TrackerManager::scrape()` — try each tracker's scrape until one succeeds
+- `consecutive_failures` and `scrape_info` tracking on `TrackerEntry`
+- Announce response now threads seeders/leechers from tracker into `scrape_info`
+- `AlertKind::ScrapeReply` and `AlertKind::ScrapeError` alert variants (categories: TRACKER, TRACKER|ERROR)
+- lt_trackers wire protocol: `lt_trackers=3` registered in `ExtHandshake::new()`
+- `LtTrackersMessage` — bencode encode/decode for tracker URL exchange between peers
+- `PeerEvent::TrackersReceived` — new peer event for received tracker URLs
+- Peer dispatch: incoming lt_trackers messages parsed and forwarded to TorrentActor
+- TorrentActor: received tracker URLs added via `add_tracker_url()`
+- `TorrentCommand::ForceReannounce`, `TrackerList`, `Scrape` command variants
+- `TorrentHandle::tracker_list()`, `force_reannounce()`, `scrape()` public API methods
+- Facade re-exports: `ScrapeInfo`, `announce_url_to_scrape`, `HttpScrapeResponse`, `UdpScrapeResponse`, `TrackerInfo`, `TrackerStatus`
+- 22 new tests across tracker, session, wire, and facade crates
+
 ## 0.24.0 — 2026-02-27
 
 Seeding optimizations — BEP 16 super seeding, BEP 21 upload-only, batched Have. Eleven crates, 599 tests.

@@ -332,7 +332,7 @@ Optimized initial seeding, upload-only mode, and have message batching.
 message, choker behavior, have batching, skip redundant have, bitfield
 fallback)
 
-### M24: Tracker Scraping + Enhanced Tracker
+### M24: Tracker Scraping + Enhanced Tracker ✅
 
 Complete tracker protocol support.
 
@@ -341,14 +341,15 @@ Complete tracker protocol support.
   (complete/incomplete/downloaded counts)
 - UDP scrape: BEP 15 scrape action (2), multi-hash scrape
 - Tracker exchange: `lt_trackers` extension (share tracker URLs with peers)
-- Announce to specific tracker tiers
-- `TrackerInfo` struct: seeders, leechers, completed, next_announce
-- `TorrentHandle::tracker_list()`, `force_reannounce()`
+- `TrackerInfo` / `TrackerStatus` public types
+- `TrackerManager::tracker_list()`, `force_reannounce()`, `add_tracker_url()`, `scrape()`
+- `TorrentHandle::tracker_list()`, `force_reannounce()`, `scrape()`
 - Alert: ScrapeReply, ScrapeError
 
-**Crates:** ferrite-tracker, ferrite-session
-**Tests:** ~6 (HTTP scrape parse, UDP scrape packet, lt_trackers exchange,
-tier selection, force reannounce)
+**Crates:** ferrite-tracker, ferrite-wire, ferrite-session, ferrite
+**Tests:** 22 new (ScrapeInfo, URL conversion, HTTP scrape URL, UDP scrape
+request/response/parse, TrackerManager list/reannounce/add/scrape, alerts,
+lt_trackers encode/decode, facade types)
 
 ---
 

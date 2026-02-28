@@ -3,14 +3,17 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
+use ferrite_core::Id20;
+
 use crate::compact::{parse_compact_peers, parse_compact_peers6};
 use crate::error::{Error, Result};
-use crate::{AnnounceRequest, AnnounceResponse};
+use crate::{AnnounceRequest, AnnounceResponse, ScrapeInfo};
 
 /// Magic connection ID for UDP tracker connect (BEP 15).
 const CONNECT_MAGIC: u64 = 0x0417_2710_1980;
 const ACTION_CONNECT: u32 = 0;
 const ACTION_ANNOUNCE: u32 = 1;
+const ACTION_SCRAPE: u32 = 2;
 
 /// Default timeout for UDP tracker requests.
 const UDP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -24,6 +27,13 @@ pub struct UdpTracker {
 #[derive(Debug, Clone)]
 pub struct UdpAnnounceResponse {
     pub response: AnnounceResponse,
+    pub transaction_id: u32,
+}
+
+/// UDP scrape response.
+#[derive(Debug, Clone)]
+pub struct UdpScrapeResponse {
+    pub results: Vec<ScrapeInfo>,
     pub transaction_id: u32,
 }
 
@@ -245,6 +255,118 @@ impl UdpTracker {
             Self::parse_announce_response(&buf[..n], txn_id2)
         }
     }
+
+    /// Build a UDP scrape request packet (BEP 15).
+    ///
+    /// Format: connection_id(8) + action(4, value=2) + transaction_id(4) + info_hash(20)*N
+    pub fn build_scrape_request(
+        connection_id: u64,
+        transaction_id: u32,
+        info_hashes: &[Id20],
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16 + 20 * info_hashes.len());
+        buf.extend_from_slice(&connection_id.to_be_bytes());
+        buf.extend_from_slice(&ACTION_SCRAPE.to_be_bytes());
+        buf.extend_from_slice(&transaction_id.to_be_bytes());
+        for hash in info_hashes {
+            buf.extend_from_slice(hash.as_bytes());
+        }
+        buf
+    }
+
+    /// Parse a UDP scrape response.
+    ///
+    /// Format: action(4) + transaction_id(4) + [seeders(4) + completed(4) + leechers(4)]*N
+    pub fn parse_scrape_response(
+        data: &[u8],
+        expected_transaction_id: u32,
+    ) -> Result<UdpScrapeResponse> {
+        if data.len() < 8 {
+            return Err(Error::UdpProtocol(format!(
+                "scrape response too short: {} bytes",
+                data.len()
+            )));
+        }
+
+        let action = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        if action == 3 && data.len() > 8 {
+            let msg = String::from_utf8_lossy(&data[8..]);
+            return Err(Error::TrackerError(msg.into_owned()));
+        }
+        if action != ACTION_SCRAPE {
+            return Err(Error::UdpProtocol(format!(
+                "expected action 2 (scrape), got {action}"
+            )));
+        }
+
+        let transaction_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        if transaction_id != expected_transaction_id {
+            return Err(Error::UdpProtocol(format!(
+                "transaction ID mismatch: expected {expected_transaction_id}, got {transaction_id}"
+            )));
+        }
+
+        let payload = &data[8..];
+        if !payload.len().is_multiple_of(12) {
+            return Err(Error::UdpProtocol(format!(
+                "scrape payload not divisible by 12: {} bytes",
+                payload.len()
+            )));
+        }
+
+        let mut results = Vec::with_capacity(payload.len() / 12);
+        for chunk in payload.chunks_exact(12) {
+            let complete = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let downloaded = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            let incomplete = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
+            results.push(ScrapeInfo { complete, incomplete, downloaded });
+        }
+
+        Ok(UdpScrapeResponse {
+            results,
+            transaction_id,
+        })
+    }
+
+    /// Perform a full UDP scrape (connect + scrape).
+    pub async fn scrape(
+        &self,
+        tracker_addr: &str,
+        info_hashes: &[Id20],
+    ) -> Result<UdpScrapeResponse> {
+        let addr: SocketAddr = tracker_addr
+            .parse()
+            .map_err(|_| Error::InvalidUrl(format!("invalid socket address: {tracker_addr}")))?;
+
+        let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let socket = UdpSocket::bind(bind_addr).await?;
+        socket.connect(addr).await?;
+
+        // Step 1: Connect
+        let txn_id = generate_transaction_id();
+        let connect_req = Self::build_connect_request(txn_id);
+        socket.send(&connect_req).await?;
+
+        let mut buf = [0u8; 2048];
+        let n = tokio::time::timeout(self.timeout, socket.recv(&mut buf))
+            .await
+            .map_err(|_| Error::Timeout)?
+            ?;
+
+        let connection_id = Self::parse_connect_response(&buf[..n], txn_id)?;
+
+        // Step 2: Scrape
+        let txn_id2 = generate_transaction_id();
+        let scrape_req = Self::build_scrape_request(connection_id, txn_id2, info_hashes);
+        socket.send(&scrape_req).await?;
+
+        let n = tokio::time::timeout(self.timeout, socket.recv(&mut buf))
+            .await
+            .map_err(|_| Error::Timeout)?
+            ?;
+
+        Self::parse_scrape_response(&buf[..n], txn_id2)
+    }
 }
 
 impl Default for UdpTracker {
@@ -366,6 +488,73 @@ mod tests {
     #[test]
     fn connect_response_too_short() {
         assert!(UdpTracker::parse_connect_response(&[0u8; 10], 0).is_err());
+    }
+
+    #[test]
+    fn scrape_request_format() {
+        let hash1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let hash2 = Id20::from_hex("0102030405060708091011121314151617181920").unwrap();
+        let data = UdpTracker::build_scrape_request(42, 100, &[hash1, hash2]);
+        assert_eq!(data.len(), 16 + 40); // header + 2 hashes
+        assert_eq!(u64::from_be_bytes(data[0..8].try_into().unwrap()), 42);
+        assert_eq!(u32::from_be_bytes(data[8..12].try_into().unwrap()), 2); // action=scrape
+        assert_eq!(u32::from_be_bytes(data[12..16].try_into().unwrap()), 100);
+        assert_eq!(&data[16..36], hash1.as_bytes());
+        assert_eq!(&data[36..56], hash2.as_bytes());
+    }
+
+    #[test]
+    fn scrape_response_parse() {
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&2u32.to_be_bytes()); // action = scrape
+        resp.extend_from_slice(&42u32.to_be_bytes()); // txn id
+        // seeders=10, completed=50, leechers=3
+        resp.extend_from_slice(&10u32.to_be_bytes());
+        resp.extend_from_slice(&50u32.to_be_bytes());
+        resp.extend_from_slice(&3u32.to_be_bytes());
+
+        let parsed = UdpTracker::parse_scrape_response(&resp, 42).unwrap();
+        assert_eq!(parsed.results.len(), 1);
+        assert_eq!(parsed.results[0].complete, 10);
+        assert_eq!(parsed.results[0].downloaded, 50);
+        assert_eq!(parsed.results[0].incomplete, 3);
+    }
+
+    #[test]
+    fn scrape_response_multiple_hashes() {
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&2u32.to_be_bytes());
+        resp.extend_from_slice(&42u32.to_be_bytes());
+        // Hash 1: seeders=10, completed=50, leechers=3
+        resp.extend_from_slice(&10u32.to_be_bytes());
+        resp.extend_from_slice(&50u32.to_be_bytes());
+        resp.extend_from_slice(&3u32.to_be_bytes());
+        // Hash 2: seeders=20, completed=100, leechers=5
+        resp.extend_from_slice(&20u32.to_be_bytes());
+        resp.extend_from_slice(&100u32.to_be_bytes());
+        resp.extend_from_slice(&5u32.to_be_bytes());
+
+        let parsed = UdpTracker::parse_scrape_response(&resp, 42).unwrap();
+        assert_eq!(parsed.results.len(), 2);
+        assert_eq!(parsed.results[1].complete, 20);
+        assert_eq!(parsed.results[1].downloaded, 100);
+        assert_eq!(parsed.results[1].incomplete, 5);
+    }
+
+    #[test]
+    fn scrape_response_wrong_action() {
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&1u32.to_be_bytes()); // action = announce (wrong)
+        resp.extend_from_slice(&42u32.to_be_bytes());
+
+        let result = UdpTracker::parse_scrape_response(&resp, 42);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scrape_response_too_short() {
+        let result = UdpTracker::parse_scrape_response(&[0u8; 4], 0);
+        assert!(result.is_err());
     }
 
     #[test]

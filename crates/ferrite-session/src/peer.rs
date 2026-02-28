@@ -156,9 +156,11 @@ pub(crate) async fn run_peer(
     // - our_ut_*: IDs from OUR ext handshake (used for matching INCOMING messages)
     let mut peer_ut_metadata: Option<u8> = None;
     let mut peer_ut_pex: Option<u8> = None;
+    let mut peer_lt_trackers: Option<u8> = None;
     let our_ext = ExtHandshake::new();
     let our_ut_metadata: Option<u8> = our_ext.ext_id("ut_metadata");
     let our_ut_pex: Option<u8> = our_ext.ext_id("ut_pex");
+    let our_lt_trackers: Option<u8> = our_ext.ext_id("lt_trackers");
 
     // --- Phase 5: Main loop ---
     let disconnect_reason: Option<String> = loop {
@@ -173,8 +175,10 @@ pub(crate) async fn run_peer(
                             &event_tx,
                             &mut peer_ut_metadata,
                             &mut peer_ut_pex,
+                            &mut peer_lt_trackers,
                             our_ut_metadata,
                             our_ut_pex,
+                            our_lt_trackers,
                             both_support_fast,
                         ).await {
                             warn!(%addr, "error handling message: {e}");
@@ -237,8 +241,10 @@ async fn handle_message(
     event_tx: &mpsc::Sender<PeerEvent>,
     peer_ut_metadata: &mut Option<u8>,
     peer_ut_pex: &mut Option<u8>,
+    peer_lt_trackers: &mut Option<u8>,
     our_ut_metadata: Option<u8>,
     our_ut_pex: Option<u8>,
+    our_lt_trackers: Option<u8>,
     both_support_fast: bool,
 ) -> crate::Result<()> {
     match msg {
@@ -313,6 +319,7 @@ async fn handle_message(
             let ext_hs = ExtHandshake::from_bytes(&payload)?;
             *peer_ut_metadata = ext_hs.ext_id("ut_metadata");
             *peer_ut_pex = ext_hs.ext_id("ut_pex");
+            *peer_lt_trackers = ext_hs.ext_id("lt_trackers");
             event_tx
                 .send(PeerEvent::ExtHandshake {
                     peer_addr: addr,
@@ -327,6 +334,8 @@ async fn handle_message(
                 handle_metadata_message(addr, &payload, event_tx).await?;
             } else if Some(ext_id) == our_ut_pex {
                 handle_pex_message(&payload, event_tx).await?;
+            } else if Some(ext_id) == our_lt_trackers {
+                handle_lt_trackers_message(&payload, event_tx).await?;
             } else {
                 warn!(%addr, ext_id, "unknown extension message");
             }
@@ -453,6 +462,23 @@ async fn handle_pex_message(
     if !new_peers.is_empty() {
         event_tx
             .send(PeerEvent::PexPeers { new_peers })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+    }
+    Ok(())
+}
+
+/// Handle an incoming lt_trackers extension message.
+async fn handle_lt_trackers_message(
+    payload: &[u8],
+    event_tx: &mpsc::Sender<PeerEvent>,
+) -> crate::Result<()> {
+    let msg = crate::lt_trackers::LtTrackersMessage::from_bytes(payload)?;
+    if !msg.added.is_empty() {
+        event_tx
+            .send(PeerEvent::TrackersReceived {
+                tracker_urls: msg.added,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
     }

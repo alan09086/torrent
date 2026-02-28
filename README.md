@@ -31,15 +31,15 @@ ferrite              Public facade API
 | `ferrite-bencode` | Serde-based bencode serialization | 64 |
 | `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority | 57 |
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21 extensions, MSE/PE encryption | 56 |
-| `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, IPv6 compact peers | 24 |
+| `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 42 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have | 224 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange | 234 |
 | `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 19 |
-| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 28 |
+| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 29 |
 
-**Total: 599 tests, zero clippy warnings.**
+**Total: 621 tests, zero clippy warnings.**
 
 ## Design Decisions
 
@@ -70,7 +70,7 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 | Foundation | M1-M10 (bencode → facade) | Done |
 | Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth + auto upload slots, alerts, queue) | Done |
 | Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Done |
-| Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | M23 done |
+| Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Done |
 | Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Planned |
 | Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode + plugin interface) | Planned |
 | Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | Planned |
