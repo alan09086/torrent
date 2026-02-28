@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use ferrite_storage::Bitfield;
 use ferrite_wire::ExtHandshake;
 
+use crate::pipeline::PeerPipelineState;
 use crate::types::PeerCommand;
 
 /// Per-peer state tracked by the torrent actor.
@@ -46,6 +47,14 @@ pub(crate) struct PeerState {
     pub super_seed_assigned: Option<u32>,
     /// Channel to send commands to this peer's task.
     pub cmd_tx: mpsc::Sender<PeerCommand>,
+    /// Per-peer dynamic request queue sizing (M28).
+    pub pipeline: PeerPipelineState,
+    /// Whether this peer is snubbed (no data for snub_timeout_secs).
+    pub snubbed: bool,
+    /// Last time we received data from this peer.
+    pub last_data_received: Option<std::time::Instant>,
+    /// BEP 6: pieces suggested by this peer.
+    pub suggested_pieces: HashSet<u32>,
 }
 
 #[allow(dead_code)]
@@ -70,6 +79,10 @@ impl PeerState {
             upload_only: false,
             super_seed_assigned: None,
             cmd_tx,
+            pipeline: PeerPipelineState::new(250, 3.0),
+            snubbed: false,
+            last_data_received: None,
+            suggested_pieces: HashSet::new(),
         }
     }
 }

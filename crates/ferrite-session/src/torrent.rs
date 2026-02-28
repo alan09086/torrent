@@ -4,7 +4,7 @@
 //! peer management) and communicates with spawned PeerTasks via channels.
 //! The handle is a thin wrapper around an mpsc sender.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::PeerState;
-use crate::piece_selector::PieceSelector;
+use crate::piece_selector::{InFlightPiece, PeerSpeed, PickContext, PieceSelector};
 use crate::tracker_manager::TrackerManager;
 use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, TorrentState, TorrentStats};
 
@@ -154,7 +154,9 @@ impl TorrentHandle {
             lengths: Some(lengths),
             num_pieces,
             piece_selector,
-            in_flight: HashSet::new(),
+            in_flight_pieces: HashMap::new(),
+            streaming_pieces: BTreeSet::new(),
+            time_critical_pieces: BTreeSet::new(),
             file_priorities,
             wanted_pieces,
             end_game: EndGame::new(),
@@ -285,7 +287,9 @@ impl TorrentHandle {
             lengths: None,
             num_pieces: 0,
             piece_selector: PieceSelector::new(0),
-            in_flight: HashSet::new(),
+            in_flight_pieces: HashMap::new(),
+            streaming_pieces: BTreeSet::new(),
+            time_critical_pieces: BTreeSet::new(),
             file_priorities: Vec::new(),
             wanted_pieces: Bitfield::new(0),
             end_game: EndGame::new(),
@@ -465,10 +469,14 @@ struct TorrentActor {
 
     // Piece management
     piece_selector: PieceSelector,
-    in_flight: HashSet<u32>,
+    in_flight_pieces: HashMap<u32, InFlightPiece>,
     file_priorities: Vec<FilePriority>,
     wanted_pieces: Bitfield,
     end_game: EndGame,
+
+    // Streaming (M28)
+    streaming_pieces: BTreeSet<u32>,
+    time_critical_pieces: BTreeSet<u32>,
 
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
@@ -1075,10 +1083,12 @@ impl TorrentActor {
                 }
             }
             PeerEvent::SuggestPiece {
-                peer_addr: _,
-                index: _,
+                peer_addr,
+                index,
             } => {
-                // Suggestion noted; current piece selector handles rarest-first
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.suggested_pieces.insert(index);
+                }
             }
             PeerEvent::Disconnected {
                 peer_addr,
@@ -1107,8 +1117,12 @@ impl TorrentActor {
                             p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx)
                         });
                         if !other_has {
-                            self.in_flight.remove(&piece_idx);
+                            self.in_flight_pieces.remove(&piece_idx);
                         }
+                    }
+                    // Clean up pipeline request tracking for disconnected peer
+                    for ifp in self.in_flight_pieces.values_mut() {
+                        ifp.assigned_blocks.retain(|_, addr| *addr != peer_addr);
                     }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
@@ -1153,6 +1167,20 @@ impl TorrentActor {
                 peer.pending_requests.swap_remove(pos);
             }
             peer.download_bytes_window += data.len() as u64;
+
+            // Update pipeline state (M28)
+            peer.pipeline.block_received(index, begin, data.len() as u32, std::time::Instant::now());
+            peer.last_data_received = Some(std::time::Instant::now());
+            // Clear snub if snubbed
+            if peer.snubbed {
+                peer.snubbed = false;
+                peer.pipeline.reset_to_slow_start();
+            }
+        }
+
+        // Remove block assignment from InFlightPiece
+        if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
+            ifp.assigned_blocks.remove(&(index, begin));
         }
 
         // End-game: cancel this block on all other peers
@@ -1396,7 +1424,7 @@ impl TorrentActor {
             if let Some(ref mut ct) = self.chunk_tracker {
                 ct.mark_verified(index);
             }
-            self.in_flight.remove(&index);
+            self.in_flight_pieces.remove(&index);
             self.piece_contributors.remove(&index);
             info!(index, "piece verified");
             post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PieceFinished {
@@ -1475,7 +1503,7 @@ impl TorrentActor {
             if let Some(ref mut ct) = self.chunk_tracker {
                 ct.mark_failed(index);
             }
-            self.in_flight.remove(&index);
+            self.in_flight_pieces.remove(&index);
             // Hash failure in end-game: deactivate and resume normal mode
             if self.end_game.is_active() {
                 self.end_game.deactivate();
@@ -1782,7 +1810,7 @@ impl TorrentActor {
             // not in web_seed_in_flight, and wanted.
             let piece = (0..self.num_pieces).find(|&i| {
                 !ct.has_piece(i)
-                    && !self.in_flight.contains(&i)
+                    && !self.in_flight_pieces.contains_key(&i)
                     && !self.web_seed_in_flight.contains_key(&i)
                     && self.wanted_pieces.get(i)
             });
@@ -1905,14 +1933,22 @@ impl TorrentActor {
             return;
         }
 
-        // Check if peer exists and is eligible for requests
-        let can_request = self
-            .peers
-            .get(&peer_addr)
-            .is_some_and(|p| !p.peer_choking && !p.upload_only && p.pending_requests.len() < self.config.target_request_queue);
-        if !can_request {
-            return;
-        }
+        // Compute available slots from pipeline
+        let (slots, peer_speed, peer_rate, is_snubbed) = match self.peers.get(&peer_addr) {
+            Some(p) => {
+                if p.peer_choking || p.upload_only {
+                    return;
+                }
+                let depth = if p.snubbed { 1 } else { p.pipeline.queue_depth() };
+                let avail = depth.saturating_sub(p.pending_requests.len());
+                if avail == 0 {
+                    return;
+                }
+                let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
+                (avail, speed, p.pipeline.ewma_rate(), p.snubbed)
+            }
+            None => return,
+        };
 
         // Parole piece assignment: check if any parole piece can be assigned
         // to this peer (peer must not be an original contributor, must have the piece,
@@ -1933,76 +1969,88 @@ impl TorrentActor {
             // Assign this peer as parole peer
             parole.parole_peer = Some(peer_ip);
             debug!(parole_idx, %peer_addr, "assigned parole peer for piece");
-            // The piece is already marked failed (chunks cleared), so it will
-            // be picked up by the normal piece selection below since it's
-            // not in in_flight and not verified.
             break;
         }
 
         let we_have = ct.bitfield().clone();
+        let completed_count = ct.bitfield().count_ones();
 
         // Collect pieces to request (must borrow self.peers immutably for bitfield)
         let peer_bitfield = match self.peers.get(&peer_addr) {
             Some(p) => p.bitfield.clone(),
             None => return,
         };
+        let suggested = self.peers.get(&peer_addr)
+            .map(|p| p.suggested_pieces.clone())
+            .unwrap_or_default();
 
-        // Try to pick and request a piece
-        if let Some(peer) = self.peers.get(&peer_addr) {
-            if peer.pending_requests.len() >= self.config.target_request_queue {
-                return;
-            }
+        let ctx = PickContext {
+            peer_addr,
+            peer_has: &peer_bitfield,
+            peer_speed,
+            peer_is_snubbed: is_snubbed,
+            peer_rate,
+            we_have: &we_have,
+            in_flight_pieces: &self.in_flight_pieces,
+            wanted: &self.wanted_pieces,
+            streaming_pieces: &self.streaming_pieces,
+            time_critical_pieces: &self.time_critical_pieces,
+            suggested_pieces: &suggested,
+            sequential_download: self.config.sequential_download,
+            completed_count,
+            initial_picker_threshold: self.config.initial_picker_threshold,
+            connected_peer_count: self.peers.len(),
+            whole_pieces_threshold: self.config.whole_pieces_threshold,
+            piece_size: self.lengths.as_ref().map(|l| l.piece_length() as u32).unwrap_or(262144),
+        };
 
-            let picked = self.piece_selector.pick(
-                &peer_bitfield,
-                &we_have,
-                &self.in_flight,
-                &self.wanted_pieces,
-            );
+        let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
+            self.chunk_tracker.as_ref()
+                .map(|ct| ct.missing_chunks(piece))
+                .unwrap_or_default()
+        };
 
-            let piece_index = match picked {
-                Some(idx) => idx,
-                None => {
-                    self.check_end_game_activation();
-                    return;
-                }
-            };
+        if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
+            // Track in in_flight_pieces
+            let total_blocks = self.chunk_tracker.as_ref()
+                .map(|ct| ct.missing_chunks(result.piece).len() as u32)
+                .unwrap_or(1);
+            let ifp = self.in_flight_pieces
+                .entry(result.piece)
+                .or_insert_with(|| InFlightPiece::new(total_blocks));
 
-            self.in_flight.insert(piece_index);
+            for (begin, length) in result.blocks.iter().take(slots) {
+                ifp.assigned_blocks.insert((result.piece, *begin), peer_addr);
 
-            // Get missing chunks for this piece
-            let missing_chunks = match self.chunk_tracker {
-                Some(ref ct) => ct.missing_chunks(piece_index),
-                None => return,
-            };
-
-            for (begin, length) in missing_chunks {
                 // Check download rate limits
                 if !self.download_bucket.is_unlimited() {
                     let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
                     if !is_local
                         && let Some(ref global) = self.global_download_bucket
-                        && !global.lock().unwrap().try_consume(length as u64)
+                        && !global.lock().unwrap().try_consume(*length as u64)
                     {
                         break;
                     }
-                    if !self.download_bucket.try_consume(length as u64) {
+                    if !self.download_bucket.try_consume(*length as u64) {
                         break;
                     }
                 }
 
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.pipeline.request_sent(result.piece, *begin, std::time::Instant::now());
                     let _ = peer
                         .cmd_tx
                         .send(PeerCommand::Request {
-                            index: piece_index,
-                            begin,
-                            length,
+                            index: result.piece,
+                            begin: *begin,
+                            length: *length,
                         })
                         .await;
-                    peer.pending_requests.push((piece_index, begin, length));
+                    peer.pending_requests.push((result.piece, *begin, *length));
                 }
             }
+        } else {
+            self.check_end_game_activation();
         }
     }
 
@@ -2014,8 +2062,8 @@ impl TorrentActor {
             return;
         };
         let have = ct.bitfield().count_ones();
-        let in_flight = self.in_flight.len() as u32;
-        if have + in_flight >= self.num_pieces && !self.in_flight.is_empty() {
+        let in_flight = self.in_flight_pieces.len() as u32;
+        if have + in_flight >= self.num_pieces && !self.in_flight_pieces.is_empty() {
             let pending: Vec<_> = self
                 .peers
                 .iter()
