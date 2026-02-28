@@ -2069,7 +2069,7 @@ impl TorrentActor {
                 .iter()
                 .map(|(addr, p)| (*addr, p.pending_requests.clone()))
                 .collect();
-            self.end_game.activate(&pending);
+            self.end_game.activate_with_inflight(&self.in_flight_pieces, &pending);
             info!(
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
@@ -2091,7 +2091,9 @@ impl TorrentActor {
             None => return,
         };
 
-        let block = if self.config.strict_end_game {
+        let block = if !self.streaming_pieces.is_empty() {
+            self.end_game.pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
+        } else if self.config.strict_end_game {
             self.end_game.pick_block_strict(peer_addr, &peer_bitfield, &[])
         } else {
             self.end_game.pick_block(peer_addr, &peer_bitfield)

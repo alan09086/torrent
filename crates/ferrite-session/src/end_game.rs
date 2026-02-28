@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 
 use ferrite_storage::Bitfield;
+
+use crate::piece_selector::InFlightPiece;
 
 /// Block requests for a given (piece, offset) pair.
 type PendingBlocks = Vec<(SocketAddr, Vec<(u32, u32, u32)>)>;
@@ -37,6 +39,7 @@ impl EndGame {
 
     /// Activate end-game by scanning all peers' pending requests.
     /// `pending` is: [(peer_addr, [(piece, begin, length), ...])]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn activate(&mut self, pending: &PendingBlocks) {
         self.active = true;
         self.blocks.clear();
@@ -146,6 +149,69 @@ impl EndGame {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn remove_piece(&mut self, index: u32) {
         self.blocks.retain(|&(pi, _), _| pi != index);
+    }
+
+    /// Activate end-game using InFlightPiece data in addition to pending requests.
+    ///
+    /// This merges block-level tracking from `in_flight_pieces` with pending
+    /// requests, ensuring all outstanding blocks are covered.
+    pub fn activate_with_inflight(
+        &mut self,
+        in_flight_pieces: &HashMap<u32, InFlightPiece>,
+        pending: &PendingBlocks,
+    ) {
+        self.active = true;
+        self.blocks.clear();
+        // First, populate from InFlightPiece assigned_blocks
+        for ifp in in_flight_pieces.values() {
+            for (&(index, begin), &addr) in &ifp.assigned_blocks {
+                self.blocks
+                    .entry((index, begin))
+                    .or_insert_with(|| BlockEntry {
+                        length: ferrite_core::DEFAULT_CHUNK_SIZE,
+                        peers: Vec::new(),
+                    })
+                    .peers
+                    .push(addr);
+            }
+        }
+        // Then merge pending requests (may add peers not yet in InFlightPiece)
+        for (addr, requests) in pending {
+            for &(index, begin, length) in requests {
+                let entry = self.blocks
+                    .entry((index, begin))
+                    .or_insert_with(|| BlockEntry {
+                        length,
+                        peers: Vec::new(),
+                    });
+                if !entry.peers.contains(addr) {
+                    entry.peers.push(*addr);
+                }
+            }
+        }
+    }
+
+    /// Pick a block with streaming priority: try streaming pieces first,
+    /// then fall back to regular pick.
+    pub fn pick_block_streaming(
+        &self,
+        peer_addr: SocketAddr,
+        peer_has: &Bitfield,
+        streaming_pieces: &BTreeSet<u32>,
+    ) -> Option<(u32, u32, u32)> {
+        // First try streaming pieces
+        for &piece in streaming_pieces {
+            if !peer_has.get(piece) {
+                continue;
+            }
+            for (&(idx, begin), entry) in &self.blocks {
+                if idx == piece && !entry.peers.contains(&peer_addr) {
+                    return Some((idx, begin, entry.length));
+                }
+            }
+        }
+        // Fall back to regular pick
+        self.pick_block(peer_addr, peer_has)
     }
 }
 
