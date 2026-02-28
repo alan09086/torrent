@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +63,8 @@ pub struct TorrentMetaV1 {
     pub url_list: Vec<String>,
     /// BEP 17 HTTP seed URLs (Hoffman-style).
     pub httpseeds: Vec<String>,
+    /// Raw info dict bytes for BEP 9 metadata serving.
+    pub info_bytes: Option<Bytes>,
 }
 
 /// The "info" dictionary from a .torrent file.
@@ -143,7 +146,8 @@ struct RawTorrent {
 pub fn torrent_from_bytes(data: &[u8]) -> Result<TorrentMetaV1, Error> {
     // Step 1: Find the raw info dict span for hashing
     let info_span = ferrite_bencode::find_dict_key_span(data, "info")?;
-    let info_hash = crate::sha1(&data[info_span]);
+    let info_hash = crate::sha1(&data[info_span.clone()]);
+    let info_raw = Bytes::copy_from_slice(&data[info_span]);
 
     // Step 2: Deserialize the full structure
     let raw: RawTorrent = ferrite_bencode::from_bytes(data)?;
@@ -161,6 +165,7 @@ pub fn torrent_from_bytes(data: &[u8]) -> Result<TorrentMetaV1, Error> {
         info: raw.info,
         url_list: raw.url_list.0,
         httpseeds: raw.httpseeds,
+        info_bytes: Some(info_raw),
     })
 }
 
@@ -311,5 +316,16 @@ mod tests {
         let data = make_torrent_bytes_sorted(b"", b"");
         let meta = torrent_from_bytes(&data).unwrap();
         assert!(meta.httpseeds.is_empty());
+    }
+
+    #[test]
+    fn torrent_from_bytes_stores_raw_info_bytes() {
+        let data = make_torrent_bytes_sorted(b"", b"");
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert!(meta.info_bytes.is_some());
+        let info_bytes = meta.info_bytes.unwrap();
+        // Re-hashing the stored bytes should produce the same info hash
+        let rehash = crate::sha1(&info_bytes);
+        assert_eq!(rehash, meta.info_hash);
     }
 }

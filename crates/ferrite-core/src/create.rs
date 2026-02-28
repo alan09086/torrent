@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use bytes::Bytes;
+
 use crate::error::{Error, Result};
 use crate::hash::Id20;
 use crate::metainfo::{FileEntry, InfoDict, TorrentMetaV1};
@@ -482,6 +484,7 @@ impl CreateTorrent {
             info: output.info,
             url_list: self.web_seeds,
             httpseeds: self.http_seeds,
+            info_bytes: Some(Bytes::from(info_bytes)),
         };
 
         Ok(CreateTorrentResult { meta, bytes })
