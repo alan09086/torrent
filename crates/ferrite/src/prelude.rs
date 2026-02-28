@@ -41,3 +41,6 @@ pub use crate::session::FileStream;
 
 // IP filtering + proxy (M29)
 pub use crate::session::{IpFilter, ProxyConfig, ProxyType};
+
+// Torrent creation (M30)
+pub use crate::core::CreateTorrent;

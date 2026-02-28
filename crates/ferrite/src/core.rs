@@ -37,3 +37,6 @@ pub use ferrite_core::AddressFamily;
 
 // Storage allocation mode (M26)
 pub use ferrite_core::StorageMode;
+
+// Torrent creation (M30)
+pub use ferrite_core::{CreateTorrent, CreateTorrentResult};

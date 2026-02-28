@@ -346,7 +346,7 @@ impl Default for ClientBuilder {
 #[allow(dead_code)]
 enum TorrentSource {
     /// Parsed torrent metainfo.
-    Meta(TorrentMetaV1),
+    Meta(Box<TorrentMetaV1>),
     /// Magnet link (metadata fetched via BEP 9).
     Magnet(Magnet),
     /// Path to a .torrent file on disk.
@@ -373,7 +373,7 @@ impl AddTorrentParams {
     /// Create params from parsed torrent metainfo.
     pub fn from_torrent(meta: TorrentMetaV1) -> Self {
         Self {
-            source: TorrentSource::Meta(meta),
+            source: TorrentSource::Meta(Box::new(meta)),
             download_dir: None,
             storage: None,
         }

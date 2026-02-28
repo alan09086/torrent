@@ -23,4 +23,12 @@ pub enum Error {
     /// Torrent metainfo is malformed.
     #[error("invalid torrent: {0}")]
     InvalidTorrent(String),
+
+    /// I/O error.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Torrent creation error.
+    #[error("create torrent: {0}")]
+    CreateTorrent(String),
 }

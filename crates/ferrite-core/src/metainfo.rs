@@ -1,5 +1,5 @@
 use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 use crate::hash::Id20;
@@ -65,7 +65,7 @@ pub struct TorrentMetaV1 {
 }
 
 /// The "info" dictionary from a .torrent file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InfoDict {
     /// Suggested file/directory name.
     pub name: String,
@@ -76,20 +76,35 @@ pub struct InfoDict {
     #[serde(with = "serde_bytes")]
     pub pieces: Vec<u8>,
     /// Length in bytes (single-file mode).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub length: Option<u64>,
     /// Files (multi-file mode).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub files: Option<Vec<FileEntry>>,
     /// Private flag.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub private: Option<i64>,
+    /// Source tag (private tracker identification).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<String>,
 }
 
 /// A file entry in multi-file mode.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FileEntry {
     /// File length in bytes.
     pub length: u64,
     /// Path components (e.g., ["dir", "file.txt"]).
     pub path: Vec<String>,
+    /// BEP 47 file attributes ("p"=pad, "h"=hidden, "x"=executable, "l"=symlink).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub attr: Option<String>,
+    /// File modification time (unix timestamp).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mtime: Option<i64>,
+    /// Symlink target path components.
+    #[serde(rename = "symlink path", skip_serializing_if = "Option::is_none", default)]
+    pub symlink_path: Option<Vec<String>>,
 }
 
 /// High-level file info (unified from single-file and multi-file modes).

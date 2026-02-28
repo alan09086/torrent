@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.31.0 — 2026-02-28
+
+Torrent creation from local files/directories with full BEP support. Eleven crates, 748 tests.
+
+### M30: Torrent Creation
+
+### Added
+- `CreateTorrent` builder — create `.torrent` files from local files or directories
+- `CreateTorrentResult` — generated torrent metadata + raw `.torrent` bytes
+- `auto_piece_size()` — libtorrent-style automatic piece size selection (32 KiB–4 MiB based on total size)
+- Builder API: `add_file()`, `add_directory()`, `set_name()`, `set_piece_size()`, `set_comment()`, `set_creator()`, `set_creation_date()`, `set_private()`, `set_source()`
+- Network metadata: `add_tracker(url, tier)`, `add_web_seed()` (BEP 19), `add_http_seed()` (BEP 17), `add_dht_node()` (BEP 5)
+- BEP 47 pad file alignment: `set_pad_file_limit(Option<u64>)` — None=no padding, Some(0)=pad all, Some(n)=threshold
+- File metadata: `include_mtime(bool)` for modification times, `include_symlinks(bool)` for symlink targets
+- BEP 47 file attributes: auto-detected "x" (executable), "h" (hidden), "p" (pad), "l" (symlink)
+- Pre-computed hashes: `set_hash(piece, Id20)` skips disk reads for pieces with known hashes
+- Progress callback: `generate_with_progress(|current, total| ...)` for piece hashing progress
+- `Serialize` derive added to `InfoDict` and `FileEntry` (backward-compatible, enables bencode output)
+- `InfoDict::source` field — private tracker source tag
+- `FileEntry::attr`, `FileEntry::mtime`, `FileEntry::symlink_path` fields (BEP 47)
+- `Error::Io` and `Error::CreateTorrent` variants in ferrite-core
+- Facade re-exports: `CreateTorrent`, `CreateTorrentResult` in `ferrite::core` and `ferrite::prelude`
+- 14 new tests: auto piece size, single/multi-file round-trip, private+source, tracker tiers, web/HTTP seeds, pad files, progress callback, empty input error, info hash round-trip, DHT nodes, file mtime, pre-computed hashes
+
 ## 0.30.0 — 2026-02-28
 
 IP filtering, proxy support, anonymous mode, and force proxy mode. First milestone in Phase 5 (Network Hardening & Tools). Eleven crates, 734 tests.

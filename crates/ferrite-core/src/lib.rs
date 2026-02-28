@@ -1,5 +1,6 @@
 //! Core types for BitTorrent: hashes, metainfo, magnets, and piece arithmetic.
 
+mod create;
 mod error;
 mod hash;
 mod lengths;
@@ -10,6 +11,7 @@ mod resume_data;
 mod file_priority;
 mod storage_mode;
 
+pub use create::{CreateTorrent, CreateTorrentResult};
 pub use error::{Error, Result};
 pub use file_priority::FilePriority;
 pub use hash::{Id20, Id32};
