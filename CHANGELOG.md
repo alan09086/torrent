@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.29.0 — 2026-02-28
+
+Advanced piece picker with block-level priority, dynamic request queue sizing, and file streaming. Eleven crates, 689 tests.
+
+### M28: Advanced Piece Picker + Dynamic Request Queue + File Streaming
+
+### Added
+- `PieceSelector` rewrite with 5 priority layers: streaming window, time-critical, suggested, partial (speed affinity), new piece (rarest-first/sequential/random)
+- Block-level piece picking: `pick_blocks()` returns individual block assignments instead of whole pieces
+- `PeerSpeed` classification (Slow/Medium/Fast) with speed-affinity partial piece assignment
+- `InFlightPiece` — per-block peer assignment tracking replacing `HashSet<u32>` in-flight set
+- `PickContext` — structured per-peer pick cycle input with 17 fields
+- `PickResult` — pick output with piece, blocks, and exclusive flag for whole-piece assignment
+- Seed counter on `PieceSelector` for effective availability without modifying per-piece arrays
+- Auto-sequential mode: switches to sequential when in-flight explosion detected
+- Snubbed peer reverse picking (highest availability first)
+- `PeerPipelineState` — per-peer dynamic request queue with TCP-like slow-start and EWMA rate tracking
+- BDP-based queue depth calculation: `rate * request_queue_time / chunk_size`, clamped to [2, max]
+- Slow-start exit detection: plateau in throughput (delta < 10 KB/s between seconds)
+- Block-level request timeout tracking with `timed_out_blocks()` and `most_recent_request()`
+- `FileStream` — `AsyncRead + AsyncSeek` over individual torrent files for media streaming
+- `FileStreamHandle` — internal handle passed from actor to construct FileStream
+- `StreamingCursor` — actor-tracked cursor with readahead window for streaming priority
+- `TorrentHandle::open_file()` — open a streaming reader for a file within the torrent
+- Piece completion broadcasting via `broadcast::channel` for FileStream wake-on-piece
+- Have-bitfield watch channel for FileStream piece availability checks
+- Concurrent stream reader limiting via `Semaphore`
+- `EndGame::activate_with_inflight()` — merges InFlightPiece data with pending requests
+- `EndGame::pick_block_streaming()` — streaming-aware block picking in end-game mode
+- `PeerState` fields: `pipeline`, `snubbed`, `last_data_received`, `suggested_pieces`
+- `TorrentConfig` fields: `sequential_download`, `initial_picker_threshold`, `whole_pieces_threshold`, `snub_timeout_secs`, `readahead_pieces`, `streaming_timeout_escalation`, `max_concurrent_stream_reads`
+- `SessionConfig` fields: `max_request_queue_depth`, `request_queue_time`, `block_request_timeout_secs`, `max_concurrent_stream_reads`
+- `ClientBuilder` methods: `max_request_queue_depth()`, `request_queue_time()`, `block_request_timeout_secs()`, `max_concurrent_stream_reads()`
+- `FileStream` re-exported in `ferrite::session` and `ferrite::prelude`
+- `Error::FileSkipped` variant for attempting to stream a skipped file
+- 22 new tests: 2 config, 4 pipeline, 11 piece selector, 5 streaming
+
+### Changed
+- `TorrentActor::in_flight` replaced with `in_flight_pieces: HashMap<u32, InFlightPiece>` for block-level tracking
+- `request_pieces_from_peer()` rewritten to use `pick_blocks()` with pipeline queue depth
+- `handle_piece_data()` updates pipeline state, clears snub on data receipt
+- `check_end_game_activation()` uses `activate_with_inflight()` for block-level end-game
+- `request_end_game_block()` uses `pick_block_streaming()` when streaming active
+- SuggestPiece handler records to `peer.suggested_pieces`
+- Unchoke tick now updates streaming cursors and time-critical pieces
+
 ## 0.28.0 — 2026-02-28
 
 Multi-threaded piece hashing with JoinSet, Checking state with progress reporting, configurable hashing threads. Eleven crates, 665 tests.
