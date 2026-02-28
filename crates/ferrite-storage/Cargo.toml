@@ -7,6 +7,7 @@ description = "Piece storage, verification, and disk I/O for BitTorrent"
 
 [dependencies]
 ferrite-core = { path = "../ferrite-core" }
+memmap2 = "0.9"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
