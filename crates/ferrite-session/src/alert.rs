@@ -118,6 +118,9 @@ pub enum AlertKind {
         paused: bool,
     },
 
+    // ── IP filtering (PEER) ──
+    PeerBlocked { addr: SocketAddr },
+
     // ── Web seeding (STATUS) ──
     WebSeedBanned { info_hash: Id20, url: String },
 
@@ -184,6 +187,9 @@ impl AlertKind {
             // QUEUE MANAGEMENT (STATUS)
             TorrentQueuePositionChanged { .. } => AlertCategory::STATUS,
             TorrentAutoManaged { .. } => AlertCategory::STATUS,
+
+            // IP FILTER
+            PeerBlocked { .. } => AlertCategory::PEER,
 
             // WEB SEED
             WebSeedBanned { .. } => AlertCategory::STATUS,

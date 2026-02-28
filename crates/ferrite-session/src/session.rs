@@ -32,6 +32,9 @@ type QueueMoveFn = fn(&mut [crate::queue::QueueEntry], Id20) -> Vec<(Id20, i32, 
 /// Shared session-wide ban manager, accessed by TorrentActors via `Arc`.
 pub(crate) type SharedBanManager = Arc<std::sync::RwLock<crate::ban::BanManager>>;
 
+/// Shared session-wide IP filter, accessed by TorrentActors via `Arc`.
+pub(crate) type SharedIpFilter = Arc<std::sync::RwLock<crate::ip_filter::IpFilter>>;
+
 /// Entry for a torrent managed by the session.
 struct TorrentEntry {
     handle: TorrentHandle,
@@ -127,6 +130,13 @@ enum SessionCommand {
     },
     BannedPeers {
         reply: oneshot::Sender<Vec<IpAddr>>,
+    },
+    SetIpFilter {
+        filter: crate::ip_filter::IpFilter,
+        reply: oneshot::Sender<()>,
+    },
+    GetIpFilter {
+        reply: oneshot::Sender<crate::ip_filter::IpFilter>,
     },
     Shutdown,
 }
@@ -259,6 +269,10 @@ impl SessionHandle {
             std::sync::RwLock::new(crate::ban::BanManager::new(ban_config)),
         );
 
+        let ip_filter: SharedIpFilter = Arc::new(
+            std::sync::RwLock::new(crate::ip_filter::IpFilter::new()),
+        );
+
         let disk_config = config.to_disk_config();
         let (disk_manager, disk_actor_handle) =
             crate::disk::DiskManagerHandle::new(disk_config);
@@ -282,6 +296,7 @@ impl SessionHandle {
             nat,
             nat_events_rx,
             ban_manager,
+            ip_filter,
             disk_manager,
             disk_actor_handle,
         };
@@ -556,6 +571,27 @@ impl SessionHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Replace the session-wide IP filter. Connected peers that are now blocked will
+    /// be refused on subsequent connection attempts.
+    pub async fn set_ip_filter(&self, filter: crate::ip_filter::IpFilter) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetIpFilter { filter, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get a clone of the current IP filter.
+    pub async fn ip_filter(&self) -> crate::Result<crate::ip_filter::IpFilter> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::GetIpFilter { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
     /// Get the list of currently banned peer IPs.
     pub async fn banned_peers(&self) -> crate::Result<Vec<IpAddr>> {
         let (tx, rx) = oneshot::channel();
@@ -590,6 +626,7 @@ struct SessionActor {
     nat: Option<ferrite_nat::NatHandle>,
     nat_events_rx: Option<mpsc::Receiver<ferrite_nat::NatEvent>>,
     ban_manager: SharedBanManager,
+    ip_filter: SharedIpFilter,
     disk_manager: crate::disk::DiskManagerHandle,
     #[allow(dead_code)]
     disk_actor_handle: tokio::task::JoinHandle<()>,
@@ -697,6 +734,14 @@ impl SessionActor {
                             let list: Vec<IpAddr> = self.ban_manager.read().unwrap()
                                 .banned_list().iter().copied().collect();
                             let _ = reply.send(list);
+                        }
+                        Some(SessionCommand::SetIpFilter { filter, reply }) => {
+                            *self.ip_filter.write().unwrap() = filter;
+                            let _ = reply.send(());
+                        }
+                        Some(SessionCommand::GetIpFilter { reply }) => {
+                            let filter = self.ip_filter.read().unwrap().clone();
+                            let _ = reply.send(filter);
                         }
                         Some(SessionCommand::Shutdown) | None => {
                             self.shutdown_all().await;
@@ -886,6 +931,7 @@ impl SessionActor {
             self.utp_socket.clone(),
             self.utp_socket_v6.clone(),
             Arc::clone(&self.ban_manager),
+            Arc::clone(&self.ip_filter),
         )
         .await?;
 
@@ -945,6 +991,7 @@ impl SessionActor {
             self.utp_socket.clone(),
             self.utp_socket_v6.clone(),
             Arc::clone(&self.ban_manager),
+            Arc::clone(&self.ip_filter),
         )
         .await?;
         self.torrents.insert(
@@ -1512,6 +1559,7 @@ mod tests {
             request_queue_time: 3.0,
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
+            apply_ip_filter_to_trackers: true,
         }
     }
 

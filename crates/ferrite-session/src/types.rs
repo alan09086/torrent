@@ -363,6 +363,8 @@ pub struct SessionConfig {
     pub block_request_timeout_secs: u32,
     /// Maximum concurrent FileStream readers (semaphore permits).
     pub max_concurrent_stream_reads: usize,
+    /// Check tracker IP addresses against the IP filter (default: true).
+    pub apply_ip_filter_to_trackers: bool,
 }
 
 impl Default for SessionConfig {
@@ -414,6 +416,7 @@ impl Default for SessionConfig {
             request_queue_time: 3.0,
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
+            apply_ip_filter_to_trackers: true,
         }
     }
 }
