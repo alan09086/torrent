@@ -28,7 +28,7 @@ use crate::choker::{Choker, PeerInfo};
 use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
-use crate::peer_state::PeerState;
+use crate::peer_state::{PeerSource, PeerState};
 use crate::piece_selector::{InFlightPiece, PeerSpeed, PickContext, PieceSelector};
 use crate::tracker_manager::TrackerManager;
 use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, TorrentState, TorrentStats};
@@ -384,9 +384,9 @@ impl TorrentHandle {
     }
 
     /// Add peer addresses to the available-peer pool.
-    pub async fn add_peers(&self, peers: Vec<SocketAddr>) -> crate::Result<()> {
+    pub async fn add_peers(&self, peers: Vec<SocketAddr>, source: PeerSource) -> crate::Result<()> {
         self.cmd_tx
-            .send(TorrentCommand::AddPeers { peers })
+            .send(TorrentCommand::AddPeers { peers, source })
             .await
             .map_err(|_| crate::Error::Shutdown)
     }
@@ -523,7 +523,7 @@ struct TorrentActor {
 
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
-    available_peers: Vec<SocketAddr>,
+    available_peers: Vec<(SocketAddr, PeerSource)>,
     choker: Choker,
 
     // Metadata (for magnet links)
@@ -651,8 +651,8 @@ impl TorrentActor {
                 // Commands from handle
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(TorrentCommand::AddPeers { peers }) => {
-                            self.handle_add_peers(peers);
+                        Some(TorrentCommand::AddPeers { peers, source }) => {
+                            self.handle_add_peers(peers, source);
                         }
                         Some(TorrentCommand::Stats { reply }) => {
                             let _ = reply.send(self.make_stats());
@@ -783,7 +783,7 @@ impl TorrentActor {
                         self.fire_tracker_alerts(&result.outcomes);
                         if !result.peers.is_empty() {
                             debug!(count = result.peers.len(), "tracker returned peers");
-                            self.handle_add_peers(result.peers);
+                            self.handle_add_peers(result.peers, PeerSource::Tracker);
                         }
                     }
                 }
@@ -797,7 +797,7 @@ impl TorrentActor {
                     match result {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v4 returned peers");
-                            self.handle_add_peers(peers);
+                            self.handle_add_peers(peers, PeerSource::Dht);
                         }
                         None => {
                             debug!("DHT v4 peer search exhausted");
@@ -815,7 +815,7 @@ impl TorrentActor {
                     match result {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v6 returned peers");
-                            self.handle_add_peers(peers);
+                            self.handle_add_peers(peers, PeerSource::Dht);
                         }
                         None => {
                             debug!("DHT v6 peer search exhausted");
@@ -844,18 +844,20 @@ impl TorrentActor {
 
     // ----- Command handlers -----
 
-    fn handle_add_peers(&mut self, peers: Vec<SocketAddr>) {
+    fn handle_add_peers(&mut self, peers: Vec<SocketAddr>, source: PeerSource) {
         let ban_mgr = self.ban_manager.read().unwrap();
         let ip_flt = self.ip_filter.read().unwrap();
         for addr in peers {
             if ban_mgr.is_banned(&addr.ip()) {
-                continue; // skip banned peers
+                continue;
             }
             if ip_flt.is_blocked(addr.ip()) {
-                continue; // skip IP-filtered peers
+                continue;
             }
-            if !self.peers.contains_key(&addr) && !self.available_peers.contains(&addr) {
-                self.available_peers.push(addr);
+            if !self.peers.contains_key(&addr)
+                && !self.available_peers.iter().any(|(a, _)| *a == addr)
+            {
+                self.available_peers.push((addr, source));
             }
         }
     }
@@ -979,7 +981,7 @@ impl TorrentActor {
         ).await;
         self.fire_tracker_alerts(&result.outcomes);
         if !result.peers.is_empty() {
-            self.handle_add_peers(result.peers);
+            self.handle_add_peers(result.peers, PeerSource::Tracker);
         }
         self.try_connect_peers();
     }
@@ -1093,7 +1095,7 @@ impl TorrentActor {
             }
             PeerEvent::PexPeers { new_peers } => {
                 if self.config.enable_pex {
-                    self.handle_add_peers(new_peers);
+                    self.handle_add_peers(new_peers, PeerSource::Pex);
                 }
             }
             PeerEvent::TrackersReceived { tracker_urls } => {
@@ -1707,7 +1709,7 @@ impl TorrentActor {
             }
         }
         // Remove from available peers pool
-        self.available_peers.retain(|a| a.ip() != ip);
+        self.available_peers.retain(|(a, _)| a.ip() != ip);
     }
 
     /// Flush the batched Have buffer, sending accumulated Haves or a full bitfield.
@@ -2496,8 +2498,8 @@ impl TorrentActor {
 
     fn try_connect_peers(&mut self) {
         while self.peers.len() < self.config.max_peers {
-            let addr = match self.available_peers.pop() {
-                Some(a) => a,
+            let (addr, source) = match self.available_peers.pop() {
+                Some(pair) => pair,
                 None => break,
             };
 
@@ -2528,7 +2530,7 @@ impl TorrentActor {
             };
 
             self.peers
-                .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
+                .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, source));
             post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
                 info_hash: self.info_hash,
                 addr,
@@ -2684,7 +2686,7 @@ impl TorrentActor {
         };
 
         self.peers
-            .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
+            .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, PeerSource::Incoming));
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
             info_hash: self.info_hash,
             addr,
@@ -2948,7 +2950,7 @@ mod tests {
             .add_peers(vec![
                 "127.0.0.1:6881".parse().unwrap(),
                 "127.0.0.1:6882".parse().unwrap(),
-            ])
+            ], PeerSource::Tracker)
             .await
             .unwrap();
 
@@ -3090,7 +3092,7 @@ mod tests {
             .unwrap();
 
         let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
-        handle.add_peers(vec![addr, addr, addr]).await.unwrap();
+        handle.add_peers(vec![addr, addr, addr], PeerSource::Tracker).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let stats = handle.stats().await.unwrap();
@@ -3118,7 +3120,7 @@ mod tests {
 
         // Add peers through one handle
         handle
-            .add_peers(vec!["127.0.0.1:7777".parse().unwrap()])
+            .add_peers(vec!["127.0.0.1:7777".parse().unwrap()], PeerSource::Tracker)
             .await
             .unwrap();
 
@@ -3781,7 +3783,7 @@ mod tests {
             .unwrap();
 
         // Add seeder as a peer
-        leecher.add_peers(vec![seeder_addr]).await.unwrap();
+        leecher.add_peers(vec![seeder_addr], PeerSource::Tracker).await.unwrap();
 
         // Give the connect interval time to fire (it ticks every 30s).
         // Instead, wait a bit for the initial connect tick. Since our interval
@@ -4932,7 +4934,7 @@ mod tests {
         handle.add_peers(vec![
             SocketAddr::new(banned_ip, 6881),
             "10.0.0.1:6881".parse().unwrap(),
-        ]).await.unwrap();
+        ], PeerSource::Tracker).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
@@ -5160,7 +5162,7 @@ mod tests {
         // Add peers: one blocked (public IP in TEST-NET-3), one allowed (different public IP)
         let blocked_addr: SocketAddr = "203.0.113.42:6881".parse().unwrap();
         let allowed_addr: SocketAddr = "198.51.100.1:6881".parse().unwrap();
-        handle.add_peers(vec![blocked_addr, allowed_addr]).await.unwrap();
+        handle.add_peers(vec![blocked_addr, allowed_addr], PeerSource::Tracker).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
@@ -5196,7 +5198,7 @@ mod tests {
 
         // Initially, 198.51.100.1 (TEST-NET-2) is allowed
         let test_addr: SocketAddr = "198.51.100.1:6881".parse().unwrap();
-        handle.add_peers(vec![test_addr]).await.unwrap();
+        handle.add_peers(vec![test_addr], PeerSource::Tracker).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
         assert!(stats.peers_available + stats.peers_connected >= 1,

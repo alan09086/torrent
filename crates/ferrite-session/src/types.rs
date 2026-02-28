@@ -263,7 +263,7 @@ pub(crate) enum PeerCommand {
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by torrent module (not yet implemented)
 pub(crate) enum TorrentCommand {
-    AddPeers { peers: Vec<SocketAddr> },
+    AddPeers { peers: Vec<SocketAddr>, source: crate::peer_state::PeerSource },
     Stats { reply: oneshot::Sender<TorrentStats> },
     Pause,
     Resume,

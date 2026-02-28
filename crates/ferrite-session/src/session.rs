@@ -805,7 +805,7 @@ impl SessionActor {
                     if let Some((info_hash, peer_addr)) = result
                         && let Some(entry) = self.torrents.get(&info_hash)
                     {
-                        let _ = entry.handle.add_peers(vec![peer_addr]).await;
+                        let _ = entry.handle.add_peers(vec![peer_addr], crate::peer_state::PeerSource::Lsd).await;
                     }
                 }
                 // uTP inbound connections (IPv4)

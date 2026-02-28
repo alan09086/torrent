@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use ferrite_storage::Bitfield;
@@ -8,6 +9,17 @@ use ferrite_wire::ExtHandshake;
 
 use crate::pipeline::PeerPipelineState;
 use crate::types::PeerCommand;
+
+/// Origin of a peer address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PeerSource {
+    Tracker,
+    Dht,
+    Pex,
+    Lsd,
+    Incoming,
+    ResumeData,
+}
 
 /// Per-peer state tracked by the torrent actor.
 #[allow(dead_code)] // consumed by torrent module (not yet implemented)
@@ -55,11 +67,18 @@ pub(crate) struct PeerState {
     pub last_data_received: Option<std::time::Instant>,
     /// BEP 6: pieces suggested by this peer.
     pub suggested_pieces: HashSet<u32>,
+    /// How this peer was discovered.
+    pub source: PeerSource,
 }
 
 #[allow(dead_code)]
 impl PeerState {
-    pub fn new(addr: SocketAddr, bitfield_len: u32, cmd_tx: mpsc::Sender<PeerCommand>) -> Self {
+    pub fn new(
+        addr: SocketAddr,
+        bitfield_len: u32,
+        cmd_tx: mpsc::Sender<PeerCommand>,
+        source: PeerSource,
+    ) -> Self {
         Self {
             addr,
             peer_choking: true,
@@ -83,6 +102,38 @@ impl PeerState {
             snubbed: false,
             last_data_received: None,
             suggested_pieces: HashSet::new(),
+            source,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_source_serialization() {
+        let source = PeerSource::Tracker;
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(json, "\"Tracker\"");
+        let roundtrip: PeerSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, PeerSource::Tracker);
+    }
+
+    #[test]
+    fn peer_source_all_variants() {
+        let variants = [
+            PeerSource::Tracker,
+            PeerSource::Dht,
+            PeerSource::Pex,
+            PeerSource::Lsd,
+            PeerSource::Incoming,
+            PeerSource::ResumeData,
+        ];
+        for source in variants {
+            let json = serde_json::to_string(&source).unwrap();
+            let roundtrip: PeerSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(roundtrip, source);
         }
     }
 }
