@@ -411,14 +411,13 @@ impl NatActor {
                     let ext_body = crate::upnp::soap::format_get_external_ip();
                     if let Ok(ext_resp) = crate::upnp::soap::soap_request(
                         control_url, service_type, "GetExternalIPAddress", &ext_body,
-                    ).await {
-                        if let Some(ip_str) = crate::upnp::soap::extract_xml_value(
+                    ).await
+                        && let Some(ip_str) = crate::upnp::soap::extract_xml_value(
                             &ext_resp, "NewExternalIPAddress",
-                        ) {
-                            if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                                self.emit(NatEvent::ExternalIpDiscovered { ip }).await;
-                            }
-                        }
+                        )
+                        && let Ok(ip) = ip_str.parse::<IpAddr>()
+                    {
+                        self.emit(NatEvent::ExternalIpDiscovered { ip }).await;
                     }
                     self.emit(NatEvent::MappingSucceeded {
                         port: tcp_port,
