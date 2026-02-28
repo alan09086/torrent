@@ -4707,4 +4707,166 @@ mod tests {
         assert!(mgr.is_banned(&banned_ip));
         assert!(!mgr.is_banned(&ok_ip));
     }
+
+    // ---- M27: Parallel hashing tests ----
+
+    #[test]
+    fn hashing_threads_config_default() {
+        let sc = crate::types::SessionConfig::default();
+        assert_eq!(sc.hashing_threads, 2);
+        let tc = TorrentConfig::default();
+        assert_eq!(tc.hashing_threads, 2);
+    }
+
+    #[tokio::test]
+    async fn checking_state_and_progress_alerts() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let data = vec![0xEEu8; 65536]; // 4 pieces of 16384
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut rx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, dh, dm, config, None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(),
+        )
+        .await
+        .unwrap();
+
+        // Collect alerts for up to 2 seconds
+        let mut saw_checking = false;
+        let mut progress_values: Vec<f32> = Vec::new();
+        let mut saw_checked = false;
+        let mut checked_have = 0u32;
+        let mut checked_total = 0u32;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(alert)) => match alert.kind {
+                    AlertKind::StateChanged { new_state: TorrentState::Checking, .. } => {
+                        saw_checking = true;
+                    }
+                    AlertKind::CheckingProgress { progress, .. } => {
+                        progress_values.push(progress);
+                    }
+                    AlertKind::TorrentChecked { pieces_have, pieces_total, .. } => {
+                        saw_checked = true;
+                        checked_have = pieces_have;
+                        checked_total = pieces_total;
+                        break;
+                    }
+                    _ => {}
+                },
+                _ => break,
+            }
+        }
+
+        assert!(saw_checking, "should have seen StateChanged → Checking");
+        assert!(!progress_values.is_empty(), "should have seen CheckingProgress alerts");
+        // Progress should be monotonically increasing
+        for w in progress_values.windows(2) {
+            assert!(w[1] >= w[0], "progress should be monotonically increasing: {} < {}", w[0], w[1]);
+        }
+        assert!(saw_checked, "should have seen TorrentChecked");
+        assert_eq!(checked_have, 4);
+        assert_eq!(checked_total, 4);
+
+        // Final state should be Seeding (all pieces valid)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checking_progress_in_stats() {
+        // When not in Checking state, checking_progress should be 0.0
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, dh, dm, config, None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(),
+        )
+        .await
+        .unwrap();
+
+        // Give actor time to finish checking (no valid pieces → Downloading)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+        assert_eq!(stats.checking_progress, 0.0, "checking_progress should be 0.0 when not checking");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_pieces_partial_data() {
+        use crate::alert::AlertKind;
+
+        // 4 pieces, only first 2 have valid data
+        let data = vec![0xCCu8; 65536]; // 4 pieces × 16384
+        let meta = make_test_torrent(&data, 16384);
+
+        // Create storage and only write valid data for pieces 0 and 1
+        let lengths = Lengths::new(data.len() as u64, 16384, DEFAULT_CHUNK_SIZE);
+        let storage = Arc::new(MemoryStorage::new(lengths.clone()));
+        for p in 0..2u32 {
+            let offset = lengths.piece_offset(p) as usize;
+            let size = lengths.piece_size(p) as usize;
+            storage.write_chunk(p, 0, &data[offset..offset + size]).unwrap();
+        }
+        // Pieces 2 and 3 have no data (zeros) — won't match hash
+
+        let config = test_config();
+        let (atx, amask) = test_alert_channel();
+        let mut rx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, dh, dm, config, None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(),
+        )
+        .await
+        .unwrap();
+
+        // Wait for TorrentChecked alert
+        let mut checked_have = 0u32;
+        let mut checked_total = 0u32;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(alert)) => {
+                    if let AlertKind::TorrentChecked { pieces_have, pieces_total, .. } = alert.kind {
+                        checked_have = pieces_have;
+                        checked_total = pieces_total;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!(checked_have, 2, "only 2 pieces should be valid");
+        assert_eq!(checked_total, 4);
+
+        // Final state should be Downloading (partial)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Downloading);
+        assert_eq!(stats.pieces_have, 2);
+        assert_eq!(stats.pieces_total, 4);
+
+        handle.shutdown().await.unwrap();
+    }
 }

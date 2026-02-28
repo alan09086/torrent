@@ -783,4 +783,63 @@ mod tests {
 
         mgr.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn concurrent_verify_multiple_pieces() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(10);
+
+        // 8 pieces of 50 bytes each = 400 bytes total
+        let data: Vec<u8> = (0..400).map(|i| (i % 256) as u8).collect();
+        let piece_len = 50u64;
+        let lengths = Lengths::new(data.len() as u64, piece_len, 25);
+        let storage = Arc::new(MemoryStorage::new(lengths.clone()));
+
+        // Write all piece data
+        let num_pieces = lengths.num_pieces();
+        for p in 0..num_pieces {
+            let offset = lengths.piece_offset(p) as usize;
+            let size = lengths.piece_size(p) as usize;
+            storage
+                .write_chunk(p, 0, &data[offset..offset + size])
+                .unwrap();
+        }
+
+        let disk = mgr.register_torrent(ih, storage).await;
+
+        // Compute expected hashes
+        let mut expected_hashes = Vec::new();
+        for p in 0..num_pieces {
+            let offset = lengths.piece_offset(p) as usize;
+            let size = lengths.piece_size(p) as usize;
+            expected_hashes.push(ferrite_core::sha1(&data[offset..offset + size]));
+        }
+
+        // Verify all 8 pieces concurrently via JoinSet
+        let mut js = tokio::task::JoinSet::new();
+        for p in 0..num_pieces {
+            let d = disk.clone();
+            let hash = expected_hashes[p as usize];
+            js.spawn(async move {
+                let valid = d
+                    .verify_piece(p, hash, DiskJobFlags::empty())
+                    .await
+                    .unwrap();
+                (p, valid)
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(r) = js.join_next().await {
+            results.push(r.unwrap());
+        }
+        results.sort_by_key(|&(p, _)| p);
+
+        assert_eq!(results.len(), num_pieces as usize);
+        for (p, valid) in &results {
+            assert!(valid, "piece {p} should be valid");
+        }
+
+        mgr.shutdown().await;
+    }
 }
