@@ -60,6 +60,10 @@ pub enum AlertKind {
     StateChanged { info_hash: Id20, prev_state: TorrentState, new_state: TorrentState },
     MetadataReceived { info_hash: Id20, name: String },
 
+    // ── Checking (STATUS) ──
+    TorrentChecked { info_hash: Id20, pieces_have: u32, pieces_total: u32 },
+    CheckingProgress { info_hash: Id20, progress: f32 },
+
     // ── Transfer (PIECE / BLOCK) ──
     PieceFinished { info_hash: Id20, piece: u32 },
     BlockFinished { info_hash: Id20, piece: u32, offset: u32 },
@@ -137,7 +141,9 @@ impl AlertKind {
             | MetadataReceived { .. }
             | ListenSucceeded { .. }
             | ListenFailed { .. }
-            | ResumeDataSaved { .. } => AlertCategory::STATUS,
+            | ResumeDataSaved { .. }
+            | TorrentChecked { .. }
+            | CheckingProgress { .. } => AlertCategory::STATUS,
 
             SessionStatsUpdate(_) => AlertCategory::STATS,
 
