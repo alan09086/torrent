@@ -111,7 +111,7 @@ impl Default for DiskConfig {
 }
 
 /// Disk I/O performance counters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiskStats {
     pub read_bytes: u64,
     pub write_bytes: u64,

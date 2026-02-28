@@ -86,10 +86,11 @@ pub enum AlertKind {
     ListenFailed { port: u16, message: String },
     SessionStatsUpdate(crate::types::SessionStats),
 
-    // ── Storage ──
+    // ── Storage / Disk ──
     FileRenamed { info_hash: Id20, index: usize, new_path: std::path::PathBuf },
     StorageMoved { info_hash: Id20, new_path: std::path::PathBuf },
     FileError { info_hash: Id20, path: std::path::PathBuf, message: String },
+    DiskStatsUpdate(crate::disk::DiskStats),
 
     // ── Resume (STATUS) ──
     ResumeDataSaved { info_hash: Id20 },
@@ -166,6 +167,7 @@ impl AlertKind {
             FileRenamed { .. }
             | StorageMoved { .. } => AlertCategory::STORAGE,
             FileError { .. } => AlertCategory::STORAGE | AlertCategory::ERROR,
+            DiskStatsUpdate(_) => AlertCategory::STATS | AlertCategory::STORAGE,
 
             // ERROR
             TorrentError { .. } => AlertCategory::ERROR,
