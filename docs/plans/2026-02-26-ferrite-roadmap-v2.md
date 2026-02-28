@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-26
 **Target:** Complete libtorrent-rasterbar feature parity for magnetor (qBittorrent replacement)
-**Current State:** M1-M13 complete, v0.13.0, 8 crates, 390 tests
+**Current State:** M1-M23 complete, v0.24.0, 11 crates, 599 tests
 
 ## Completed (M1-M13)
 
