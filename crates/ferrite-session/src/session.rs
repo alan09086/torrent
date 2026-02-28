@@ -139,6 +139,13 @@ enum SessionCommand {
     GetIpFilter {
         reply: oneshot::Sender<crate::ip_filter::IpFilter>,
     },
+    GetSettings {
+        reply: oneshot::Sender<Settings>,
+    },
+    ApplySettings {
+        settings: Box<Settings>,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     Shutdown,
 }
 
@@ -601,6 +608,30 @@ impl SessionHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Get a clone of the current session settings.
+    pub async fn settings(&self) -> crate::Result<Settings> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::GetSettings { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Apply new settings at runtime.
+    ///
+    /// Validates the settings, updates rate limiters immediately, and stores
+    /// the new settings. Sub-actor reconfiguration (disk, DHT, NAT) takes
+    /// effect on next session restart.
+    pub async fn apply_settings(&self, settings: Settings) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ApplySettings { settings: Box::new(settings), reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
     /// Get the list of currently banned peer IPs.
     pub async fn banned_peers(&self) -> crate::Result<Vec<IpAddr>> {
         let (tx, rx) = oneshot::channel();
@@ -751,6 +782,13 @@ impl SessionActor {
                         Some(SessionCommand::GetIpFilter { reply }) => {
                             let filter = self.ip_filter.read().unwrap().clone();
                             let _ = reply.send(filter);
+                        }
+                        Some(SessionCommand::GetSettings { reply }) => {
+                            let _ = reply.send(self.settings.clone());
+                        }
+                        Some(SessionCommand::ApplySettings { settings, reply }) => {
+                            let result = self.handle_apply_settings(*settings);
+                            let _ = reply.send(result);
                         }
                         Some(SessionCommand::Shutdown) | None => {
                             self.shutdown_all().await;
@@ -1158,6 +1196,39 @@ impl SessionActor {
             banned_peers,
             peer_strikes,
         })
+    }
+
+    /// Apply new settings at runtime.
+    ///
+    /// Validates, updates rate limiters and alert mask immediately.
+    /// Sub-actor reconfiguration (disk, DHT, NAT) takes effect on next restart.
+    fn handle_apply_settings(&mut self, new: Settings) -> crate::Result<()> {
+        new.validate()?;
+
+        // Update rate limiters if changed
+        if new.upload_rate_limit != self.settings.upload_rate_limit {
+            self.global_upload_bucket.lock().unwrap().set_rate(new.upload_rate_limit);
+        }
+        if new.download_rate_limit != self.settings.download_rate_limit {
+            self.global_download_bucket.lock().unwrap().set_rate(new.download_rate_limit);
+        }
+
+        // Update alert mask if changed
+        if new.alert_mask != self.settings.alert_mask {
+            self.alert_mask.store(new.alert_mask.bits(), Ordering::Relaxed);
+        }
+
+        // Store new settings
+        self.settings = new;
+
+        // Fire alert
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::SettingsChanged,
+        );
+
+        Ok(())
     }
 
     /// Build a QueueEntry snapshot from current auto-managed torrents.
@@ -2240,5 +2311,40 @@ mod tests {
         assert!(s.force_proxy);
         assert!(s.anonymous_mode);
         assert_eq!(s.proxy.to_url(), "socks5://user:pass@localhost:9050");
+    }
+
+    #[tokio::test]
+    async fn apply_settings_runtime() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let original = session.settings().await.unwrap();
+        assert_eq!(original.max_torrents, 10);
+
+        let mut new = original.clone();
+        new.max_torrents = 200;
+        new.upload_rate_limit = 1_000_000;
+        session.apply_settings(new).await.unwrap();
+
+        let updated = session.settings().await.unwrap();
+        assert_eq!(updated.max_torrents, 200);
+        assert_eq!(updated.upload_rate_limit, 1_000_000);
+
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_settings_validation_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+
+        // force_proxy=true without a proxy configured should fail validation
+        let mut bad = Settings::default();
+        bad.force_proxy = true;
+        let result = session.apply_settings(bad).await;
+        assert!(result.is_err());
+
+        // Original settings should be unchanged
+        let current = session.settings().await.unwrap();
+        assert!(!current.force_proxy);
+
+        session.shutdown().await.unwrap();
     }
 }

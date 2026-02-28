@@ -127,6 +127,9 @@ pub enum AlertKind {
     // ── Port mapping ──
     PortMappingSucceeded { port: u16, protocol: String },
     PortMappingFailed { port: u16, message: String },
+
+    // ── Settings (M31) ──
+    SettingsChanged,
 }
 
 impl AlertKind {
@@ -197,6 +200,9 @@ impl AlertKind {
             // PORT_MAPPING
             PortMappingSucceeded { .. } => AlertCategory::PORT_MAPPING,
             PortMappingFailed { .. } => AlertCategory::PORT_MAPPING | AlertCategory::ERROR,
+
+            // SETTINGS
+            SettingsChanged => AlertCategory::STATUS,
         }
     }
 }
