@@ -869,6 +869,11 @@ impl TorrentActor {
             .map(|ct| ct.bitfield().count_ones())
             .unwrap_or(0);
 
+        let mut peers_by_source = std::collections::HashMap::new();
+        for peer in self.peers.values() {
+            *peers_by_source.entry(peer.source).or_insert(0) += 1;
+        }
+
         TorrentStats {
             state: self.state,
             downloaded: self.downloaded,
@@ -878,6 +883,7 @@ impl TorrentActor {
             peers_connected: self.peers.len(),
             peers_available: self.available_peers.len(),
             checking_progress: self.checking_progress,
+            peers_by_source,
         }
     }
 

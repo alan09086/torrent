@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -155,6 +156,8 @@ pub struct TorrentStats {
     pub peers_available: usize,
     /// Progress of piece checking (0.0–1.0), meaningful when state is `Checking`.
     pub checking_progress: f32,
+    /// Number of connected peers broken down by discovery source.
+    pub peers_by_source: HashMap<crate::peer_state::PeerSource, usize>,
 }
 
 /// Events sent from a `PeerTask` back to the `TorrentActor`.
@@ -393,4 +396,32 @@ mod tests {
         assert!(cfg.streaming_timeout_escalation);
     }
 
+    #[test]
+    fn torrent_stats_has_peers_by_source() {
+        use std::collections::HashMap;
+        use crate::peer_state::PeerSource;
+
+        let stats = TorrentStats {
+            state: TorrentState::Downloading,
+            downloaded: 0,
+            uploaded: 0,
+            pieces_have: 0,
+            pieces_total: 10,
+            peers_connected: 0,
+            peers_available: 0,
+            checking_progress: 0.0,
+            peers_by_source: HashMap::new(),
+        };
+        assert!(stats.peers_by_source.is_empty());
+
+        let mut map = HashMap::new();
+        map.insert(PeerSource::Tracker, 5);
+        map.insert(PeerSource::Dht, 3);
+        let stats2 = TorrentStats {
+            peers_by_source: map.clone(),
+            ..stats
+        };
+        assert_eq!(stats2.peers_by_source[&PeerSource::Tracker], 5);
+        assert_eq!(stats2.peers_by_source[&PeerSource::Dht], 3);
+    }
 }
