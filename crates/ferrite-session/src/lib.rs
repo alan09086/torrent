@@ -23,6 +23,8 @@ pub(crate) mod super_seed;
 pub(crate) mod have_buffer;
 pub(crate) mod ban;
 pub(crate) mod ip_filter;
+#[allow(dead_code)] // Wired in during Step 5 (proxy integration).
+pub(crate) mod proxy;
 pub(crate) mod pipeline;
 pub mod streaming;
 pub mod disk;
@@ -39,6 +41,7 @@ pub use torrent::TorrentHandle;
 pub use session::SessionHandle;
 pub use ban::BanConfig;
 pub use ip_filter::{IpFilter, IpFilterError, PortFilter, parse_dat, parse_p2p};
+pub use proxy::{ProxyType, ProxyConfig};
 pub use persistence::{SessionState, DhtNodeEntry, PeerStrikeEntry, validate_resume_bitfield};
 pub use crate::piece_selector::build_wanted_pieces;
 pub use crate::tracker_manager::{TrackerInfo, TrackerStatus};
