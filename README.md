@@ -63,7 +63,7 @@ Requires Rust edition 2024 support (rustc 1.85+).
 
 ## Roadmap
 
-See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-roadmap-v2.md) for the full 35-milestone roadmap to libtorrent-rasterbar parity.
+See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-roadmap-v2.md) for the full 38-milestone roadmap to libtorrent-rasterbar parity.
 
 | Phase | Milestones | Status |
 |-------|-----------|--------|
@@ -72,7 +72,7 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 | Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Done |
 | Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Done |
 | Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Done |
-| Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode + plugin interface) | In Progress |
+| Phase 5: Network & Tools | M29-M32d (IP filter, torrent creation, settings, metadata serving, BEP 40, per-class rate limits, move storage, share mode, extension plugins) | In Progress |
 | Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | Planned |
 
 ## License

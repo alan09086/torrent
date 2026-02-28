@@ -28,7 +28,7 @@ cargo clippy --workspace -- -D warnings
 
 ## Milestones
 
-- 35-milestone roadmap: `docs/plans/2026-02-26-ferrite-roadmap-v2.md`
+- 38-milestone roadmap: `docs/plans/2026-02-26-ferrite-roadmap-v2.md`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
 - Plan files: `docs/plans/YYYY-MM-DD-ferrite-<milestone>-<topic>.md`

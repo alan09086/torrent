@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-26
 **Target:** Complete libtorrent-rasterbar feature parity for magnetor (qBittorrent replacement)
-**Current State:** M1-M23 complete, v0.24.0, 11 crates, 599 tests
+**Current State:** M1-M24 complete, v0.25.0, 11 crates, 621 tests
 
 ## Completed (M1-M13)
 
@@ -467,7 +467,7 @@ concurrent streams, readahead window)
 
 ---
 
-## Phase 5: Network Hardening & Tools (M29-M32)
+## Phase 5: Network Hardening & Tools (M29-M32d)
 
 *Remaining infrastructure for full parity.*
 
@@ -536,34 +536,69 @@ Centralized typed configuration with runtime changes.
 **Tests:** ~6 (default settings, presets, runtime change, validation,
 serialization round-trip, alert)
 
-### M32: Share Mode + Remaining Extensions + Plugin Interface
+### M32a: Metadata Serving + Peer Source Tracking
 
-Final features for completeness and extensibility.
+Complete BEP 9 implementation and add peer origin tracking.
 
 **Scope:**
-- **Share mode:** join swarm and upload without downloading (seed without
-  having the files — relay pieces as they arrive)
-- **BEP 40:** canonical peer priority (deterministic peer ordering based
-  on IP, reduces connections in large swarms)
-- **Per-class rate limits:** rate limits on peer classes (global, TCP, uTP,
-  local), not just global/per-torrent
-- **Peer source tracking:** identify how each peer was discovered
-  (tracker, DHT, PEX, LSD, incoming, resume data)
-- **Move storage:** relocate torrent files to new directory while active
-- **Extension plugin interface:** trait-based system for custom BitTorrent
-  protocol extensions, allowing third-party code to hook into the wire
-  protocol without modifying ferrite internals.
-  - `ExtensionPlugin` trait: `on_handshake()`, `on_message()`,
-    `on_peer_connected()`, `on_peer_disconnected()`, `extension_name()`
-  - Plugins register via `ClientBuilder::add_extension(Box<dyn ExtensionPlugin>)`
-  - Extension negotiation integrated with BEP 10 extended handshake
-  - Plugin receives raw extension messages and can send custom messages
-  - Plugins run in the peer task context (no separate runtime)
+- **Metadata serving (BEP 9 complete):** respond to ut_metadata requests
+  from peers (currently silently dropped). Store raw info dict bytes in
+  TorrentMetaV1, serve 16 KiB metadata pieces on request.
+- **Peer source tracking:** `PeerSource` enum (Tracker, Dht, Pex, Lsd,
+  Incoming, ResumeData). Tag peers at insertion, store on PeerState,
+  expose in stats.
 
-**Crates:** ferrite-session, ferrite-wire, ferrite (facade re-exports)
-**Tests:** ~10 (share mode relay, BEP 40 ordering, per-class limits, peer
-source tracking, move storage, plugin registration, plugin handshake
-negotiation, plugin message dispatch, plugin lifecycle)
+**Crates:** ferrite-core, ferrite-session
+**Tests:** ~8
+
+### M32b: BEP 40 Canonical Peer Priority + Per-Class Rate Limits
+
+Smarter peer selection and granular bandwidth control.
+
+**Scope:**
+- **BEP 40 canonical peer priority:** CRC32C-based deterministic peer
+  ordering by IP pair. Sort available_peers by priority in
+  try_connect_peers(). Requires external IP detection (NAT mapping,
+  tracker response, or explicit config).
+- **Per-class rate limits:** separate TokenBuckets for TCP and uTP
+  traffic. `RateLimiterSet` struct replaces individual SharedBuckets.
+  4 new Settings fields (tcp/utp upload/download limits).
+  `PeerTransport` enum (Tcp/Utp) on PeerState.
+
+**Crates:** ferrite-session
+**Tests:** ~10
+
+### M32c: Move Storage + Share Mode
+
+Storage relocation and piece relay without local files.
+
+**Scope:**
+- **Move storage:** implement DiskJob::MoveStorage handler (rename with
+  cross-filesystem copy fallback). Pause I/O during move. Expose via
+  SessionHandle::move_torrent_storage(). Alerts: StorageMoved, FileError.
+- **Share mode:** join swarm and relay pieces without persistent storage.
+  In-memory piece cache, SHA1 verify, serve from cache, LRU eviction.
+  New TorrentState::Sharing. Requires BEP 6 Fast Extension for
+  RejectRequest on evicted pieces.
+
+**Crates:** ferrite-session
+**Tests:** ~8
+
+### M32d: Extension Plugin Interface
+
+Trait-based system for custom BEP 10 protocol extensions.
+
+**Scope:**
+- `ExtensionPlugin` trait: `name()`, `on_handshake()`, `on_message()`,
+  `on_peer_connected()`, `on_peer_disconnected()`
+- Plugins register via `ClientBuilder::add_extension(Box<dyn ExtensionPlugin>)`
+- Extension ID allocation: built-in 1-3, plugins from 10+
+- Dispatch in peer task after built-in handlers
+- Plugins are synchronous, immutable after session start
+- Facade re-exports + prelude
+
+**Crates:** ferrite-session, ferrite (facade)
+**Tests:** ~8
 
 ---
 
