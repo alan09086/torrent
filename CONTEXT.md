@@ -7,11 +7,11 @@
 | Field | Value |
 |-------|-------|
 | Version | 0.26.0 |
-| Active Milestone | M25 — Smart Banning |
+| Active Milestone | M26 — Async Disk I/O + mmap Storage + Disk Cache |
 | Milestone Status | Not started |
-| Progress | 24/35 milestones complete |
+| Progress | 25/35 milestones complete |
 | Crates | 10 |
-| Last Commit | `cb23a9d` feat: tracker scrape, lt_trackers exchange, enhanced tracker management (M24) |
+| Last Commit | `6e211b2` feat: smart banning — peer attribution, parole mode, session-wide bans (M25) |
 
 ## Architecture & Patterns
 
@@ -37,9 +37,9 @@
 
 ## Next Steps
 
-1. **M25: Smart Banning**
+1. **M26: Async Disk I/O + mmap Storage + Disk Cache**
    - No plan file yet — design doc needed first
-2. **M26: Async Disk I/O + mmap Storage + Disk Cache**
+2. **M27: Multi-threaded Hashing**
    - No plan file yet — design doc needed first
 
 ## Quick Reference
@@ -49,10 +49,10 @@
 - **Key crates:** ferrite, ferrite-core, ferrite-session
 
 **Recent Commits:**
+  6e211b2 feat: smart banning — peer attribution, parole mode, session-wide bans (M25)
   cb23a9d feat: tracker scrape, lt_trackers exchange, enhanced tracker management (M24)
   552135f docs: update roadmap current state for v0.24.0 (M23)
   69774a5 feat: super seeding, upload-only, batched Have — BEP 16, 21 (M23)
   5f921d7 docs: update README/changelog for v0.23.0
   42c9b32 feat: HTTP/web seeding — BEP 19, BEP 17 (M22)
-  a1fe73f feat: full dual-stack IPv6 support — BEP 7, 24, 11 (M21)
 
