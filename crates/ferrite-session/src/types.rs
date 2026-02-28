@@ -40,6 +40,19 @@ pub struct TorrentConfig {
     pub have_send_delay_ms: u64,
     /// Number of concurrent piece verifications during torrent checking.
     pub hashing_threads: usize,
+    /// Enable sequential (in-order) piece downloading.
+    pub sequential_download: bool,
+    /// Completed piece count below which the picker uses random selection to promote diversity.
+    pub initial_picker_threshold: u32,
+    /// Seconds below which a fast peer downloads a whole piece; if under this, picker grants
+    /// exclusive assignment (no block splitting).
+    pub whole_pieces_threshold: u32,
+    /// Seconds without data from a peer before marking it as snubbed.
+    pub snub_timeout_secs: u32,
+    /// Number of pieces ahead of the streaming cursor to prioritize.
+    pub readahead_pieces: u32,
+    /// When true, escalate streaming piece requests that exceed the mean RTT.
+    pub streaming_timeout_escalation: bool,
 }
 
 impl Default for TorrentConfig {
@@ -64,6 +77,12 @@ impl Default for TorrentConfig {
             upload_only_announce: true,
             have_send_delay_ms: 0,
             hashing_threads: 2,
+            sequential_download: false,
+            initial_picker_threshold: 4,
+            whole_pieces_threshold: 20,
+            snub_timeout_secs: 60,
+            readahead_pieces: 8,
+            streaming_timeout_escalation: true,
         }
     }
 }
@@ -328,6 +347,14 @@ pub struct SessionConfig {
     pub disk_write_cache_ratio: f32,
     /// Number of concurrent piece hash verifications (default: 2).
     pub hashing_threads: usize,
+    /// Maximum per-peer request queue depth (ceiling for BDP-based sizing).
+    pub max_request_queue_depth: usize,
+    /// Target seconds of data in-flight (request_queue_time × rate = queue bytes).
+    pub request_queue_time: f64,
+    /// Seconds before a block request is considered timed out.
+    pub block_request_timeout_secs: u32,
+    /// Maximum concurrent FileStream readers (semaphore permits).
+    pub max_concurrent_stream_reads: usize,
 }
 
 impl Default for SessionConfig {
@@ -375,6 +402,10 @@ impl Default for SessionConfig {
             disk_cache_size: 64 * 1024 * 1024,
             disk_write_cache_ratio: 0.25,
             hashing_threads: 2,
+            max_request_queue_depth: 250,
+            request_queue_time: 3.0,
+            block_request_timeout_secs: 60,
+            max_concurrent_stream_reads: 8,
         }
     }
 }
@@ -505,5 +536,25 @@ mod tests {
     fn torrent_config_have_delay_default() {
         let cfg = TorrentConfig::default();
         assert_eq!(cfg.have_send_delay_ms, 0);
+    }
+
+    #[test]
+    fn torrent_config_picker_defaults() {
+        let cfg = TorrentConfig::default();
+        assert!(!cfg.sequential_download);
+        assert_eq!(cfg.initial_picker_threshold, 4);
+        assert_eq!(cfg.whole_pieces_threshold, 20);
+        assert_eq!(cfg.snub_timeout_secs, 60);
+        assert_eq!(cfg.readahead_pieces, 8);
+        assert!(cfg.streaming_timeout_escalation);
+    }
+
+    #[test]
+    fn session_config_pipeline_defaults() {
+        let cfg = SessionConfig::default();
+        assert_eq!(cfg.max_request_queue_depth, 250);
+        assert!((cfg.request_queue_time - 3.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.block_request_timeout_secs, 60);
+        assert_eq!(cfg.max_concurrent_stream_reads, 8);
     }
 }

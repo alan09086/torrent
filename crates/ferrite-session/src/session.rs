@@ -816,6 +816,12 @@ impl SessionActor {
             upload_only_announce: self.config.upload_only_announce,
             have_send_delay_ms: self.config.have_send_delay_ms,
             hashing_threads: self.config.hashing_threads,
+            sequential_download: false,
+            initial_picker_threshold: 4,
+            whole_pieces_threshold: 20,
+            snub_timeout_secs: 60,
+            readahead_pieces: 8,
+            streaming_timeout_escalation: true,
         }
     }
 
@@ -1501,6 +1507,10 @@ mod tests {
             disk_cache_size: 1024 * 1024,
             disk_write_cache_ratio: 0.25,
             hashing_threads: 2,
+            max_request_queue_depth: 250,
+            request_queue_time: 3.0,
+            block_request_timeout_secs: 60,
+            max_concurrent_stream_reads: 8,
         }
     }
 

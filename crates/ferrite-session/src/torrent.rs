@@ -2566,6 +2566,12 @@ mod tests {
             upload_only_announce: true,
             have_send_delay_ms: 0,
             hashing_threads: 2,
+            sequential_download: false,
+            initial_picker_threshold: 4,
+            whole_pieces_threshold: 20,
+            snub_timeout_secs: 60,
+            readahead_pieces: 8,
+            streaming_timeout_escalation: true,
         }
     }
 
