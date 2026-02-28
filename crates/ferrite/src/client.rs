@@ -189,6 +189,15 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable HTTP/web seeding (BEP 19 GetRight, BEP 17 Hoffman).
+    ///
+    /// When enabled, torrents with `url-list` or `httpseeds` will download
+    /// pieces from HTTP servers alongside peer-to-peer transfers. Default: true.
+    pub fn enable_web_seed(mut self, v: bool) -> Self {
+        self.config.enable_web_seed = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
@@ -305,5 +314,16 @@ mod tests {
         // Explicitly disabled
         let config = ClientBuilder::new().enable_utp(false).into_config();
         assert!(!config.enable_utp);
+    }
+
+    #[test]
+    fn client_builder_web_seed_config() {
+        // Default: web seed enabled
+        let config = ClientBuilder::new().into_config();
+        assert!(config.enable_web_seed);
+
+        // Explicitly disabled
+        let config = ClientBuilder::new().enable_web_seed(false).into_config();
+        assert!(!config.enable_web_seed);
     }
 }

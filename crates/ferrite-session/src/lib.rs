@@ -17,6 +17,7 @@ pub(crate) mod lsd;
 pub(crate) mod peer;
 pub(crate) mod queue;
 pub(crate) mod utp_routing;
+pub(crate) mod web_seed;
 mod torrent;
 mod session;
 mod persistence;

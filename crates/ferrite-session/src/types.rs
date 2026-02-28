@@ -28,6 +28,10 @@ pub struct TorrentConfig {
     pub encryption_mode: ferrite_wire::mse::EncryptionMode,
     /// Enable uTP (micro Transport Protocol) for peer connections.
     pub enable_utp: bool,
+    /// Enable HTTP/web seeding (BEP 19, BEP 17).
+    pub enable_web_seed: bool,
+    /// Maximum concurrent web seed connections.
+    pub max_web_seeds: usize,
 }
 
 impl Default for TorrentConfig {
@@ -46,6 +50,8 @@ impl Default for TorrentConfig {
             download_rate_limit: 0,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
             enable_utp: true,
+            enable_web_seed: true,
+            max_web_seeds: 4,
         }
     }
 }
@@ -139,6 +145,16 @@ pub(crate) enum PeerEvent {
     Disconnected {
         peer_addr: SocketAddr,
         reason: Option<String>,
+    },
+    WebSeedPieceData {
+        url: String,
+        index: u32,
+        data: Bytes,
+    },
+    WebSeedError {
+        url: String,
+        piece: u32,
+        message: String,
     },
 }
 
@@ -261,6 +277,8 @@ pub struct SessionConfig {
     pub enable_natpmp: bool,
     /// Enable IPv6 dual-stack (listeners, DHT, PEX). Default: true.
     pub enable_ipv6: bool,
+    /// Enable HTTP/web seeding (BEP 19, BEP 17). Default: true.
+    pub enable_web_seed: bool,
 }
 
 impl Default for SessionConfig {
@@ -297,6 +315,7 @@ impl Default for SessionConfig {
             enable_upnp: true,
             enable_natpmp: true,
             enable_ipv6: true,
+            enable_web_seed: true,
         }
     }
 }
@@ -388,5 +407,18 @@ mod tests {
     fn torrent_config_utp_default() {
         let cfg = TorrentConfig::default();
         assert!(cfg.enable_utp);
+    }
+
+    #[test]
+    fn torrent_config_web_seed_defaults() {
+        let cfg = TorrentConfig::default();
+        assert!(cfg.enable_web_seed);
+        assert_eq!(cfg.max_web_seeds, 4);
+    }
+
+    #[test]
+    fn session_config_web_seed_default() {
+        let cfg = SessionConfig::default();
+        assert!(cfg.enable_web_seed);
     }
 }

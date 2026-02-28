@@ -1,7 +1,45 @@
+use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
 use crate::error::Error;
 use crate::hash::Id20;
+
+/// Wrapper for `url-list` that handles both a single string and a list of strings.
+#[derive(Debug, Clone, Default)]
+pub struct UrlList(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for UrlList {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UrlListVisitor;
+
+        impl<'de> de::Visitor<'de> for UrlListVisitor {
+            type Value = UrlList;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string or list of strings")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<UrlList, E> {
+                Ok(UrlList(vec![v.to_owned()]))
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<UrlList, E> {
+                let s = std::str::from_utf8(v).map_err(de::Error::custom)?;
+                Ok(UrlList(vec![s.to_owned()]))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<UrlList, A::Error> {
+                let mut urls = Vec::new();
+                while let Some(url) = seq.next_element::<String>()? {
+                    urls.push(url);
+                }
+                Ok(UrlList(urls))
+            }
+        }
+
+        deserializer.deserialize_any(UrlListVisitor)
+    }
+}
 
 /// Parsed .torrent file (BEP 3 metainfo, v1).
 #[derive(Debug, Clone)]
@@ -20,6 +58,10 @@ pub struct TorrentMetaV1 {
     pub creation_date: Option<i64>,
     /// Info dictionary.
     pub info: InfoDict,
+    /// BEP 19 web seed URLs (GetRight-style).
+    pub url_list: Vec<String>,
+    /// BEP 17 HTTP seed URLs (Hoffman-style).
+    pub httpseeds: Vec<String>,
 }
 
 /// The "info" dictionary from a .torrent file.
@@ -71,6 +113,12 @@ struct RawTorrent {
     #[serde(rename = "creation date")]
     creation_date: Option<i64>,
     info: InfoDict,
+    /// BEP 19: web seed URL(s) — single string or list.
+    #[serde(rename = "url-list", default)]
+    url_list: UrlList,
+    /// BEP 17: HTTP seed URLs.
+    #[serde(default)]
+    httpseeds: Vec<String>,
 }
 
 /// Parse a .torrent file from raw bytes.
@@ -96,6 +144,8 @@ pub fn torrent_from_bytes(data: &[u8]) -> Result<TorrentMetaV1, Error> {
         created_by: raw.created_by,
         creation_date: raw.creation_date,
         info: raw.info,
+        url_list: raw.url_list.0,
+        httpseeds: raw.httpseeds,
     })
 }
 
@@ -176,5 +226,75 @@ impl InfoDict {
         } else {
             vec![]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal torrent bencoded dict with extra keys sorted correctly.
+    ///
+    /// `before_info` contains keys that sort before "info" (e.g., "httpseeds").
+    /// `after_info` contains keys that sort after "info" (e.g., "url-list").
+    fn make_torrent_bytes_sorted(before_info: &[u8], after_info: &[u8]) -> Vec<u8> {
+        // Minimal info dict: name, piece length, pieces (20 zero bytes), length
+        let info = b"d6:lengthi1048576e4:name4:test12:piece lengthi262144e6:pieces20:\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00e";
+        let mut buf = Vec::new();
+        buf.push(b'd');
+        buf.extend_from_slice(before_info);
+        buf.extend_from_slice(b"4:info");
+        buf.extend_from_slice(info);
+        buf.extend_from_slice(after_info);
+        buf.push(b'e');
+        buf
+    }
+
+    #[test]
+    fn url_list_single_string() {
+        // url-list sorts after info
+        let data = make_torrent_bytes_sorted(
+            b"",
+            b"8:url-list24:http://example.com/files",
+        );
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert_eq!(meta.url_list, vec!["http://example.com/files"]);
+    }
+
+    #[test]
+    fn url_list_multiple() {
+        let data = make_torrent_bytes_sorted(
+            b"",
+            b"8:url-listl24:http://example.com/files26:http://mirror.example.com/e",
+        );
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert_eq!(meta.url_list.len(), 2);
+        assert_eq!(meta.url_list[0], "http://example.com/files");
+        assert_eq!(meta.url_list[1], "http://mirror.example.com/");
+    }
+
+    #[test]
+    fn url_list_absent() {
+        let data = make_torrent_bytes_sorted(b"", b"");
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert!(meta.url_list.is_empty());
+    }
+
+    #[test]
+    fn httpseeds_present() {
+        // httpseeds sorts before info
+        let data = make_torrent_bytes_sorted(
+            b"9:httpseedsl28:http://seed.example.com/seede",
+            b"",
+        );
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert_eq!(meta.httpseeds, vec!["http://seed.example.com/seed"]);
+    }
+
+    #[test]
+    fn httpseeds_absent() {
+        let data = make_torrent_bytes_sorted(b"", b"");
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert!(meta.httpseeds.is_empty());
     }
 }

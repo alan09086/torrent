@@ -169,6 +169,16 @@ pub struct FastResumeData {
     #[serde(with = "serde_bytes")]
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub info: Option<Vec<u8>>,
+
+    /// BEP 19 web seed URLs (GetRight-style).
+    #[serde(rename = "url_seeds")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub url_seeds: Vec<String>,
+
+    /// BEP 17 HTTP seed URLs (Hoffman-style).
+    #[serde(rename = "http_seeds")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub http_seeds: Vec<String>,
 }
 
 impl FastResumeData {
@@ -207,6 +217,8 @@ impl FastResumeData {
             max_connections: -1,
             max_uploads: -1,
             info: None,
+            url_seeds: Vec::new(),
+            http_seeds: Vec::new(),
         }
     }
 }
@@ -334,5 +346,52 @@ mod tests {
         );
         assert_eq!(resume.file_format, "libtorrent resume file");
         assert_eq!(resume.file_version, 1);
+    }
+
+    #[test]
+    fn resume_data_url_seeds_round_trip() {
+        let mut resume = FastResumeData::new(
+            vec![0xDD; 20],
+            "web-seed-test".into(),
+            "/downloads".into(),
+        );
+        resume.url_seeds = vec![
+            "http://example.com/files".into(),
+            "http://mirror.example.com/".into(),
+        ];
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.url_seeds, resume.url_seeds);
+    }
+
+    #[test]
+    fn resume_data_http_seeds_round_trip() {
+        let mut resume = FastResumeData::new(
+            vec![0xEE; 20],
+            "http-seed-test".into(),
+            "/downloads".into(),
+        );
+        resume.http_seeds = vec!["http://seed.example.com/seed".into()];
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.http_seeds, resume.http_seeds);
+    }
+
+    #[test]
+    fn resume_data_empty_seeds_not_serialized() {
+        let resume = FastResumeData::new(
+            vec![0x00; 20],
+            "no-seeds".into(),
+            "/tmp".into(),
+        );
+        assert!(resume.url_seeds.is_empty());
+        assert!(resume.http_seeds.is_empty());
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert!(decoded.url_seeds.is_empty());
+        assert!(decoded.http_seeds.is_empty());
     }
 }

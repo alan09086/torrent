@@ -734,6 +734,8 @@ impl SessionActor {
             download_rate_limit: 0,
             encryption_mode: self.config.encryption_mode,
             enable_utp: self.config.enable_utp,
+            enable_web_seed: self.config.enable_web_seed,
+            max_web_seeds: 4,
         }
     }
 
@@ -1384,6 +1386,7 @@ mod tests {
             enable_upnp: false,
             enable_natpmp: false,
             enable_ipv6: false,
+            enable_web_seed: true,
         }
     }
 

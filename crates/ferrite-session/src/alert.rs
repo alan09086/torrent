@@ -111,6 +111,9 @@ pub enum AlertKind {
         paused: bool,
     },
 
+    // ── Web seeding (STATUS) ──
+    WebSeedBanned { info_hash: Id20, url: String },
+
     // ── Port mapping ──
     PortMappingSucceeded { port: u16, protocol: String },
     PortMappingFailed { port: u16, message: String },
@@ -169,6 +172,9 @@ impl AlertKind {
             // QUEUE MANAGEMENT (STATUS)
             TorrentQueuePositionChanged { .. } => AlertCategory::STATUS,
             TorrentAutoManaged { .. } => AlertCategory::STATUS,
+
+            // WEB SEED
+            WebSeedBanned { .. } => AlertCategory::STATUS,
 
             // PORT_MAPPING
             PortMappingSucceeded { .. } => AlertCategory::PORT_MAPPING,
@@ -376,6 +382,15 @@ mod tests {
         let alert = Alert::new(AlertKind::TorrentAutoManaged {
             info_hash: Id20::from([0u8; 20]),
             paused: true,
+        });
+        assert!(alert.category().contains(AlertCategory::STATUS));
+    }
+
+    #[test]
+    fn web_seed_banned_alert_has_status_category() {
+        let alert = Alert::new(AlertKind::WebSeedBanned {
+            info_hash: Id20::from([0u8; 20]),
+            url: "http://example.com/files".into(),
         });
         assert!(alert.category().contains(AlertCategory::STATUS));
     }

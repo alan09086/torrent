@@ -173,6 +173,9 @@ impl TorrentHandle {
             global_download_bucket,
             slot_tuner,
             upload_bytes_interval: 0,
+            web_seeds: HashMap::new(),
+            banned_web_seeds: HashSet::new(),
+            web_seed_in_flight: HashMap::new(),
         };
 
         tokio::spawn(actor.run());
@@ -285,6 +288,9 @@ impl TorrentHandle {
             global_download_bucket,
             slot_tuner,
             upload_bytes_interval: 0,
+            web_seeds: HashMap::new(),
+            banned_web_seeds: HashSet::new(),
+            web_seed_in_flight: HashMap::new(),
         };
 
         tokio::spawn(actor.run());
@@ -450,6 +456,11 @@ struct TorrentActor {
     global_download_bucket: Option<SharedBucket>,
     slot_tuner: crate::slot_tuner::SlotTuner,
     upload_bytes_interval: u64,
+
+    // Web seeding (M22)
+    web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
+    banned_web_seeds: HashSet<String>,
+    web_seed_in_flight: HashMap<u32, String>,
 }
 
 impl TorrentActor {
@@ -470,6 +481,12 @@ impl TorrentActor {
     async fn run(mut self) {
         // Verify existing pieces on startup (resume support)
         self.verify_existing_pieces();
+
+        // Spawn web seeds if not already seeding
+        if self.state != TorrentState::Seeding {
+            self.spawn_web_seeds();
+            self.assign_pieces_to_web_seeds();
+        }
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
@@ -533,6 +550,7 @@ impl TorrentActor {
                             );
                         }
                         Some(TorrentCommand::Shutdown) | None => {
+                            self.shutdown_web_seeds().await;
                             self.shutdown_peers().await;
                             return;
                         }
@@ -566,6 +584,7 @@ impl TorrentActor {
                 // Connect timer
                 _ = connect_interval.tick() => {
                     self.try_connect_peers();
+                    self.assign_pieces_to_web_seeds();
                     // Re-trigger DHT search if exhausted and we still need peers
                     if self.config.enable_dht
                         && self.available_peers.is_empty()
@@ -964,6 +983,12 @@ impl TorrentActor {
                     }
                 }
             }
+            PeerEvent::WebSeedPieceData { url, index, data } => {
+                self.handle_web_seed_piece_data(url, index, data).await;
+            }
+            PeerEvent::WebSeedError { url, piece, message } => {
+                self.handle_web_seed_error(url, piece, message);
+            }
         }
     }
 
@@ -1102,6 +1127,8 @@ impl TorrentActor {
             } else if let Some(ref announce) = meta.announce {
                 rd.trackers = vec![vec![announce.clone()]];
             }
+            rd.url_seeds = meta.url_list.clone();
+            rd.http_seeds = meta.httpseeds.clone();
         }
 
         // Collect connected peer addresses as compact bytes
@@ -1268,6 +1295,10 @@ impl TorrentActor {
                             name,
                         });
                         info!("metadata assembled, switching to Downloading");
+
+                        // Start web seeds now that we have metadata
+                        self.spawn_web_seeds();
+                        self.assign_pieces_to_web_seeds();
                     }
                     Err(e) => {
                         warn!("failed to parse assembled metadata: {e}");
@@ -1278,6 +1309,218 @@ impl TorrentActor {
                 warn!("metadata assembly failed: {e}");
             }
         }
+    }
+
+    // ----- Web seeding (M22) -----
+
+    fn spawn_web_seeds(&mut self) {
+        if !self.config.enable_web_seed {
+            return;
+        }
+        let meta = match &self.meta {
+            Some(m) => m,
+            None => return,
+        };
+        let lengths = match &self.lengths {
+            Some(l) => l.clone(),
+            None => return,
+        };
+
+        let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
+        let file_map = ferrite_storage::FileMap::new(file_lengths, lengths.clone());
+
+        // BEP 19 (GetRight) web seeds
+        for url in &meta.url_list {
+            if self.banned_web_seeds.contains(url) || self.web_seeds.contains_key(url) {
+                continue;
+            }
+            if self.web_seeds.len() >= self.config.max_web_seeds {
+                break;
+            }
+
+            let url_builder = if meta.info.length.is_some() {
+                crate::web_seed::WebSeedUrlBuilder::single(url.clone(), meta.info.name.clone())
+            } else {
+                let file_paths: Vec<String> = meta
+                    .info
+                    .files()
+                    .iter()
+                    .map(|f| f.path[1..].join("/")) // skip torrent name prefix
+                    .collect();
+                crate::web_seed::WebSeedUrlBuilder::multi(
+                    url.clone(),
+                    meta.info.name.clone(),
+                    file_paths,
+                )
+            };
+
+            let (cmd_tx, cmd_rx) = mpsc::channel(16);
+            let task = crate::web_seed::WebSeedTask::new(
+                url.clone(),
+                crate::web_seed::WebSeedMode::GetRight,
+                url_builder,
+                lengths.clone(),
+                file_map.clone(),
+                self.info_hash,
+                cmd_rx,
+                self.event_tx.clone(),
+            );
+            tokio::spawn(task.run());
+            self.web_seeds.insert(url.clone(), cmd_tx);
+            debug!(url, "spawned BEP 19 web seed");
+        }
+
+        // BEP 17 (Hoffman) HTTP seeds
+        for url in &meta.httpseeds {
+            if self.banned_web_seeds.contains(url) || self.web_seeds.contains_key(url) {
+                continue;
+            }
+            if self.web_seeds.len() >= self.config.max_web_seeds {
+                break;
+            }
+
+            // BEP 17 doesn't use URL builder for per-file paths; it sends parameterized URLs
+            let url_builder = crate::web_seed::WebSeedUrlBuilder::single(
+                url.clone(),
+                meta.info.name.clone(),
+            );
+
+            let (cmd_tx, cmd_rx) = mpsc::channel(16);
+            let task = crate::web_seed::WebSeedTask::new(
+                url.clone(),
+                crate::web_seed::WebSeedMode::Hoffman,
+                url_builder,
+                lengths.clone(),
+                file_map.clone(),
+                self.info_hash,
+                cmd_rx,
+                self.event_tx.clone(),
+            );
+            tokio::spawn(task.run());
+            self.web_seeds.insert(url.clone(), cmd_tx);
+            debug!(url, "spawned BEP 17 web seed");
+        }
+    }
+
+    fn assign_pieces_to_web_seeds(&mut self) {
+        if self.state != TorrentState::Downloading || self.end_game.is_active() {
+            return;
+        }
+
+        // Collect idle web seed URLs (not currently downloading a piece)
+        let active_urls: HashSet<&String> = self.web_seed_in_flight.values().collect();
+        let idle_urls: Vec<String> = self
+            .web_seeds
+            .keys()
+            .filter(|u| !active_urls.contains(u))
+            .cloned()
+            .collect();
+
+        let ct = match &self.chunk_tracker {
+            Some(ct) => ct,
+            None => return,
+        };
+
+        for url in idle_urls {
+            // Find lowest-index piece that is: not verified, not in peer in_flight,
+            // not in web_seed_in_flight, and wanted.
+            let piece = (0..self.num_pieces).find(|&i| {
+                !ct.has_piece(i)
+                    && !self.in_flight.contains(&i)
+                    && !self.web_seed_in_flight.contains_key(&i)
+                    && self.wanted_pieces.get(i)
+            });
+
+            if let Some(piece) = piece
+                && let Some(cmd_tx) = self.web_seeds.get(&url)
+            {
+                let _ = cmd_tx.try_send(crate::web_seed::WebSeedCommand::FetchPiece(piece));
+                self.web_seed_in_flight.insert(piece, url);
+            }
+        }
+    }
+
+    async fn handle_web_seed_piece_data(&mut self, url: String, index: u32, data: Bytes) {
+        self.web_seed_in_flight.remove(&index);
+
+        // If peer already completed this piece, discard
+        if let Some(ref ct) = self.chunk_tracker
+            && ct.has_piece(index)
+        {
+            self.assign_pieces_to_web_seeds();
+            return;
+        }
+
+        // Write entire piece to storage at offset 0
+        if let Some(ref storage) = self.storage
+            && let Err(e) = storage.write_chunk(index, 0, &data)
+        {
+            warn!(index, "web seed: failed to write piece: {e}");
+            self.assign_pieces_to_web_seeds();
+            return;
+        }
+
+        // Mark all chunks as received
+        if let Some(ref mut ct) = self.chunk_tracker
+            && let Some(ref lengths) = self.lengths
+        {
+            let num_chunks = lengths.chunks_in_piece(index);
+            for chunk_idx in 0..num_chunks {
+                if let Some((begin, _len)) = lengths.chunk_info(index, chunk_idx) {
+                    ct.chunk_received(index, begin);
+                }
+            }
+        }
+
+        self.downloaded += data.len() as u64;
+
+        // Verify the piece hash
+        self.verify_and_mark_piece(index).await;
+
+        // If hash failed, ban this web seed (BEP 19 spec)
+        if let Some(ref ct) = self.chunk_tracker
+            && !ct.has_piece(index)
+        {
+            self.ban_web_seed(&url);
+            return;
+        }
+
+        self.assign_pieces_to_web_seeds();
+    }
+
+    fn handle_web_seed_error(&mut self, url: String, piece: u32, message: String) {
+        self.web_seed_in_flight.remove(&piece);
+        warn!(%url, piece, %message, "web seed error");
+        self.assign_pieces_to_web_seeds();
+    }
+
+    fn ban_web_seed(&mut self, url: &str) {
+        warn!(%url, "banning web seed due to hash failure");
+        self.banned_web_seeds.insert(url.to_owned());
+
+        // Send shutdown to the task
+        if let Some(cmd_tx) = self.web_seeds.remove(url) {
+            let _ = cmd_tx.try_send(crate::web_seed::WebSeedCommand::Shutdown);
+        }
+
+        // Remove all in-flight pieces for this URL
+        self.web_seed_in_flight.retain(|_, v| v != url);
+
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::WebSeedBanned {
+                info_hash: self.info_hash,
+                url: url.to_owned(),
+            },
+        );
+    }
+
+    async fn shutdown_web_seeds(&mut self) {
+        for (_, cmd_tx) in self.web_seeds.drain() {
+            let _ = cmd_tx.send(crate::web_seed::WebSeedCommand::Shutdown).await;
+        }
+        self.web_seed_in_flight.clear();
     }
 
     // ----- Piece requesting -----
@@ -1891,6 +2134,8 @@ mod tests {
             download_rate_limit: 0,
             encryption_mode: ferrite_wire::mse::EncryptionMode::Disabled,
             enable_utp: false,
+            enable_web_seed: true,
+            max_web_seeds: 4,
         }
     }
 
