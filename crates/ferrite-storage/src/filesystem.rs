@@ -33,6 +33,7 @@ impl FilesystemStorage {
         file_lengths: Vec<u64>,
         lengths: Lengths,
         file_priorities: Option<&[ferrite_core::FilePriority]>,
+        preallocate: bool,
     ) -> Result<Self> {
         let file_map = FileMap::new(file_lengths.clone(), lengths.clone());
 
@@ -49,9 +50,13 @@ impl FilesystemStorage {
             if let Some(parent) = full.parent() {
                 fs::create_dir_all(parent)?;
             }
-            // Create sparse file with correct length.
             let f = File::create(&full)?;
-            f.set_len(file_lengths[i])?;
+            if preallocate {
+                Self::preallocate_file(&f, file_lengths[i])?;
+            } else {
+                // Create sparse file with correct length.
+                f.set_len(file_lengths[i])?;
+            }
         }
 
         let files = (0..file_paths.len())
@@ -65,6 +70,40 @@ impl FilesystemStorage {
             file_map,
             lengths,
         })
+    }
+
+    /// Pre-allocate a file by writing actual blocks (not sparse).
+    ///
+    /// Uses `fallocate` on Linux, falls back to writing zeros on other platforms.
+    fn preallocate_file(f: &File, length: u64) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let ret = unsafe {
+                libc::fallocate(f.as_raw_fd(), 0, 0, length as libc::off_t)
+            };
+            if ret == 0 {
+                return Ok(());
+            }
+            // Fallback on error (e.g. filesystem doesn't support fallocate)
+        }
+
+        f.set_len(length)?;
+
+        // Write zeros in chunks to actually allocate blocks
+        if length > 0 {
+            let chunk_size = 65536u64.min(length) as usize;
+            let zeros = vec![0u8; chunk_size];
+            let mut writer = std::io::BufWriter::new(f);
+            let mut remaining = length;
+            while remaining > 0 {
+                let n = (remaining as usize).min(zeros.len());
+                writer.write_all(&zeros[..n])?;
+                remaining -= n as u64;
+            }
+        }
+
+        Ok(())
     }
 
     /// Open (or return cached) file handle for the given file index.
@@ -150,6 +189,7 @@ mod tests {
             vec![100],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -171,6 +211,7 @@ mod tests {
             vec![100, 100],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -195,6 +236,7 @@ mod tests {
             vec![100],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -216,6 +258,7 @@ mod tests {
             vec![100],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -239,6 +282,7 @@ mod tests {
             vec![100],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -257,6 +301,7 @@ mod tests {
             vec![1_000_000],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -277,6 +322,7 @@ mod tests {
             vec![75],
             lengths,
             None,
+            false,
         )
         .unwrap();
 
@@ -299,6 +345,7 @@ mod tests {
                 vec![100, 100],
                 lengths,
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -338,6 +385,7 @@ mod tests {
             vec![100, 100],
             lengths,
             Some(&[FilePriority::Normal, FilePriority::Skip]),
+            false,
         )
         .unwrap();
 
@@ -350,6 +398,41 @@ mod tests {
         let data = vec![42u8; 50];
         s.write_chunk(0, 0, &data).unwrap();
         let read = s.read_chunk(0, 0, 50).unwrap();
+        assert_eq!(read, data);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn full_preallocation() {
+        let dir = temp_dir("prealloc");
+        let lengths = Lengths::new(100_000, 50_000, 16384);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![100_000],
+            lengths,
+            None,
+            true,
+        )
+        .unwrap();
+
+        // File should exist with correct size
+        let meta = fs::metadata(dir.join("test.bin")).unwrap();
+        assert_eq!(meta.len(), 100_000);
+
+        // On Linux, blocks should be allocated (not sparse)
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::linux::fs::MetadataExt;
+            // 512-byte blocks, should have at least total_size/512 blocks
+            assert!(meta.st_blocks() * 512 >= 100_000);
+        }
+
+        // I/O still works
+        let data = vec![42u8; 16384];
+        s.write_chunk(0, 0, &data).unwrap();
+        let read = s.read_chunk(0, 0, 16384).unwrap();
         assert_eq!(read, data);
 
         fs::remove_dir_all(&dir).unwrap();
