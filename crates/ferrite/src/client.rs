@@ -325,6 +325,42 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the DHT query rate (queries per second). Default: 5.
+    pub fn dht_queries_per_second(mut self, n: usize) -> Self {
+        self.settings.dht_queries_per_second = n;
+        self
+    }
+
+    /// Set the DHT query timeout in seconds. Default: 15.
+    pub fn dht_query_timeout_secs(mut self, secs: u64) -> Self {
+        self.settings.dht_query_timeout_secs = secs;
+        self
+    }
+
+    /// Set the UPnP lease duration in seconds. Default: 3600.
+    pub fn upnp_lease_duration(mut self, secs: u32) -> Self {
+        self.settings.upnp_lease_duration = secs;
+        self
+    }
+
+    /// Set the NAT-PMP mapping lifetime in seconds. Default: 3600.
+    pub fn natpmp_lifetime(mut self, secs: u32) -> Self {
+        self.settings.natpmp_lifetime = secs;
+        self
+    }
+
+    /// Set the maximum uTP connections. Default: 256.
+    pub fn utp_max_connections(mut self, n: usize) -> Self {
+        self.settings.utp_max_connections = n;
+        self
+    }
+
+    /// Set the disk I/O channel capacity. Default: 1024.
+    pub fn disk_channel_capacity(mut self, n: usize) -> Self {
+        self.settings.disk_channel_capacity = n;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings

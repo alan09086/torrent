@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.32.0 — 2026-02-28
+
+Unified settings pack with runtime configuration, presets, and serialization. Eleven crates, 754+ tests.
+
+### M31: Settings Pack + Runtime Config
+
+### Added
+- `Settings` struct — unified 56-field configuration replacing `SessionConfig`
+- Preset profiles: `Settings::min_memory()`, `Settings::high_performance()`
+- `Settings::validate()` — 7 validation checks (piece size, thread counts, proxy config)
+- JSON serialization with `#[serde(default)]` for forward-compatible config files
+- `From<&Settings>` impls for `DiskConfig`, `BanConfig`, `TorrentConfig`
+- Helper methods: `to_dht_config()`, `to_nat_config()`, `to_utp_config()`
+- `SessionHandle::settings()` — query current session settings at runtime
+- `SessionHandle::apply_settings()` — runtime config mutation with validation
+- `AlertKind::SettingsChanged` — STATUS-category alert fired on settings update
+- Runtime rate limiter updates via `apply_settings()` (upload/download limits)
+- 6 new `ClientBuilder` methods: `dht_queries_per_second`, `dht_query_timeout_secs`, `upnp_lease_duration`, `natpmp_lifetime`, `utp_max_connections`, `disk_channel_capacity`
+- `Settings` in `ferrite::prelude`
+- 13 new tests across settings, session, and facade
+
+### Changed
+- `SessionHandle::start()` takes `Settings` instead of `SessionConfig`
+- `ClientBuilder` stores `Settings` internally; `into_config()` renamed to `into_settings()`
+- `Serialize`/`Deserialize` added to `EncryptionMode` and `StorageMode`
+
+### Removed
+- `SessionConfig` struct (replaced by `Settings`)
+
 ## 0.31.0 — 2026-02-28
 
 Torrent creation from local files/directories with full BEP support. Eleven crates, 748 tests.
