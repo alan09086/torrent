@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.23.0 — 2026-02-27
+
+HTTP/web seeding support — BEP 19 (GetRight) and BEP 17 (Hoffman). Eleven crates, 585 tests.
+
+### M22: HTTP/Web Seeding (BEP 19, BEP 17)
+
+### Added
+- `url-list` parsing from torrent metadata with custom `UrlList` deserializer (handles both single string and list)
+- `httpseeds` parsing from torrent metadata (BEP 17)
+- `WebSeedTask` — background async task that downloads pieces from HTTP servers
+- `WebSeedUrlBuilder` — constructs HTTP Range requests for single-file and multi-file torrents
+- BEP 19 (GetRight): per-file HTTP Range requests against static web servers
+- BEP 17 (Hoffman): parameterized URL requests with percent-encoded info hash
+- `WebSeedMode` enum: `GetRight` (BEP 19) vs `Hoffman` (BEP 17)
+- `WebSeedCommand` / `WebSeedError` types for task communication
+- TorrentActor integration: `spawn_web_seeds()`, `assign_pieces_to_web_seeds()`, piece data handling
+- Hash-failure banning: permanent URL ban on piece verification failure (per BEP 19 spec)
+- `enable_web_seed` config field on `TorrentConfig` and `SessionConfig` (default: `true`)
+- `max_web_seeds` config field on `TorrentConfig` (default: `4`)
+- `WebSeedBanned` alert variant (category: STATUS)
+- Resume data: `url_seeds` and `http_seeds` fields on `FastResumeData`
+- `ClientBuilder::enable_web_seed()` facade builder method
+- `url_encode_info_hash()` for BEP 17 percent-encoding
+- reqwest dependency added to ferrite-session (rustls-tls)
+- 19 new tests across metainfo, web_seed, types, resume_data, alert, and facade
+
 ## 0.22.0 — 2026-02-27
 
 Full dual-stack IPv6 support — BEP 7, BEP 24, BEP 11 IPv6 extensions. Eleven crates, 566 tests.
