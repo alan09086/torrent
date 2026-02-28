@@ -27,6 +27,7 @@ pub(crate) mod ip_filter;
 #[allow(dead_code)] // Wired in during Step 5 (proxy integration).
 pub(crate) mod proxy;
 pub(crate) mod pipeline;
+pub(crate) mod peer_priority;
 pub mod streaming;
 pub mod disk;
 pub(crate) mod write_buffer;
