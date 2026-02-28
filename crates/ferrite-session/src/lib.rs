@@ -22,6 +22,7 @@ pub(crate) mod web_seed;
 pub(crate) mod super_seed;
 pub(crate) mod have_buffer;
 pub(crate) mod ban;
+pub mod disk;
 mod torrent;
 mod session;
 mod persistence;
