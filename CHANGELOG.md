@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.26.0 — 2026-02-28
+
+Smart banning — peer attribution for hash failures, parole mode, session-wide bans. Eleven crates, 637 tests.
+
+### M25: Smart Banning
+
+### Added
+- `BanConfig` — configurable max failures (default: 3) and parole toggle
+- `BanManager` — session-wide ban/strike tracker shared via `Arc<RwLock<_>>`
+- `ParoleState` — per-piece parole tracking (re-download from uninvolved peer)
+- Piece contributor tracking: `TorrentActor` records which peers send data for each piece
+- Parole mode: on hash failure, re-downloads piece from single uninvolved peer to isolate offender
+- Parole success → strikes all original contributors; parole failure → strikes parole peer
+- Ban checking at all connection points: `handle_add_peers`, `try_connect_peers`, `spawn_peer_from_stream_with_mode`
+- `disconnect_banned_ip()` — removes all peers matching banned IP
+- `AlertKind::HashFailed` extended with `contributors: Vec<IpAddr>` field
+- `SessionHandle::ban_peer()`, `unban_peer()`, `banned_peers()` public API
+- `SessionConfig::smart_ban_max_failures`, `smart_ban_parole` configuration fields
+- `ClientBuilder::smart_ban_max_failures()`, `smart_ban_parole()` builder methods
+- `SessionState::banned_peers`, `peer_strikes` persistence fields (backward compatible via `#[serde(default)]`)
+- `PeerStrikeEntry` persistence struct
+- `BanManager::restore()` for rebuilding from persisted state
+- Facade re-exports: `BanConfig`, `PeerStrikeEntry` through `ferrite::session` and `ferrite::prelude`
+- 16 new tests across ban, torrent, persistence, session, and facade modules
+
 ## 0.25.0 — 2026-02-28
 
 Tracker scraping, tracker exchange, enhanced tracker management. Eleven crates, 621 tests.

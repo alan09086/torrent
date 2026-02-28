@@ -71,7 +71,7 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 | Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth + auto upload slots, alerts, queue) | Done |
 | Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Done |
 | Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Done |
-| Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Planned |
+| Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | In Progress |
 | Phase 5: Network & Tools | M29-M32 (IP filter, torrent creation, settings, share mode + plugin interface) | Planned |
 | Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | Planned |
 

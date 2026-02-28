@@ -308,6 +308,10 @@ pub struct SessionConfig {
     pub upload_only_announce: bool,
     /// Batched Have: buffer Have messages for this many ms (0 = disabled).
     pub have_send_delay_ms: u64,
+    /// Smart banning: hash-failure involvements before auto-ban (default: 3).
+    pub smart_ban_max_failures: u32,
+    /// Smart banning: use parole to isolate offending peer before striking (default: true).
+    pub smart_ban_parole: bool,
 }
 
 impl Default for SessionConfig {
@@ -348,6 +352,8 @@ impl Default for SessionConfig {
             default_super_seeding: false,
             upload_only_announce: true,
             have_send_delay_ms: 0,
+            smart_ban_max_failures: 3,
+            smart_ban_parole: true,
         }
     }
 }

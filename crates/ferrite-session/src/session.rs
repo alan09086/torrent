@@ -4,7 +4,7 @@
 //! SessionActor is the single-owner event loop (internal).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -28,6 +28,9 @@ type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
 
 /// Function signature for queue move operations (move_up, move_down, etc.).
 type QueueMoveFn = fn(&mut [crate::queue::QueueEntry], Id20) -> Vec<(Id20, i32, i32)>;
+
+/// Shared session-wide ban manager, accessed by TorrentActors via `Arc`.
+pub(crate) type SharedBanManager = Arc<std::sync::RwLock<crate::ban::BanManager>>;
 
 /// Entry for a torrent managed by the session.
 struct TorrentEntry {
@@ -113,6 +116,17 @@ enum SessionCommand {
     QueuePositionBottom {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<()>>,
+    },
+    BanPeer {
+        ip: IpAddr,
+        reply: oneshot::Sender<()>,
+    },
+    UnbanPeer {
+        ip: IpAddr,
+        reply: oneshot::Sender<bool>,
+    },
+    BannedPeers {
+        reply: oneshot::Sender<Vec<IpAddr>>,
     },
     Shutdown,
 }
@@ -237,6 +251,14 @@ impl SessionHandle {
             None
         };
 
+        let ban_config = crate::ban::BanConfig {
+            max_failures: config.smart_ban_max_failures,
+            use_parole: config.smart_ban_parole,
+        };
+        let ban_manager: SharedBanManager = Arc::new(
+            std::sync::RwLock::new(crate::ban::BanManager::new(ban_config)),
+        );
+
         let actor = SessionActor {
             config,
             torrents: HashMap::new(),
@@ -255,6 +277,7 @@ impl SessionHandle {
             utp_listener_v6,
             nat,
             nat_events_rx,
+            ban_manager,
         };
 
         tokio::spawn(actor.run());
@@ -506,6 +529,36 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Ban a peer IP session-wide. All torrents will disconnect and refuse this IP.
+    pub async fn ban_peer(&self, ip: IpAddr) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::BanPeer { ip, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Remove a ban and clear strikes for an IP. Returns `true` if the IP was banned.
+    pub async fn unban_peer(&self, ip: IpAddr) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::UnbanPeer { ip, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the list of currently banned peer IPs.
+    pub async fn banned_peers(&self) -> crate::Result<Vec<IpAddr>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::BannedPeers { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +583,7 @@ struct SessionActor {
     utp_listener_v6: Option<ferrite_utp::UtpListener>,
     nat: Option<ferrite_nat::NatHandle>,
     nat_events_rx: Option<mpsc::Receiver<ferrite_nat::NatEvent>>,
+    ban_manager: SharedBanManager,
 }
 
 impl SessionActor {
@@ -621,6 +675,19 @@ impl SessionActor {
                         Some(SessionCommand::QueuePositionBottom { info_hash, reply }) => {
                             let result = self.handle_queue_move(info_hash, crate::queue::move_bottom);
                             let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::BanPeer { ip, reply }) => {
+                            self.ban_manager.write().unwrap().ban(ip);
+                            let _ = reply.send(());
+                        }
+                        Some(SessionCommand::UnbanPeer { ip, reply }) => {
+                            let was_banned = self.ban_manager.write().unwrap().unban(&ip);
+                            let _ = reply.send(was_banned);
+                        }
+                        Some(SessionCommand::BannedPeers { reply }) => {
+                            let list: Vec<IpAddr> = self.ban_manager.read().unwrap()
+                                .banned_list().iter().copied().collect();
+                            let _ = reply.send(list);
                         }
                         Some(SessionCommand::Shutdown) | None => {
                             self.shutdown_all().await;
@@ -799,6 +866,7 @@ impl SessionActor {
             Arc::clone(&self.alert_mask),
             self.utp_socket.clone(),
             self.utp_socket_v6.clone(),
+            Arc::clone(&self.ban_manager),
         )
         .await?;
 
@@ -856,6 +924,7 @@ impl SessionActor {
             Arc::clone(&self.alert_mask),
             self.utp_socket.clone(),
             self.utp_socket_v6.clone(),
+            Arc::clone(&self.ban_manager),
         )
         .await?;
         self.torrents.insert(
@@ -1018,9 +1087,26 @@ impl SessionActor {
             }
         }
 
+        // Serialize smart ban state
+        let ban_mgr = self.ban_manager.read().unwrap();
+        let banned_peers: Vec<String> = ban_mgr.banned_list()
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect();
+        let peer_strikes: Vec<crate::persistence::PeerStrikeEntry> = ban_mgr.strikes_map()
+            .iter()
+            .map(|(ip, &count)| crate::persistence::PeerStrikeEntry {
+                ip: ip.to_string(),
+                count: count as i64,
+            })
+            .collect();
+        drop(ban_mgr);
+
         Ok(SessionState {
             dht_nodes: Vec::new(), // DHT node cache — populated when DHT is wired
             torrents,
+            banned_peers,
+            peer_strikes,
         })
     }
 
@@ -1393,6 +1479,8 @@ mod tests {
             default_super_seeding: false,
             upload_only_announce: true,
             have_send_delay_ms: 0,
+            smart_ban_max_failures: 3,
+            smart_ban_parole: true,
         }
     }
 

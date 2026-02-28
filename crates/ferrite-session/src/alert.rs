@@ -63,7 +63,7 @@ pub enum AlertKind {
     // ── Transfer (PIECE / BLOCK) ──
     PieceFinished { info_hash: Id20, piece: u32 },
     BlockFinished { info_hash: Id20, piece: u32, offset: u32 },
-    HashFailed { info_hash: Id20, piece: u32 },
+    HashFailed { info_hash: Id20, piece: u32, contributors: Vec<std::net::IpAddr> },
 
     // ── Peers (PEER) ──
     PeerConnected { info_hash: Id20, addr: SocketAddr },

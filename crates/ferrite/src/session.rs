@@ -25,7 +25,10 @@ pub use ferrite_session::{
     // Persistence (M11)
     SessionState,
     DhtNodeEntry,
+    PeerStrikeEntry,
     validate_resume_bitfield,
+    // Smart banning (M25)
+    BanConfig,
     // Piece selection (M12)
     build_wanted_pieces,
     // Tracker management (M24)

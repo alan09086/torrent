@@ -226,6 +226,23 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the number of hash-failure involvements before a peer is auto-banned.
+    ///
+    /// Default: 3. Lower values ban faster but risk false positives.
+    pub fn smart_ban_max_failures(mut self, n: u32) -> Self {
+        self.config.smart_ban_max_failures = n;
+        self
+    }
+
+    /// Enable or disable parole mode for smart banning.
+    ///
+    /// When enabled (default), a failed piece is re-downloaded from a single
+    /// uninvolved peer to definitively attribute fault before striking.
+    pub fn smart_ban_parole(mut self, enabled: bool) -> Self {
+        self.config.smart_ban_parole = enabled;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
@@ -372,5 +389,29 @@ mod tests {
         // Explicitly disabled
         let config = ClientBuilder::new().enable_web_seed(false).into_config();
         assert!(!config.enable_web_seed);
+    }
+
+    #[test]
+    fn client_builder_smart_ban_config() {
+        // Defaults
+        let config = ClientBuilder::new().into_config();
+        assert_eq!(config.smart_ban_max_failures, 3);
+        assert!(config.smart_ban_parole);
+
+        // Custom
+        let config = ClientBuilder::new()
+            .smart_ban_max_failures(5)
+            .smart_ban_parole(false)
+            .into_config();
+        assert_eq!(config.smart_ban_max_failures, 5);
+        assert!(!config.smart_ban_parole);
+    }
+
+    #[test]
+    fn facade_ban_config_reexport() {
+        // Verify BanConfig is accessible via the facade
+        let _cfg = ferrite_session::BanConfig::default();
+        assert_eq!(_cfg.max_failures, 3);
+        assert!(_cfg.use_parole);
     }
 }

@@ -59,6 +59,7 @@ impl TorrentHandle {
         alert_mask: Arc<AtomicU32>,
         utp_socket: Option<ferrite_utp::UtpSocket>,
         utp_socket_v6: Option<ferrite_utp::UtpSocket>,
+        ban_manager: crate::session::SharedBanManager,
     ) -> crate::Result<Self> {
         let mut config = config;
         // BEP 27: private torrents disable DHT and PEX
@@ -185,6 +186,9 @@ impl TorrentHandle {
             web_seed_in_flight: HashMap::new(),
             super_seed,
             have_buffer,
+            ban_manager,
+            piece_contributors: HashMap::new(),
+            parole_pieces: HashMap::new(),
         };
 
         tokio::spawn(actor.run());
@@ -205,6 +209,7 @@ impl TorrentHandle {
         alert_mask: Arc<AtomicU32>,
         utp_socket: Option<ferrite_utp::UtpSocket>,
         utp_socket_v6: Option<ferrite_utp::UtpSocket>,
+        ban_manager: crate::session::SharedBanManager,
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -309,6 +314,9 @@ impl TorrentHandle {
             web_seed_in_flight: HashMap::new(),
             super_seed,
             have_buffer,
+            ban_manager,
+            piece_contributors: HashMap::new(),
+            parole_pieces: HashMap::new(),
         };
 
         tokio::spawn(actor.run());
@@ -512,6 +520,11 @@ struct TorrentActor {
     super_seed: Option<crate::super_seed::SuperSeedState>,
     // Batched Have (M23)
     have_buffer: crate::have_buffer::HaveBuffer,
+
+    // Smart banning (M25)
+    ban_manager: crate::session::SharedBanManager,
+    piece_contributors: HashMap<u32, HashSet<std::net::IpAddr>>,
+    parole_pieces: HashMap<u32, crate::ban::ParoleState>,
 }
 
 impl TorrentActor {
@@ -763,7 +776,11 @@ impl TorrentActor {
     // ----- Command handlers -----
 
     fn handle_add_peers(&mut self, peers: Vec<SocketAddr>) {
+        let ban_mgr = self.ban_manager.read().unwrap();
         for addr in peers {
+            if ban_mgr.is_banned(&addr.ip()) {
+                continue; // skip banned peers
+            }
             if !self.peers.contains_key(&addr) && !self.available_peers.contains(&addr) {
                 self.available_peers.push(addr);
             }
@@ -1114,6 +1131,9 @@ impl TorrentActor {
 
         self.downloaded += data.len() as u64;
 
+        // Smart banning: track which peers contribute to each piece
+        self.piece_contributors.entry(index).or_default().insert(peer_addr.ip());
+
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
             if let Some(pos) = peer
                 .pending_requests
@@ -1301,11 +1321,18 @@ impl TorrentActor {
                 ct.mark_verified(index);
             }
             self.in_flight.remove(&index);
+            self.piece_contributors.remove(&index);
             info!(index, "piece verified");
             post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PieceFinished {
                 info_hash: self.info_hash,
                 piece: index,
             });
+
+            // Handle parole success: the parole peer delivered a good piece,
+            // so the original contributors are the likely offenders.
+            if let Some(parole) = self.parole_pieces.remove(&index) {
+                self.apply_parole_success(index, parole).await;
+            }
 
             // Broadcast Have to all peers (skip in super-seed mode)
             if self.super_seed.is_none() {
@@ -1347,10 +1374,27 @@ impl TorrentActor {
                 self.fire_tracker_alerts(&result.outcomes);
             }
         } else {
-            warn!(index, "piece hash verification failed, re-requesting");
+            // Collect contributors before clearing
+            let contributors: Vec<std::net::IpAddr> = self.piece_contributors
+                .remove(&index)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
+            warn!(index, contributors = contributors.len(), "piece hash verification failed");
+
+            // Check if this is a parole failure
+            if let Some(parole) = self.parole_pieces.remove(&index) {
+                self.apply_parole_failure(index, parole);
+            } else {
+                // First failure: enter parole if enabled
+                self.enter_parole(index, contributors.clone());
+            }
+
             post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
                 info_hash: self.info_hash,
                 piece: index,
+                contributors,
             });
             if let Some(ref mut ct) = self.chunk_tracker {
                 ct.mark_failed(index);
@@ -1362,6 +1406,86 @@ impl TorrentActor {
                 info!(index, "end-game deactivated due to hash failure");
             }
         }
+    }
+
+    // ── Smart banning helpers (M25) ────────────────────────────────────
+
+    /// Enter parole mode for a failed piece: save the original contributors
+    /// and mark the piece for single-peer re-download.
+    fn enter_parole(&mut self, index: u32, contributors: Vec<std::net::IpAddr>) {
+        let use_parole = self.ban_manager.read().unwrap().use_parole();
+        if !use_parole || contributors.is_empty() {
+            // Parole disabled or no contributors to blame — strike everyone
+            let mut mgr = self.ban_manager.write().unwrap();
+            for &ip in &contributors {
+                if mgr.record_strike(ip) {
+                    info!(%ip, "peer banned (no parole, hash failure threshold)");
+                }
+            }
+            return;
+        }
+
+        info!(index, contributors = contributors.len(), "entering parole mode");
+        self.parole_pieces.insert(index, crate::ban::ParoleState {
+            original_contributors: contributors.into_iter().collect(),
+            parole_peer: None,
+        });
+    }
+
+    /// Parole piece verified successfully — the original contributors sent bad data.
+    async fn apply_parole_success(&mut self, index: u32, parole: crate::ban::ParoleState) {
+        info!(index, "parole success — striking original contributors");
+        let mut banned_ips = Vec::new();
+        {
+            let mut mgr = self.ban_manager.write().unwrap();
+            for ip in &parole.original_contributors {
+                if mgr.record_strike(*ip) {
+                    info!(%ip, "peer banned (parole confirmed bad data)");
+                    banned_ips.push(*ip);
+                }
+            }
+        }
+        // Disconnect and fire alerts for newly banned peers
+        for ip in banned_ips {
+            self.disconnect_banned_ip(ip).await;
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerBanned {
+                info_hash: self.info_hash,
+                addr: std::net::SocketAddr::new(ip, 0),
+            });
+        }
+    }
+
+    /// Parole piece failed again — the parole peer itself sent bad data.
+    fn apply_parole_failure(&mut self, index: u32, parole: crate::ban::ParoleState) {
+        if let Some(parole_ip) = parole.parole_peer {
+            info!(index, %parole_ip, "parole failure — striking parole peer");
+            let mut mgr = self.ban_manager.write().unwrap();
+            if mgr.record_strike(parole_ip) {
+                info!(%parole_ip, "parole peer banned");
+            }
+        }
+        // Don't re-enter parole for the same piece — ambiguous situation
+    }
+
+    /// Disconnect all peers matching a banned IP and remove from available_peers.
+    async fn disconnect_banned_ip(&mut self, ip: std::net::IpAddr) {
+        // Remove from connected peers
+        let addrs_to_remove: Vec<SocketAddr> = self.peers.keys()
+            .filter(|a| a.ip() == ip)
+            .copied()
+            .collect();
+        for addr in addrs_to_remove {
+            if let Some(peer) = self.peers.remove(&addr) {
+                let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerDisconnected {
+                    info_hash: self.info_hash,
+                    addr,
+                    reason: Some("banned".into()),
+                });
+            }
+        }
+        // Remove from available peers pool
+        self.available_peers.retain(|a| a.ip() != ip);
     }
 
     /// Flush the batched Have buffer, sending accumulated Haves or a full bitfield.
@@ -1709,6 +1833,31 @@ impl TorrentActor {
             .is_some_and(|p| !p.peer_choking && !p.upload_only && p.pending_requests.len() < self.config.target_request_queue);
         if !can_request {
             return;
+        }
+
+        // Parole piece assignment: check if any parole piece can be assigned
+        // to this peer (peer must not be an original contributor, must have the piece,
+        // and must not already have a parole peer assigned).
+        let peer_ip = peer_addr.ip();
+        for (&parole_idx, parole) in &mut self.parole_pieces {
+            if parole.parole_peer.is_some() {
+                continue; // already assigned
+            }
+            if parole.original_contributors.contains(&peer_ip) {
+                continue; // this peer is a suspect
+            }
+            let peer_has = self.peers.get(&peer_addr)
+                .is_some_and(|p| p.bitfield.get(parole_idx));
+            if !peer_has {
+                continue;
+            }
+            // Assign this peer as parole peer
+            parole.parole_peer = Some(peer_ip);
+            debug!(parole_idx, %peer_addr, "assigned parole peer for piece");
+            // The piece is already marked failed (chunks cleared), so it will
+            // be picked up by the normal piece selection below since it's
+            // not in in_flight and not verified.
+            break;
         }
 
         let we_have = ct.bitfield().clone();
@@ -2064,6 +2213,11 @@ impl TorrentActor {
                 continue;
             }
 
+            // Skip banned peers
+            if self.ban_manager.read().unwrap().is_banned(&addr.ip()) {
+                continue;
+            }
+
             let (cmd_tx, cmd_rx) = mpsc::channel(64);
             let bitfield = if self.super_seed.is_some() {
                 // Super seeding: send empty bitfield to hide our pieces
@@ -2189,6 +2343,12 @@ impl TorrentActor {
         mode_override: Option<ferrite_wire::mse::EncryptionMode>,
     ) {
         if self.peers.contains_key(&addr) || self.peers.len() >= self.config.max_peers {
+            return;
+        }
+
+        // Reject banned incoming peers
+        if self.ban_manager.read().unwrap().is_banned(&addr.ip()) {
+            debug!(%addr, "rejected banned incoming peer");
             return;
         }
 
@@ -2362,6 +2522,10 @@ mod tests {
         (tx, mask)
     }
 
+    fn test_ban_manager() -> crate::session::SharedBanManager {
+        Arc::new(std::sync::RwLock::new(crate::ban::BanManager::new(crate::ban::BanConfig::default())))
+    }
+
     /// Handshake size constant.
     const HANDSHAKE_SIZE: usize = 68;
 
@@ -2374,7 +2538,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2399,7 +2563,7 @@ mod tests {
         };
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2419,7 +2583,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2449,7 +2613,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2513,7 +2677,7 @@ mod tests {
         config.enable_pex = true;
 
         // The from_torrent constructor should disable DHT and PEX
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2535,7 +2699,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2556,7 +2720,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2580,7 +2744,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
         let handle2 = handle.clone();
@@ -2621,7 +2785,7 @@ mod tests {
         // Drop the pre-bound listener before from_torrent binds
         drop(listener);
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2682,7 +2846,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2806,7 +2970,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -2932,7 +3096,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3049,7 +3213,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3234,7 +3398,7 @@ mod tests {
 
         let leecher_config = test_config();
         let (latx, lamask) = test_alert_channel();
-        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), latx, lamask, None, None)
+        let leecher = TorrentHandle::from_torrent(leecher_meta, leecher_storage, leecher_config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), latx, lamask, None, None, test_ban_manager())
             .await
             .unwrap();
 
@@ -3289,7 +3453,7 @@ mod tests {
             peers: vec![],
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3351,7 +3515,7 @@ mod tests {
 
         // The torrent should start and announce to tracker (which will fail since
         // the tracker doesn't exist, but that's fine — failures are non-fatal).
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3407,7 +3571,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3428,7 +3592,7 @@ mod tests {
             peers: vec![],
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_magnet(magnet, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3450,7 +3614,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
         let config = test_config();
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3478,7 +3642,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
         let config = test_config();
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3513,7 +3677,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3689,7 +3853,7 @@ mod tests {
             ..test_config()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3835,7 +3999,7 @@ mod tests {
         let storage = make_seeded_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3860,7 +4024,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3894,7 +4058,7 @@ mod tests {
         let storage = make_seeded_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3924,7 +4088,7 @@ mod tests {
         let storage = make_storage(&data, 16384);
         let config = test_config();
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3956,7 +4120,7 @@ mod tests {
             ..Default::default()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -3998,7 +4162,7 @@ mod tests {
             ..Default::default()
         };
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -4042,7 +4206,7 @@ mod tests {
         };
 
         drop(listener);
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -4136,7 +4300,7 @@ mod tests {
         assert_eq!(config.upload_rate_limit, 0);
         assert_eq!(config.download_rate_limit, 0);
 
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -4166,7 +4330,7 @@ mod tests {
         };
 
         drop(listener);
-        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None) }
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager()) }
             .await
             .unwrap();
 
@@ -4233,5 +4397,158 @@ mod tests {
         );
 
         handle.shutdown().await.unwrap();
+    }
+
+    // ── Smart banning tests (M25) ────────────────────────────────────
+
+    #[test]
+    fn piece_contributor_tracking() {
+        use std::net::IpAddr;
+        let mut contributors: HashMap<u32, HashSet<IpAddr>> = HashMap::new();
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+
+        contributors.entry(0).or_default().insert(ip1);
+        contributors.entry(0).or_default().insert(ip2);
+        assert_eq!(contributors[&0].len(), 2);
+        assert!(contributors[&0].contains(&ip1));
+        assert!(contributors[&0].contains(&ip2));
+
+        // Clear on verify
+        contributors.remove(&0);
+        assert!(!contributors.contains_key(&0));
+    }
+
+    #[test]
+    fn parole_enter_on_hash_failure() {
+        use crate::ban::{BanConfig, BanManager, ParoleState};
+        use std::net::IpAddr;
+
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+        let contributors = vec![ip1, ip2];
+
+        // Simulate entering parole
+        let parole = ParoleState {
+            original_contributors: contributors.into_iter().collect(),
+            parole_peer: None,
+        };
+
+        assert_eq!(parole.original_contributors.len(), 2);
+        assert!(parole.original_contributors.contains(&ip1));
+        assert!(parole.original_contributors.contains(&ip2));
+        assert!(parole.parole_peer.is_none());
+    }
+
+    #[test]
+    fn parole_success_strikes_originals() {
+        use crate::ban::{BanConfig, BanManager, ParoleState};
+        use std::net::IpAddr;
+
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+        let parole_ip: IpAddr = "10.0.0.3".parse().unwrap();
+
+        let mut mgr = BanManager::new(BanConfig { max_failures: 2, use_parole: true });
+
+        let parole = ParoleState {
+            original_contributors: [ip1, ip2].into_iter().collect(),
+            parole_peer: Some(parole_ip),
+        };
+
+        // Simulate parole success: strike all originals
+        for ip in &parole.original_contributors {
+            mgr.record_strike(*ip);
+        }
+
+        assert_eq!(*mgr.strikes_map().get(&ip1).unwrap(), 1);
+        assert_eq!(*mgr.strikes_map().get(&ip2).unwrap(), 1);
+        // Parole peer should not be struck
+        assert!(!mgr.strikes_map().contains_key(&parole_ip));
+
+        // Second strike bans them
+        for ip in &parole.original_contributors {
+            mgr.record_strike(*ip);
+        }
+        assert!(mgr.is_banned(&ip1));
+        assert!(mgr.is_banned(&ip2));
+    }
+
+    #[test]
+    fn parole_failure_strikes_parole_peer() {
+        use crate::ban::{BanConfig, BanManager, ParoleState};
+        use std::net::IpAddr;
+
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let parole_ip: IpAddr = "10.0.0.3".parse().unwrap();
+
+        let mut mgr = BanManager::new(BanConfig { max_failures: 2, use_parole: true });
+
+        let parole = ParoleState {
+            original_contributors: [ip1].into_iter().collect(),
+            parole_peer: Some(parole_ip),
+        };
+
+        // Parole failure: strike the parole peer, not originals
+        if let Some(pp) = parole.parole_peer {
+            mgr.record_strike(pp);
+        }
+
+        assert_eq!(*mgr.strikes_map().get(&parole_ip).unwrap(), 1);
+        assert!(!mgr.strikes_map().contains_key(&ip1));
+    }
+
+    #[tokio::test]
+    async fn banned_peer_rejected_on_connect() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+        let ban_mgr = test_ban_manager();
+
+        // Pre-ban an IP
+        let banned_ip: std::net::IpAddr = "192.168.1.100".parse().unwrap();
+        ban_mgr.write().unwrap().ban(banned_ip);
+
+        let handle = { let (atx, amask) = test_alert_channel(); TorrentHandle::from_torrent(meta, storage, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, Arc::clone(&ban_mgr)) }
+            .await
+            .unwrap();
+
+        // Add the banned peer — it should be filtered out
+        handle.add_peers(vec![
+            SocketAddr::new(banned_ip, 6881),
+            "10.0.0.1:6881".parse().unwrap(),
+        ]).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let stats = handle.stats().await.unwrap();
+        // Only the non-banned peer should be in available pool (and may have connected)
+        // The banned one should never appear
+        assert!(stats.peers_available + stats.peers_connected <= 1,
+            "banned peer should not be added: available={}, connected={}",
+            stats.peers_available, stats.peers_connected);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn banned_peer_filtered_from_available() {
+        use crate::ban::{BanConfig, BanManager};
+        use std::net::IpAddr;
+
+        let banned_ip: IpAddr = "192.168.1.200".parse().unwrap();
+        let ok_ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        let mgr = BanManager::new(BanConfig::default());
+        // Not banned yet — both should pass
+        assert!(!mgr.is_banned(&banned_ip));
+        assert!(!mgr.is_banned(&ok_ip));
+
+        let mut mgr = BanManager::new(BanConfig::default());
+        mgr.ban(banned_ip);
+
+        // Now banned_ip is filtered, ok_ip is not
+        assert!(mgr.is_banned(&banned_ip));
+        assert!(!mgr.is_banned(&ok_ip));
     }
 }

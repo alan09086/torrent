@@ -302,6 +302,8 @@ mod tests {
                 port: 6881,
             }],
             torrents: vec![rd],
+            banned_peers: Vec::new(),
+            peer_strikes: Vec::new(),
         };
         let encoded = bencode::to_bytes(&state).unwrap();
         let decoded: session::SessionState = bencode::from_bytes(&encoded).unwrap();
@@ -360,6 +362,8 @@ mod tests {
         let _state = SessionState {
             dht_nodes: Vec::new(),
             torrents: Vec::new(),
+            banned_peers: Vec::new(),
+            peer_strikes: Vec::new(),
         };
     }
 
