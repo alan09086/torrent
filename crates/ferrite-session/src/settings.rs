@@ -431,6 +431,68 @@ impl Settings {
     }
 }
 
+// ── Sub-config conversions ───────────────────────────────────────────
+
+impl From<&Settings> for crate::disk::DiskConfig {
+    fn from(s: &Settings) -> Self {
+        Self {
+            io_threads: s.disk_io_threads,
+            storage_mode: s.storage_mode,
+            cache_size: s.disk_cache_size,
+            write_cache_ratio: s.disk_write_cache_ratio,
+            channel_capacity: s.disk_channel_capacity,
+        }
+    }
+}
+
+impl From<&Settings> for crate::ban::BanConfig {
+    fn from(s: &Settings) -> Self {
+        Self {
+            max_failures: s.smart_ban_max_failures,
+            use_parole: s.smart_ban_parole,
+        }
+    }
+}
+
+impl Settings {
+    pub(crate) fn to_dht_config(&self) -> ferrite_dht::DhtConfig {
+        let mut config = ferrite_dht::DhtConfig::default();
+        config.queries_per_second = self.dht_queries_per_second;
+        config.query_timeout = std::time::Duration::from_secs(self.dht_query_timeout_secs);
+        config
+    }
+
+    pub(crate) fn to_dht_config_v6(&self) -> ferrite_dht::DhtConfig {
+        let mut config = ferrite_dht::DhtConfig::default_v6();
+        config.queries_per_second = self.dht_queries_per_second;
+        config.query_timeout = std::time::Duration::from_secs(self.dht_query_timeout_secs);
+        config
+    }
+
+    pub(crate) fn to_nat_config(&self) -> ferrite_nat::NatConfig {
+        ferrite_nat::NatConfig {
+            enable_upnp: self.enable_upnp,
+            enable_natpmp: self.enable_natpmp,
+            upnp_lease_duration: self.upnp_lease_duration,
+            natpmp_lifetime: self.natpmp_lifetime,
+        }
+    }
+
+    pub(crate) fn to_utp_config(&self, port: u16) -> ferrite_utp::UtpConfig {
+        ferrite_utp::UtpConfig {
+            bind_addr: std::net::SocketAddr::from(([0, 0, 0, 0], port)),
+            max_connections: self.utp_max_connections,
+        }
+    }
+
+    pub(crate) fn to_utp_config_v6(&self, port: u16) -> ferrite_utp::UtpConfig {
+        ferrite_utp::UtpConfig {
+            bind_addr: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
+            max_connections: self.utp_max_connections,
+        }
+    }
+}
+
 // ── PartialEq (manual — f32/f64 fields need special handling) ────────
 
 impl PartialEq for Settings {
@@ -623,6 +685,33 @@ mod tests {
         Settings::default().validate().unwrap();
         Settings::min_memory().validate().unwrap();
         Settings::high_performance().validate().unwrap();
+    }
+
+    #[test]
+    fn disk_config_from_settings() {
+        let s = Settings::default();
+        let dc = crate::disk::DiskConfig::from(&s);
+        assert_eq!(dc.io_threads, 4);
+        assert_eq!(dc.storage_mode, StorageMode::Auto);
+        assert_eq!(dc.cache_size, 64 * 1024 * 1024);
+        assert!((dc.write_cache_ratio - 0.25).abs() < f32::EPSILON);
+        assert_eq!(dc.channel_capacity, 512);
+    }
+
+    #[test]
+    fn torrent_config_from_settings() {
+        let s = Settings::default();
+        let tc = crate::types::TorrentConfig::from(&s);
+        assert_eq!(tc.listen_port, 0); // random per-torrent
+        assert_eq!(tc.download_dir, s.download_dir);
+        assert_eq!(tc.enable_dht, s.enable_dht);
+        assert_eq!(tc.enable_pex, s.enable_pex);
+        assert_eq!(tc.encryption_mode, s.encryption_mode);
+        assert_eq!(tc.enable_utp, s.enable_utp);
+        assert_eq!(tc.enable_web_seed, s.enable_web_seed);
+        assert_eq!(tc.hashing_threads, s.hashing_threads);
+        assert_eq!(tc.max_concurrent_stream_reads, s.max_concurrent_stream_reads);
+        assert_eq!(tc.anonymous_mode, s.anonymous_mode);
     }
 
     #[test]

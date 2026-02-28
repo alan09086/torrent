@@ -96,6 +96,41 @@ impl Default for TorrentConfig {
     }
 }
 
+impl From<&crate::settings::Settings> for TorrentConfig {
+    fn from(s: &crate::settings::Settings) -> Self {
+        Self {
+            listen_port: 0, // Each torrent gets a random port (matches make_torrent_config)
+            max_peers: 50,
+            target_request_queue: 5,
+            download_dir: s.download_dir.clone(),
+            enable_dht: s.enable_dht,
+            enable_pex: s.enable_pex,
+            enable_fast: s.enable_fast_extension,
+            seed_ratio_limit: s.seed_ratio_limit,
+            strict_end_game: true,
+            upload_rate_limit: 0,
+            download_rate_limit: 0,
+            encryption_mode: s.encryption_mode,
+            enable_utp: s.enable_utp,
+            enable_web_seed: s.enable_web_seed,
+            max_web_seeds: 4,
+            super_seeding: s.default_super_seeding,
+            upload_only_announce: s.upload_only_announce,
+            have_send_delay_ms: s.have_send_delay_ms,
+            hashing_threads: s.hashing_threads,
+            sequential_download: false,
+            initial_picker_threshold: 4,
+            whole_pieces_threshold: 20,
+            snub_timeout_secs: 60,
+            readahead_pieces: 8,
+            streaming_timeout_escalation: true,
+            max_concurrent_stream_reads: s.max_concurrent_stream_reads,
+            proxy: s.proxy.clone(),
+            anonymous_mode: s.anonymous_mode,
+        }
+    }
+}
+
 /// Current state of a torrent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TorrentState {
