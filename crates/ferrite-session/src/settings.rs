@@ -176,6 +176,18 @@ pub struct Settings {
     pub upload_rate_limit: u64,
     #[serde(default)]
     pub download_rate_limit: u64,
+    /// TCP upload rate limit in bytes/sec (0 = unlimited).
+    #[serde(default)]
+    pub tcp_upload_rate_limit: u64,
+    /// TCP download rate limit in bytes/sec (0 = unlimited).
+    #[serde(default)]
+    pub tcp_download_rate_limit: u64,
+    /// uTP upload rate limit in bytes/sec (0 = unlimited).
+    #[serde(default)]
+    pub utp_upload_rate_limit: u64,
+    /// uTP download rate limit in bytes/sec (0 = unlimited).
+    #[serde(default)]
+    pub utp_download_rate_limit: u64,
     #[serde(default = "default_true")]
     pub auto_upload_slots: bool,
     #[serde(default = "default_auto_upload_slots_min")]
@@ -295,6 +307,10 @@ impl Default for Settings {
             // Rate limiting
             upload_rate_limit: 0,
             download_rate_limit: 0,
+            tcp_upload_rate_limit: 0,
+            tcp_download_rate_limit: 0,
+            utp_upload_rate_limit: 0,
+            utp_download_rate_limit: 0,
             auto_upload_slots: true,
             auto_upload_slots_min: 2,
             auto_upload_slots_max: 20,
@@ -527,6 +543,10 @@ impl PartialEq for Settings {
             && self.have_send_delay_ms == other.have_send_delay_ms
             && self.upload_rate_limit == other.upload_rate_limit
             && self.download_rate_limit == other.download_rate_limit
+            && self.tcp_upload_rate_limit == other.tcp_upload_rate_limit
+            && self.tcp_download_rate_limit == other.tcp_download_rate_limit
+            && self.utp_upload_rate_limit == other.utp_upload_rate_limit
+            && self.utp_download_rate_limit == other.utp_download_rate_limit
             && self.auto_upload_slots == other.auto_upload_slots
             && self.auto_upload_slots_min == other.auto_upload_slots_min
             && self.auto_upload_slots_max == other.auto_upload_slots_max

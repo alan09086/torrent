@@ -78,6 +78,126 @@ impl TokenBucket {
     }
 }
 
+/// Transport type for per-class rate limiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub(crate) enum PeerTransport {
+    Tcp,
+    Utp,
+}
+
+/// Per-class rate limiter set (BEP 40 / libtorrent parity).
+///
+/// Maintains separate upload/download buckets for TCP and uTP, plus global
+/// upload/download buckets. Uses check-before-consume pattern to avoid
+/// partial consumption when one bucket has capacity but another doesn't.
+#[allow(dead_code)]
+pub(crate) struct RateLimiterSet {
+    tcp_upload: TokenBucket,
+    tcp_download: TokenBucket,
+    utp_upload: TokenBucket,
+    utp_download: TokenBucket,
+    global_upload: TokenBucket,
+    global_download: TokenBucket,
+}
+
+#[allow(dead_code)]
+impl RateLimiterSet {
+    /// Create a new rate limiter set. Rate of 0 = unlimited.
+    pub fn new(
+        tcp_upload_rate: u64,
+        tcp_download_rate: u64,
+        utp_upload_rate: u64,
+        utp_download_rate: u64,
+        global_upload_rate: u64,
+        global_download_rate: u64,
+    ) -> Self {
+        Self {
+            tcp_upload: TokenBucket::new(tcp_upload_rate),
+            tcp_download: TokenBucket::new(tcp_download_rate),
+            utp_upload: TokenBucket::new(utp_upload_rate),
+            utp_download: TokenBucket::new(utp_download_rate),
+            global_upload: TokenBucket::new(global_upload_rate),
+            global_download: TokenBucket::new(global_download_rate),
+        }
+    }
+
+    /// Refill all buckets proportional to elapsed time.
+    pub fn refill(&mut self, elapsed: Duration) {
+        self.tcp_upload.refill(elapsed);
+        self.tcp_download.refill(elapsed);
+        self.utp_upload.refill(elapsed);
+        self.utp_download.refill(elapsed);
+        self.global_upload.refill(elapsed);
+        self.global_download.refill(elapsed);
+    }
+
+    /// Try to consume upload tokens for the given transport class.
+    ///
+    /// Checks both the class bucket and global bucket *before* consuming
+    /// either, to avoid partial consumption without refund.
+    pub fn try_consume_upload(&mut self, amount: u64, transport: PeerTransport) -> bool {
+        let class = match transport {
+            PeerTransport::Tcp => &self.tcp_upload,
+            PeerTransport::Utp => &self.utp_upload,
+        };
+        // Check both before consuming either
+        if !class.is_unlimited() && class.available() < amount {
+            return false;
+        }
+        if !self.global_upload.is_unlimited() && self.global_upload.available() < amount {
+            return false;
+        }
+        // Both have capacity — consume from both
+        let class = match transport {
+            PeerTransport::Tcp => &mut self.tcp_upload,
+            PeerTransport::Utp => &mut self.utp_upload,
+        };
+        class.try_consume(amount);
+        self.global_upload.try_consume(amount);
+        true
+    }
+
+    /// Try to consume download tokens for the given transport class.
+    pub fn try_consume_download(&mut self, amount: u64, transport: PeerTransport) -> bool {
+        let class = match transport {
+            PeerTransport::Tcp => &self.tcp_download,
+            PeerTransport::Utp => &self.utp_download,
+        };
+        if !class.is_unlimited() && class.available() < amount {
+            return false;
+        }
+        if !self.global_download.is_unlimited() && self.global_download.available() < amount {
+            return false;
+        }
+        let class = match transport {
+            PeerTransport::Tcp => &mut self.tcp_download,
+            PeerTransport::Utp => &mut self.utp_download,
+        };
+        class.try_consume(amount);
+        self.global_download.try_consume(amount);
+        true
+    }
+
+    /// Update per-class rates at runtime (e.g., from apply_settings).
+    pub fn set_rates(
+        &mut self,
+        tcp_upload: u64,
+        tcp_download: u64,
+        utp_upload: u64,
+        utp_download: u64,
+        global_upload: u64,
+        global_download: u64,
+    ) {
+        self.tcp_upload.set_rate(tcp_upload);
+        self.tcp_download.set_rate(tcp_download);
+        self.utp_upload.set_rate(utp_upload);
+        self.utp_download.set_rate(utp_download);
+        self.global_upload.set_rate(global_upload);
+        self.global_download.set_rate(global_download);
+    }
+}
+
 /// Check if an IP address is on a local/private network.
 ///
 /// IPv4: loopback, private (RFC 1918), link-local (169.254.0.0/16).
@@ -184,5 +304,73 @@ mod tests {
         // Global unicast — not local
         assert!(!is_local_network("2001:db8::1".parse().unwrap()));
         assert!(!is_local_network("2607:f8b0:4004:800::200e".parse().unwrap()));
+    }
+
+    #[test]
+    fn rate_limiter_set_all_unlimited() {
+        let mut rls = RateLimiterSet::new(0, 0, 0, 0, 0, 0);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(1_000_000, PeerTransport::Tcp));
+        assert!(rls.try_consume_upload(1_000_000, PeerTransport::Utp));
+        assert!(rls.try_consume_download(1_000_000, PeerTransport::Tcp));
+        assert!(rls.try_consume_download(1_000_000, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn rate_limiter_set_class_limited() {
+        let mut rls = RateLimiterSet::new(1000, 1000, 500, 500, 0, 0);
+        rls.refill(Duration::from_secs(1));
+        // TCP: 1000 capacity
+        assert!(rls.try_consume_upload(1000, PeerTransport::Tcp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Tcp)); // exhausted
+        // uTP: 500 capacity, independent
+        assert!(rls.try_consume_upload(500, PeerTransport::Utp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn rate_limiter_set_global_limits() {
+        // Global upload limit = 500, class limit = 1000 each
+        let mut rls = RateLimiterSet::new(1000, 0, 1000, 0, 500, 0);
+        rls.refill(Duration::from_secs(1));
+        // TCP class has 1000, but global only has 500
+        assert!(rls.try_consume_upload(500, PeerTransport::Tcp));
+        // Now global is exhausted — uTP should also be blocked
+        assert!(!rls.try_consume_upload(1, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn rate_limiter_set_check_before_consume_no_partial() {
+        // If global allows but class doesn't, no partial consumption
+        let mut rls = RateLimiterSet::new(100, 0, 0, 0, 1000, 0);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(100, PeerTransport::Tcp));
+        // Class exhausted, global still has 900 — should fail cleanly
+        assert!(!rls.try_consume_upload(1, PeerTransport::Tcp));
+        // uTP is unlimited, global has 900
+        assert!(rls.try_consume_upload(900, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn rate_limiter_set_refill_all() {
+        let mut rls = RateLimiterSet::new(1000, 2000, 500, 750, 5000, 10000);
+        rls.refill(Duration::from_millis(100));
+        // Each bucket should have 10% of its rate
+        assert!(rls.try_consume_upload(100, PeerTransport::Tcp));
+        assert!(rls.try_consume_download(200, PeerTransport::Tcp));
+        assert!(rls.try_consume_upload(50, PeerTransport::Utp));
+        assert!(rls.try_consume_download(75, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn rate_limiter_set_runtime_update() {
+        let mut rls = RateLimiterSet::new(1000, 1000, 1000, 1000, 0, 0);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(1000, PeerTransport::Tcp));
+        // Update TCP upload to 500
+        rls.set_rates(500, 1000, 1000, 1000, 0, 0);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(500, PeerTransport::Tcp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Tcp));
     }
 }
