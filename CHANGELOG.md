@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.30.0 — 2026-02-28
+
+IP filtering, proxy support, anonymous mode, and force proxy mode. First milestone in Phase 5 (Network Hardening & Tools). Eleven crates, 734 tests.
+
+### M29: IP Filtering + Proxy Support
+
+### Added
+- `IpFilter` — sorted interval map-based IP address filtering with IPv4/IPv6 support
+- `PortFilter` — port range filtering using the same interval map structure
+- `IntervalMap<K>` — generic sorted interval map with O(log n) lookup via BTreeMap
+- `parse_dat()` / `parse_p2p()` — eMule `.dat` and P2P plaintext blocklist parsers
+- Local network exemption: RFC 1918, loopback, and link-local addresses always allowed
+- `SharedIpFilter` wired through `SessionActor` → `TorrentActor` with checks at all 3 connection points
+- `SessionHandle::set_ip_filter()` / `ip_filter()` for dynamic filter updates
+- `apply_ip_filter_to_trackers` config option (default: true)
+- `PeerBlocked` alert variant (PEER category)
+- `ProxyType` enum: None, Socks4, Socks5, Socks5Password, Http, HttpPassword
+- `ProxyConfig` with per-connection-type routing (peer, tracker, hostname resolution)
+- Hand-rolled SOCKS4 handshake (RFC 1928 predecessor)
+- Hand-rolled SOCKS5 handshake with RFC 1929 username/password auth
+- HTTP CONNECT tunnel with optional Basic auth
+- SOCKS5 UDP ASSOCIATE + `ProxiedUdpSocket` for UDP relay
+- `connect_through_proxy()` — TCP tunnel through any supported proxy type
+- `HttpTracker::with_proxy()` — proxy-aware HTTP tracker client
+- `force_proxy` mode: mandates proxy for all connections, disables listen/UPnP/NAT-PMP/DHT/LSD
+- `anonymous_mode`: suppresses client version in BEP 10 ext handshake, disables discovery
+- Outbound TCP connections routed through proxy when `proxy_peer_connections` is true
+- uTP skipped when proxy is active (not proxied)
+- `ClientBuilder::proxy()`, `force_proxy()`, `anonymous_mode()`, `apply_ip_filter_to_trackers()`
+- Facade re-exports: `IpFilter`, `IpFilterError`, `PortFilter`, `parse_dat`, `parse_p2p`, `ProxyType`, `ProxyConfig`
+
 ## 0.29.0 — 2026-02-28
 
 Advanced piece picker with block-level priority, dynamic request queue sizing, and file streaming. Eleven crates, 689 tests.
