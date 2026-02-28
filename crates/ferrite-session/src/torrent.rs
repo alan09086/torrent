@@ -719,6 +719,7 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::UpdateExternalIp { ip }) => {
                             self.external_ip = Some(ip);
+                            self.sort_available_peers();
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
@@ -861,20 +862,40 @@ impl TorrentActor {
     // ----- Command handlers -----
 
     fn handle_add_peers(&mut self, peers: Vec<SocketAddr>, source: PeerSource) {
-        let ban_mgr = self.ban_manager.read().unwrap();
-        let ip_flt = self.ip_filter.read().unwrap();
-        for addr in peers {
-            if ban_mgr.is_banned(&addr.ip()) {
-                continue;
+        let mut added = false;
+        {
+            let ban_mgr = self.ban_manager.read().unwrap();
+            let ip_flt = self.ip_filter.read().unwrap();
+            for addr in peers {
+                if ban_mgr.is_banned(&addr.ip()) {
+                    continue;
+                }
+                if ip_flt.is_blocked(addr.ip()) {
+                    continue;
+                }
+                if !self.peers.contains_key(&addr)
+                    && !self.available_peers.iter().any(|(a, _)| *a == addr)
+                {
+                    self.available_peers.push((addr, source));
+                    added = true;
+                }
             }
-            if ip_flt.is_blocked(addr.ip()) {
-                continue;
-            }
-            if !self.peers.contains_key(&addr)
-                && !self.available_peers.iter().any(|(a, _)| *a == addr)
-            {
-                self.available_peers.push((addr, source));
-            }
+        }
+        if added {
+            self.sort_available_peers();
+        }
+    }
+
+    /// Sort available peers by BEP 40 canonical priority (descending) so that
+    /// `pop()` yields the most preferred peer (lowest priority value).
+    fn sort_available_peers(&mut self) {
+        if let Some(my_ip) = self.external_ip {
+            self.available_peers.sort_by(|a, b| {
+                let pa = crate::peer_priority::canonical_peer_priority(my_ip, a.0.ip());
+                let pb = crate::peer_priority::canonical_peer_priority(my_ip, b.0.ip());
+                // Descending: highest priority value first, so pop() gives lowest
+                pb.cmp(&pa)
+            });
         }
     }
 

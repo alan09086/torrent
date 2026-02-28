@@ -268,4 +268,26 @@ mod tests {
             canonical_peer_priority(v6, v6),
         );
     }
+
+    #[test]
+    fn sort_peers_by_priority_descending() {
+        // Simulate the sort_available_peers logic: sort descending so pop() gives lowest
+        use std::net::SocketAddr;
+        let my_ip = IpAddr::V4(Ipv4Addr::new(123, 213, 32, 10));
+        let peers = vec![
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(98, 76, 54, 32)), 6881),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(123, 213, 32, 234)), 6881),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 6881),
+        ];
+        let mut scored: Vec<(SocketAddr, u32)> = peers
+            .iter()
+            .map(|a| (*a, canonical_peer_priority(my_ip, a.ip())))
+            .collect();
+        // Sort descending by priority
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        // Last element (pop target) should have lowest priority = most preferred
+        let last = scored.last().unwrap();
+        let min_priority = scored.iter().map(|s| s.1).min().unwrap();
+        assert_eq!(last.1, min_priority);
+    }
 }
