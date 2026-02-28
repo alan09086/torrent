@@ -2546,6 +2546,7 @@ impl TorrentActor {
             let use_proxy = proxy_config.proxy_type != crate::proxy::ProxyType::None
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
+            let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
             // Pick the uTP socket matching the peer's address family
             let utp_socket = if addr.is_ipv6() {
                 self.utp_socket_v6.clone()
@@ -2581,6 +2582,7 @@ impl TorrentActor {
                                 encryption_mode,
                                 true, // outbound
                                 anonymous_mode,
+                                info_bytes.clone(),
                             )
                             .await;
                             return;
@@ -2616,6 +2618,7 @@ impl TorrentActor {
                             encryption_mode,
                             true, // outbound
                             anonymous_mode,
+                            info_bytes,
                         )
                         .await;
                     }
@@ -2695,6 +2698,7 @@ impl TorrentActor {
         let enable_fast = self.config.enable_fast;
         let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
         let anonymous_mode = self.config.anonymous_mode;
+        let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
 
         tokio::spawn(async move {
             let _ = run_peer(
@@ -2711,6 +2715,7 @@ impl TorrentActor {
                 encryption_mode,
                 false, // inbound
                 anonymous_mode,
+                info_bytes,
             )
             .await;
         });

@@ -125,6 +125,16 @@ impl MetadataMessage {
         }
     }
 
+    /// Create a data response for a metadata piece.
+    pub fn data(piece: u32, total_size: u64, data: Bytes) -> Self {
+        MetadataMessage {
+            msg_type: MetadataMessageType::Data,
+            piece,
+            total_size: Some(total_size),
+            data: Some(data),
+        }
+    }
+
     /// Create a reject for metadata piece.
     pub fn reject(piece: u32) -> Self {
         MetadataMessage {

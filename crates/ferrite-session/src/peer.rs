@@ -41,6 +41,7 @@ pub(crate) async fn run_peer(
     encryption_mode: ferrite_wire::mse::EncryptionMode,
     outbound: bool,
     anonymous_mode: bool,
+    info_bytes: Option<Bytes>,
 ) -> crate::Result<()> {
     use ferrite_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -172,7 +173,7 @@ pub(crate) async fn run_peer(
             frame = framed_read.next() => {
                 match frame {
                     Some(Ok(msg)) => {
-                        if let Err(e) = handle_message(
+                        match handle_message(
                             msg,
                             addr,
                             num_pieces,
@@ -184,8 +185,18 @@ pub(crate) async fn run_peer(
                             our_ut_pex,
                             our_lt_trackers,
                             both_support_fast,
+                            info_bytes.as_ref(),
                         ).await {
-                            warn!(%addr, "error handling message: {e}");
+                            Ok(Some(response)) => {
+                                if let Err(e) = framed_write.send(response).await {
+                                    warn!(%addr, "error sending response: {e}");
+                                    break Some(e.to_string());
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(%addr, "error handling message: {e}");
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -237,6 +248,8 @@ pub(crate) async fn run_peer(
 ///
 /// `peer_ut_metadata`/`peer_ut_pex`: stored from remote's ext handshake (for sending).
 /// `our_ut_metadata`/`our_ut_pex`: our assigned IDs (for matching incoming).
+///
+/// Returns `Ok(Some(msg))` when a response message should be sent on the wire.
 #[allow(clippy::too_many_arguments)]
 async fn handle_message(
     msg: Message,
@@ -250,7 +263,8 @@ async fn handle_message(
     our_ut_pex: Option<u8>,
     our_lt_trackers: Option<u8>,
     both_support_fast: bool,
-) -> crate::Result<()> {
+    info_bytes: Option<&Bytes>,
+) -> crate::Result<Option<Message>> {
     match msg {
         Message::Choke => {
             event_tx
@@ -335,7 +349,12 @@ async fn handle_message(
         Message::Extended { ext_id, payload } => {
             // Routed extension message: the remote sends using OUR assigned IDs
             if Some(ext_id) == our_ut_metadata {
-                handle_metadata_message(addr, &payload, event_tx).await?;
+                let response = handle_metadata_message(
+                    addr, &payload, event_tx, info_bytes, *peer_ut_metadata,
+                ).await?;
+                if let Some(msg) = response {
+                    return Ok(Some(msg));
+                }
             } else if Some(ext_id) == our_ut_pex {
                 handle_pex_message(&payload, event_tx).await?;
             } else if Some(ext_id) == our_lt_trackers {
@@ -415,15 +434,19 @@ async fn handle_message(
                 .map_err(|_| crate::Error::Shutdown)?;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Handle an incoming ut_metadata extension message.
+///
+/// Returns `Ok(Some(msg))` when a metadata response should be sent on the wire.
 async fn handle_metadata_message(
     addr: SocketAddr,
     payload: &[u8],
     event_tx: &mpsc::Sender<PeerEvent>,
-) -> crate::Result<()> {
+    info_bytes: Option<&Bytes>,
+    peer_ut_metadata: Option<u8>,
+) -> crate::Result<Option<Message>> {
     let meta_msg = MetadataMessage::from_bytes(payload)?;
     match meta_msg.msg_type {
         MetadataMessageType::Data => {
@@ -449,10 +472,32 @@ async fn handle_metadata_message(
                 .map_err(|_| crate::Error::Shutdown)?;
         }
         MetadataMessageType::Request => {
-            // We don't serve metadata yet — ignore
+            if let Some(remote_id) = peer_ut_metadata {
+                let response = build_metadata_response(meta_msg.piece, info_bytes);
+                let payload = response.to_bytes().map_err(crate::Error::Wire)?;
+                return Ok(Some(Message::Extended { ext_id: remote_id, payload }));
+            }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Build a BEP 9 metadata response (data or reject) for the given piece index.
+fn build_metadata_response(piece: u32, info_bytes: Option<&Bytes>) -> MetadataMessage {
+    const METADATA_PIECE_SIZE: usize = 16384;
+
+    let Some(info) = info_bytes else {
+        return MetadataMessage::reject(piece);
+    };
+
+    let offset = piece as usize * METADATA_PIECE_SIZE;
+    if offset >= info.len() {
+        return MetadataMessage::reject(piece);
+    }
+
+    let end = (offset + METADATA_PIECE_SIZE).min(info.len());
+    let chunk = info.slice(offset..end);
+    MetadataMessage::data(piece, info.len() as u64, chunk)
 }
 
 /// Handle an incoming ut_pex extension message.
@@ -681,6 +726,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -729,6 +775,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -777,6 +824,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -837,6 +885,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -885,6 +934,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -942,6 +992,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -999,6 +1050,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1043,6 +1095,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1126,6 +1179,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1177,6 +1231,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1227,6 +1282,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1290,6 +1346,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1384,6 +1441,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1429,6 +1487,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1474,6 +1533,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1533,6 +1593,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1575,6 +1636,7 @@ mod tests {
                 ferrite_wire::mse::EncryptionMode::Disabled,
                 false, // outbound
                 false, // anonymous_mode
+                None,  // info_bytes
             )
             .await
         });
@@ -1603,6 +1665,90 @@ mod tests {
                 assert_eq!(data, piece_data);
             }
             other => panic!("expected Piece, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn serves_metadata_request() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(65536);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+
+        // Build a small info dict to serve
+        let info_raw = b"d4:name4:test12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAe";
+        let info_bytes = Bytes::from_static(info_raw);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                Some(info_bytes),
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read the extension handshake our peer sends
+        let ext_hs_msg = read_framed_message(&mut server_stream).await;
+        let our_ut_metadata_id = match &ext_hs_msg {
+            Message::Extended { ext_id: 0, payload } => {
+                let hs = ExtHandshake::from_bytes(payload).unwrap();
+                hs.ext_id("ut_metadata").unwrap()
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        };
+
+        // Send a remote ext handshake that advertises ut_metadata=5
+        let mut remote_ext = ExtHandshake::new();
+        remote_ext.m.insert("ut_metadata".into(), 5);
+        let ext_payload = remote_ext.to_bytes().unwrap();
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended { ext_id: 0, payload: ext_payload },
+        )
+        .await;
+
+        // Send a metadata request for piece 0, using OUR ut_metadata ID
+        let req = MetadataMessage::request(0);
+        let req_payload = req.to_bytes().unwrap();
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended {
+                ext_id: our_ut_metadata_id,
+                payload: req_payload,
+            },
+        )
+        .await;
+
+        // Read the data response — it should use the REMOTE's ext_id (5)
+        let response = read_framed_message(&mut server_stream).await;
+        match response {
+            Message::Extended { ext_id, payload } => {
+                assert_eq!(ext_id, 5, "should use remote's ut_metadata id");
+                let meta_msg = MetadataMessage::from_bytes(&payload).unwrap();
+                assert_eq!(meta_msg.msg_type, MetadataMessageType::Data);
+                assert_eq!(meta_msg.piece, 0);
+                assert_eq!(meta_msg.total_size, Some(info_raw.len() as u64));
+                assert_eq!(meta_msg.data.as_deref(), Some(info_raw.as_ref()));
+            }
+            other => panic!("expected Extended data response, got: {other:?}"),
         }
 
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
