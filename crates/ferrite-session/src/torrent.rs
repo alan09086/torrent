@@ -209,6 +209,7 @@ impl TorrentHandle {
             ip_filter,
             piece_contributors: HashMap::new(),
             parole_pieces: HashMap::new(),
+            external_ip: None,
         };
 
         tokio::spawn(actor.run());
@@ -355,6 +356,7 @@ impl TorrentHandle {
             ip_filter,
             piece_contributors: HashMap::new(),
             parole_pieces: HashMap::new(),
+            external_ip: None,
         };
 
         tokio::spawn(actor.run());
@@ -486,6 +488,14 @@ impl TorrentHandle {
         let handle = rx.await.map_err(|_| crate::Error::Shutdown)??;
         Ok(crate::streaming::FileStream::from_handle(handle))
     }
+
+    /// Update the external IP for BEP 40 peer priority sorting.
+    pub(crate) async fn update_external_ip(&self, ip: std::net::IpAddr) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::UpdateExternalIp { ip })
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +598,9 @@ struct TorrentActor {
 
     // IP filtering (M29)
     ip_filter: crate::session::SharedIpFilter,
+
+    // BEP 40 peer priority (M32b)
+    external_ip: Option<std::net::IpAddr>,
 }
 
 impl TorrentActor {
@@ -703,6 +716,9 @@ impl TorrentActor {
                                 stream,
                                 Some(ferrite_wire::mse::EncryptionMode::Disabled),
                             );
+                        }
+                        Some(TorrentCommand::UpdateExternalIp { ip }) => {
+                            self.external_ip = Some(ip);
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;

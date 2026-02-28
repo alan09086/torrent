@@ -223,6 +223,14 @@ pub async fn delete_udp_mapping(gateway: Ipv4Addr, internal_port: u16) -> Result
     Ok(())
 }
 
+/// Query the external IP address via NAT-PMP (opcode 0).
+pub async fn query_external_ip(gateway: Ipv4Addr) -> Result<Ipv4Addr> {
+    let req = encode_external_addr_request();
+    let resp = send_request(gateway, &req).await?;
+    let decoded = decode_external_addr_response(&resp)?;
+    Ok(decoded.external_ip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

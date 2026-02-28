@@ -4,6 +4,7 @@
 //! consolidates all configurable knobs. Supports presets, validation, and
 //! serde serialization (bencode + JSON).
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -155,6 +156,10 @@ pub struct Settings {
     pub encryption_mode: EncryptionMode,
     #[serde(default)]
     pub anonymous_mode: bool,
+    /// Manually configured external IP for BEP 40 peer priority.
+    /// If not set, discovered automatically via NAT traversal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ip: Option<IpAddr>,
 
     // ── Seeding ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +286,7 @@ impl Default for Settings {
             enable_web_seed: true,
             encryption_mode: EncryptionMode::Enabled,
             anonymous_mode: false,
+            external_ip: None,
             // Seeding
             seed_ratio_limit: None,
             default_super_seeding: false,
@@ -514,6 +520,7 @@ impl PartialEq for Settings {
             && self.enable_web_seed == other.enable_web_seed
             && self.encryption_mode == other.encryption_mode
             && self.anonymous_mode == other.anonymous_mode
+            && self.external_ip == other.external_ip
             && self.seed_ratio_limit == other.seed_ratio_limit
             && self.default_super_seeding == other.default_super_seeding
             && self.upload_only_announce == other.upload_only_announce
@@ -714,6 +721,25 @@ mod tests {
         assert_eq!(tc.hashing_threads, s.hashing_threads);
         assert_eq!(tc.max_concurrent_stream_reads, s.max_concurrent_stream_reads);
         assert_eq!(tc.anonymous_mode, s.anonymous_mode);
+    }
+
+    #[test]
+    fn external_ip_default_and_json() {
+        let s = Settings::default();
+        assert!(s.external_ip.is_none());
+
+        // JSON with external_ip set
+        let json = r#"{"external_ip": "203.0.113.5"}"#;
+        let decoded: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded.external_ip,
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)))
+        );
+
+        // Round-trip preserves external_ip
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        let roundtrip: Settings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(roundtrip.external_ip, decoded.external_ip);
     }
 
     #[test]

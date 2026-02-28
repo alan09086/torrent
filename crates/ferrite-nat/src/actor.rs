@@ -3,7 +3,7 @@
 //! Tries PCP first (newest), falls back to NAT-PMP, then UPnP IGD.
 //! Automatically renews mappings before they expire.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -62,6 +62,11 @@ pub enum NatEvent {
         port: u16,
         /// Description of the failure.
         message: String,
+    },
+    /// External IP address discovered via NAT traversal (PCP/NAT-PMP/UPnP).
+    ExternalIpDiscovered {
+        /// The discovered external IP address.
+        ip: IpAddr,
     },
 }
 
@@ -214,6 +219,7 @@ impl NatActor {
                 Ok(resp) if resp.result_code == 0 => {
                     info!(port = tcp_port, protocol = "TCP", "PCP port mapping succeeded");
                     self.granted_lifetime = Some(resp.lifetime);
+                    self.emit(NatEvent::ExternalIpDiscovered { ip: resp.external_ip }).await;
                     self.emit(NatEvent::MappingSucceeded {
                         port: tcp_port,
                         protocol: "TCP".into(),
@@ -250,6 +256,10 @@ impl NatActor {
                     "NAT-PMP TCP mapping succeeded"
                 );
                 self.granted_lifetime = Some(resp.lifetime);
+                // Query external IP via NAT-PMP opcode 0.
+                if let Ok(ext_ip) = crate::natpmp::query_external_ip(gateway).await {
+                    self.emit(NatEvent::ExternalIpDiscovered { ip: IpAddr::V4(ext_ip) }).await;
+                }
                 self.emit(NatEvent::MappingSucceeded {
                     port: tcp_port,
                     protocol: "TCP".into(),
@@ -397,6 +407,19 @@ impl NatActor {
                 } else {
                     info!(port = tcp_port, "UPnP TCP port mapping succeeded");
                     self.granted_lifetime = Some(self.config.upnp_lease_duration);
+                    // Query external IP via UPnP GetExternalIPAddress.
+                    let ext_body = crate::upnp::soap::format_get_external_ip();
+                    if let Ok(ext_resp) = crate::upnp::soap::soap_request(
+                        control_url, service_type, "GetExternalIPAddress", &ext_body,
+                    ).await {
+                        if let Some(ip_str) = crate::upnp::soap::extract_xml_value(
+                            &ext_resp, "NewExternalIPAddress",
+                        ) {
+                            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                                self.emit(NatEvent::ExternalIpDiscovered { ip }).await;
+                            }
+                        }
+                    }
                     self.emit(NatEvent::MappingSucceeded {
                         port: tcp_port,
                         protocol: "TCP".into(),
@@ -513,6 +536,19 @@ mod tests {
         assert!(config.enable_natpmp);
         assert_eq!(config.upnp_lease_duration, 3600);
         assert_eq!(config.natpmp_lifetime, 7200);
+    }
+
+    #[test]
+    fn nat_event_external_ip_variant() {
+        let event = NatEvent::ExternalIpDiscovered {
+            ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+        };
+        match event {
+            NatEvent::ExternalIpDiscovered { ip } => {
+                assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
+            }
+            _ => panic!("expected ExternalIpDiscovered"),
+        }
     }
 
     #[tokio::test]

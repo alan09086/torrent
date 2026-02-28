@@ -293,6 +293,7 @@ impl SessionHandle {
         let (disk_manager, disk_actor_handle) =
             crate::disk::DiskManagerHandle::new(disk_config);
 
+        let external_ip = settings.external_ip;
         let actor = SessionActor {
             settings,
             torrents: HashMap::new(),
@@ -315,6 +316,7 @@ impl SessionHandle {
             ip_filter,
             disk_manager,
             disk_actor_handle,
+            external_ip,
         };
 
         tokio::spawn(actor.run());
@@ -670,6 +672,8 @@ struct SessionActor {
     disk_manager: crate::disk::DiskManagerHandle,
     #[allow(dead_code)]
     disk_actor_handle: tokio::task::JoinHandle<()>,
+    /// External IP discovered via NAT traversal or configured manually (BEP 40).
+    external_ip: Option<std::net::IpAddr>,
 }
 
 impl SessionActor {
@@ -848,6 +852,14 @@ impl SessionActor {
                                 &self.alert_mask,
                                 AlertKind::PortMappingFailed { port, message },
                             );
+                        }
+                        ferrite_nat::NatEvent::ExternalIpDiscovered { ip } => {
+                            info!(%ip, "external IP discovered via NAT traversal");
+                            self.external_ip = Some(ip);
+                            // Propagate to all active torrents for BEP 40 peer priority.
+                            for entry in self.torrents.values() {
+                                let _ = entry.handle.update_external_ip(ip).await;
+                            }
                         }
                     }
                 }

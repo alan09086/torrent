@@ -299,6 +299,10 @@ pub(crate) enum TorrentCommand {
         file_index: usize,
         reply: oneshot::Sender<crate::Result<crate::streaming::FileStreamHandle>>,
     },
+    /// Update the external IP for BEP 40 peer priority calculation.
+    UpdateExternalIp {
+        ip: std::net::IpAddr,
+    },
 }
 
 /// Info about a file within a torrent.
