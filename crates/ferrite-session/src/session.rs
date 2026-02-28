@@ -14,13 +14,14 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use ferrite_core::{Id20, Lengths, Magnet, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
-use ferrite_dht::{DhtConfig, DhtHandle};
+use ferrite_dht::DhtHandle;
 use ferrite_storage::TorrentStorage;
 
 use crate::alert::{post_alert, Alert, AlertCategory, AlertKind, AlertStream};
 use crate::torrent::TorrentHandle;
+use crate::settings::Settings;
 use crate::types::{
-    FileInfo, SessionConfig, SessionStats, TorrentConfig, TorrentInfo, TorrentState, TorrentStats,
+    FileInfo, SessionStats, TorrentConfig, TorrentInfo, TorrentState, TorrentStats,
 };
 
 /// Shared global rate limiter bucket.
@@ -150,39 +151,39 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Start a new session with the given configuration.
-    pub async fn start(config: SessionConfig) -> crate::Result<Self> {
-        let mut config = config;
+    /// Start a new session with the given settings.
+    pub async fn start(settings: Settings) -> crate::Result<Self> {
+        let mut settings = settings;
 
         // Force proxy mode: all connections must go through proxy.
-        if config.force_proxy {
-            if config.proxy.proxy_type == crate::proxy::ProxyType::None {
+        if settings.force_proxy {
+            if settings.proxy.proxy_type == crate::proxy::ProxyType::None {
                 return Err(crate::Error::Config(
                     "force_proxy requires a proxy to be configured".into(),
                 ));
             }
-            config.enable_upnp = false;
-            config.enable_natpmp = false;
-            config.enable_dht = false;
-            config.enable_lsd = false;
+            settings.enable_upnp = false;
+            settings.enable_natpmp = false;
+            settings.enable_dht = false;
+            settings.enable_lsd = false;
         }
 
         // Anonymous mode: suppress identity and disable discovery.
-        if config.anonymous_mode {
-            config.enable_dht = false;
-            config.enable_lsd = false;
-            config.enable_upnp = false;
-            config.enable_natpmp = false;
+        if settings.anonymous_mode {
+            settings.enable_dht = false;
+            settings.enable_lsd = false;
+            settings.enable_upnp = false;
+            settings.enable_natpmp = false;
         }
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
         // Alert broadcast channel
-        let (alert_tx, _) = broadcast::channel(config.alert_channel_size);
-        let alert_mask = Arc::new(AtomicU32::new(config.alert_mask.bits()));
+        let (alert_tx, _) = broadcast::channel(settings.alert_channel_size);
+        let alert_mask = Arc::new(AtomicU32::new(settings.alert_mask.bits()));
 
-        let (lsd, lsd_peers_rx) = if config.enable_lsd {
-            match crate::lsd::LsdHandle::start(config.listen_port).await {
+        let (lsd, lsd_peers_rx) = if settings.enable_lsd {
+            match crate::lsd::LsdHandle::start(settings.listen_port).await {
                 Ok((handle, rx)) => (Some(handle), Some(rx)),
                 Err(e) => {
                     warn!("LSD unavailable (port 6771): {e}");
@@ -194,19 +195,15 @@ impl SessionHandle {
         };
 
         let global_upload_bucket = Arc::new(std::sync::Mutex::new(
-            crate::rate_limiter::TokenBucket::new(config.upload_rate_limit),
+            crate::rate_limiter::TokenBucket::new(settings.upload_rate_limit),
         ));
         let global_download_bucket = Arc::new(std::sync::Mutex::new(
-            crate::rate_limiter::TokenBucket::new(config.download_rate_limit),
+            crate::rate_limiter::TokenBucket::new(settings.download_rate_limit),
         ));
 
         // uTP socket (shared across all torrents)
-        let (utp_socket, utp_listener) = if config.enable_utp {
-            let utp_config = ferrite_utp::UtpConfig {
-                bind_addr: SocketAddr::from(([0, 0, 0, 0], config.listen_port)),
-                max_connections: 256,
-            };
-            match ferrite_utp::UtpSocket::bind(utp_config).await {
+        let (utp_socket, utp_listener) = if settings.enable_utp {
+            match ferrite_utp::UtpSocket::bind(settings.to_utp_config(settings.listen_port)).await {
                 Ok((socket, listener)) => (Some(socket), Some(listener)),
                 Err(e) => {
                     warn!("uTP bind failed: {e}");
@@ -218,12 +215,8 @@ impl SessionHandle {
         };
 
         // IPv6 uTP socket (dual-stack)
-        let (utp_socket_v6, utp_listener_v6) = if config.enable_utp && config.enable_ipv6 {
-            let utp_config_v6 = ferrite_utp::UtpConfig {
-                bind_addr: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)),
-                max_connections: 256,
-            };
-            match ferrite_utp::UtpSocket::bind(utp_config_v6).await {
+        let (utp_socket_v6, utp_listener_v6) = if settings.enable_utp && settings.enable_ipv6 {
+            match ferrite_utp::UtpSocket::bind(settings.to_utp_config_v6(settings.listen_port)).await {
                 Ok((socket, listener)) => (Some(socket), Some(listener)),
                 Err(e) => {
                     debug!("uTP IPv6 bind failed (non-fatal): {e}");
@@ -235,27 +228,23 @@ impl SessionHandle {
         };
 
         // NAT port mapping (PCP / NAT-PMP / UPnP)
-        let (nat, nat_events_rx) = if config.enable_upnp || config.enable_natpmp {
-            let nat_config = ferrite_nat::NatConfig {
-                enable_upnp: config.enable_upnp,
-                enable_natpmp: config.enable_natpmp,
-                ..Default::default()
-            };
+        let (nat, nat_events_rx) = if settings.enable_upnp || settings.enable_natpmp {
+            let nat_config = settings.to_nat_config();
             let (handle, events_rx) = ferrite_nat::NatHandle::start(nat_config);
-            let udp_port = if config.enable_utp {
-                Some(config.listen_port)
+            let udp_port = if settings.enable_utp {
+                Some(settings.listen_port)
             } else {
                 None
             };
-            handle.map_ports(config.listen_port, udp_port).await;
+            handle.map_ports(settings.listen_port, udp_port).await;
             (Some(handle), Some(events_rx))
         } else {
             (None, None)
         };
 
         // Start DHT instances
-        let dht_v4 = if config.enable_dht {
-            match DhtHandle::start(DhtConfig::default()).await {
+        let dht_v4 = if settings.enable_dht {
+            match DhtHandle::start(settings.to_dht_config()).await {
                 Ok(handle) => {
                     info!("DHT v4 started");
                     Some(handle)
@@ -269,8 +258,8 @@ impl SessionHandle {
             None
         };
 
-        let dht_v6 = if config.enable_dht && config.enable_ipv6 {
-            match DhtHandle::start(DhtConfig::default_v6()).await {
+        let dht_v6 = if settings.enable_dht && settings.enable_ipv6 {
+            match DhtHandle::start(settings.to_dht_config_v6()).await {
                 Ok(handle) => {
                     info!("DHT v6 started");
                     Some(handle)
@@ -284,10 +273,7 @@ impl SessionHandle {
             None
         };
 
-        let ban_config = crate::ban::BanConfig {
-            max_failures: config.smart_ban_max_failures,
-            use_parole: config.smart_ban_parole,
-        };
+        let ban_config = crate::ban::BanConfig::from(&settings);
         let ban_manager: SharedBanManager = Arc::new(
             std::sync::RwLock::new(crate::ban::BanManager::new(ban_config)),
         );
@@ -296,12 +282,12 @@ impl SessionHandle {
             std::sync::RwLock::new(crate::ip_filter::IpFilter::new()),
         );
 
-        let disk_config = config.to_disk_config();
+        let disk_config = crate::disk::DiskConfig::from(&settings);
         let (disk_manager, disk_actor_handle) =
             crate::disk::DiskManagerHandle::new(disk_config);
 
         let actor = SessionActor {
-            config,
+            settings,
             torrents: HashMap::new(),
             dht_v4,
             dht_v6,
@@ -631,7 +617,7 @@ impl SessionHandle {
 // ---------------------------------------------------------------------------
 
 struct SessionActor {
-    config: SessionConfig,
+    settings: Settings,
     torrents: HashMap<Id20, TorrentEntry>,
     dht_v4: Option<DhtHandle>,
     dht_v6: Option<DhtHandle>,
@@ -660,7 +646,7 @@ impl SessionActor {
         let mut refill_interval = tokio::time::interval(std::time::Duration::from_millis(100));
         refill_interval.tick().await; // skip first immediate tick
 
-        let auto_manage_secs = self.config.auto_manage_interval.max(1);
+        let auto_manage_secs = self.settings.auto_manage_interval.max(1);
         let mut auto_manage_interval = tokio::time::interval(
             std::time::Duration::from_secs(auto_manage_secs),
         );
@@ -838,12 +824,12 @@ impl SessionActor {
         Option<SharedBucket>,
         Option<SharedBucket>,
     ) {
-        let up = if self.config.upload_rate_limit > 0 {
+        let up = if self.settings.upload_rate_limit > 0 {
             Some(Arc::clone(&self.global_upload_bucket))
         } else {
             None
         };
-        let down = if self.config.download_rate_limit > 0 {
+        let down = if self.settings.download_rate_limit > 0 {
             Some(Arc::clone(&self.global_download_bucket))
         } else {
             None
@@ -852,11 +838,11 @@ impl SessionActor {
     }
 
     fn make_slot_tuner(&self) -> crate::slot_tuner::SlotTuner {
-        if self.config.auto_upload_slots {
+        if self.settings.auto_upload_slots {
             crate::slot_tuner::SlotTuner::new(
                 4, // initial slots
-                self.config.auto_upload_slots_min,
-                self.config.auto_upload_slots_max,
+                self.settings.auto_upload_slots_min,
+                self.settings.auto_upload_slots_max,
             )
         } else {
             crate::slot_tuner::SlotTuner::disabled(4)
@@ -864,36 +850,7 @@ impl SessionActor {
     }
 
     fn make_torrent_config(&self) -> TorrentConfig {
-        TorrentConfig {
-            listen_port: 0, // Each torrent gets a random port
-            max_peers: 50,
-            target_request_queue: 5,
-            download_dir: self.config.download_dir.clone(),
-            enable_dht: self.config.enable_dht,
-            enable_pex: self.config.enable_pex,
-            enable_fast: self.config.enable_fast_extension,
-            seed_ratio_limit: self.config.seed_ratio_limit,
-            strict_end_game: true,
-            upload_rate_limit: 0,
-            download_rate_limit: 0,
-            encryption_mode: self.config.encryption_mode,
-            enable_utp: self.config.enable_utp,
-            enable_web_seed: self.config.enable_web_seed,
-            max_web_seeds: 4,
-            super_seeding: self.config.default_super_seeding,
-            upload_only_announce: self.config.upload_only_announce,
-            have_send_delay_ms: self.config.have_send_delay_ms,
-            hashing_threads: self.config.hashing_threads,
-            sequential_download: false,
-            initial_picker_threshold: 4,
-            whole_pieces_threshold: 20,
-            snub_timeout_secs: 60,
-            readahead_pieces: 8,
-            streaming_timeout_escalation: true,
-            max_concurrent_stream_reads: self.config.max_concurrent_stream_reads,
-            proxy: self.config.proxy.clone(),
-            anonymous_mode: self.config.anonymous_mode,
-        }
+        TorrentConfig::from(&self.settings)
     }
 
     /// Returns the next available queue position (one past the max).
@@ -918,8 +875,8 @@ impl SessionActor {
             return Err(crate::Error::DuplicateTorrent(info_hash));
         }
 
-        if self.torrents.len() >= self.config.max_torrents {
-            return Err(crate::Error::SessionAtCapacity(self.config.max_torrents));
+        if self.torrents.len() >= self.settings.max_torrents {
+            return Err(crate::Error::SessionAtCapacity(self.settings.max_torrents));
         }
 
         let torrent_config = self.make_torrent_config();
@@ -996,8 +953,8 @@ impl SessionActor {
         if self.torrents.contains_key(&info_hash) {
             return Err(crate::Error::DuplicateTorrent(info_hash));
         }
-        if self.torrents.len() >= self.config.max_torrents {
-            return Err(crate::Error::SessionAtCapacity(self.config.max_torrents));
+        if self.torrents.len() >= self.settings.max_torrents {
+            return Err(crate::Error::SessionAtCapacity(self.settings.max_torrents));
         }
         let config = self.make_torrent_config();
         let (global_up, global_down) = self.global_buckets_if_limited();
@@ -1259,8 +1216,8 @@ impl SessionActor {
 
     async fn evaluate_queue(&mut self) {
         let now = tokio::time::Instant::now();
-        let startup_duration = std::time::Duration::from_secs(self.config.auto_manage_startup);
-        let auto_manage_secs = self.config.auto_manage_interval.max(1);
+        let startup_duration = std::time::Duration::from_secs(self.settings.auto_manage_startup);
+        let auto_manage_secs = self.settings.auto_manage_interval.max(1);
         let mut candidates = Vec::new();
 
         // Collect info hashes first to avoid borrow issues with async calls
@@ -1328,10 +1285,10 @@ impl SessionActor {
             let is_inactive = past_startup
                 && match category {
                     crate::queue::QueueCategory::Downloading => {
-                        download_rate < self.config.inactive_down_rate
+                        download_rate < self.settings.inactive_down_rate
                     }
                     crate::queue::QueueCategory::Seeding => {
-                        upload_rate < self.config.inactive_up_rate
+                        upload_rate < self.settings.inactive_up_rate
                     }
                 };
 
@@ -1357,11 +1314,11 @@ impl SessionActor {
 
         let decision = crate::queue::evaluate(
             &candidates,
-            self.config.active_downloads,
-            self.config.active_seeds,
-            self.config.active_limit,
-            self.config.dont_count_slow_torrents,
-            self.config.auto_manage_prefer_seeds,
+            self.settings.active_downloads,
+            self.settings.active_seeds,
+            self.settings.active_limit,
+            self.settings.dont_count_slow_torrents,
+            self.settings.auto_manage_prefer_seeds,
         );
 
         // Apply decisions
@@ -1536,8 +1493,8 @@ mod tests {
         Arc::new(MemoryStorage::new(lengths))
     }
 
-    fn test_session_config() -> SessionConfig {
-        SessionConfig {
+    fn test_settings() -> Settings {
+        Settings {
             listen_port: 0,
             download_dir: PathBuf::from("/tmp"),
             max_torrents: 10,
@@ -1545,49 +1502,15 @@ mod tests {
             enable_pex: false,
             enable_lsd: false,
             enable_fast_extension: false,
-            seed_ratio_limit: None,
-            resume_data_dir: None,
-            upload_rate_limit: 0,
-            download_rate_limit: 0,
-            auto_upload_slots: true,
-            auto_upload_slots_min: 2,
-            auto_upload_slots_max: 20,
-            alert_mask: crate::alert::AlertCategory::ALL,
-            alert_channel_size: 64,
-            active_downloads: 3,
-            active_seeds: 5,
-            active_limit: 500,
-            active_checking: 1,
-            dont_count_slow_torrents: true,
-            inactive_down_rate: 2048,
-            inactive_up_rate: 2048,
-            auto_manage_interval: 30,
-            auto_manage_startup: 60,
-            auto_manage_prefer_seeds: false,
-            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
             enable_utp: false,
             enable_upnp: false,
             enable_natpmp: false,
             enable_ipv6: false,
-            enable_web_seed: true,
-            default_super_seeding: false,
-            upload_only_announce: true,
-            have_send_delay_ms: 0,
-            smart_ban_max_failures: 3,
-            smart_ban_parole: true,
+            alert_channel_size: 64,
             disk_io_threads: 2,
             storage_mode: ferrite_core::StorageMode::Sparse,
             disk_cache_size: 1024 * 1024,
-            disk_write_cache_ratio: 0.25,
-            hashing_threads: 2,
-            max_request_queue_depth: 250,
-            request_queue_time: 3.0,
-            block_request_timeout_secs: 60,
-            max_concurrent_stream_reads: 8,
-            apply_ip_filter_to_trackers: true,
-            proxy: crate::proxy::ProxyConfig::default(),
-            force_proxy: false,
-            anonymous_mode: false,
+            ..Settings::default()
         }
     }
 
@@ -1595,7 +1518,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_start_and_shutdown() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let stats = session.session_stats().await.unwrap();
         assert_eq!(stats.active_torrents, 0);
         session.shutdown().await.unwrap();
@@ -1605,7 +1528,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_and_list_torrent() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let expected_hash = meta.info_hash;
@@ -1625,7 +1548,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_torrent() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
@@ -1645,7 +1568,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_torrent_rejected() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage1 = make_storage(&data, 16384);
@@ -1666,7 +1589,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_at_capacity() {
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.max_torrents = 1;
         let session = SessionHandle::start(config).await.unwrap();
 
@@ -1689,7 +1612,7 @@ mod tests {
 
     #[tokio::test]
     async fn torrent_stats_via_session() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 32768];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
@@ -1706,7 +1629,7 @@ mod tests {
 
     #[tokio::test]
     async fn torrent_info_via_session() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 32768];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
@@ -1728,7 +1651,7 @@ mod tests {
 
     #[tokio::test]
     async fn pause_resume_via_session() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
@@ -1752,7 +1675,7 @@ mod tests {
 
     #[tokio::test]
     async fn not_found_errors() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let fake_hash = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
 
         assert!(session.torrent_stats(fake_hash).await.is_err());
@@ -1768,7 +1691,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_stats_aggregate() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
 
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
@@ -1792,7 +1715,7 @@ mod tests {
     async fn add_magnet_and_list() {
         use ferrite_core::Magnet;
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let magnet = Magnet {
             info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
             display_name: Some("test-magnet".into()),
@@ -1821,7 +1744,7 @@ mod tests {
     async fn add_magnet_duplicate_rejected() {
         use ferrite_core::Magnet;
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let magnet = Magnet {
             info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
             display_name: Some("test-magnet".into()),
@@ -1844,7 +1767,7 @@ mod tests {
         use ferrite_core::Magnet;
 
         // LSD may fail to bind port 6771 — session should still start
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.enable_lsd = true;
 
         let session = SessionHandle::start(config).await.unwrap();
@@ -1874,7 +1797,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_torrent_resume_data_via_session() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let data = vec![0xAB; 32768];
         let meta = make_test_torrent(&data, 16384);
         let info_hash = meta.info_hash;
@@ -1896,7 +1819,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_session_state_captures_all_torrents() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
 
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
@@ -1923,7 +1846,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_resume_data_not_found() {
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let fake_hash = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let result = session.save_torrent_resume_data(fake_hash).await;
         assert!(result.is_err());
@@ -1937,7 +1860,7 @@ mod tests {
     async fn subscribe_receives_torrent_added_alert() {
         use crate::alert::AlertKind;
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let mut alerts = session.subscribe();
 
         let data = vec![0xAB; 16384];
@@ -1960,7 +1883,7 @@ mod tests {
         use crate::alert::AlertKind;
         use crate::types::TorrentState;
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let mut alerts = session.subscribe();
 
         let data = vec![0xAB; 16384];
@@ -1996,7 +1919,7 @@ mod tests {
     async fn multiple_subscribers_each_receive_alerts() {
         use crate::alert::AlertKind;
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let mut sub1 = session.subscribe();
         let mut sub2 = session.subscribe();
 
@@ -2021,7 +1944,7 @@ mod tests {
     async fn set_alert_mask_filters_at_runtime() {
         use crate::alert::{AlertCategory, AlertKind};
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let mut alerts = session.subscribe();
 
         // Start with ALL — TorrentAdded (STATUS) should arrive
@@ -2070,7 +1993,7 @@ mod tests {
     async fn alert_stream_filters_per_subscriber() {
         use crate::alert::{AlertCategory, AlertKind};
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
 
         // subscriber A: STATUS only
         let mut status_sub = session.subscribe_filtered(AlertCategory::STATUS);
@@ -2100,7 +2023,7 @@ mod tests {
     async fn state_changed_tracks_transitions() {
         use crate::alert::AlertKind;
 
-        let session = SessionHandle::start(test_session_config()).await.unwrap();
+        let session = SessionHandle::start(test_settings()).await.unwrap();
         let mut alerts = session.subscribe();
 
         let data = vec![0xAB; 16384];
@@ -2173,7 +2096,7 @@ mod tests {
     #[tokio::test]
     async fn session_config_creates_utp_socket() {
         // Start session with uTP enabled — should succeed without errors
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.enable_utp = true;
         let session = SessionHandle::start(config).await.unwrap();
         let stats = session.session_stats().await.unwrap();
@@ -2182,15 +2105,15 @@ mod tests {
     }
 
     #[test]
-    fn session_config_nat_defaults() {
-        let config = SessionConfig::default();
-        assert!(config.enable_upnp, "enable_upnp should default to true");
-        assert!(config.enable_natpmp, "enable_natpmp should default to true");
+    fn settings_nat_defaults() {
+        let s = Settings::default();
+        assert!(s.enable_upnp, "enable_upnp should default to true");
+        assert!(s.enable_natpmp, "enable_natpmp should default to true");
     }
 
     #[tokio::test]
     async fn session_with_nat_disabled() {
-        let config = test_session_config();
+        let config = test_settings();
         // test_session_config already sets enable_upnp: false, enable_natpmp: false
         assert!(!config.enable_upnp);
         assert!(!config.enable_natpmp);
@@ -2204,7 +2127,7 @@ mod tests {
 
     #[test]
     fn anonymous_mode_disables_discovery() {
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.anonymous_mode = true;
         config.enable_dht = true;
         config.enable_lsd = true;
@@ -2228,7 +2151,7 @@ mod tests {
 
     #[tokio::test]
     async fn anonymous_mode_session_starts_with_discovery_disabled() {
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.anonymous_mode = true;
         // Even if we enable these, anonymous_mode should override
         config.enable_dht = true;
@@ -2242,7 +2165,7 @@ mod tests {
 
     #[test]
     fn force_proxy_requires_proxy_configured() {
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.force_proxy = true;
         config.proxy = crate::proxy::ProxyConfig::default(); // no proxy
 
@@ -2254,7 +2177,7 @@ mod tests {
 
     #[tokio::test]
     async fn force_proxy_errors_without_proxy() {
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.force_proxy = true;
         // proxy_type is None by default
 
@@ -2268,7 +2191,7 @@ mod tests {
 
     #[test]
     fn force_proxy_disables_features() {
-        let mut config = test_session_config();
+        let mut config = test_settings();
         config.force_proxy = true;
         config.proxy = crate::proxy::ProxyConfig {
             proxy_type: crate::proxy::ProxyType::Socks5,
@@ -2297,7 +2220,7 @@ mod tests {
 
     #[test]
     fn proxy_config_round_trip() {
-        let config = SessionConfig {
+        let s = Settings {
             proxy: crate::proxy::ProxyConfig {
                 proxy_type: crate::proxy::ProxyType::Socks5Password,
                 hostname: "localhost".into(),
@@ -2308,14 +2231,14 @@ mod tests {
             },
             force_proxy: true,
             anonymous_mode: true,
-            ..test_session_config()
+            ..test_settings()
         };
 
-        assert_eq!(config.proxy.proxy_type, crate::proxy::ProxyType::Socks5Password);
-        assert_eq!(config.proxy.hostname, "localhost");
-        assert_eq!(config.proxy.port, 9050);
-        assert!(config.force_proxy);
-        assert!(config.anonymous_mode);
-        assert_eq!(config.proxy.to_url(), "socks5://user:pass@localhost:9050");
+        assert_eq!(s.proxy.proxy_type, crate::proxy::ProxyType::Socks5Password);
+        assert_eq!(s.proxy.hostname, "localhost");
+        assert_eq!(s.proxy.port, 9050);
+        assert!(s.force_proxy);
+        assert!(s.anonymous_mode);
+        assert_eq!(s.proxy.to_url(), "socks5://user:pass@localhost:9050");
     }
 }

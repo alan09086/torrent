@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferrite_core::{Magnet, TorrentMetaV1};
-use ferrite_session::SessionConfig;
+use ferrite_session::Settings;
 use ferrite_storage::TorrentStorage;
 
 /// Ergonomic builder for creating a ferrite session.
 ///
-/// Wraps [`SessionConfig`] with a fluent API. Call [`start()`](Self::start)
+/// Wraps [`Settings`] with a fluent API. Call [`start()`](Self::start)
 /// to spawn the session actor and get a [`SessionHandle`](ferrite_session::SessionHandle).
 ///
 /// # Example
@@ -26,128 +26,128 @@ use ferrite_storage::TorrentStorage;
 /// # }
 /// ```
 pub struct ClientBuilder {
-    config: SessionConfig,
+    settings: Settings,
 }
 
 impl ClientBuilder {
-    /// Create a new builder with default configuration.
+    /// Create a new builder with default settings.
     pub fn new() -> Self {
         Self {
-            config: SessionConfig::default(),
+            settings: Settings::default(),
         }
     }
 
     /// Set the TCP listen port for incoming peer connections.
     pub fn listen_port(mut self, port: u16) -> Self {
-        self.config.listen_port = port;
+        self.settings.listen_port = port;
         self
     }
 
     /// Set the default download directory.
     pub fn download_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.download_dir = path.into();
+        self.settings.download_dir = path.into();
         self
     }
 
     /// Set the maximum number of concurrent torrents.
     pub fn max_torrents(mut self, n: usize) -> Self {
-        self.config.max_torrents = n;
+        self.settings.max_torrents = n;
         self
     }
 
     /// Enable or disable DHT peer discovery.
     pub fn enable_dht(mut self, v: bool) -> Self {
-        self.config.enable_dht = v;
+        self.settings.enable_dht = v;
         self
     }
 
     /// Enable or disable Local Service Discovery.
     pub fn enable_lsd(mut self, v: bool) -> Self {
-        self.config.enable_lsd = v;
+        self.settings.enable_lsd = v;
         self
     }
 
     /// Enable or disable Peer Exchange.
     pub fn enable_pex(mut self, v: bool) -> Self {
-        self.config.enable_pex = v;
+        self.settings.enable_pex = v;
         self
     }
 
     /// Enable or disable BEP 6 Fast Extension.
     pub fn enable_fast_extension(mut self, v: bool) -> Self {
-        self.config.enable_fast_extension = v;
+        self.settings.enable_fast_extension = v;
         self
     }
 
     /// Set the seed ratio limit. Torrents stop seeding when this ratio is reached.
     pub fn seed_ratio_limit(mut self, ratio: f64) -> Self {
-        self.config.seed_ratio_limit = Some(ratio);
+        self.settings.seed_ratio_limit = Some(ratio);
         self
     }
 
     /// Set the alert category mask (default: all categories).
     pub fn alert_mask(mut self, mask: ferrite_session::AlertCategory) -> Self {
-        self.config.alert_mask = mask;
+        self.settings.alert_mask = mask;
         self
     }
 
     /// Set the alert broadcast channel capacity (default: 1024).
     pub fn alert_channel_size(mut self, size: usize) -> Self {
-        self.config.alert_channel_size = size;
+        self.settings.alert_channel_size = size;
         self
     }
 
     /// Set the maximum number of concurrent auto-managed downloading torrents (-1 = unlimited).
     pub fn active_downloads(mut self, n: i32) -> Self {
-        self.config.active_downloads = n;
+        self.settings.active_downloads = n;
         self
     }
 
     /// Set the maximum number of concurrent auto-managed seeding torrents (-1 = unlimited).
     pub fn active_seeds(mut self, n: i32) -> Self {
-        self.config.active_seeds = n;
+        self.settings.active_seeds = n;
         self
     }
 
     /// Set the hard cap on all active auto-managed torrents (-1 = unlimited).
     pub fn active_limit(mut self, n: i32) -> Self {
-        self.config.active_limit = n;
+        self.settings.active_limit = n;
         self
     }
 
     /// Set the maximum number of concurrent hash-check operations.
     pub fn active_checking(mut self, n: i32) -> Self {
-        self.config.active_checking = n;
+        self.settings.active_checking = n;
         self
     }
 
     /// Set whether inactive torrents are exempt from download/seed limits.
     pub fn dont_count_slow_torrents(mut self, v: bool) -> Self {
-        self.config.dont_count_slow_torrents = v;
+        self.settings.dont_count_slow_torrents = v;
         self
     }
 
     /// Set the interval (seconds) between queue evaluations.
     pub fn auto_manage_interval(mut self, secs: u64) -> Self {
-        self.config.auto_manage_interval = secs;
+        self.settings.auto_manage_interval = secs;
         self
     }
 
     /// Set the startup grace period (seconds) where a torrent is considered active regardless of speed.
     pub fn auto_manage_startup(mut self, secs: u64) -> Self {
-        self.config.auto_manage_startup = secs;
+        self.settings.auto_manage_startup = secs;
         self
     }
 
     /// Set whether seeding slots are allocated before download slots.
     pub fn auto_manage_prefer_seeds(mut self, v: bool) -> Self {
-        self.config.auto_manage_prefer_seeds = v;
+        self.settings.auto_manage_prefer_seeds = v;
         self
     }
 
     /// Set the connection encryption mode (MSE/PE).
     pub fn encryption_mode(mut self, mode: ferrite_wire::mse::EncryptionMode) -> Self {
-        self.config.encryption_mode = mode;
+        self.settings.encryption_mode = mode;
         self
     }
 
@@ -157,7 +157,7 @@ impl ClientBuilder {
     /// before falling back to TCP. Inbound uTP connections are routed to the
     /// correct torrent by reading the BT preamble.
     pub fn enable_utp(mut self, v: bool) -> Self {
-        self.config.enable_utp = v;
+        self.settings.enable_utp = v;
         self
     }
 
@@ -166,7 +166,7 @@ impl ClientBuilder {
     /// When enabled, the session automatically attempts to open ports on the
     /// router via UPnP as a last resort (after PCP and NAT-PMP).
     pub fn enable_upnp(mut self, v: bool) -> Self {
-        self.config.enable_upnp = v;
+        self.settings.enable_upnp = v;
         self
     }
 
@@ -175,7 +175,7 @@ impl ClientBuilder {
     /// When enabled, the session tries PCP first (RFC 6887), then falls back
     /// to NAT-PMP (RFC 6886), to open ports on the router.
     pub fn enable_natpmp(mut self, v: bool) -> Self {
-        self.config.enable_natpmp = v;
+        self.settings.enable_natpmp = v;
         self
     }
 
@@ -185,7 +185,7 @@ impl ClientBuilder {
     /// starts a second DHT instance for IPv6, and processes IPv6 peers
     /// in PEX and tracker responses. Default: true.
     pub fn enable_ipv6(mut self, v: bool) -> Self {
-        self.config.enable_ipv6 = v;
+        self.settings.enable_ipv6 = v;
         self
     }
 
@@ -194,7 +194,7 @@ impl ClientBuilder {
     /// When enabled, torrents with `url-list` or `httpseeds` will download
     /// pieces from HTTP servers alongside peer-to-peer transfers. Default: true.
     pub fn enable_web_seed(mut self, v: bool) -> Self {
-        self.config.enable_web_seed = v;
+        self.settings.enable_web_seed = v;
         self
     }
 
@@ -203,7 +203,7 @@ impl ClientBuilder {
     /// Super seeding reveals pieces one-per-peer to maximize piece diversity
     /// across the swarm. Most useful for initial seeders. Default: false.
     pub fn super_seeding(mut self, v: bool) -> Self {
-        self.config.default_super_seeding = v;
+        self.settings.default_super_seeding = v;
         self
     }
 
@@ -212,7 +212,7 @@ impl ClientBuilder {
     /// When enabled, the client advertises upload-only status via the
     /// extension handshake when a torrent transitions to seeding. Default: true.
     pub fn upload_only_announce(mut self, v: bool) -> Self {
-        self.config.upload_only_announce = v;
+        self.settings.upload_only_announce = v;
         self
     }
 
@@ -222,7 +222,7 @@ impl ClientBuilder {
     /// If the batch exceeds 50% of total pieces, a full Bitfield is sent instead.
     /// Default: 0 (immediate, no batching).
     pub fn have_send_delay_ms(mut self, ms: u64) -> Self {
-        self.config.have_send_delay_ms = ms;
+        self.settings.have_send_delay_ms = ms;
         self
     }
 
@@ -230,7 +230,7 @@ impl ClientBuilder {
     ///
     /// Default: 3. Lower values ban faster but risk false positives.
     pub fn smart_ban_max_failures(mut self, n: u32) -> Self {
-        self.config.smart_ban_max_failures = n;
+        self.settings.smart_ban_max_failures = n;
         self
     }
 
@@ -239,61 +239,61 @@ impl ClientBuilder {
     /// When enabled (default), a failed piece is re-downloaded from a single
     /// uninvolved peer to definitively attribute fault before striking.
     pub fn smart_ban_parole(mut self, enabled: bool) -> Self {
-        self.config.smart_ban_parole = enabled;
+        self.settings.smart_ban_parole = enabled;
         self
     }
 
     /// Set the number of concurrent disk I/O threads. Default: 4.
     pub fn disk_io_threads(mut self, n: usize) -> Self {
-        self.config.disk_io_threads = n;
+        self.settings.disk_io_threads = n;
         self
     }
 
     /// Set the storage allocation mode. Default: Auto.
     pub fn storage_mode(mut self, mode: ferrite_core::StorageMode) -> Self {
-        self.config.storage_mode = mode;
+        self.settings.storage_mode = mode;
         self
     }
 
     /// Set the number of concurrent piece hash verifications. Default: 2.
     pub fn hashing_threads(mut self, n: usize) -> Self {
-        self.config.hashing_threads = n;
+        self.settings.hashing_threads = n;
         self
     }
 
     /// Set the total disk cache size in bytes. Default: 64 MiB.
     pub fn disk_cache_size(mut self, bytes: usize) -> Self {
-        self.config.disk_cache_size = bytes;
+        self.settings.disk_cache_size = bytes;
         self
     }
 
     /// Set the maximum per-peer request queue depth. Default: 250.
     pub fn max_request_queue_depth(mut self, n: usize) -> Self {
-        self.config.max_request_queue_depth = n;
+        self.settings.max_request_queue_depth = n;
         self
     }
 
     /// Set the request queue time multiplier (seconds). Default: 3.0.
     pub fn request_queue_time(mut self, secs: f64) -> Self {
-        self.config.request_queue_time = secs;
+        self.settings.request_queue_time = secs;
         self
     }
 
     /// Set the block request timeout in seconds. Default: 60.
     pub fn block_request_timeout_secs(mut self, secs: u32) -> Self {
-        self.config.block_request_timeout_secs = secs;
+        self.settings.block_request_timeout_secs = secs;
         self
     }
 
     /// Set the maximum concurrent file stream readers. Default: 8.
     pub fn max_concurrent_stream_reads(mut self, n: usize) -> Self {
-        self.config.max_concurrent_stream_reads = n;
+        self.settings.max_concurrent_stream_reads = n;
         self
     }
 
     /// Set the proxy configuration for peer and tracker connections.
     pub fn proxy(mut self, proxy: ferrite_session::ProxyConfig) -> Self {
-        self.config.proxy = proxy;
+        self.settings.proxy = proxy;
         self
     }
 
@@ -303,7 +303,7 @@ impl ClientBuilder {
     /// Disables listen sockets, UPnP, NAT-PMP, DHT, and LSD.
     /// Fails at start if no proxy is configured.
     pub fn force_proxy(mut self, v: bool) -> Self {
-        self.config.force_proxy = v;
+        self.settings.force_proxy = v;
         self
     }
 
@@ -312,7 +312,7 @@ impl ClientBuilder {
     /// Suppresses identifying information (client version in BEP 10
     /// handshake) and disables DHT, LSD, UPnP, and NAT-PMP.
     pub fn anonymous_mode(mut self, v: bool) -> Self {
-        self.config.anonymous_mode = v;
+        self.settings.anonymous_mode = v;
         self
     }
 
@@ -321,18 +321,18 @@ impl ClientBuilder {
     /// When true (default), tracker IP addresses are checked against
     /// the IP filter. When false, trackers are exempt.
     pub fn apply_ip_filter_to_trackers(mut self, v: bool) -> Self {
-        self.config.apply_ip_filter_to_trackers = v;
+        self.settings.apply_ip_filter_to_trackers = v;
         self
     }
 
-    /// Consume the builder and return the underlying `SessionConfig`.
-    pub fn into_config(self) -> SessionConfig {
-        self.config
+    /// Consume the builder and return the underlying `Settings`.
+    pub fn into_settings(self) -> Settings {
+        self.settings
     }
 
     /// Start the session, spawning the background actor.
     pub async fn start(self) -> ferrite_session::Result<ferrite_session::SessionHandle> {
-        ferrite_session::SessionHandle::start(self.config).await
+        ferrite_session::SessionHandle::start(self.settings).await
     }
 }
 
@@ -428,25 +428,25 @@ mod tests {
         use ferrite_wire::mse::EncryptionMode;
         let config = ClientBuilder::new()
             .encryption_mode(EncryptionMode::Forced)
-            .into_config();
+            .into_settings();
         assert_eq!(config.encryption_mode, EncryptionMode::Forced);
     }
 
     #[test]
     fn client_builder_utp_config() {
         // Default: uTP enabled
-        let config = ClientBuilder::new().into_config();
+        let config = ClientBuilder::new().into_settings();
         assert!(config.enable_utp);
 
         // Explicitly disabled
-        let config = ClientBuilder::new().enable_utp(false).into_config();
+        let config = ClientBuilder::new().enable_utp(false).into_settings();
         assert!(!config.enable_utp);
     }
 
     #[test]
     fn client_builder_super_seeding_config() {
         // Default: super seeding disabled
-        let config = ClientBuilder::new().into_config();
+        let config = ClientBuilder::new().into_settings();
         assert!(!config.default_super_seeding);
         assert!(config.upload_only_announce);
         assert_eq!(config.have_send_delay_ms, 0);
@@ -456,7 +456,7 @@ mod tests {
             .super_seeding(true)
             .upload_only_announce(false)
             .have_send_delay_ms(500)
-            .into_config();
+            .into_settings();
         assert!(config.default_super_seeding);
         assert!(!config.upload_only_announce);
         assert_eq!(config.have_send_delay_ms, 500);
@@ -465,18 +465,18 @@ mod tests {
     #[test]
     fn client_builder_web_seed_config() {
         // Default: web seed enabled
-        let config = ClientBuilder::new().into_config();
+        let config = ClientBuilder::new().into_settings();
         assert!(config.enable_web_seed);
 
         // Explicitly disabled
-        let config = ClientBuilder::new().enable_web_seed(false).into_config();
+        let config = ClientBuilder::new().enable_web_seed(false).into_settings();
         assert!(!config.enable_web_seed);
     }
 
     #[test]
     fn client_builder_smart_ban_config() {
         // Defaults
-        let config = ClientBuilder::new().into_config();
+        let config = ClientBuilder::new().into_settings();
         assert_eq!(config.smart_ban_max_failures, 3);
         assert!(config.smart_ban_parole);
 
@@ -484,7 +484,7 @@ mod tests {
         let config = ClientBuilder::new()
             .smart_ban_max_failures(5)
             .smart_ban_parole(false)
-            .into_config();
+            .into_settings();
         assert_eq!(config.smart_ban_max_failures, 5);
         assert!(!config.smart_ban_parole);
     }
@@ -511,7 +511,7 @@ mod tests {
             .force_proxy(true)
             .anonymous_mode(true)
             .apply_ip_filter_to_trackers(false)
-            .into_config();
+            .into_settings();
 
         assert_eq!(config.proxy.proxy_type, ferrite_session::ProxyType::Socks5Password);
         assert_eq!(config.proxy.hostname, "localhost");

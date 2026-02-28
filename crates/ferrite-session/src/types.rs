@@ -317,175 +317,6 @@ pub struct TorrentInfo {
     pub private: bool,
 }
 
-/// Configuration for a multi-torrent session.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    pub listen_port: u16,
-    pub download_dir: PathBuf,
-    pub max_torrents: usize,
-    pub enable_dht: bool,
-    pub enable_pex: bool,
-    pub enable_lsd: bool,
-    pub enable_fast_extension: bool,
-    pub seed_ratio_limit: Option<f64>,
-    /// Directory for resume data files. Defaults to `<download_dir>/.ferrite/`.
-    pub resume_data_dir: Option<std::path::PathBuf>,
-    /// Global upload rate limit in bytes/sec (0 = unlimited).
-    pub upload_rate_limit: u64,
-    /// Global download rate limit in bytes/sec (0 = unlimited).
-    pub download_rate_limit: u64,
-    /// Automatically adjust unchoke slot count based on upload capacity.
-    pub auto_upload_slots: bool,
-    /// Minimum unchoke slots when auto-tuning.
-    pub auto_upload_slots_min: usize,
-    /// Maximum unchoke slots when auto-tuning.
-    pub auto_upload_slots_max: usize,
-    /// Bitmask of alert categories to deliver (default: all).
-    pub alert_mask: crate::alert::AlertCategory,
-    /// Capacity of the alert broadcast channel (default: 1024).
-    pub alert_channel_size: usize,
-    /// Max concurrent auto-managed downloading torrents (-1 = unlimited).
-    pub active_downloads: i32,
-    /// Max concurrent auto-managed seeding torrents (-1 = unlimited).
-    pub active_seeds: i32,
-    /// Hard cap on all active auto-managed torrents (-1 = unlimited).
-    pub active_limit: i32,
-    /// Max concurrent hash-check operations.
-    pub active_checking: i32,
-    /// Exempt inactive torrents from active_downloads/active_seeds limits.
-    pub dont_count_slow_torrents: bool,
-    /// Bytes/sec threshold — downloading torrent below this is "inactive".
-    pub inactive_down_rate: u64,
-    /// Bytes/sec threshold — seeding torrent below this is "inactive".
-    pub inactive_up_rate: u64,
-    /// Seconds between queue evaluations.
-    pub auto_manage_interval: u64,
-    /// Grace period: torrent counts as active regardless of speed for this many seconds after start.
-    pub auto_manage_startup: u64,
-    /// When true, seeding slots are allocated before download slots.
-    pub auto_manage_prefer_seeds: bool,
-    /// Connection encryption mode (MSE/PE).
-    pub encryption_mode: ferrite_wire::mse::EncryptionMode,
-    /// Enable uTP (micro Transport Protocol) for peer connections.
-    pub enable_utp: bool,
-    /// Enable UPnP IGD port mapping.
-    pub enable_upnp: bool,
-    /// Enable NAT-PMP / PCP port mapping.
-    pub enable_natpmp: bool,
-    /// Enable IPv6 dual-stack (listeners, DHT, PEX). Default: true.
-    pub enable_ipv6: bool,
-    /// Enable HTTP/web seeding (BEP 19, BEP 17). Default: true.
-    pub enable_web_seed: bool,
-    /// BEP 16: enable super seeding by default for new torrents.
-    pub default_super_seeding: bool,
-    /// BEP 21: advertise upload-only status when seeding.
-    pub upload_only_announce: bool,
-    /// Batched Have: buffer Have messages for this many ms (0 = disabled).
-    pub have_send_delay_ms: u64,
-    /// Smart banning: hash-failure involvements before auto-ban (default: 3).
-    pub smart_ban_max_failures: u32,
-    /// Smart banning: use parole to isolate offending peer before striking (default: true).
-    pub smart_ban_parole: bool,
-    /// Number of concurrent disk I/O threads (default: 4).
-    pub disk_io_threads: usize,
-    /// Storage allocation mode (default: Auto).
-    pub storage_mode: ferrite_core::StorageMode,
-    /// Total disk cache size in bytes (default: 64 MiB).
-    pub disk_cache_size: usize,
-    /// Fraction of disk cache reserved for write buffering (default: 0.25).
-    pub disk_write_cache_ratio: f32,
-    /// Number of concurrent piece hash verifications (default: 2).
-    pub hashing_threads: usize,
-    /// Maximum per-peer request queue depth (ceiling for BDP-based sizing).
-    pub max_request_queue_depth: usize,
-    /// Target seconds of data in-flight (request_queue_time × rate = queue bytes).
-    pub request_queue_time: f64,
-    /// Seconds before a block request is considered timed out.
-    pub block_request_timeout_secs: u32,
-    /// Maximum concurrent FileStream readers (semaphore permits).
-    pub max_concurrent_stream_reads: usize,
-    /// Check tracker IP addresses against the IP filter (default: true).
-    pub apply_ip_filter_to_trackers: bool,
-    /// Proxy configuration for peer and tracker connections.
-    pub proxy: crate::proxy::ProxyConfig,
-    /// When true, all connections must go through the proxy.
-    /// Disables listen sockets, UPnP, NAT-PMP, DHT, and LSD.
-    pub force_proxy: bool,
-    /// When true, suppress identifying information (user-agent, client version)
-    /// and disable DHT, LSD, UPnP, NAT-PMP.
-    pub anonymous_mode: bool,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            listen_port: 6881,
-            download_dir: PathBuf::from("."),
-            max_torrents: 100,
-            enable_dht: true,
-            enable_pex: true,
-            enable_lsd: true,
-            enable_fast_extension: true,
-            seed_ratio_limit: None,
-            resume_data_dir: None,
-            upload_rate_limit: 0,
-            download_rate_limit: 0,
-            auto_upload_slots: true,
-            auto_upload_slots_min: 2,
-            auto_upload_slots_max: 20,
-            alert_mask: crate::alert::AlertCategory::ALL,
-            alert_channel_size: 1024,
-            active_downloads: 3,
-            active_seeds: 5,
-            active_limit: 500,
-            active_checking: 1,
-            dont_count_slow_torrents: true,
-            inactive_down_rate: 2048,
-            inactive_up_rate: 2048,
-            auto_manage_interval: 30,
-            auto_manage_startup: 60,
-            auto_manage_prefer_seeds: false,
-            encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
-            enable_utp: true,
-            enable_upnp: true,
-            enable_natpmp: true,
-            enable_ipv6: true,
-            enable_web_seed: true,
-            default_super_seeding: false,
-            upload_only_announce: true,
-            have_send_delay_ms: 0,
-            smart_ban_max_failures: 3,
-            smart_ban_parole: true,
-            disk_io_threads: 4,
-            storage_mode: ferrite_core::StorageMode::Auto,
-            disk_cache_size: 64 * 1024 * 1024,
-            disk_write_cache_ratio: 0.25,
-            hashing_threads: 2,
-            max_request_queue_depth: 250,
-            request_queue_time: 3.0,
-            block_request_timeout_secs: 60,
-            max_concurrent_stream_reads: 8,
-            apply_ip_filter_to_trackers: true,
-            proxy: crate::proxy::ProxyConfig::default(),
-            force_proxy: false,
-            anonymous_mode: false,
-        }
-    }
-}
-
-impl SessionConfig {
-    /// Build a `DiskConfig` from the session-level disk I/O settings.
-    pub fn to_disk_config(&self) -> crate::disk::DiskConfig {
-        crate::disk::DiskConfig {
-            io_threads: self.disk_io_threads,
-            storage_mode: self.storage_mode,
-            cache_size: self.disk_cache_size,
-            write_cache_ratio: self.disk_write_cache_ratio,
-            ..crate::disk::DiskConfig::default()
-        }
-    }
-}
-
 /// Aggregate statistics for the whole session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStats {
@@ -520,53 +351,9 @@ mod tests {
     }
 
     #[test]
-    fn session_config_alert_defaults() {
-        let config = SessionConfig::default();
-        assert_eq!(config.alert_mask, crate::alert::AlertCategory::ALL);
-        assert_eq!(config.alert_channel_size, 1024);
-    }
-
-    #[test]
-    fn session_config_bandwidth_defaults() {
-        let config = SessionConfig::default();
-        assert_eq!(config.upload_rate_limit, 0);
-        assert_eq!(config.download_rate_limit, 0);
-        assert!(config.auto_upload_slots);
-        assert_eq!(config.auto_upload_slots_min, 2);
-        assert_eq!(config.auto_upload_slots_max, 20);
-    }
-
-    #[test]
-    fn session_config_encryption_default() {
-        let cfg = SessionConfig::default();
-        assert_eq!(cfg.encryption_mode, ferrite_wire::mse::EncryptionMode::Enabled);
-    }
-
-    #[test]
     fn torrent_config_encryption_default() {
         let cfg = TorrentConfig::default();
         assert_eq!(cfg.encryption_mode, ferrite_wire::mse::EncryptionMode::Enabled);
-    }
-
-    #[test]
-    fn session_config_queue_defaults() {
-        let cfg = SessionConfig::default();
-        assert_eq!(cfg.active_downloads, 3);
-        assert_eq!(cfg.active_seeds, 5);
-        assert_eq!(cfg.active_limit, 500);
-        assert_eq!(cfg.active_checking, 1);
-        assert!(cfg.dont_count_slow_torrents);
-        assert_eq!(cfg.inactive_down_rate, 2048);
-        assert_eq!(cfg.inactive_up_rate, 2048);
-        assert_eq!(cfg.auto_manage_interval, 30);
-        assert_eq!(cfg.auto_manage_startup, 60);
-        assert!(!cfg.auto_manage_prefer_seeds);
-    }
-
-    #[test]
-    fn session_config_utp_default() {
-        let cfg = SessionConfig::default();
-        assert!(cfg.enable_utp);
     }
 
     #[test]
@@ -580,12 +367,6 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert!(cfg.enable_web_seed);
         assert_eq!(cfg.max_web_seeds, 4);
-    }
-
-    #[test]
-    fn session_config_web_seed_default() {
-        let cfg = SessionConfig::default();
-        assert!(cfg.enable_web_seed);
     }
 
     #[test]
@@ -612,12 +393,4 @@ mod tests {
         assert!(cfg.streaming_timeout_escalation);
     }
 
-    #[test]
-    fn session_config_pipeline_defaults() {
-        let cfg = SessionConfig::default();
-        assert_eq!(cfg.max_request_queue_depth, 250);
-        assert!((cfg.request_queue_time - 3.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.block_request_timeout_secs, 60);
-        assert_eq!(cfg.max_concurrent_stream_reads, 8);
-    }
 }

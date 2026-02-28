@@ -4963,8 +4963,8 @@ mod tests {
 
     #[test]
     fn hashing_threads_config_default() {
-        let sc = crate::types::SessionConfig::default();
-        assert_eq!(sc.hashing_threads, 2);
+        let s = crate::settings::Settings::default();
+        assert_eq!(s.hashing_threads, 2);
         let tc = TorrentConfig::default();
         assert_eq!(tc.hashing_threads, 2);
     }

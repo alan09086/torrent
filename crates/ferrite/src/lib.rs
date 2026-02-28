@@ -193,7 +193,7 @@ mod tests {
             .enable_fast_extension(true)
             .seed_ratio_limit(2.0);
 
-        let config = builder.into_config();
+        let config = builder.into_settings();
         assert_eq!(config.listen_port, 6882);
         assert_eq!(config.download_dir, std::path::PathBuf::from("/tmp/test"));
         assert_eq!(config.max_torrents, 50);
@@ -340,7 +340,7 @@ mod tests {
             .auto_manage_interval(60)
             .auto_manage_startup(120)
             .auto_manage_prefer_seeds(true);
-        let config = builder.into_config();
+        let config = builder.into_settings();
         assert_eq!(config.active_downloads, 5);
         assert_eq!(config.active_seeds, 10);
         assert_eq!(config.active_limit, 100);
@@ -533,11 +533,11 @@ mod tests {
     #[test]
     fn client_builder_ipv6_config() {
         // Default: IPv6 enabled
-        let config = crate::ClientBuilder::new().into_config();
+        let config = crate::ClientBuilder::new().into_settings();
         assert!(config.enable_ipv6);
 
         // Explicitly disabled
-        let config = crate::ClientBuilder::new().enable_ipv6(false).into_config();
+        let config = crate::ClientBuilder::new().enable_ipv6(false).into_settings();
         assert!(!config.enable_ipv6);
     }
 
@@ -548,7 +548,7 @@ mod tests {
             .request_queue_time(5.0)
             .block_request_timeout_secs(30)
             .max_concurrent_stream_reads(4)
-            .into_config();
+            .into_settings();
         assert_eq!(config.max_request_queue_depth, 100);
         assert!((config.request_queue_time - 5.0).abs() < f64::EPSILON);
         assert_eq!(config.block_request_timeout_secs, 30);
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn client_builder_nat_config() {
         // Defaults: both enabled
-        let config = crate::ClientBuilder::new().into_config();
+        let config = crate::ClientBuilder::new().into_settings();
         assert!(config.enable_upnp);
         assert!(config.enable_natpmp);
 
@@ -573,7 +573,7 @@ mod tests {
         let config = crate::ClientBuilder::new()
             .enable_upnp(false)
             .enable_natpmp(false)
-            .into_config();
+            .into_settings();
         assert!(!config.enable_upnp);
         assert!(!config.enable_natpmp);
     }

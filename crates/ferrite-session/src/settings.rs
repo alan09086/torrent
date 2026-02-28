@@ -456,17 +456,19 @@ impl From<&Settings> for crate::ban::BanConfig {
 
 impl Settings {
     pub(crate) fn to_dht_config(&self) -> ferrite_dht::DhtConfig {
-        let mut config = ferrite_dht::DhtConfig::default();
-        config.queries_per_second = self.dht_queries_per_second;
-        config.query_timeout = std::time::Duration::from_secs(self.dht_query_timeout_secs);
-        config
+        ferrite_dht::DhtConfig {
+            queries_per_second: self.dht_queries_per_second,
+            query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
+            ..ferrite_dht::DhtConfig::default()
+        }
     }
 
     pub(crate) fn to_dht_config_v6(&self) -> ferrite_dht::DhtConfig {
-        let mut config = ferrite_dht::DhtConfig::default_v6();
-        config.queries_per_second = self.dht_queries_per_second;
-        config.query_timeout = std::time::Duration::from_secs(self.dht_query_timeout_secs);
-        config
+        ferrite_dht::DhtConfig {
+            queries_per_second: self.dht_queries_per_second,
+            query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
+            ..ferrite_dht::DhtConfig::default_v6()
+        }
     }
 
     pub(crate) fn to_nat_config(&self) -> ferrite_nat::NatConfig {

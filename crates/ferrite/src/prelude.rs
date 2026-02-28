@@ -33,6 +33,9 @@ pub use crate::core::FilePriority;
 // Encryption mode (M17)
 pub use crate::wire::mse::EncryptionMode;
 
+// Settings pack (M31)
+pub use crate::session::Settings;
+
 // Smart banning (M25)
 pub use crate::session::BanConfig;
 

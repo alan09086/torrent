@@ -5,7 +5,7 @@
 pub use ferrite_session::{
     // Session manager
     SessionHandle,
-    SessionConfig,
+    Settings,
     SessionStats,
     // Torrent handle and state
     TorrentHandle,
