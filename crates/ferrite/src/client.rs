@@ -291,6 +291,40 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the proxy configuration for peer and tracker connections.
+    pub fn proxy(mut self, proxy: ferrite_session::ProxyConfig) -> Self {
+        self.config.proxy = proxy;
+        self
+    }
+
+    /// Enable force proxy mode.
+    ///
+    /// When enabled, all connections must go through the configured proxy.
+    /// Disables listen sockets, UPnP, NAT-PMP, DHT, and LSD.
+    /// Fails at start if no proxy is configured.
+    pub fn force_proxy(mut self, v: bool) -> Self {
+        self.config.force_proxy = v;
+        self
+    }
+
+    /// Enable anonymous mode.
+    ///
+    /// Suppresses identifying information (client version in BEP 10
+    /// handshake) and disables DHT, LSD, UPnP, and NAT-PMP.
+    pub fn anonymous_mode(mut self, v: bool) -> Self {
+        self.config.anonymous_mode = v;
+        self
+    }
+
+    /// Set whether the IP filter applies to tracker connections.
+    ///
+    /// When true (default), tracker IP addresses are checked against
+    /// the IP filter. When false, trackers are exempt.
+    pub fn apply_ip_filter_to_trackers(mut self, v: bool) -> Self {
+        self.config.apply_ip_filter_to_trackers = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
@@ -461,5 +495,45 @@ mod tests {
         let _cfg = ferrite_session::BanConfig::default();
         assert_eq!(_cfg.max_failures, 3);
         assert!(_cfg.use_parole);
+    }
+
+    #[test]
+    fn client_builder_proxy_config() {
+        let config = ClientBuilder::new()
+            .proxy(ferrite_session::ProxyConfig {
+                proxy_type: ferrite_session::ProxyType::Socks5Password,
+                hostname: "localhost".into(),
+                port: 9050,
+                username: Some("user".into()),
+                password: Some("pass".into()),
+                ..Default::default()
+            })
+            .force_proxy(true)
+            .anonymous_mode(true)
+            .apply_ip_filter_to_trackers(false)
+            .into_config();
+
+        assert_eq!(config.proxy.proxy_type, ferrite_session::ProxyType::Socks5Password);
+        assert_eq!(config.proxy.hostname, "localhost");
+        assert_eq!(config.proxy.port, 9050);
+        assert!(config.force_proxy);
+        assert!(config.anonymous_mode);
+        assert!(!config.apply_ip_filter_to_trackers);
+    }
+
+    #[test]
+    fn facade_ip_filter_reexport() {
+        // Verify IpFilter, ProxyConfig, ProxyType are accessible via facade
+        let mut filter = ferrite_session::IpFilter::new();
+        filter.add_rule(
+            "203.0.113.0".parse().unwrap(),
+            "203.0.113.255".parse().unwrap(),
+            1,
+        );
+        assert!(filter.is_blocked("203.0.113.42".parse().unwrap()));
+        assert!(!filter.is_blocked("198.51.100.1".parse().unwrap()));
+
+        let _proxy = ferrite_session::ProxyConfig::default();
+        assert_eq!(_proxy.proxy_type, ferrite_session::ProxyType::None);
     }
 }

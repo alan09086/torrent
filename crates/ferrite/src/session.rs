@@ -36,6 +36,15 @@ pub use ferrite_session::{
     TrackerStatus,
     // File streaming (M28)
     FileStream,
+    // IP filtering (M29)
+    IpFilter,
+    IpFilterError,
+    PortFilter,
+    parse_dat,
+    parse_p2p,
+    // Proxy support (M29)
+    ProxyType,
+    ProxyConfig,
     // Disk I/O (M26)
     DiskConfig,
     DiskHandle,

@@ -38,3 +38,6 @@ pub use crate::session::BanConfig;
 
 // File streaming (M28)
 pub use crate::session::FileStream;
+
+// IP filtering + proxy (M29)
+pub use crate::session::{IpFilter, ProxyConfig, ProxyType};
