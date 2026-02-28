@@ -515,6 +515,11 @@ async fn handle_command(
         PeerCommand::SendPiece { index, begin, data } => {
             Message::Piece { index, begin, data }
         }
+        PeerCommand::SendExtHandshake(hs) => {
+            let payload = hs.to_bytes().map_err(crate::Error::Wire)?;
+            Message::Extended { ext_id: 0, payload }
+        }
+        PeerCommand::SendBitfield(data) => Message::Bitfield(data),
         PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());

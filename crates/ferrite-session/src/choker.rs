@@ -11,6 +11,8 @@ pub(crate) struct PeerInfo {
     pub upload_rate: u64,
     /// Peer is interested in our data.
     pub interested: bool,
+    /// BEP 21: peer declared upload-only status.
+    pub upload_only: bool,
 }
 
 /// Result of a choking decision.
@@ -110,7 +112,7 @@ impl Choker {
     /// Selects the interested peer with the lowest download rate that is not
     /// already the optimistic peer.
     pub fn rotate_optimistic(&mut self, peers: &[PeerInfo]) {
-        let mut interested: Vec<&PeerInfo> = peers.iter().filter(|p| p.interested).collect();
+        let mut interested: Vec<&PeerInfo> = peers.iter().filter(|p| p.interested && !p.upload_only).collect();
         // Sort ascending by download rate so the first non-optimistic is picked.
         interested.sort_by(|a, b| a.download_rate.cmp(&b.download_rate));
 
@@ -131,17 +133,17 @@ impl Choker {
     ) -> Option<SocketAddr> {
         // Keep existing optimistic peer if it qualifies.
         if let Some(opt) = self.optimistic_peer {
-            let still_interested = interested.iter().any(|p| p.addr == opt);
+            let still_interested = interested.iter().any(|p| p.addr == opt && !p.upload_only);
             let already_regular = regular_unchokes.contains(&opt);
             if still_interested && !already_regular {
                 return Some(opt);
             }
         }
 
-        // Pick first interested peer not already in regular unchokes.
+        // Pick first interested peer not already in regular unchokes (exclude upload-only).
         interested
             .iter()
-            .find(|p| !regular_unchokes.contains(&p.addr))
+            .find(|p| !regular_unchokes.contains(&p.addr) && !p.upload_only)
             .map(|p| p.addr)
     }
 }
@@ -160,6 +162,7 @@ mod tests {
             download_rate,
             upload_rate: 0,
             interested,
+            upload_only: false,
         }
     }
 
@@ -169,6 +172,7 @@ mod tests {
             download_rate: 0,
             upload_rate,
             interested,
+            upload_only: false,
         }
     }
 
@@ -337,5 +341,66 @@ mod tests {
 
         // Plus one optimistic
         assert_eq!(decision.to_unchoke.len(), 3);
+    }
+
+    #[test]
+    fn upload_only_excluded_from_optimistic() {
+        let mut choker = Choker::new(2);
+        let peers = vec![
+            peer(6881, 500, true),
+            peer(6882, 400, true),
+            // These two are interested but upload-only — should never get optimistic slot
+            PeerInfo {
+                addr: addr(6883),
+                download_rate: 100,
+                upload_rate: 0,
+                interested: true,
+                upload_only: true,
+            },
+            PeerInfo {
+                addr: addr(6884),
+                download_rate: 50,
+                upload_rate: 0,
+                interested: true,
+                upload_only: true,
+            },
+        ];
+
+        let decision = choker.decide(&peers);
+
+        // Regular unchokes: 6881, 6882 (top 2 by rate)
+        // No optimistic: both remaining interested peers are upload-only
+        assert_eq!(decision.to_unchoke.len(), 2);
+        assert!(decision.to_unchoke.contains(&addr(6881)));
+        assert!(decision.to_unchoke.contains(&addr(6882)));
+
+        // Upload-only peers are choked
+        assert!(decision.to_choke.contains(&addr(6883)));
+        assert!(decision.to_choke.contains(&addr(6884)));
+    }
+
+    #[test]
+    fn upload_only_still_regular_unchoked() {
+        // In seed mode, upload-only peers can earn regular unchoke by upload rate
+        let mut choker = Choker::new(2);
+        choker.set_seed_mode(true);
+
+        let peers = vec![
+            PeerInfo {
+                addr: addr(6881),
+                download_rate: 0,
+                upload_rate: 500,
+                interested: true,
+                upload_only: true, // upload-only but high upload rate
+            },
+            seed_peer(6882, 300, true),
+            seed_peer(6883, 100, true),
+        ];
+
+        let decision = choker.decide(&peers);
+
+        // Upload-only peer at 6881 has highest upload rate, should be in regular unchokes
+        assert!(decision.to_unchoke.contains(&addr(6881)));
+        assert!(decision.to_unchoke.contains(&addr(6882)));
     }
 }

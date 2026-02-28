@@ -25,6 +25,9 @@ pub struct ExtHandshake {
     /// Total size of metadata (for ut_metadata).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_size: Option<u64>,
+    /// BEP 21: upload-only flag (1 = seeder, 0 or absent = leecher).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_only: Option<u8>,
 }
 
 impl ExtHandshake {
@@ -40,7 +43,20 @@ impl ExtHandshake {
             p: None,
             reqq: Some(250),
             metadata_size: None,
+            upload_only: None,
         }
+    }
+
+    /// Create a handshake advertising upload-only (BEP 21 seeder) status.
+    pub fn new_upload_only() -> Self {
+        let mut hs = Self::new();
+        hs.upload_only = Some(1);
+        hs
+    }
+
+    /// Returns true if the peer declared BEP 21 upload-only status.
+    pub fn is_upload_only(&self) -> bool {
+        self.upload_only.unwrap_or(0) != 0
     }
 
     /// Encode to bencode bytes.
@@ -235,6 +251,23 @@ mod tests {
         assert_eq!(hs.ext_id("ut_metadata"), Some(1));
         assert_eq!(hs.ext_id("ut_pex"), Some(2));
         assert_eq!(hs.ext_id("unknown"), None);
+    }
+
+    #[test]
+    fn ext_handshake_upload_only_round_trip() {
+        let hs = ExtHandshake::new_upload_only();
+        assert!(hs.is_upload_only());
+        let bytes = hs.to_bytes().unwrap();
+        let parsed = ExtHandshake::from_bytes(&bytes).unwrap();
+        assert!(parsed.is_upload_only());
+        assert_eq!(parsed.upload_only, Some(1));
+    }
+
+    #[test]
+    fn ext_handshake_no_upload_only_default() {
+        let hs = ExtHandshake::new();
+        assert!(!hs.is_upload_only());
+        assert_eq!(hs.upload_only, None);
     }
 
     #[test]

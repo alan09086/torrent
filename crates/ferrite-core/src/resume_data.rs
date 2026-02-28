@@ -170,6 +170,11 @@ pub struct FastResumeData {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub info: Option<Vec<u8>>,
 
+    /// BEP 16: whether super seeding was enabled.
+    #[serde(rename = "super_seeding")]
+    #[serde(default)]
+    pub super_seeding: i64,
+
     /// BEP 19 web seed URLs (GetRight-style).
     #[serde(rename = "url_seeds")]
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -216,6 +221,7 @@ impl FastResumeData {
             download_rate_limit: -1,
             max_connections: -1,
             max_uploads: -1,
+            super_seeding: 0,
             info: None,
             url_seeds: Vec::new(),
             http_seeds: Vec::new(),
@@ -377,6 +383,24 @@ mod tests {
         let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
         let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
         assert_eq!(decoded.http_seeds, resume.http_seeds);
+    }
+
+    #[test]
+    fn resume_data_super_seeding_round_trip() {
+        let mut resume = FastResumeData::new(
+            vec![0xFF; 20],
+            "super-seed-test".into(),
+            "/downloads".into(),
+        );
+        resume.super_seeding = 1;
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.super_seeding, 1);
+
+        // Default should be 0
+        let default_resume = FastResumeData::new(vec![0; 20], "test".into(), "/tmp".into());
+        assert_eq!(default_resume.super_seeding, 0);
     }
 
     #[test]

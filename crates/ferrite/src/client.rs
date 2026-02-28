@@ -198,6 +198,34 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable BEP 16 super seeding for new torrents.
+    ///
+    /// Super seeding reveals pieces one-per-peer to maximize piece diversity
+    /// across the swarm. Most useful for initial seeders. Default: false.
+    pub fn super_seeding(mut self, v: bool) -> Self {
+        self.config.default_super_seeding = v;
+        self
+    }
+
+    /// Enable or disable BEP 21 upload-only announcement.
+    ///
+    /// When enabled, the client advertises upload-only status via the
+    /// extension handshake when a torrent transitions to seeding. Default: true.
+    pub fn upload_only_announce(mut self, v: bool) -> Self {
+        self.config.upload_only_announce = v;
+        self
+    }
+
+    /// Set the Have message batching delay in milliseconds.
+    ///
+    /// When > 0, Have messages are buffered and sent in batches at this interval.
+    /// If the batch exceeds 50% of total pieces, a full Bitfield is sent instead.
+    /// Default: 0 (immediate, no batching).
+    pub fn have_send_delay_ms(mut self, ms: u64) -> Self {
+        self.config.have_send_delay_ms = ms;
+        self
+    }
+
     /// Consume the builder and return the underlying `SessionConfig`.
     pub fn into_config(self) -> SessionConfig {
         self.config
@@ -314,6 +342,25 @@ mod tests {
         // Explicitly disabled
         let config = ClientBuilder::new().enable_utp(false).into_config();
         assert!(!config.enable_utp);
+    }
+
+    #[test]
+    fn client_builder_super_seeding_config() {
+        // Default: super seeding disabled
+        let config = ClientBuilder::new().into_config();
+        assert!(!config.default_super_seeding);
+        assert!(config.upload_only_announce);
+        assert_eq!(config.have_send_delay_ms, 0);
+
+        // Explicitly enabled
+        let config = ClientBuilder::new()
+            .super_seeding(true)
+            .upload_only_announce(false)
+            .have_send_delay_ms(500)
+            .into_config();
+        assert!(config.default_super_seeding);
+        assert!(!config.upload_only_announce);
+        assert_eq!(config.have_send_delay_ms, 500);
     }
 
     #[test]

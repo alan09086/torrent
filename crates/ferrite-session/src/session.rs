@@ -736,6 +736,9 @@ impl SessionActor {
             enable_utp: self.config.enable_utp,
             enable_web_seed: self.config.enable_web_seed,
             max_web_seeds: 4,
+            super_seeding: self.config.default_super_seeding,
+            upload_only_announce: self.config.upload_only_announce,
+            have_send_delay_ms: self.config.have_send_delay_ms,
         }
     }
 
@@ -1387,6 +1390,9 @@ mod tests {
             enable_natpmp: false,
             enable_ipv6: false,
             enable_web_seed: true,
+            default_super_seeding: false,
+            upload_only_announce: true,
+            have_send_delay_ms: 0,
         }
     }
 

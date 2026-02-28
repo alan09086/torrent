@@ -40,6 +40,10 @@ pub(crate) struct PeerState {
     pub supports_fast: bool,
     /// Set of piece indices the peer is allowed to request while choked.
     pub allowed_fast: HashSet<u32>,
+    /// BEP 21: peer declared upload-only status.
+    pub upload_only: bool,
+    /// BEP 16: piece index we revealed to this peer in super-seed mode.
+    pub super_seed_assigned: Option<u32>,
     /// Channel to send commands to this peer's task.
     pub cmd_tx: mpsc::Sender<PeerCommand>,
 }
@@ -63,6 +67,8 @@ impl PeerState {
             ext_handshake: None,
             supports_fast: false,
             allowed_fast: HashSet::new(),
+            upload_only: false,
+            super_seed_assigned: None,
             cmd_tx,
         }
     }

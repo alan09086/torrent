@@ -133,6 +133,13 @@ impl TorrentHandle {
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
         let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
 
+        let super_seed = if config.super_seeding {
+            Some(crate::super_seed::SuperSeedState::new())
+        } else {
+            None
+        };
+        let have_buffer = crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -176,6 +183,8 @@ impl TorrentHandle {
             web_seeds: HashMap::new(),
             banned_web_seeds: HashSet::new(),
             web_seed_in_flight: HashMap::new(),
+            super_seed,
+            have_buffer,
         };
 
         tokio::spawn(actor.run());
@@ -248,6 +257,13 @@ impl TorrentHandle {
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
         let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
 
+        let super_seed = if config.super_seeding {
+            Some(crate::super_seed::SuperSeedState::new())
+        } else {
+            None
+        };
+        let have_buffer = crate::have_buffer::HaveBuffer::new(0, config.have_send_delay_ms);
+
         let actor = TorrentActor {
             config,
             info_hash: magnet.info_hash,
@@ -291,6 +307,8 @@ impl TorrentHandle {
             web_seeds: HashMap::new(),
             banned_web_seeds: HashSet::new(),
             web_seed_in_flight: HashMap::new(),
+            super_seed,
+            have_buffer,
         };
 
         tokio::spawn(actor.run());
@@ -461,6 +479,11 @@ struct TorrentActor {
     web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
     banned_web_seeds: HashSet<String>,
     web_seed_in_flight: HashMap<u32, String>,
+
+    // BEP 16 super seeding (M23)
+    super_seed: Option<crate::super_seed::SuperSeedState>,
+    // Batched Have (M23)
+    have_buffer: crate::have_buffer::HaveBuffer,
 }
 
 impl TorrentActor {
@@ -492,6 +515,11 @@ impl TorrentActor {
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
         let mut connect_interval = tokio::time::interval(Duration::from_secs(30));
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
+            Some(tokio::time::interval(Duration::from_millis(self.config.have_send_delay_ms)))
+        } else {
+            None
+        };
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
@@ -666,6 +694,15 @@ impl TorrentActor {
                         }
                     }
                 }
+                // Batched Have flush timer
+                _ = async {
+                    match &mut have_flush_interval {
+                        Some(interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.flush_have_buffer().await;
+                }
                 // Rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
                     let elapsed = Duration::from_millis(100);
@@ -821,6 +858,8 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield = bitfield;
                 }
+                // BEP 16: assign a piece in super-seed mode
+                self.assign_next_piece_for_peer(peer_addr).await;
                 // Check if we're interested in this peer
                 self.maybe_express_interest(peer_addr).await;
                 self.request_pieces_from_peer(peer_addr).await;
@@ -829,6 +868,12 @@ impl TorrentActor {
                 self.piece_selector.increment(index);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield.set(index);
+                }
+                // BEP 16: Have-back detection in super-seed mode
+                if let Some(ref mut ss) = self.super_seed
+                    && ss.peer_reported_have(peer_addr, index)
+                {
+                    self.assign_next_piece_for_peer(peer_addr).await;
                 }
                 self.maybe_express_interest(peer_addr).await;
                 self.request_pieces_from_peer(peer_addr).await;
@@ -883,6 +928,8 @@ impl TorrentActor {
                     }
                 }
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    // BEP 21: mark upload-only peers
+                    peer.upload_only = handshake.is_upload_only();
                     peer.ext_handshake = Some(handshake);
                 }
             }
@@ -962,6 +1009,10 @@ impl TorrentActor {
                     addr: peer_addr,
                     reason: reason.clone(),
                 });
+                // BEP 16: clean up super-seed assignment
+                if let Some(ref mut ss) = self.super_seed {
+                    ss.peer_disconnected(peer_addr);
+                }
                 if let Some(peer) = self.peers.remove(&peer_addr) {
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
@@ -1088,6 +1139,9 @@ impl TorrentActor {
         if verified_count == self.num_pieces {
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
+            // BEP 21: broadcast upload-only at startup if already seeding
+            // (peers haven't connected yet, so this is a no-op in practice,
+            // but matches the seeding transition logic for consistency)
             info!("all pieces verified, starting as seeder");
         }
     }
@@ -1119,6 +1173,7 @@ impl TorrentActor {
 
         rd.paused = if self.state == TorrentState::Paused { 1 } else { 0 };
         rd.seed_mode = if self.state == TorrentState::Seeding { 1 } else { 0 };
+        rd.super_seeding = if self.super_seed.is_some() { 1 } else { 0 };
 
         // Collect tracker URLs from torrent metadata
         if let Some(ref meta) = self.meta {
@@ -1198,9 +1253,18 @@ impl TorrentActor {
                 piece: index,
             });
 
-            // Broadcast Have to all peers
-            for peer in self.peers.values() {
-                let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+            // Broadcast Have to all peers (skip in super-seed mode)
+            if self.super_seed.is_none() {
+                if self.have_buffer.is_enabled() {
+                    self.have_buffer.push(index);
+                } else {
+                    // Immediate mode — with redundancy elimination
+                    for peer in self.peers.values() {
+                        if !peer.bitfield.get(index) {
+                            let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                        }
+                    }
+                }
             }
 
             // Check if download is complete
@@ -1214,6 +1278,13 @@ impl TorrentActor {
                 self.end_game.deactivate();
                 self.transition_state(TorrentState::Seeding);
                 self.choker.set_seed_mode(true);
+                // BEP 21: broadcast upload-only status
+                if self.config.upload_only_announce {
+                    let hs = ferrite_wire::ExtHandshake::new_upload_only();
+                    for peer in self.peers.values() {
+                        let _ = peer.cmd_tx.send(PeerCommand::SendExtHandshake(hs.clone())).await;
+                    }
+                }
                 // Announce completion to trackers
                 let result = self
                     .tracker_manager
@@ -1236,6 +1307,34 @@ impl TorrentActor {
                 self.end_game.deactivate();
                 info!(index, "end-game deactivated due to hash failure");
             }
+        }
+    }
+
+    /// Flush the batched Have buffer, sending accumulated Haves or a full bitfield.
+    async fn flush_have_buffer(&mut self) {
+        let ct = match &self.chunk_tracker {
+            Some(ct) => ct,
+            None => return,
+        };
+
+        let result = self.have_buffer.flush(ct.bitfield());
+        match result {
+            Some(crate::have_buffer::FlushResult::SendHaves(pieces)) => {
+                for peer in self.peers.values() {
+                    for &idx in &pieces {
+                        if !peer.bitfield.get(idx) {
+                            let _ = peer.cmd_tx.send(PeerCommand::Have(idx)).await;
+                        }
+                    }
+                }
+            }
+            Some(crate::have_buffer::FlushResult::SendBitfield(bf)) => {
+                let data = Bytes::copy_from_slice(bf.as_bytes());
+                for peer in self.peers.values() {
+                    let _ = peer.cmd_tx.send(PeerCommand::SendBitfield(data.clone())).await;
+                }
+            }
+            None => {}
         }
     }
 
@@ -1553,7 +1652,7 @@ impl TorrentActor {
         let can_request = self
             .peers
             .get(&peer_addr)
-            .is_some_and(|p| !p.peer_choking && p.pending_requests.len() < self.config.target_request_queue);
+            .is_some_and(|p| !p.peer_choking && !p.upload_only && p.pending_requests.len() < self.config.target_request_queue);
         if !can_request {
             return;
         }
@@ -1731,6 +1830,7 @@ impl TorrentActor {
                 download_rate: p.download_rate,
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
+                upload_only: p.upload_only,
             })
             .collect();
 
@@ -1866,10 +1966,35 @@ impl TorrentActor {
                 download_rate: p.download_rate,
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
+                upload_only: p.upload_only,
             })
             .collect();
 
         self.choker.rotate_optimistic(&peer_infos);
+    }
+
+    /// BEP 16: assign the next super-seed piece to a peer.
+    async fn assign_next_piece_for_peer(&mut self, peer_addr: SocketAddr) {
+        let ss = match &mut self.super_seed {
+            Some(ss) => ss,
+            None => return,
+        };
+
+        if ss.has_assignment(&peer_addr) {
+            return;
+        }
+
+        let peer_bitfield = match self.peers.get(&peer_addr) {
+            Some(p) => p.bitfield.clone(),
+            None => return,
+        };
+
+        let availability = self.piece_selector.availability();
+        if let Some(idx) = ss.assign_piece(peer_addr, &peer_bitfield, availability, self.num_pieces)
+            && let Some(peer) = self.peers.get(&peer_addr)
+        {
+            let _ = peer.cmd_tx.send(PeerCommand::Have(idx)).await;
+        }
     }
 
     // ----- Peer connectivity -----
@@ -1886,11 +2011,15 @@ impl TorrentActor {
             }
 
             let (cmd_tx, cmd_rx) = mpsc::channel(64);
-            let bitfield = self
-                .chunk_tracker
-                .as_ref()
-                .map(|ct| ct.bitfield().clone())
-                .unwrap_or_else(|| Bitfield::new(self.num_pieces));
+            let bitfield = if self.super_seed.is_some() {
+                // Super seeding: send empty bitfield to hide our pieces
+                Bitfield::new(self.num_pieces)
+            } else {
+                self.chunk_tracker
+                    .as_ref()
+                    .map(|ct| ct.bitfield().clone())
+                    .unwrap_or_else(|| Bitfield::new(self.num_pieces))
+            };
 
             self.peers
                 .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
@@ -2010,11 +2139,15 @@ impl TorrentActor {
         }
 
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
-        let bitfield = self
-            .chunk_tracker
-            .as_ref()
-            .map(|ct| ct.bitfield().clone())
-            .unwrap_or_else(|| Bitfield::new(self.num_pieces));
+        let bitfield = if self.super_seed.is_some() {
+            // Super seeding: send empty bitfield to hide our pieces
+            Bitfield::new(self.num_pieces)
+        } else {
+            self.chunk_tracker
+                .as_ref()
+                .map(|ct| ct.bitfield().clone())
+                .unwrap_or_else(|| Bitfield::new(self.num_pieces))
+        };
 
         self.peers
             .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx));
@@ -2136,6 +2269,9 @@ mod tests {
             enable_utp: false,
             enable_web_seed: true,
             max_web_seeds: 4,
+            super_seeding: false,
+            upload_only_announce: true,
+            have_send_delay_ms: 0,
         }
     }
 

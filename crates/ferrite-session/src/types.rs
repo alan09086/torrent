@@ -32,6 +32,12 @@ pub struct TorrentConfig {
     pub enable_web_seed: bool,
     /// Maximum concurrent web seed connections.
     pub max_web_seeds: usize,
+    /// BEP 16: super seeding mode — reveal pieces one-per-peer for maximum diversity.
+    pub super_seeding: bool,
+    /// BEP 21: advertise upload-only status via extension handshake when seeding.
+    pub upload_only_announce: bool,
+    /// Batched Have: buffer Have messages for this many ms before sending (0 = disabled).
+    pub have_send_delay_ms: u64,
 }
 
 impl Default for TorrentConfig {
@@ -52,6 +58,9 @@ impl Default for TorrentConfig {
             enable_utp: true,
             enable_web_seed: true,
             max_web_seeds: 4,
+            super_seeding: false,
+            upload_only_announce: true,
+            have_send_delay_ms: 0,
         }
     }
 }
@@ -171,6 +180,10 @@ pub(crate) enum PeerCommand {
     RejectRequest { index: u32, begin: u32, length: u32 },
     AllowedFast(u32),
     SendPiece { index: u32, begin: u32, data: Bytes },
+    /// Send an updated extension handshake (e.g. BEP 21 upload-only).
+    SendExtHandshake(ferrite_wire::ExtHandshake),
+    /// Send a full bitfield mid-connection (batched Have fallback).
+    SendBitfield(Bytes),
     Shutdown,
 }
 
@@ -279,6 +292,12 @@ pub struct SessionConfig {
     pub enable_ipv6: bool,
     /// Enable HTTP/web seeding (BEP 19, BEP 17). Default: true.
     pub enable_web_seed: bool,
+    /// BEP 16: enable super seeding by default for new torrents.
+    pub default_super_seeding: bool,
+    /// BEP 21: advertise upload-only status when seeding.
+    pub upload_only_announce: bool,
+    /// Batched Have: buffer Have messages for this many ms (0 = disabled).
+    pub have_send_delay_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -316,6 +335,9 @@ impl Default for SessionConfig {
             enable_natpmp: true,
             enable_ipv6: true,
             enable_web_seed: true,
+            default_super_seeding: false,
+            upload_only_announce: true,
+            have_send_delay_ms: 0,
         }
     }
 }
@@ -420,5 +442,18 @@ mod tests {
     fn session_config_web_seed_default() {
         let cfg = SessionConfig::default();
         assert!(cfg.enable_web_seed);
+    }
+
+    #[test]
+    fn torrent_config_super_seeding_default() {
+        let cfg = TorrentConfig::default();
+        assert!(!cfg.super_seeding);
+        assert!(cfg.upload_only_announce);
+    }
+
+    #[test]
+    fn torrent_config_have_delay_default() {
+        let cfg = TorrentConfig::default();
+        assert_eq!(cfg.have_send_delay_ms, 0);
     }
 }

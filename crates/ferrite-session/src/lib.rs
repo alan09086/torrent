@@ -18,6 +18,8 @@ pub(crate) mod peer;
 pub(crate) mod queue;
 pub(crate) mod utp_routing;
 pub(crate) mod web_seed;
+pub(crate) mod super_seed;
+pub(crate) mod have_buffer;
 mod torrent;
 mod session;
 mod persistence;

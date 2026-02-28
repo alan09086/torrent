@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.24.0 — 2026-02-27
+
+Seeding optimizations — BEP 16 super seeding, BEP 21 upload-only, batched Have. Eleven crates, 599 tests.
+
+### M23: Super Seeding, Upload-Only, Batched Have
+
+### Added
+- BEP 16 super seeding: `SuperSeedState` tracks per-peer piece assignments, reveals rarest pieces one-per-peer for maximum swarm diversity
+- BEP 21 upload-only: `upload_only` field on `ExtHandshake`, `new_upload_only()` constructor, `is_upload_only()` accessor
+- BEP 21 choker integration: upload-only peers excluded from optimistic unchoke slot but can earn regular unchoke by upload rate
+- BEP 21 automatic broadcast: extension handshake with `upload_only=1` sent to all peers when transitioning to seeding
+- Batched Have: `HaveBuffer` accumulates Have messages and flushes on configurable timer; auto-upgrades to full Bitfield when > 50% of pieces pending
+- Redundancy elimination: Have messages not sent to peers that already have the piece (both immediate and batched modes)
+- `super_seeding`, `upload_only_announce`, `have_send_delay_ms` config fields on `TorrentConfig` and `SessionConfig`
+- `PeerCommand::SendExtHandshake` and `PeerCommand::SendBitfield` variants for mid-connection protocol messages
+- `PeerState::upload_only` and `PeerState::super_seed_assigned` tracking fields
+- `super_seeding` field on `FastResumeData` for resume persistence
+- `ClientBuilder::super_seeding()`, `upload_only_announce()`, `have_send_delay_ms()` builder methods
+- 14 new tests across wire, session types, choker, super_seed, have_buffer, resume_data, and facade
+
 ## 0.23.0 — 2026-02-27
 
 HTTP/web seeding support — BEP 19 (GetRight) and BEP 17 (Hoffman). Eleven crates, 585 tests.
