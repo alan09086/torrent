@@ -34,3 +34,6 @@ pub use ferrite_core::FilePriority;
 
 // Address family (M21 IPv6)
 pub use ferrite_core::AddressFamily;
+
+// Storage allocation mode (M26)
+pub use ferrite_core::StorageMode;

@@ -17,7 +17,8 @@ pub use crate::session::{
 pub use crate::core::{Id20, Magnet, TorrentMetaV1};
 
 // Storage
-pub use crate::storage::{TorrentStorage, FilesystemStorage};
+pub use crate::storage::{TorrentStorage, FilesystemStorage, MmapStorage};
+pub use crate::core::StorageMode;
 
 // Unified error
 pub use crate::error::{Error, Result};

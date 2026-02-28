@@ -34,6 +34,12 @@ pub use ferrite_session::{
     // Tracker management (M24)
     TrackerInfo,
     TrackerStatus,
+    // Disk I/O (M26)
+    DiskConfig,
+    DiskHandle,
+    DiskManagerHandle,
+    DiskJobFlags,
+    DiskStats,
     // Error types
     Error,
     Result,

@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.27.0 — 2026-02-28
+
+Async disk I/O with central actor, mmap storage backend, ARC disk cache. Eleven crates, 660 tests.
+
+### M26: Async Disk I/O + mmap Storage + ARC Disk Cache
+
+### Added
+- `StorageMode` enum in ferrite-core: Auto, Sparse, Full (fallocate), Mmap
+- Full pre-allocation mode (`preallocate: bool`) for `FilesystemStorage` using `fallocate` on Linux
+- `MmapStorage` backend using `memmap2` with lazy per-file mmap and multi-file spanning
+- `ArcCache<K, V>` — Adaptive Replacement Cache (Megiddo & Modha 2003) with ghost lists and adaptive parameter
+- `DiskActor` — central tokio task for all disk I/O, receives jobs via bounded mpsc channel
+- `DiskHandle` — per-torrent async API: `write_chunk()`, `read_chunk()`, `verify_piece()`, `flush_piece()`, `move_storage()`
+- `DiskManagerHandle` — session-level API: `register_torrent()`, `unregister_torrent()`, `shutdown()`
+- `DiskConfig` — configurable I/O threads, storage mode, cache size, write cache ratio
+- `DiskJobFlags` bitflags: FORCE_COPY, SEQUENTIAL, VOLATILE_READ, FLUSH_PIECE
+- `DiskStats` — read/write bytes, cache hits/misses, write buffer usage, queued jobs
+- `WriteBuffer` — per-piece write buffering with pressure-based eviction
+- `AlertKind::DiskStatsUpdate(DiskStats)` alert variant
+- `SessionConfig` fields: `disk_io_threads`, `storage_mode`, `disk_cache_size`, `disk_write_cache_ratio`
+- `ClientBuilder` methods: `disk_io_threads()`, `storage_mode()`, `disk_cache_size()`
+- Auto-flush WriteBuffer before piece hash verification
+- Session disk lifecycle: register on add, unregister on remove, shutdown on exit
+- Magnet torrents register storage with disk manager after metadata assembly
+- Facade re-exports: `MmapStorage`, `ArcCache`, `DiskConfig`, `DiskHandle`, `DiskManagerHandle`, `DiskJobFlags`, `DiskStats`, `StorageMode`
+- 23 new tests across storage, cache, disk, and session modules
+
+### Changed
+- `TorrentActor` uses `DiskHandle` instead of `Arc<dyn TorrentStorage>` — all I/O is async through DiskActor
+- `TorrentHandle::from_torrent()` accepts `DiskHandle` + `DiskManagerHandle` instead of `Arc<dyn TorrentStorage>`
+- `TorrentHandle::from_magnet()` accepts `DiskManagerHandle` for post-metadata storage registration
+- `verify_existing_pieces()` is now async (verifies through DiskHandle)
+- Piece reads for upload use async DiskHandle instead of synchronous storage
+
 ## 0.26.0 — 2026-02-28
 
 Smart banning — peer attribution for hash failures, parole mode, session-wide bans. Eleven crates, 637 tests.

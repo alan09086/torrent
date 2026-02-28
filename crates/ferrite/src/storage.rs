@@ -15,6 +15,9 @@ pub use ferrite_storage::{
     // Storage backends
     MemoryStorage,
     FilesystemStorage,
+    MmapStorage,
+    // ARC disk cache
+    ArcCache,
     // Error types
     Error,
     Result,
