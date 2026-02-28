@@ -28,18 +28,18 @@ ferrite              Public facade API
 
 | Crate | Description | Tests |
 |-------|-------------|-------|
-| `ferrite-bencode` | Serde-based bencode serialization | 64 |
-| `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority | 57 |
+| `ferrite-bencode` | Serde-based bencode serialization | 66 |
+| `ferrite-core` | Id20/Id32, TorrentMetaV1, Magnet, Lengths, PeerId, FastResumeData, FilePriority | 65 |
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21 extensions, MSE/PE encryption | 56 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker, TorrentStorage trait | 42 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange | 234 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers exchange, smart banning | 248 |
 | `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 19 |
-| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 29 |
+| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 30 |
 
-**Total: 621 tests, zero clippy warnings.**
+**Total: 637 tests, zero clippy warnings.**
 
 ## Design Decisions
 
