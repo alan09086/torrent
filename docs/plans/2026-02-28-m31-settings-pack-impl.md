@@ -4,7 +4,7 @@
 
 **Goal:** Replace `SessionConfig` with a unified `Settings` struct, add runtime config mutation via `apply_settings()`, presets, validation, and serialization.
 
-**Architecture:** New `settings.rs` in ferrite-session contains the `Settings` struct with all ~55 fields. `SessionConfig` is removed and all references updated. `SessionHandle` gets `settings()`/`apply_settings()` methods. Sub-configs constructed via `From<&Settings>` impls. `ClientBuilder` targets `Settings` directly.
+**Architecture:** New `settings.rs` in ferrite-session contains the `Settings` struct with all 56 fields (50 from SessionConfig + 6 newly surfaced from sub-configs). `SessionConfig` is removed and all references updated. `SessionHandle` gets `settings()`/`apply_settings()` methods. Sub-configs constructed via `From<&Settings>` impls. `ClientBuilder` targets `Settings` directly.
 
 **Tech Stack:** Rust, serde (Serialize/Deserialize), ferrite-bencode (serialization), existing actor command pattern.
 
@@ -15,19 +15,23 @@
 **Files:**
 - Create: `crates/ferrite-session/src/settings.rs`
 - Modify: `crates/ferrite-session/src/lib.rs` — add `mod settings;` + pub use
+- Modify: `crates/ferrite-wire/src/mse/mod.rs` — add `Serialize, Deserialize` to `EncryptionMode`
+- Modify: `crates/ferrite-wire/Cargo.toml` — add `serde` dependency with `derive` feature
+- Modify: `crates/ferrite-core/src/storage_mode.rs` — add `Serialize, Deserialize` to `StorageMode`
+- Modify: `crates/ferrite-session/src/error.rs` — add `InvalidSettings` variant
 
-This step creates the new Settings struct as a standalone addition — no existing code is changed yet (except lib.rs wiring). All 55 fields, Default impl, 3 presets, validation, Serialize/Deserialize, and 8 tests.
+This step creates the new Settings struct as a standalone addition — no existing code is changed yet (except lib.rs wiring and serde derive prerequisites). All 56 fields, Default impl, 3 presets, validation, Serialize/Deserialize, and 8 tests.
 
-**The struct** has all fields from the design doc. Every field gets `#[serde(default)]` for forward compatibility (bencode has no null, but JSON does — and missing keys during deserialization need defaults). `ProxyConfig` needs `Serialize + Deserialize` — check if it already has them; if not, add derives.
+**The struct** has all fields from the design doc. Every field gets `#[serde(default)]` for forward compatibility (bencode has no null, but JSON does — and missing keys during deserialization need defaults).
 
-**Important serde notes:**
-- `AlertCategory` is bitflags — verify it has Serialize/Deserialize (it does, from M15)
-- `EncryptionMode` — verify serde derives (it does, from M17)
-- `StorageMode` — verify serde derives (it does, from M26)
-- `ProxyConfig` — check if it has serde derives. If not, add `Serialize, Deserialize` to `ProxyConfig` and `ProxyType` in `proxy.rs`
+**Serde derive prerequisites — add BEFORE writing Settings:**
+- `EncryptionMode` in `crates/ferrite-wire/src/mse/mod.rs` — does NOT have serde derives. Add `Serialize, Deserialize` to the derive list. Also add `use serde::{Deserialize, Serialize};` to the file imports. This requires adding `serde = { version = "1", features = ["derive"] }` to `crates/ferrite-wire/Cargo.toml` dependencies.
+- `StorageMode` in `crates/ferrite-core/src/storage_mode.rs` — does NOT have serde derives. Add `Serialize, Deserialize` to the derive list. Also add `use serde::{Deserialize, Serialize};` to the file imports. `ferrite-core` already has the `serde` dependency.
+- `AlertCategory` is bitflags — already has Serialize/Deserialize (from M15). No changes needed.
+- `ProxyConfig` and `ProxyType` in `crates/ferrite-session/src/proxy.rs` — already have Serialize/Deserialize. No changes needed.
 - `PathBuf` — serde handles this natively
 
-**Settings struct fields (55 total):**
+**Settings struct fields (56 total — 50 from SessionConfig + 6 newly surfaced):**
 
 ```rust
 use std::path::PathBuf;
@@ -194,8 +198,6 @@ mod settings;
 pub use settings::Settings;
 ```
 
-Before writing Settings, check if `ProxyConfig` and `ProxyType` have `Serialize, Deserialize` derives. If not, add them in `crates/ferrite-session/src/proxy.rs`.
-
 **Tests (in settings.rs #[cfg(test)] module):**
 
 1. `default_settings_values` — spot-check key defaults (listen_port=6881, max_torrents=100, disk_cache_size=64MiB, etc.)
@@ -293,7 +295,7 @@ In `types.rs`, add `From<&Settings>` for TorrentConfig (at the end of the Torren
 impl From<&crate::settings::Settings> for TorrentConfig {
     fn from(s: &crate::settings::Settings) -> Self {
         Self {
-            listen_port: s.listen_port,
+            listen_port: 0, // Each torrent gets a random port (matches make_torrent_config behavior)
             max_peers: 50, // TorrentConfig default, not in Settings
             target_request_queue: 5,
             download_dir: s.download_dir.clone(),
@@ -340,6 +342,9 @@ impl From<&crate::settings::Settings> for TorrentConfig {
 
 **Files:**
 - Modify: `crates/ferrite-session/src/session.rs` — the big migration
+- Modify: `crates/ferrite-session/src/torrent.rs` — update test at line 4966
+- Modify: `crates/ferrite-session/src/types.rs` — remove SessionConfig
+- Modify: `crates/ferrite-session/src/lib.rs` — remove SessionConfig from exports
 
 This is the core change. Replace every `SessionConfig` reference in session.rs with `Settings`.
 
@@ -381,6 +386,9 @@ This is the core change. Replace every `SessionConfig` reference in session.rs w
 - All test call sites using `SessionHandle::start(test_session_config())` → `SessionHandle::start(test_settings())`
 - `session_config_nat_defaults()` test (line 2186): Update to use `Settings::default()`
 - Any struct literal tests: Update field names
+
+**Changes in torrent.rs:**
+- Line 4966: Change `crate::types::SessionConfig::default()` → `crate::settings::Settings::default()`. This is used in a test to construct a session config for torrent actor testing.
 
 **Verify:** `cargo test -p ferrite-session` — all existing tests pass with Settings. `cargo test --workspace` — everything compiles. Clippy clean.
 
@@ -443,16 +451,12 @@ fn handle_apply_settings(&mut self, new: Settings) -> crate::Result<()> {
     new.validate()?;
 
     // Update rate limiters if changed
+    // Field names: self.global_upload_bucket / self.global_download_bucket (SharedBucket = Arc<Mutex<TokenBucket>>)
     if new.upload_rate_limit != self.settings.upload_rate_limit {
-        if new.upload_rate_limit > 0 {
-            self.upload_limiter.lock().unwrap().set_rate(new.upload_rate_limit);
-        }
-        // If 0 (unlimited), the limiter's allow() always returns true when rate=0
+        self.global_upload_bucket.lock().unwrap().set_rate(new.upload_rate_limit);
     }
     if new.download_rate_limit != self.settings.download_rate_limit {
-        if new.download_rate_limit > 0 {
-            self.download_limiter.lock().unwrap().set_rate(new.download_rate_limit);
-        }
+        self.global_download_bucket.lock().unwrap().set_rate(new.download_rate_limit);
     }
 
     // Store new settings
@@ -471,7 +475,7 @@ fn handle_apply_settings(&mut self, new: Settings) -> crate::Result<()> {
 
 Note: For this milestone, we push the most important runtime changes (rate limits, alert mask). Full sub-actor propagation (disk, DHT, NAT reconfiguration) is left for future enhancement — the settings are stored and will take effect on next session restart. Document this in a comment.
 
-Check if `TokenBucket` has a `set_rate()` method. If not, add one (simple: `self.rate = rate; self.tokens = self.tokens.min(rate);`).
+`TokenBucket` already has a `set_rate()` method (rate_limiter.rs:72). No additions needed.
 
 **Tests:** Add 2 tests in session.rs:
 11. `apply_settings_runtime` — start session → apply_settings with changed max_torrents → query settings() → verify changed
@@ -499,10 +503,13 @@ Check if `TokenBucket` has a `set_rate()` method. If not, add one (simple: `self
 - All builder methods: `self.config.field_name` → `self.settings.field_name`
 - `into_config()` → `into_settings()` (rename method, return type Settings)
 - `start()` → passes `self.settings` to `SessionHandle::start()`
-- Add 3 new builder methods for the newly surfaced fields:
+- Add 6 new builder methods for the newly surfaced fields:
   - `dht_queries_per_second(n: usize)`
+  - `dht_query_timeout_secs(secs: u64)`
   - `upnp_lease_duration(secs: u32)`
+  - `natpmp_lifetime(secs: u32)`
   - `utp_max_connections(n: usize)`
+  - `disk_channel_capacity(n: usize)`
 - Update all tests in client.rs: `.into_config()` → `.into_settings()`, `SessionConfig` → `Settings`
 
 **In session.rs (facade re-exports):**
