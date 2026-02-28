@@ -8,6 +8,7 @@ mod metainfo;
 mod peer_id;
 mod resume_data;
 mod file_priority;
+mod storage_mode;
 
 pub use error::{Error, Result};
 pub use file_priority::FilePriority;
@@ -17,6 +18,7 @@ pub use magnet::Magnet;
 pub use metainfo::{FileEntry, FileInfo, InfoDict, TorrentMetaV1, torrent_from_bytes};
 pub use peer_id::PeerId;
 pub use resume_data::{FastResumeData, UnfinishedPiece};
+pub use storage_mode::StorageMode;
 
 /// Network address family for dual-stack support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
