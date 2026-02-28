@@ -116,6 +116,11 @@ impl WriteBuffer {
     pub fn oldest_piece(&self) -> Option<(Id20, u32)> {
         self.pending.keys().next().copied()
     }
+
+    /// Iterate all pending (info_hash, piece) keys.
+    pub fn pending_keys(&self) -> impl Iterator<Item = (Id20, u32)> + '_ {
+        self.pending.keys().copied()
+    }
 }
 
 #[cfg(test)]
