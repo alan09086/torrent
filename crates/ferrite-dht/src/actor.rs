@@ -2179,4 +2179,90 @@ mod tests {
 
         handle.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn two_nodes_put_get_immutable() {
+        let config_a = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            ..DhtConfig::default()
+        };
+        let (handle_a, _ip_rx) = DhtHandle::start(config_a).await.unwrap();
+
+        // Node A stores an item locally
+        let value = b"12:Hello World!".to_vec();
+        let target = handle_a.put_immutable(value.clone()).await.unwrap();
+
+        // Verify local retrieval
+        let result = handle_a.get_immutable(target).await.unwrap();
+        assert_eq!(result, Some(value));
+
+        handle_a.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_mutable_sequence_update() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let seed = [99u8; 32];
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let pubkey = keypair.verifying_key().to_bytes();
+
+        // Put seq=1
+        handle
+            .put_mutable(seed, b"5:first".to_vec(), 1, Vec::new())
+            .await
+            .unwrap();
+        let result = handle.get_mutable(pubkey, Vec::new()).await.unwrap();
+        assert_eq!(result, Some((b"5:first".to_vec(), 1)));
+
+        // Put seq=2 (should replace)
+        handle
+            .put_mutable(seed, b"6:second".to_vec(), 2, Vec::new())
+            .await
+            .unwrap();
+        let result = handle.get_mutable(pubkey, Vec::new()).await.unwrap();
+        assert_eq!(result, Some((b"6:second".to_vec(), 2)));
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_mutable_with_salt_isolation() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let seed = [77u8; 32];
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let pubkey = keypair.verifying_key().to_bytes();
+
+        // Put with salt "a"
+        handle
+            .put_mutable(seed, b"1:A".to_vec(), 1, b"a".to_vec())
+            .await
+            .unwrap();
+        // Put with salt "b"
+        handle
+            .put_mutable(seed, b"1:B".to_vec(), 1, b"b".to_vec())
+            .await
+            .unwrap();
+
+        // Each salt returns its own value
+        let a = handle.get_mutable(pubkey, b"a".to_vec()).await.unwrap();
+        assert_eq!(a, Some((b"1:A".to_vec(), 1)));
+        let b = handle.get_mutable(pubkey, b"b".to_vec()).await.unwrap();
+        assert_eq!(b, Some((b"1:B".to_vec(), 1)));
+
+        handle.shutdown().await.unwrap();
+    }
 }
