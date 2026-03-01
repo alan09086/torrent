@@ -29,7 +29,7 @@ cargo clippy --workspace -- -D warnings
 ## Milestones
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`
-- M1-M41 complete (v0.47.0, 1078 tests). M42-M51 planned for full libtorrent parity.
+- M1-M47 complete (v0.53.0, 1207 tests). M48-M51 planned for full libtorrent parity.
 - Implementation plans exist for all remaining milestones (M40-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
@@ -101,7 +101,7 @@ cargo clippy --workspace -- -D warnings
 - `FastResumeData` v2 fields: `info_hash2` (SHA-256), `trees` (piece-layer hash cache)
 
 ### Session Configuration (`ferrite-session/src/settings.rs`)
-- `Settings` — unified 56-field session configuration (replaces former `SessionConfig`)
+- `Settings` — unified 93-field session configuration (replaces former `SessionConfig`)
 - Presets: `Settings::min_memory()`, `Settings::high_performance()`
 - `Settings::validate()` — 7 checks (piece size power-of-2, thread counts, proxy config)
 - JSON serialization with `#[serde(default = "...")]` for forward-compatible config files

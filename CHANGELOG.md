@@ -8,6 +8,34 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.53.0 — 2026-03-01
+
+SSRF mitigation, IDNA rejection, and HTTPS tracker validation. Eleven crates, 1207 tests, 27 BEPs implemented. Phase 10 (Security & Hardening) begins.
+
+### M47: SSRF Mitigation + URL Security
+
+### Added
+- `url_guard` module in ferrite-session: centralized URL security validation for tracker and web seed URLs
+- `UrlSecurityConfig` struct with 3 fields: `ssrf_mitigation`, `allow_idna`, `validate_https_trackers`
+- `UrlGuardError` enum with 5 diagnostic variants: `InvalidUrl`, `LocalhostBadPath`, `LocalNetworkQueryString`, `RedirectToPrivateIp`, `IdnaDomain`
+- URL validators: `validate_tracker_url()`, `validate_web_seed_url()`, `validate_redirect()`
+- HTTP client builder: `build_redirect_policy()` (SSRF-safe custom reqwest redirect policy), `build_http_client()`
+- `HttpTracker::with_security()` constructor with self-contained SSRF redirect policy in ferrite-tracker
+- `SecurityViolation(String)` error variant in ferrite-tracker
+- `TrackerManager::from_torrent_filtered()` — URL-validating version of `from_torrent()`
+- `TrackerManager::add_tracker_url_validated()` — validates before adding tracker URLs
+- `TrackerManager::set_metadata_filtered()` — filtered version for BEP 9 magnet metadata flow
+- 3 new Settings fields: `ssrf_mitigation` (default true), `allow_idna` (default false), `validate_https_trackers` (default true)
+- `UrlSecurityConfig` field on `TorrentConfig` with `From<&Settings>` conversion
+- Facade: 3 `ClientBuilder` methods: `ssrf_mitigation()`, `allow_idna()`, `validate_https_trackers()`
+- 51 new tests (1207 total)
+
+### Changed
+- `TorrentActor` now validates all tracker/web seed URLs through `url_guard` at parse time and redirect time
+- `WebSeedTask::new()` accepts `UrlSecurityConfig` and uses `build_http_client()` for SSRF-safe HTTP clients
+- BEP 9 magnet metadata path uses `set_metadata_filtered()` to validate URLs from peers
+- Version bump 0.52.0 → 0.53.0
+
 ## 0.52.0 — 2026-03-01
 
 Peer turnover algorithm for periodic replacement of underperforming peers. Eleven crates, 1156 tests, 27 BEPs implemented. Phase 9 (Swarm Intelligence) complete.
