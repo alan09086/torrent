@@ -77,6 +77,14 @@ pub struct TorrentConfig {
     pub seed_choking_algorithm: SeedChokingAlgorithm,
     /// Algorithm for determining the number of unchoke slots.
     pub choking_algorithm: ChokingAlgorithm,
+    /// Prefer grouping piece requests within the same 4 MiB disk extent.
+    pub piece_extent_affinity: bool,
+    /// Enable sending SuggestPiece messages for cached pieces.
+    pub suggest_mode: bool,
+    /// Maximum number of pieces to suggest per peer.
+    pub max_suggest_pieces: usize,
+    /// Delay (ms) before announcing Have for a piece still being written to disk (0 = disabled).
+    pub predictive_piece_announce_ms: u64,
 }
 
 impl Default for TorrentConfig {
@@ -117,6 +125,10 @@ impl Default for TorrentConfig {
             ssl_listen_port: 0,
             seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: ChokingAlgorithm::FixedSlots,
+            piece_extent_affinity: true,
+            suggest_mode: false,
+            max_suggest_pieces: 10,
+            predictive_piece_announce_ms: 0,
         }
     }
 }
@@ -159,6 +171,10 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             ssl_listen_port: s.ssl_listen_port,
             seed_choking_algorithm: s.seed_choking_algorithm,
             choking_algorithm: s.choking_algorithm,
+            piece_extent_affinity: s.piece_extent_affinity,
+            suggest_mode: s.suggest_mode,
+            max_suggest_pieces: s.max_suggest_pieces,
+            predictive_piece_announce_ms: s.predictive_piece_announce_ms,
         }
     }
 }
@@ -324,6 +340,8 @@ pub(crate) enum PeerCommand {
     SendExtHandshake(ferrite_wire::ExtHandshake),
     /// Send a full bitfield mid-connection (batched Have fallback).
     SendBitfield(Bytes),
+    /// BEP 6: Suggest a piece to the peer.
+    SuggestPiece(u32),
     /// BEP 52: Send a hash request to the peer.
     SendHashRequest(ferrite_core::HashRequest),
     /// BEP 52: Send hashes in response to a peer's request.
@@ -577,6 +595,15 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert_eq!(cfg.seed_choking_algorithm, SeedChokingAlgorithm::FastestUpload);
         assert_eq!(cfg.choking_algorithm, ChokingAlgorithm::FixedSlots);
+    }
+
+    #[test]
+    fn torrent_config_m44_defaults() {
+        let cfg = TorrentConfig::default();
+        assert!(cfg.piece_extent_affinity);
+        assert!(!cfg.suggest_mode);
+        assert_eq!(cfg.max_suggest_pieces, 10);
+        assert_eq!(cfg.predictive_piece_announce_ms, 0);
     }
 
     #[test]

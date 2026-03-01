@@ -753,6 +753,7 @@ async fn handle_command(
             Message::Extended { ext_id: 0, payload }
         }
         PeerCommand::SendBitfield(data) => Message::Bitfield(data),
+        PeerCommand::SuggestPiece(index) => Message::SuggestPiece(index),
         PeerCommand::SendHashRequest(req) => Message::HashRequest {
             pieces_root: req.file_root,
             base: req.base,

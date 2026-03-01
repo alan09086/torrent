@@ -123,6 +123,12 @@ fn default_dht_item_lifetime() -> u64 {
 fn default_dht_sample_interval() -> u64 {
     0
 }
+fn default_max_suggest_pieces() -> usize {
+    10
+}
+fn default_predictive_piece_announce_ms() -> u64 {
+    0
+}
 fn default_ssl_listen_port() -> u16 {
     0 // 0 = disabled
 }
@@ -290,6 +296,16 @@ pub struct Settings {
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_stream_reads: usize,
 
+    // ── Piece picker enhancements (M44) ──
+    #[serde(default = "default_true")]
+    pub piece_extent_affinity: bool,
+    #[serde(default)]
+    pub suggest_mode: bool,
+    #[serde(default = "default_max_suggest_pieces")]
+    pub max_suggest_pieces: usize,
+    #[serde(default = "default_predictive_piece_announce_ms")]
+    pub predictive_piece_announce_ms: u64,
+
     // ── Proxy ──
     #[serde(default)]
     pub proxy: ProxyConfig,
@@ -448,6 +464,11 @@ impl Default for Settings {
             request_queue_time: 3.0,
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
+            // Piece picker enhancements (M44)
+            piece_extent_affinity: true,
+            suggest_mode: false,
+            max_suggest_pieces: 10,
+            predictive_piece_announce_ms: 0,
             // Proxy
             proxy: ProxyConfig::default(),
             force_proxy: false,
@@ -520,6 +541,7 @@ impl Settings {
             hashing_threads: 4,
             disk_io_threads: 8,
             auto_upload_slots_max: 100,
+            suggest_mode: true,
             ..Self::default()
         }
     }
@@ -757,6 +779,10 @@ impl PartialEq for Settings {
             && self.request_queue_time.to_bits() == other.request_queue_time.to_bits()
             && self.block_request_timeout_secs == other.block_request_timeout_secs
             && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
+            && self.piece_extent_affinity == other.piece_extent_affinity
+            && self.suggest_mode == other.suggest_mode
+            && self.max_suggest_pieces == other.max_suggest_pieces
+            && self.predictive_piece_announce_ms == other.predictive_piece_announce_ms
             && self.force_proxy == other.force_proxy
             && self.apply_ip_filter_to_trackers == other.apply_ip_filter_to_trackers
             && self.dht_queries_per_second == other.dht_queries_per_second
@@ -1204,5 +1230,32 @@ mod tests {
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.seed_choking_algorithm, SeedChokingAlgorithm::AntiLeech);
         assert_eq!(decoded.choking_algorithm, ChokingAlgorithm::RateBased);
+    }
+
+    #[test]
+    fn m44_settings_defaults() {
+        let s = Settings::default();
+        assert!(s.piece_extent_affinity);
+        assert!(!s.suggest_mode);
+        assert_eq!(s.max_suggest_pieces, 10);
+        assert_eq!(s.predictive_piece_announce_ms, 0);
+    }
+
+    #[test]
+    fn m44_high_performance_enables_suggest() {
+        let s = Settings::high_performance();
+        assert!(s.suggest_mode);
+    }
+
+    #[test]
+    fn m44_json_round_trip() {
+        let mut s = Settings::default();
+        s.piece_extent_affinity = false;
+        s.suggest_mode = true;
+        s.max_suggest_pieces = 5;
+        s.predictive_piece_announce_ms = 50;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, decoded);
     }
 }

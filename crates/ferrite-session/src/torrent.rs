@@ -319,6 +319,8 @@ impl TorrentHandle {
             web_seed_in_flight: HashMap::new(),
             super_seed,
             have_buffer,
+            suggested_to_peers: HashMap::new(),
+            predictive_have_sent: HashSet::new(),
             ban_manager,
             ip_filter,
             piece_contributors: HashMap::new(),
@@ -495,6 +497,8 @@ impl TorrentHandle {
             web_seed_in_flight: HashMap::new(),
             super_seed,
             have_buffer,
+            suggested_to_peers: HashMap::new(),
+            predictive_have_sent: HashSet::new(),
             ban_manager,
             ip_filter,
             piece_contributors: HashMap::new(),
@@ -776,6 +780,12 @@ struct TorrentActor {
     // Batched Have (M23)
     have_buffer: crate::have_buffer::HaveBuffer,
 
+    /// M44: pieces we've suggested to each peer (avoid re-suggesting)
+    suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
+
+    /// M44: pieces for which we've already sent predictive Have
+    predictive_have_sent: HashSet<u32>,
+
     // Smart banning (M25)
     ban_manager: crate::session::SharedBanManager,
     piece_contributors: HashMap<u32, HashSet<std::net::IpAddr>>,
@@ -861,12 +871,20 @@ impl TorrentActor {
         } else {
             None
         };
+        let mut suggest_interval = if self.config.suggest_mode {
+            Some(tokio::time::interval(Duration::from_secs(30)))
+        } else {
+            None
+        };
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
         optimistic_interval.tick().await;
         connect_interval.tick().await;
         refill_interval.tick().await;
+        if let Some(ref mut si) = suggest_interval {
+            si.tick().await; // skip initial tick
+        }
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
         // DHT announce (v4 + v6) — dual-swarm for hybrid torrents
@@ -1193,6 +1211,15 @@ impl TorrentActor {
                     }
                 } => {
                     self.flush_have_buffer().await;
+                }
+                // M44: Suggest cached pieces timer
+                _ = async {
+                    match suggest_interval {
+                        Some(ref mut interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.suggest_cached_pieces().await;
                 }
                 // Rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
@@ -1639,6 +1666,7 @@ impl TorrentActor {
                         self.end_game.peer_disconnected(peer_addr);
                     }
                 }
+                self.suggested_to_peers.remove(&peer_addr);
             }
             PeerEvent::WebSeedPieceData { url, index, data } => {
                 self.handle_web_seed_piece_data(url, index, data).await;
@@ -1760,6 +1788,18 @@ impl TorrentActor {
         };
 
         if piece_complete {
+            // M44: Predictive piece announce — send Have before verification
+            if self.config.predictive_piece_announce_ms > 0
+                && !self.predictive_have_sent.contains(&index)
+            {
+                self.predictive_have_sent.insert(index);
+                for peer in self.peers.values() {
+                    if !peer.bitfield.get(index) {
+                        let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                    }
+                }
+            }
+
             self.verify_and_mark_piece(index).await;
         }
 
@@ -2217,14 +2257,35 @@ impl TorrentActor {
 
         // Broadcast Have to all peers (skip in super-seed mode)
         if self.super_seed.is_none() {
-            if self.have_buffer.is_enabled() {
-                self.have_buffer.push(index);
-            } else {
-                // Immediate mode — with redundancy elimination
-                for peer in self.peers.values() {
-                    if !peer.bitfield.get(index) {
-                        let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+            let already_announced = self.predictive_have_sent.remove(&index);
+            if !already_announced {
+                if self.have_buffer.is_enabled() {
+                    self.have_buffer.push(index);
+                } else {
+                    // Immediate mode — with redundancy elimination
+                    for peer in self.peers.values() {
+                        if !peer.bitfield.get(index) {
+                            let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                        }
                     }
+                }
+            }
+        }
+
+        // M44: suggest newly-verified piece to peers that don't have it
+        if self.config.suggest_mode {
+            let max_suggest = self.config.max_suggest_pieces;
+            let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+            for peer_addr in peer_addrs {
+                let already = self.suggested_to_peers.entry(peer_addr).or_default();
+                if already.len() >= max_suggest { continue; }
+                let should_suggest = self.peers.get(&peer_addr)
+                    .is_some_and(|p| !p.bitfield.get(index));
+                if should_suggest && !already.contains(&index)
+                    && let Some(peer) = self.peers.get(&peer_addr)
+                {
+                    let _ = peer.cmd_tx.send(PeerCommand::SuggestPiece(index)).await;
+                    already.insert(index);
                 }
             }
         }
@@ -2284,6 +2345,8 @@ impl TorrentActor {
             .collect();
 
         warn!(index, contributors = contributors.len(), "piece hash verification failed");
+
+        self.predictive_have_sent.remove(&index);
 
         // Check if this is a parole failure
         if let Some(parole) = self.parole_pieces.remove(&index) {
@@ -2505,6 +2568,40 @@ impl TorrentActor {
                 }
             }
             None => {}
+        }
+    }
+
+    /// M44: Suggest cached pieces to connected peers (BEP 6).
+    async fn suggest_cached_pieces(&mut self) {
+        if !self.config.suggest_mode {
+            return;
+        }
+        let disk = match self.disk {
+            Some(ref d) => d.clone(),
+            None => return,
+        };
+        let cached = disk.cached_pieces().await;
+        if cached.is_empty() {
+            return;
+        }
+        let max_suggest = self.config.max_suggest_pieces;
+        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+        for peer_addr in peer_addrs {
+            let already_suggested = self.suggested_to_peers.entry(peer_addr).or_default();
+            let peer_has_piece = |piece: u32| -> bool {
+                self.peers.get(&peer_addr).is_some_and(|p| p.bitfield.get(piece))
+            };
+            let mut sent = 0;
+            for &piece in &cached {
+                if sent >= max_suggest { break; }
+                if peer_has_piece(piece) { continue; }
+                if already_suggested.contains(&piece) { continue; }
+                if let Some(peer) = self.peers.get(&peer_addr) {
+                    let _ = peer.cmd_tx.send(PeerCommand::SuggestPiece(piece)).await;
+                    already_suggested.insert(piece);
+                    sent += 1;
+                }
+            }
         }
     }
 
@@ -2941,6 +3038,7 @@ impl TorrentActor {
             connected_peer_count: self.peers.len(),
             whole_pieces_threshold: self.config.whole_pieces_threshold,
             piece_size: self.lengths.as_ref().map(|l| l.piece_length() as u32).unwrap_or(262144),
+            extent_affinity: self.config.piece_extent_affinity,
         };
 
         let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
@@ -4053,6 +4151,10 @@ mod tests {
             ssl_listen_port: 0,
             seed_choking_algorithm: crate::choker::SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: crate::choker::ChokingAlgorithm::FixedSlots,
+            piece_extent_affinity: true,
+            suggest_mode: false,
+            max_suggest_pieces: 10,
+            predictive_piece_announce_ms: 0,
         }
     }
 

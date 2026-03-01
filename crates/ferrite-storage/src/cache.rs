@@ -189,6 +189,11 @@ impl<K: Hash + Eq + Clone, V> ArcCache<K, V> {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Return an iterator over all keys currently in the cache (T1 + T2).
+    pub fn cached_keys(&self) -> impl Iterator<Item = &K> {
+        self.map.keys()
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +253,23 @@ mod tests {
         cache.remove(&1);
         assert_eq!(cache.get(&1), None);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn cached_keys_returns_all_entries() {
+        let mut cache = ArcCache::new(5);
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+        let mut keys: Vec<_> = cache.cached_keys().copied().collect();
+        keys.sort();
+        assert_eq!(keys, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn cached_keys_empty_cache() {
+        let cache: ArcCache<i32, String> = ArcCache::new(3);
+        assert_eq!(cache.cached_keys().count(), 0);
     }
 
     #[test]
