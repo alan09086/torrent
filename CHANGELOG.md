@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.37.0 — 2026-02-28
+
+BEP 52 core v2 metadata types and parsing. Eleven crates, 843 tests.
+
+### M33: BEP 52 Core — v2 Metadata
+
+### Added
+- `sha256(data) -> Id32` — SHA-256 hashing (uses `sha2` crate v0.10)
+- `Id32::to_base32()` / `from_base32()` — base32 encoding for v2 magnet links
+- `Id32::to_multihash_hex()` / `from_multihash_hex()` — BEP 52 multihash format (`0x1220` prefix)
+- `InfoHashes` — unified v1/v2 hash container (libtorrent `info_hash_t` parity) with `best_v1()` truncation fallback
+- `MerkleTree` — binary heap layout with `from_leaves()`, `piece_layer()`, `proof_path()`, and `verify_proof()`
+- `FileTreeNode` / `V2FileAttr` / `V2FileInfo` — BEP 52 nested file tree types with `BencodeValue` parsing
+- `InfoDictV2` — v2 info dict with per-file piece alignment, `file_piece_ranges()`
+- `TorrentMetaV2` — v2 torrent with piece layers, `validate_piece_layers()`, `piece_layer_for_file()`, `take_piece_layers()`
+- `torrent_v2_from_bytes()` — parse v2 .torrent files with raw info bytes for BEP 9
+- `TorrentMeta` enum — `V1` / `V2` variants with `torrent_from_bytes_any()` auto-detection
+- `Magnet` extended: `urn:btmh:` parsing for v2, hybrid magnet support, `info_hash()` backward-compat method
+- Facade re-exports in `ferrite::core` and `ferrite::prelude`
+- 45 new tests across 6 new modules
+
+### Changed
+- **BREAKING**: `Magnet.info_hash: Id20` replaced by `Magnet.info_hashes: InfoHashes` — use `magnet.info_hash()` for v1 compat
+
 ## 0.36.0 — 2026-02-28
 
 Extension plugin interface for custom BEP 10 extensions. Eleven crates, 796 tests.

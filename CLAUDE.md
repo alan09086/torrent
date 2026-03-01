@@ -49,17 +49,25 @@ cargo clippy --workspace -- -D warnings
 
 ### Core Types (`ferrite-core`)
 - `Id20([u8; 20])` — SHA1 hash (info hash, piece hash). Methods: `from_hex()`, `to_hex()`, `as_bytes()`
-- `Id32([u8; 32])` — SHA-256 (for future BEP 52)
+- `Id32([u8; 32])` — SHA-256 (BEP 52). Methods: `from_hex()`, `to_hex()`, `from_base32()`, `to_base32()`, `from_multihash_hex()`, `to_multihash_hex()`
+- `InfoHashes { v1: Option<Id20>, v2: Option<Id32> }` — unified hash container. Constructors: `v1_only()`, `v2_only()`, `hybrid()`. `best_v1()` for tracker/DHT compat
 - `sha1(data: &[u8]) -> Id20` — uses `sha1` crate (v0.10)
+- `sha256(data: &[u8]) -> Id32` — uses `sha2` crate (v0.10)
+- `MerkleTree` — binary heap layout. `from_leaves()`, `root()`, `layer()`, `piece_layer()`, `proof_path()`, `verify_proof()`
 - `Lengths { total_length, piece_length, chunk_size }` — piece arithmetic: `num_pieces()`, `piece_size(idx)`, `piece_offset(idx)`
 - `DEFAULT_CHUNK_SIZE = 16384`
 
-### Torrent Metadata (`ferrite-core/src/metainfo.rs`)
+### Torrent Metadata (`ferrite-core/src/metainfo.rs`, `metainfo_v2.rs`, `detect.rs`)
 - `TorrentMetaV1` — NOT a serde struct (manually constructed). Fields: info_hash, announce, announce_list, comment, created_by, creation_date, info, url_list, httpseeds
 - `InfoDict` — `Deserialize + Serialize`. Fields: name, piece_length (renamed), pieces (serde_bytes), length (Option), files (Option), private (Option<i64>), source (Option<String>)
 - `FileEntry` — `Deserialize + Serialize`. Fields: length, path (Vec<String>), attr (Option<String>, BEP 47), mtime (Option<i64>), symlink_path (Option<Vec<String>>)
-- `torrent_from_bytes(data) -> Result<TorrentMetaV1>` — parses .torrent from raw bytes, computes info_hash via `find_dict_key_span`
-- Info-hash = SHA1 of **raw bencode bytes** of info dict (not re-serialized). For creation: serialize `InfoDict` → hash the output (deterministic via SortedMapSerializer)
+- `torrent_from_bytes(data) -> Result<TorrentMetaV1>` — parses v1 .torrent from raw bytes
+- `TorrentMetaV2` — v2 torrent (BEP 52). Fields: info_hashes, info_bytes, info (InfoDictV2), piece_layers
+- `InfoDictV2` — v2 info dict with nested `FileTreeNode` file tree. `files()`, `num_pieces()`, `file_piece_ranges()`
+- `torrent_v2_from_bytes(data) -> Result<TorrentMetaV2>` — parses v2 .torrent from raw bytes
+- `TorrentMeta` enum (`V1`/`V2`) — `torrent_from_bytes_any(data)` auto-detects format
+- `Magnet` — `info_hashes: InfoHashes` (v1 + v2), `info_hash()` method for backward compat. Parses `urn:btih:` and `urn:btmh:`
+- Info-hash = SHA1 (v1) or SHA-256 (v2) of **raw bencode bytes** of info dict (not re-serialized)
 
 ### Storage (`ferrite-storage`)
 - `FileMap::new(file_lengths, lengths)` — O(log n) piece-to-file segment mapping
