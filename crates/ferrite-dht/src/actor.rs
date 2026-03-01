@@ -490,6 +490,21 @@ impl DhtActor {
                     id: *self.routing_table.own_id(),
                 }
             }
+            // BEP 44 get/put — handled in Task 4 (M38)
+            KrpcQuery::Get { .. } | KrpcQuery::Put { .. } => {
+                let err_msg = KrpcMessage {
+                    transaction_id: msg.transaction_id,
+                    body: KrpcBody::Error {
+                        code: 204,
+                        message: "method not implemented".into(),
+                    },
+                    sender_ip: Some(addr),
+                };
+                if let Ok(bytes) = err_msg.to_bytes() {
+                    let _ = self.socket.send_to(&bytes, addr).await;
+                }
+                return;
+            }
         };
 
         let reply = KrpcMessage {

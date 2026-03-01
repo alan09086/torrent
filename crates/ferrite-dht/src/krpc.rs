@@ -81,6 +81,32 @@ pub enum KrpcQuery {
         implied_port: bool,
         token: Vec<u8>,
     },
+    /// BEP 44: get an item from DHT storage.
+    Get {
+        id: Id20,
+        /// Target hash: SHA-1(value) for immutable, SHA-1(pubkey+salt) for mutable.
+        target: Id20,
+        /// Optional: if set, only return mutable items with seq > this value.
+        seq: Option<i64>,
+    },
+    /// BEP 44: put an item into DHT storage.
+    Put {
+        id: Id20,
+        /// Write token (obtained from a prior get response).
+        token: Vec<u8>,
+        /// The bencoded value to store.
+        value: Vec<u8>,
+        /// For mutable items: ed25519 public key (32 bytes).
+        key: Option<[u8; 32]>,
+        /// For mutable items: ed25519 signature (64 bytes).
+        signature: Option<[u8; 64]>,
+        /// For mutable items: sequence number.
+        seq: Option<i64>,
+        /// For mutable items: optional salt.
+        salt: Option<Vec<u8>>,
+        /// For mutable items: optional CAS (compare-and-swap) expected seq.
+        cas: Option<i64>,
+    },
 }
 
 /// KRPC response types.
@@ -97,6 +123,21 @@ pub enum KrpcResponse {
     },
     /// Response to get_peers — either peers or closer nodes.
     GetPeers(GetPeersResponse),
+    /// BEP 44: response to a get query.
+    GetItem {
+        id: Id20,
+        token: Option<Vec<u8>>,
+        nodes: Vec<CompactNodeInfo>,
+        nodes6: Vec<CompactNodeInfo6>,
+        /// The stored value (if found).
+        value: Option<Vec<u8>>,
+        /// For mutable items: ed25519 public key.
+        key: Option<[u8; 32]>,
+        /// For mutable items: signature.
+        signature: Option<[u8; 64]>,
+        /// For mutable items: sequence number.
+        seq: Option<i64>,
+    },
 }
 
 /// get_peers response can return peers, closer nodes, or both.
@@ -120,6 +161,8 @@ impl KrpcQuery {
             KrpcQuery::FindNode { .. } => "find_node",
             KrpcQuery::GetPeers { .. } => "get_peers",
             KrpcQuery::AnnouncePeer { .. } => "announce_peer",
+            KrpcQuery::Get { .. } => "get",
+            KrpcQuery::Put { .. } => "put",
         }
     }
 
@@ -129,7 +172,9 @@ impl KrpcQuery {
             KrpcQuery::Ping { id }
             | KrpcQuery::FindNode { id, .. }
             | KrpcQuery::GetPeers { id, .. }
-            | KrpcQuery::AnnouncePeer { id, .. } => id,
+            | KrpcQuery::AnnouncePeer { id, .. }
+            | KrpcQuery::Get { id, .. }
+            | KrpcQuery::Put { id, .. } => id,
         }
     }
 }
@@ -141,6 +186,7 @@ impl KrpcResponse {
             KrpcResponse::NodeId { id } => id,
             KrpcResponse::FindNode { id, .. } => id,
             KrpcResponse::GetPeers(gp) => &gp.id,
+            KrpcResponse::GetItem { id, .. } => id,
         }
     }
 }
@@ -205,7 +251,70 @@ impl KrpcMessage {
             }
             b"r" => {
                 let values = dict_dict(dict, b"r")?;
-                KrpcBody::Response(decode_response(values)?)
+                KrpcBody::Response(decode_response(values, None)?)
+            }
+            b"e" => {
+                let err_list = dict
+                    .get(&b"e"[..])
+                    .and_then(|v| v.as_list())
+                    .ok_or_else(|| Error::InvalidMessage("missing 'e' list".into()))?;
+                if err_list.len() < 2 {
+                    return Err(Error::InvalidMessage("error list too short".into()));
+                }
+                let code = err_list[0]
+                    .as_int()
+                    .ok_or_else(|| Error::InvalidMessage("error code not integer".into()))?;
+                let message = err_list[1]
+                    .as_bytes_raw()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .ok_or_else(|| Error::InvalidMessage("error message not string".into()))?;
+                KrpcBody::Error { code, message }
+            }
+            other => {
+                return Err(Error::InvalidMessage(format!(
+                    "unknown message type: {}",
+                    String::from_utf8_lossy(other)
+                )));
+            }
+        };
+
+        let sender_ip = dict
+            .get(&b"ip"[..])
+            .and_then(|v| v.as_bytes_raw())
+            .and_then(decode_compact_addr);
+
+        Ok(KrpcMessage {
+            transaction_id,
+            body,
+            sender_ip,
+        })
+    }
+
+    /// Decode from bencode bytes with a query-method hint for response disambiguation.
+    ///
+    /// When you know which query method this response answers (e.g. `"get"` vs
+    /// `"get_peers"`), pass it here so the decoder picks the correct response
+    /// variant. This resolves ambiguity for BEP 44 "not found" responses that
+    /// share the same wire shape as get_peers responses (token + nodes only).
+    pub fn from_bytes_with_query_hint(data: &[u8], query_method: &str) -> Result<Self> {
+        let value: BencodeValue = bencode::from_bytes(data)?;
+        let dict = value
+            .as_dict()
+            .ok_or_else(|| Error::InvalidMessage("top-level value is not a dict".into()))?;
+
+        let txn_bytes = dict_bytes(dict, b"t")?;
+        let transaction_id = TransactionId::from_bytes(txn_bytes)?;
+
+        let msg_type = dict_str(dict, b"y")?;
+        let body = match msg_type {
+            b"q" => {
+                let method = dict_str(dict, b"q")?;
+                let args = dict_dict(dict, b"a")?;
+                KrpcBody::Query(decode_query(method, args)?)
+            }
+            b"r" => {
+                let values = dict_dict(dict, b"r")?;
+                KrpcBody::Response(decode_response(values, Some(query_method))?)
             }
             b"e" => {
                 let err_list = dict
@@ -276,6 +385,44 @@ fn encode_query_args(query: &KrpcQuery) -> BencodeValue {
             args.insert(b"port".to_vec(), BencodeValue::Integer(i64::from(*port)));
             args.insert(b"token".to_vec(), BencodeValue::Bytes(token.clone()));
         }
+        KrpcQuery::Get { id, target, seq } => {
+            args.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
+            if let Some(seq) = seq {
+                args.insert(b"seq".to_vec(), BencodeValue::Integer(*seq));
+            }
+            args.insert(b"target".to_vec(), BencodeValue::Bytes(target.0.to_vec()));
+        }
+        KrpcQuery::Put {
+            id,
+            token,
+            value,
+            key,
+            signature,
+            seq,
+            salt,
+            cas,
+        } => {
+            args.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
+            if let Some(cas) = cas {
+                args.insert(b"cas".to_vec(), BencodeValue::Integer(*cas));
+            }
+            if let Some(key) = key {
+                args.insert(b"k".to_vec(), BencodeValue::Bytes(key.to_vec()));
+            }
+            if let Some(salt) = salt
+                && !salt.is_empty()
+            {
+                args.insert(b"salt".to_vec(), BencodeValue::Bytes(salt.clone()));
+            }
+            if let Some(seq) = seq {
+                args.insert(b"seq".to_vec(), BencodeValue::Integer(*seq));
+            }
+            if let Some(sig) = signature {
+                args.insert(b"sig".to_vec(), BencodeValue::Bytes(sig.to_vec()));
+            }
+            args.insert(b"token".to_vec(), BencodeValue::Bytes(token.clone()));
+            args.insert(b"v".to_vec(), BencodeValue::Bytes(value.clone()));
+        }
     }
     BencodeValue::Dict(args)
 }
@@ -336,6 +483,45 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
                     b"nodes6".to_vec(),
                     BencodeValue::Bytes(encode_compact_nodes6(&gp.nodes6)),
                 );
+            }
+        }
+        KrpcResponse::GetItem {
+            id,
+            token,
+            nodes,
+            nodes6,
+            value,
+            key,
+            signature,
+            seq,
+        } => {
+            values.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
+            if let Some(key) = key {
+                values.insert(b"k".to_vec(), BencodeValue::Bytes(key.to_vec()));
+            }
+            if !nodes.is_empty() {
+                values.insert(
+                    b"nodes".to_vec(),
+                    BencodeValue::Bytes(encode_compact_nodes(nodes)),
+                );
+            }
+            if !nodes6.is_empty() {
+                values.insert(
+                    b"nodes6".to_vec(),
+                    BencodeValue::Bytes(encode_compact_nodes6(nodes6)),
+                );
+            }
+            if let Some(seq) = seq {
+                values.insert(b"seq".to_vec(), BencodeValue::Integer(*seq));
+            }
+            if let Some(sig) = signature {
+                values.insert(b"sig".to_vec(), BencodeValue::Bytes(sig.to_vec()));
+            }
+            if let Some(token) = token {
+                values.insert(b"token".to_vec(), BencodeValue::Bytes(token.clone()));
+            }
+            if let Some(v) = value {
+                values.insert(b"v".to_vec(), BencodeValue::Bytes(v.clone()));
             }
         }
     }
@@ -419,6 +605,47 @@ fn decode_query(
                 token,
             })
         }
+        b"get" => {
+            let target = args_id20(args, b"target")?;
+            let seq = args.get(&b"seq"[..]).and_then(|v| v.as_int());
+            Ok(KrpcQuery::Get { id, target, seq })
+        }
+        b"put" => {
+            let token = args
+                .get(&b"token"[..])
+                .and_then(|v| v.as_bytes_raw())
+                .map(|b| b.to_vec())
+                .ok_or_else(|| Error::InvalidMessage("missing 'token' in put".into()))?;
+            let value = args
+                .get(&b"v"[..])
+                .and_then(|v| v.as_bytes_raw())
+                .map(|b| b.to_vec())
+                .ok_or_else(|| Error::InvalidMessage("missing 'v' in put".into()))?;
+            let key = args
+                .get(&b"k"[..])
+                .and_then(|v| v.as_bytes_raw())
+                .and_then(|b| <[u8; 32]>::try_from(b).ok());
+            let signature = args
+                .get(&b"sig"[..])
+                .and_then(|v| v.as_bytes_raw())
+                .and_then(|b| <[u8; 64]>::try_from(b).ok());
+            let seq = args.get(&b"seq"[..]).and_then(|v| v.as_int());
+            let salt = args
+                .get(&b"salt"[..])
+                .and_then(|v| v.as_bytes_raw())
+                .map(|b| b.to_vec());
+            let cas = args.get(&b"cas"[..]).and_then(|v| v.as_int());
+            Ok(KrpcQuery::Put {
+                id,
+                token,
+                value,
+                key,
+                signature,
+                seq,
+                salt,
+                cas,
+            })
+        }
         _ => Err(Error::InvalidMessage(format!(
             "unknown query method: {}",
             String::from_utf8_lossy(method)
@@ -426,13 +653,38 @@ fn decode_query(
     }
 }
 
+/// Decode a KRPC response from bencoded values.
+///
+/// The optional `query_method` hint disambiguates responses that share the same
+/// wire shape (e.g. BEP 44 `get` vs BEP 5 `get_peers` — both may carry only
+/// `token` + `nodes`). When the caller knows the originating query method, pass
+/// `Some("get")` or `Some("get_peers")` to force the correct variant. Pass
+/// `None` to use heuristic detection (suitable for standalone decoding).
 fn decode_response(
     values: &BTreeMap<Vec<u8>, BencodeValue>,
+    query_method: Option<&str>,
 ) -> Result<KrpcResponse> {
     let id = args_id20(values, b"id")?;
 
-    // get_peers response: has "values" (peers) or "nodes" (closer nodes) + optional "token"
+    // If the caller tells us this is a BEP 44 get response, decode as GetItem
+    // regardless of which fields are present (handles "not found" case).
+    if query_method == Some("get") {
+        return decode_get_item_response(id, values);
+    }
+
+    // BEP 44 get response heuristic: has "k" (mutable key), "sig" (signature),
+    // or "v" without "values" (immutable value — not a get_peers peer list).
     let has_values = values.contains_key(&b"values"[..]);
+    let has_v = values.contains_key(&b"v"[..]);
+    let has_k = values.contains_key(&b"k"[..]);
+    let has_sig = values.contains_key(&b"sig"[..]);
+    let has_seq = values.contains_key(&b"seq"[..]);
+
+    if has_k || has_sig || (has_v && !has_values) || (has_seq && !has_values) {
+        return decode_get_item_response(id, values);
+    }
+
+    // get_peers response: has "values" (peers) or "nodes" (closer nodes) + optional "token"
     let has_token = values.contains_key(&b"token"[..]);
 
     if has_values || has_token {
@@ -505,6 +757,57 @@ fn decode_response(
 
     // Plain ID response (ping, announce_peer)
     Ok(KrpcResponse::NodeId { id })
+}
+
+/// Decode a BEP 44 GetItem response from its value dict.
+fn decode_get_item_response(
+    id: Id20,
+    values: &BTreeMap<Vec<u8>, BencodeValue>,
+) -> Result<KrpcResponse> {
+    let token = values
+        .get(&b"token"[..])
+        .and_then(|v| v.as_bytes_raw())
+        .map(|b| b.to_vec());
+
+    let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+        parse_compact_nodes(nodes_bytes)?
+    } else {
+        Vec::new()
+    };
+
+    let nodes6 = if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
+        parse_compact_nodes6(nodes6_bytes)?
+    } else {
+        Vec::new()
+    };
+
+    let value = values
+        .get(&b"v"[..])
+        .and_then(|v| v.as_bytes_raw())
+        .map(|b| b.to_vec());
+
+    let key = values
+        .get(&b"k"[..])
+        .and_then(|v| v.as_bytes_raw())
+        .and_then(|b| <[u8; 32]>::try_from(b).ok());
+
+    let signature = values
+        .get(&b"sig"[..])
+        .and_then(|v| v.as_bytes_raw())
+        .and_then(|b| <[u8; 64]>::try_from(b).ok());
+
+    let seq = values.get(&b"seq"[..]).and_then(|v| v.as_int());
+
+    Ok(KrpcResponse::GetItem {
+        id,
+        token,
+        nodes,
+        nodes6,
+        value,
+        key,
+        signature,
+        seq,
+    })
 }
 
 // ---- Dict access helpers ----
@@ -890,5 +1193,184 @@ mod tests {
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
         assert!(decoded.sender_ip.is_none());
+    }
+
+    // --- BEP 44 KRPC tests ---
+
+    #[test]
+    fn get_immutable_query_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(400),
+            body: KrpcBody::Query(KrpcQuery::Get {
+                id: test_id(),
+                target: target_id(),
+                seq: None,
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_mutable_query_with_seq_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(401),
+            body: KrpcBody::Query(KrpcQuery::Get {
+                id: test_id(),
+                target: target_id(),
+                seq: Some(42),
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn put_immutable_query_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(402),
+            body: KrpcBody::Query(KrpcQuery::Put {
+                id: test_id(),
+                token: b"tok12345".to_vec(),
+                value: b"12:Hello World!".to_vec(),
+                key: None,
+                signature: None,
+                seq: None,
+                salt: None,
+                cas: None,
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn put_mutable_query_round_trip() {
+        let key = [0xABu8; 32];
+        let sig = [0xCDu8; 64];
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(403),
+            body: KrpcBody::Query(KrpcQuery::Put {
+                id: test_id(),
+                token: b"tok12345".to_vec(),
+                value: b"12:Hello World!".to_vec(),
+                key: Some(key),
+                signature: Some(sig),
+                seq: Some(4),
+                salt: Some(b"foobar".to_vec()),
+                cas: Some(3),
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_response_immutable_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(404),
+            body: KrpcBody::Response(KrpcResponse::GetItem {
+                id: test_id(),
+                token: Some(b"tok".to_vec()),
+                nodes: Vec::new(),
+                nodes6: Vec::new(),
+                value: Some(b"12:Hello World!".to_vec()),
+                key: None,
+                signature: None,
+                seq: None,
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_response_mutable_round_trip() {
+        let key = [0xABu8; 32];
+        let sig = [0xCDu8; 64];
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(405),
+            body: KrpcBody::Response(KrpcResponse::GetItem {
+                id: test_id(),
+                token: Some(b"tok".to_vec()),
+                nodes: vec![CompactNodeInfo {
+                    id: target_id(),
+                    addr: "10.0.0.1:6881".parse().unwrap(),
+                }],
+                nodes6: Vec::new(),
+                value: Some(b"4:test".to_vec()),
+                key: Some(key),
+                signature: Some(sig),
+                seq: Some(7),
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_response_not_found_with_hint_round_trip() {
+        // "Not found" BEP 44 response: only token + nodes, no v/k/sig/seq.
+        // Without the query_method hint this would be decoded as GetPeers.
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(406),
+            body: KrpcBody::Response(KrpcResponse::GetItem {
+                id: test_id(),
+                token: Some(b"tok".to_vec()),
+                nodes: vec![CompactNodeInfo {
+                    id: target_id(),
+                    addr: "10.0.0.1:6881".parse().unwrap(),
+                }],
+                nodes6: Vec::new(),
+                value: None,
+                key: None,
+                signature: None,
+                seq: None,
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        // Use from_bytes_with_query_hint to force GetItem decoding
+        let decoded = KrpcMessage::from_bytes_with_query_hint(&bytes, "get").unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn bep44_query_method_names() {
+        assert_eq!(
+            KrpcQuery::Get {
+                id: Id20::ZERO,
+                target: Id20::ZERO,
+                seq: None,
+            }
+            .method_name(),
+            "get"
+        );
+        assert_eq!(
+            KrpcQuery::Put {
+                id: Id20::ZERO,
+                token: Vec::new(),
+                value: Vec::new(),
+                key: None,
+                signature: None,
+                seq: None,
+                salt: None,
+                cas: None,
+            }
+            .method_name(),
+            "put"
+        );
     }
 }
