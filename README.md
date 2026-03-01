@@ -1,80 +1,184 @@
-# Ferrite
+# 🧲 Ferrite
 
-A from-scratch Rust BitTorrent library targeting full libtorrent-rasterbar parity.
+A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** feature parity.
 
-Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that can replace librqbit as the backend for `rqbit-slint` and other applications.
+Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-## Architecture
+[![Tests](https://img.shields.io/badge/tests-895-brightgreen)](#-testing)
+[![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
+[![Version](https://img.shields.io/badge/version-0.41.0-blue)](#-versioning)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
+[![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
+
+---
+
+## ✨ Highlights
+
+- 🏗️ **11-crate modular workspace** — each layer independently testable and reusable
+- 🔐 **Full BEP 52 support** — BitTorrent v2 metadata, wire protocol, storage, and hybrid v1+v2 torrents
+- ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
+- 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
+- 📡 **21 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52)
+- 🎛️ **56-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
+- 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
+- 📊 **895 tests, zero clippy warnings**
+
+---
+
+## 🏛️ Architecture
 
 ```
-ferrite-bencode      Serde bencode codec (leaf, no deps)
-     |
-ferrite-core         Hashes, metainfo, magnets, piece arithmetic
-     |
-     +---> ferrite-wire       Peer wire protocol, handshake, extensions
-     +---> ferrite-tracker    HTTP + UDP tracker announce/scrape
-     +---> ferrite-dht        Kademlia DHT (BEP 5, actor model)
-     |
-ferrite-storage      Piece verification, chunk tracking, disk I/O
-     |
-ferrite-session      Peer management, torrent orchestration
-     |
-ferrite-utp          uTP (BEP 29) micro transport protocol
-     |
-ferrite              Public facade API
+ferrite-bencode      🔤 Serde bencode codec (leaf, no deps)
+     │
+ferrite-core         🔑 Hashes, metainfo (v1+v2), magnets, piece arithmetic
+     │
+     ├──▶ ferrite-wire       🔌 Peer wire protocol, handshake, BEP 6/9/10/21/52, MSE/PE
+     ├──▶ ferrite-tracker    📡 HTTP + UDP tracker announce/scrape
+     ├──▶ ferrite-dht        🌐 Kademlia DHT (BEP 5/24), actor model
+     │
+ferrite-storage      💾 Piece verification (SHA-1 + SHA-256), chunk tracking, mmap, ARC cache
+     │
+ferrite-session      🎯 Session manager, torrent orchestration, disk I/O actor
+     │
+ferrite-utp          🚀 uTP (BEP 29) micro transport protocol, LEDBAT congestion
+     │
+ferrite-nat          🔓 PCP / NAT-PMP / UPnP IGD automatic port mapping
+     │
+ferrite              📦 Public facade: ClientBuilder + prelude + unified error
 ```
 
-## Crates
+---
+
+## 📦 Crates
 
 | Crate | Description | Tests |
-|-------|-------------|-------|
-| `ferrite-bencode` | Serde-based bencode serialization | 14 |
-| `ferrite-core` | Id20/Id32, TorrentMetaV1/V2, InfoHashes, MerkleTree, MerkleTreeState, HashRequest, HashPicker, Magnet (v1+v2), Lengths, PeerId, FastResumeData, FilePriority, StorageMode, CreateTorrent | 140 |
-| `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption | 65 |
+|-------|-------------|:-----:|
+| `ferrite-bencode` | Serde-based bencode serialization with sorted map key ordering | 14 |
+| `ferrite-core` | Id20/Id32, TorrentMeta (v1/v2/hybrid), InfoHashes, MerkleTree, Magnet (v1+v2), CreateTorrent, FastResumeData, FilePriority | 140 |
+| `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH) | 65 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
-| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
-| `ferrite-storage` | Bitfield, FileMap, ChunkTracker (v1+v2 block tracking), TorrentStorage trait (SHA-1 + SHA-256), MmapStorage, ARC disk cache | 63 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor, v1+v2 hashing), BEP 52 v2 Merkle verification + hash exchange, unified Settings, runtime config, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers, smart banning, parallel hashing, IP filtering + proxy, file streaming, BEP 9 metadata serving, BEP 40 peer priority, per-class rate limits, move storage, share mode, extension plugins | 372 |
-| `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
-| `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 20 |
-| `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 35 |
+| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack | 55 |
+| `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 63 |
+| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 372 |
+| `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 21 |
+| `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
+| `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 35 |
 
-**Total: 883 tests, zero clippy warnings.**
+### 🎯 Session Features
 
-## Design Decisions
+The `ferrite-session` crate (372 tests) includes:
 
-- **Modular crates** — each layer is independently testable and reusable
-- **`thiserror` typed errors** per crate, no `anyhow`
-- **Rust edition 2024** with workspace resolver 2
-- **`bytes::Bytes`** for zero-copy buffer sharing across the wire protocol
-- **Actor model** for DHT — single-owner event loop with cloneable handle, no `DashMap`
-- **Async disk I/O** — central DiskActor with write buffering, ARC read cache, and semaphore-limited spawn_blocking
-- **Wire-compatible coordinates** — `(piece, begin, length)` used throughout, matching BEP 3 directly
-- **Binary search file lookup** — O(log n) piece-to-file mapping vs linear scan
+| Category | Features |
+|----------|----------|
+| **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange (bidirectional), BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange |
+| **Transfer** | Rarest-first piece picker, end-game mode, dynamic request queue, file streaming (`AsyncRead` + `AsyncSeek`), sequential download, block-level picking |
+| **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), automatic upload slot optimization |
+| **Storage** | Async DiskActor with write buffering, ARC read cache, mmap backend, parallel hashing, move storage |
+| **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy |
+| **Management** | Unified Settings (56 fields, runtime updates), alerts/events system, queue management (auto-manage), smart banning + parole, IP filtering (.dat parser) |
+| **Persistence** | FastResumeData (bencode), session state, DHT node cache |
+| **Extensibility** | Extension plugin trait, share mode, hybrid v1+v2 dual verification |
 
-## Building
+---
+
+## 📋 BEP Coverage
+
+| BEP | Description | Status |
+|:---:|-------------|:------:|
+| 3 | The BitTorrent Protocol | ✅ |
+| 5 | DHT (Kademlia) | ✅ |
+| 6 | Fast Extension | ✅ |
+| 7 | IPv6 Tracker Extension | ✅ |
+| 9 | Extension for Peers to Send Metadata Files | ✅ |
+| 10 | Extension Protocol | ✅ |
+| 11 | Peer Exchange (PEX) | ✅ |
+| 12 | Multitracker Metadata Extension | ✅ |
+| 14 | Local Service Discovery | ✅ |
+| 15 | UDP Tracker Protocol | ✅ |
+| 16 | Super Seeding | ✅ |
+| 17 | HTTP Seeding (Hoffman-style) | ✅ |
+| 19 | WebSeed (GetRight-style) | ✅ |
+| 21 | Extension for Partial Seeds | ✅ |
+| 24 | Tracker Returns External IP / IPv6 DHT | ✅ |
+| 27 | Private Torrents | ✅ |
+| 29 | uTP (Micro Transport Protocol) | ✅ |
+| 40 | Canonical Peer Priority | ✅ |
+| 47 | Pad Files and File Attributes | ✅ |
+| 48 | Tracker Protocol Extension: Scrape | ✅ |
+| 52 | BitTorrent v2 (SHA-256 Merkle) | ✅ |
+| 42 | DHT Security Extension | 🔜 M37 |
+| 44 | Storing Arbitrary Data in the DHT | 🔜 M38 |
+| 51 | DHT Infohash Indexing | 🔜 M39 |
+| 53 | Magnet URI Extension (select-only) | 🔜 M36 |
+| 55 | Holepunch Extension | 🔜 M40 |
+
+**21 BEPs implemented, 5 planned** — targeting 26 total for full libtorrent-rasterbar parity.
+
+---
+
+## 🏗️ Building
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-Requires Rust edition 2024 support (rustc 1.85+).
+Requires Rust edition 2024 support (**rustc 1.85+**).
 
-## Roadmap
+---
 
-See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-roadmap-v2.md) for the full 38-milestone roadmap to libtorrent-rasterbar parity.
+## 🗺️ Roadmap
 
-| Phase | Milestones | Status |
-|-------|-----------|--------|
-| Foundation | M1-M10 (bencode → facade) | Done |
-| Phase 1: Desktop Essentials | M11-M16 (resume, selective download, end-game, bandwidth + auto upload slots, alerts, queue) | Done |
-| Phase 2: Transport & Security | M17-M20 (encryption, uTP, NAT traversal) | Done |
-| Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Done |
-| Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Done |
-| Phase 5: Network & Tools | M29-M32d (IP filter, torrent creation, settings, metadata serving, BEP 40, per-class rate limits, move storage, share mode, extension plugins) | Done |
-| Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | M33-M35 done |
+See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md) for the full 51-milestone roadmap to complete libtorrent-rasterbar parity. Implementation plans exist for every milestone.
 
-## License
+| Phase | Milestones | Focus | Status |
+|-------|-----------|-------|:------:|
+| Foundation | M1–M10 | Bencode, core types, wire, tracker, DHT, storage, session, facade | ✅ Done |
+| 1: Desktop Essentials | M11–M16 | Resume data, selective download, end-game, bandwidth, alerts, queue | ✅ Done |
+| 2: Transport & Security | M17–M20 | MSE/PE encryption, uTP, NAT traversal | ✅ Done |
+| 3: Protocol Extensions | M21–M24 | IPv6, web seeding, super seeding, tracker scrape | ✅ Done |
+| 4: Performance | M25–M28 | Smart banning, async disk + ARC cache, parallel hashing, piece picker | ✅ Done |
+| 5: Network & Tools | M29–M32d | IP filter, torrent creation, settings, metadata serving, plugins | ✅ Done |
+| 6: BitTorrent v2 | M33–M35 | BEP 52 metadata, wire + storage, hybrid v1+v2 | ✅ Done |
+| 7: v2 Completion & DHT | M36–M39 | BEP 53, BEP 42/44/51 DHT hardening | 📝 Planned |
+| 8: Connectivity & Privacy | M40–M42 | BEP 55 holepunch, I2P (SAM), SSL torrents | 📝 Planned |
+| 9: Swarm Intelligence | M43–M46 | Choking algorithms, piece picker, mixed-mode, peer turnover | 📝 Planned |
+| 10: Security & Hardening | M47–M48 | SSRF mitigation, DSCP, anonymous mode | 📝 Planned |
+| 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | 📝 Planned |
+| 12: Simulation | M51 | In-process network simulation framework | 📝 Planned |
+
+---
+
+## 🎨 Design Decisions
+
+- **Modular crates** — each layer is independently testable and reusable
+- **`thiserror` typed errors** per crate, no `anyhow` — explicit error propagation
+- **Rust edition 2024** with workspace resolver 2
+- **`bytes::Bytes`** for zero-copy buffer sharing across the wire protocol
+- **Actor model** — `SessionActor`/`TorrentActor`/`DhtActor` with `tokio::select!` loops and command channels
+- **Async disk I/O** — central `DiskActor` with write buffering, ARC read cache, and semaphore-limited `spawn_blocking`
+- **Wire-compatible coordinates** — `(piece, begin, length)` throughout, matching BEP 3 directly
+- **Binary search file lookup** — O(log n) piece-to-file mapping via sorted `FileMap`
+- **No `rand` dependency** — thread-local xorshift64 seeded from `SystemTime`
+- **Deterministic serialization** — `SortedMapSerializer` ensures BEP 3 dict key ordering
+
+---
+
+## 🔖 Versioning
+
+Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone bumps the version:
+
+| Version | Milestone | Highlights |
+|---------|-----------|------------|
+| 0.41.0 | M35 | Hybrid v1+v2 torrents, `TorrentVersion` enum |
+| 0.40.0 | M34c | BEP 52 session integration, Merkle hash exchange |
+| 0.39.0 | M34b | v2 storage, per-block SHA-256 |
+| 0.38.0 | M34a | v2 wire protocol, `HashPicker` |
+| 0.37.0 | M33 | BEP 52 core, `Id32`, `TorrentMetaV2`, `MerkleTree` |
+| 0.36.0 | M32d | Extension plugin interface |
+
+---
+
+## 📄 License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
