@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::alert::{post_alert, Alert, AlertKind};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
@@ -1973,6 +1973,44 @@ impl TorrentActor {
             self.end_game.deactivate();
             info!(index, "end-game deactivated due to hash failure");
         }
+    }
+
+    /// Handle v1/v2 hash inconsistency — the torrent data itself is corrupt.
+    ///
+    /// Matching libtorrent: destroy hash picker, pause the torrent, post error alert.
+    #[allow(dead_code)] // called by verify_and_mark_piece_hybrid (M35 Task 4)
+    async fn on_inconsistent_hashes(&mut self, piece: u32) {
+        let info_hash = self.info_hash;
+        error!(
+            piece,
+            info_hash = %info_hash,
+            "v1 and v2 hashes are inconsistent — torrent data is corrupt"
+        );
+
+        // Destroy hash picker (Merkle tree state is untrustworthy)
+        self.hash_picker = None;
+
+        // Post specific inconsistency alert
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::InconsistentHashes { info_hash, piece },
+        );
+
+        // Post generic error alert for broader consumers
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentError {
+                info_hash,
+                message: format!(
+                    "v1 and v2 hashes do not describe the same data (piece {piece})"
+                ),
+            },
+        );
+
+        // Pause the torrent — transition state to Paused
+        self.transition_state(TorrentState::Paused);
     }
 
     // ── BEP 52 hash event handlers (M34) ────────────────────────────────

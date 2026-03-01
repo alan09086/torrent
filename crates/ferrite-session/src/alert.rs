@@ -128,6 +128,10 @@ pub enum AlertKind {
     PortMappingSucceeded { port: u16, protocol: String },
     PortMappingFailed { port: u16, message: String },
 
+    // ── Hybrid hash conflict (M35) ──
+    /// v1 and v2 hashes disagree on the same piece — the .torrent data is inconsistent.
+    InconsistentHashes { info_hash: Id20, piece: u32 },
+
     // ── Settings (M31) ──
     SettingsChanged,
 }
@@ -183,6 +187,7 @@ impl AlertKind {
 
             // ERROR
             TorrentError { .. } => AlertCategory::ERROR,
+            InconsistentHashes { .. } => AlertCategory::ERROR,
 
             // PERFORMANCE
             PerformanceWarning { .. } => AlertCategory::PERFORMANCE,
