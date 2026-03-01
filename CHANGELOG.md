@@ -8,6 +8,27 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.46.0 — 2026-03-01
+
+BEP 55 holepunch extension — NAT traversal between NATed peers via relay-mediated simultaneous connect. Eleven crates, 1037 tests, 26 BEPs implemented.
+
+### M40: BEP 55 Holepunch Extension
+
+### Added
+- BEP 55: holepunch extension for NAT traversal between NATed peers
+- Wire-level message types: `HolepunchMessage`, `HolepunchMsgType`, `HolepunchError`
+- `ut_holepunch` as built-in BEP 10 extension ID 4
+- TorrentActor relay logic: forwards Connect messages to both parties (Rendezvous protocol)
+- Simultaneous connect handler with uTP-first and TCP fallback
+- NAT detection heuristic for peer classification
+- Settings: `enable_holepunch` (default true)
+- Alerts: `HolepunchSucceeded`, `HolepunchFailed`
+- `PeerState` tracking: `supports_holepunch`, `appears_nated`
+- `PeerEvent`/`PeerCommand` variants for holepunch messages
+- `try_holepunch()` utility for initiating holepunch via relay
+- Facade: `HolepunchMessage`/`HolepunchMsgType`/`HolepunchError` re-exports, `ClientBuilder::enable_holepunch()`
+- 30 new tests (1037 total)
+
 ## 0.45.0 — 2026-03-01
 
 BEP 51 DHT infohash indexing — `sample_infohashes` query for discovering info hashes in the DHT. Eleven crates, 1007 tests, 25 BEPs implemented.
