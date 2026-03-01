@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1124-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1137-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.49.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.50.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -19,9 +19,9 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
 - 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
 - 📡 **27 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
-- 🎛️ **81-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
+- 🎛️ **85-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1124 tests, zero clippy warnings**
+- 📊 **1137 tests, zero clippy warnings**
 
 ---
 
@@ -58,8 +58,8 @@ ferrite              📦 Public facade: ClientBuilder + prelude + unified error
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH), SSL/TLS transport | 75 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 148 |
-| `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 63 |
-| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 467 |
+| `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 65 |
+| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 480 |
 | `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 35 |
@@ -71,11 +71,11 @@ The `ferrite-session` crate (376 tests) includes:
 | Category | Features |
 |----------|----------|
 | **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange (bidirectional), BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange, BEP 53 magnet `so=` file selection |
-| **Transfer** | Rarest-first piece picker, end-game mode, dynamic request queue, file streaming (`AsyncRead` + `AsyncSeek`), sequential download, block-level picking |
+| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, dynamic request queue, file streaming (`AsyncRead` + `AsyncSeek`), sequential download, block-level picking, SuggestPiece, predictive announce |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), automatic upload slot optimization |
 | **Storage** | Async DiskActor with write buffering, ARC read cache, mmap backend, parallel hashing, move storage |
 | **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport |
-| **Management** | Unified Settings (81 fields, runtime updates), alerts/events system, queue management (auto-manage), smart banning + parole, IP filtering (.dat parser) |
+| **Management** | Unified Settings (85 fields, runtime updates), alerts/events system, queue management (auto-manage), smart banning + parole, IP filtering (.dat parser) |
 | **Persistence** | FastResumeData (bencode), session state, DHT node cache |
 | **Extensibility** | Extension plugin trait, share mode, hybrid v1+v2 dual verification, dual-swarm announces, pure v2 torrent support |
 
@@ -171,6 +171,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.50.0 | M44 | Piece picker: extent affinity, SuggestPiece mode, predictive announce, PeerSpeedClassifier |
 | 0.49.0 | M43 | Pluggable choking algorithms (FixedSlots/RateBased), seed-mode strategies (FastestUpload/RoundRobin/AntiLeech) |
 | 0.48.0 | M42 | BEP 35 SSL torrents, TLS transport, SNI-based routing, self-signed certs |
 | 0.47.0 | M41 | I2P anonymous network support via SAM v3.1 protocol |

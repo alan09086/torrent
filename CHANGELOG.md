@@ -8,6 +8,32 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.50.0 — 2026-03-01
+
+Piece picker enhancements — extent affinity for disk cache locality, BEP 6 SuggestPiece mode, predictive piece announce, and configurable peer speed classification. Eleven crates, 1137 tests, 27 BEPs implemented.
+
+### M44: Piece Picker Enhancements
+
+### Added
+- Piece extent affinity: groups pieces into 4 MiB extents, preferring in-flight extents for improved disk cache locality
+- `PeerSpeedClassifier` with configurable slow/fast thresholds (default 10 KB/s and 100 KB/s)
+- SuggestPiece mode: sends BEP 6 SuggestPiece messages for pieces in the ARC disk read cache
+- `suggest_cached_pieces()` method with 30-second periodic timer and on-verification suggests
+- `PeerCommand::SuggestPiece(u32)` variant mapped to `Message::SuggestPiece`
+- `DiskJob::CachedPieces` + `DiskHandle::cached_pieces()` for querying disk cache contents
+- `ArcCache::cached_keys()` iterator for cache key enumeration
+- Predictive piece announce: sends Have messages before hash verification completes
+- `predictive_have_sent` tracking with duplicate suppression in `on_piece_verified()`
+- Hash failure cleanup: removes predictive Have state on verification failure
+- 4 new settings: `piece_extent_affinity`, `suggest_mode`, `max_suggest_pieces`, `predictive_piece_announce_ms`
+- `Settings::high_performance()` now enables suggest mode
+- Facade: 4 `ClientBuilder` methods
+- 13 new tests (1137 total)
+
+### Changed
+- `PieceSelector::pick_rarest_new()` refactored into `pick_rarest_any()` + `pick_rarest_in_extent()` for extent-filtered picking
+- `PickContext` extended with `extent_affinity` field
+
 ## 0.49.0 — 2026-03-01
 
 Pluggable choking algorithms — refactored monolithic choker into Strategy pattern with four implementations. Eleven crates, 1124 tests, 27 BEPs implemented.
