@@ -1,6 +1,7 @@
 use url::Url;
 
 use crate::error::Error;
+use crate::file_selection::FileSelection;
 use crate::hash::{Id20, Id32};
 use crate::info_hashes::InfoHashes;
 
@@ -17,6 +18,8 @@ pub struct Magnet {
     pub trackers: Vec<String>,
     /// Peer addresses (x.pe parameter).
     pub peers: Vec<String>,
+    /// BEP 53 file selection (optional `so=` parameter).
+    pub selected_files: Option<Vec<FileSelection>>,
 }
 
 impl Magnet {
@@ -55,6 +58,7 @@ impl Magnet {
         let mut display_name = None;
         let mut trackers = Vec::new();
         let mut peers = Vec::new();
+        let mut selected_files = None;
 
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
@@ -73,6 +77,12 @@ impl Magnet {
                 }
                 "x.pe" => {
                     peers.push(value.into_owned());
+                }
+                "so" => {
+                    if let Ok(sels) = FileSelection::parse(&value) {
+                        selected_files = Some(sels);
+                    }
+                    // Ignore malformed so= values per BEP 53
                 }
                 _ => {} // Ignore unknown parameters
             }
@@ -94,6 +104,7 @@ impl Magnet {
             display_name,
             trackers,
             peers,
+            selected_files,
         })
     }
 
@@ -128,6 +139,10 @@ impl Magnet {
                 "tr={}",
                 url::form_urlencoded::byte_serialize(tracker.as_bytes()).collect::<String>()
             ));
+        }
+
+        if let Some(ref sels) = self.selected_files {
+            parts.push(format!("so={}", FileSelection::to_so_value(sels)));
         }
 
         parts.join("&")
@@ -268,6 +283,44 @@ mod tests {
     #[test]
     fn reject_no_hash() {
         assert!(Magnet::parse("magnet:?dn=test").is_err());
+    }
+
+    #[test]
+    fn parse_so_parameter() {
+        let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&so=0,2,4-6";
+        let m = Magnet::parse(uri).unwrap();
+        let sels = m.selected_files.unwrap();
+        assert_eq!(
+            sels,
+            vec![
+                crate::file_selection::FileSelection::Single(0),
+                crate::file_selection::FileSelection::Single(2),
+                crate::file_selection::FileSelection::Range(4, 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn so_parameter_round_trip() {
+        let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&so=0,2,4-6";
+        let m = Magnet::parse(uri).unwrap();
+        let rebuilt = m.to_uri();
+        let m2 = Magnet::parse(&rebuilt).unwrap();
+        assert_eq!(m.selected_files, m2.selected_files);
+    }
+
+    #[test]
+    fn no_so_parameter_is_none() {
+        let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
+        let m = Magnet::parse(uri).unwrap();
+        assert!(m.selected_files.is_none());
+    }
+
+    #[test]
+    fn invalid_so_parameter_ignored() {
+        let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&so=abc";
+        let m = Magnet::parse(uri).unwrap();
+        assert!(m.selected_files.is_none());
     }
 
     #[test]
