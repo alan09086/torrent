@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 fn default_neg_one() -> i64 {
@@ -184,6 +186,19 @@ pub struct FastResumeData {
     #[serde(rename = "http_seeds")]
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub http_seeds: Vec<String>,
+
+    /// SHA-256 v2 info hash (32 bytes, BEP 52).
+    #[serde(rename = "info-hash2")]
+    #[serde(with = "serde_bytes")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub info_hash2: Option<Vec<u8>>,
+
+    /// Cached piece-layer Merkle hashes per file.
+    /// Key: hex-encoded file root hash. Value: concatenated 32-byte piece hashes.
+    /// Allows skipping piece-layer hash requests on resume.
+    #[serde(rename = "trees")]
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub trees: HashMap<String, Vec<u8>>,
 }
 
 impl FastResumeData {
@@ -225,6 +240,8 @@ impl FastResumeData {
             info: None,
             url_seeds: Vec::new(),
             http_seeds: Vec::new(),
+            info_hash2: None,
+            trees: HashMap::new(),
         }
     }
 }
@@ -401,6 +418,54 @@ mod tests {
         // Default should be 0
         let default_resume = FastResumeData::new(vec![0; 20], "test".into(), "/tmp".into());
         assert_eq!(default_resume.super_seeding, 0);
+    }
+
+    #[test]
+    fn resume_data_v2_fields_round_trip() {
+        let mut resume = FastResumeData::new(
+            vec![0xAA; 20],
+            "v2-torrent".into(),
+            "/downloads".into(),
+        );
+        resume.info_hash2 = Some(vec![0xBB; 32]);
+        resume.trees.insert(
+            hex::encode([0xCC; 32]),
+            vec![0xDD; 64], // 2 piece hashes
+        );
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.info_hash2, Some(vec![0xBB; 32]));
+        assert_eq!(decoded.trees.len(), 1);
+    }
+
+    #[test]
+    fn resume_data_v1_backward_compat() {
+        let resume = FastResumeData::new(
+            vec![0x00; 20],
+            "v1-torrent".into(),
+            "/tmp".into(),
+        );
+        assert!(resume.info_hash2.is_none());
+        assert!(resume.trees.is_empty());
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+        assert!(decoded.info_hash2.is_none());
+        assert!(decoded.trees.is_empty());
+    }
+
+    #[test]
+    fn resume_data_v2_empty_trees_not_serialized() {
+        let resume = FastResumeData::new(
+            vec![0x00; 20],
+            "minimal".into(),
+            "/tmp".into(),
+        );
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        // "5:trees" (bencode key) should not appear in output when empty
+        let encoded_str = String::from_utf8_lossy(&encoded);
+        assert!(!encoded_str.contains("5:trees"));
     }
 
     #[test]
