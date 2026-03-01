@@ -53,3 +53,6 @@ pub use crate::session::ExtensionPlugin;
 
 // Torrent creation (M30)
 pub use crate::core::CreateTorrent;
+
+// BitTorrent v2 (M33, BEP 52)
+pub use crate::core::{InfoHashes, TorrentMetaV2, TorrentMeta, Id32};

@@ -1,15 +1,16 @@
 use url::Url;
 
 use crate::error::Error;
-use crate::hash::Id20;
+use crate::hash::{Id20, Id32};
+use crate::info_hashes::InfoHashes;
 
-/// Parsed magnet link (BEP 9).
+/// Parsed magnet link (BEP 9 + BEP 52).
 ///
-/// Format: `magnet:?xt=urn:btih:<info-hash>&dn=<name>&tr=<tracker>`
+/// Supports v1 (`urn:btih:`), v2 (`urn:btmh:`), and hybrid magnets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Magnet {
-    /// The 20-byte info hash.
-    pub info_hash: Id20,
+    /// Unified info hashes (v1 and/or v2).
+    pub info_hashes: InfoHashes,
     /// Display name (optional).
     pub display_name: Option<String>,
     /// Tracker URLs.
@@ -19,6 +20,23 @@ pub struct Magnet {
 }
 
 impl Magnet {
+    /// Get the best v1 info hash for backward compatibility.
+    ///
+    /// Returns the v1 hash directly, or truncates v2 if only v2 is available.
+    pub fn info_hash(&self) -> Id20 {
+        self.info_hashes.best_v1()
+    }
+
+    /// Whether this magnet contains a v2 hash.
+    pub fn is_v2(&self) -> bool {
+        self.info_hashes.has_v2()
+    }
+
+    /// Whether this magnet contains both v1 and v2 hashes.
+    pub fn is_hybrid(&self) -> bool {
+        self.info_hashes.is_hybrid()
+    }
+
     /// Parse a magnet URI string.
     pub fn parse(uri: &str) -> Result<Self, Error> {
         // Magnet URIs use "magnet:?" which isn't a valid URL scheme for most parsers.
@@ -32,7 +50,8 @@ impl Magnet {
         let url = Url::parse(&normalized)
             .map_err(|e| Error::InvalidMagnet(format!("URL parse error: {e}")))?;
 
-        let mut info_hash = None;
+        let mut v1_hash: Option<Id20> = None;
+        let mut v2_hash: Option<Id32> = None;
         let mut display_name = None;
         let mut trackers = Vec::new();
         let mut peers = Vec::new();
@@ -41,7 +60,9 @@ impl Magnet {
             match key.as_ref() {
                 "xt" => {
                     if let Some(hash_str) = value.strip_prefix("urn:btih:") {
-                        info_hash = Some(parse_info_hash(hash_str)?);
+                        v1_hash = Some(parse_v1_hash(hash_str)?);
+                    } else if let Some(hash_str) = value.strip_prefix("urn:btmh:") {
+                        v2_hash = Some(parse_v2_multihash(hash_str)?);
                     }
                 }
                 "dn" => {
@@ -57,11 +78,19 @@ impl Magnet {
             }
         }
 
-        let info_hash =
-            info_hash.ok_or_else(|| Error::InvalidMagnet("missing xt=urn:btih:".into()))?;
+        if v1_hash.is_none() && v2_hash.is_none() {
+            return Err(Error::InvalidMagnet(
+                "missing xt=urn:btih: or xt=urn:btmh:".into(),
+            ));
+        }
+
+        let info_hashes = InfoHashes {
+            v1: v1_hash,
+            v2: v2_hash,
+        };
 
         Ok(Magnet {
-            info_hash,
+            info_hashes,
             display_name,
             trackers,
             peers,
@@ -70,7 +99,22 @@ impl Magnet {
 
     /// Convert back to a magnet URI string.
     pub fn to_uri(&self) -> String {
-        let mut parts = vec![format!("magnet:?xt=urn:btih:{}", self.info_hash.to_hex())];
+        let mut parts = Vec::new();
+
+        // Emit v1 hash if present
+        if let Some(v1) = self.info_hashes.v1 {
+            parts.push(format!("magnet:?xt=urn:btih:{}", v1.to_hex()));
+        }
+
+        // Emit v2 hash if present
+        if let Some(v2) = self.info_hashes.v2 {
+            let prefix = if parts.is_empty() { "magnet:?" } else { "" };
+            parts.push(format!(
+                "{}xt=urn:btmh:{}",
+                prefix,
+                v2.to_multihash_hex()
+            ));
+        }
 
         if let Some(ref name) = self.display_name {
             parts.push(format!(
@@ -90,16 +134,21 @@ impl Magnet {
     }
 }
 
-/// Parse an info hash from hex (40 chars) or base32 (32 chars).
-fn parse_info_hash(s: &str) -> Result<Id20, Error> {
+/// Parse a v1 info hash from hex (40 chars) or base32 (32 chars).
+fn parse_v1_hash(s: &str) -> Result<Id20, Error> {
     match s.len() {
         40 => Id20::from_hex(s),
         32 => Id20::from_base32(&s.to_ascii_uppercase()),
         _ => Err(Error::InvalidMagnet(format!(
-            "info hash must be 40 hex or 32 base32 chars, got {} chars",
+            "v1 info hash must be 40 hex or 32 base32 chars, got {} chars",
             s.len()
         ))),
     }
+}
+
+/// Parse a v2 multihash from hex (68 chars = "1220" prefix + 64 hex).
+fn parse_v2_multihash(s: &str) -> Result<Id32, Error> {
+    Id32::from_multihash_hex(s).map_err(|e| Error::InvalidMagnet(format!("v2 multihash: {e}")))
 }
 
 #[cfg(test)]
@@ -111,7 +160,7 @@ mod tests {
         let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test&tr=http://tracker.example.com/announce";
         let m = Magnet::parse(uri).unwrap();
         assert_eq!(
-            m.info_hash,
+            m.info_hash(),
             Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap()
         );
         assert_eq!(m.display_name.as_deref(), Some("test"));
@@ -120,12 +169,11 @@ mod tests {
 
     #[test]
     fn parse_base32_magnet() {
-        // Same hash as above but base32 encoded
         let id = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
         let b32 = id.to_base32();
         let uri = format!("magnet:?xt=urn:btih:{b32}");
         let m = Magnet::parse(&uri).unwrap();
-        assert_eq!(m.info_hash, id);
+        assert_eq!(m.info_hash(), id);
     }
 
     #[test]
@@ -141,7 +189,7 @@ mod tests {
         let m = Magnet::parse(uri).unwrap();
         let rebuilt = m.to_uri();
         let m2 = Magnet::parse(&rebuilt).unwrap();
-        assert_eq!(m.info_hash, m2.info_hash);
+        assert_eq!(m.info_hash(), m2.info_hash());
         assert_eq!(m.display_name, m2.display_name);
         assert_eq!(m.trackers, m2.trackers);
     }
@@ -150,5 +198,87 @@ mod tests {
     fn reject_invalid_magnet() {
         assert!(Magnet::parse("http://example.com").is_err());
         assert!(Magnet::parse("magnet:?dn=test").is_err()); // no xt
+    }
+
+    // v2-specific tests
+
+    #[test]
+    fn parse_v2_only_magnet() {
+        let hash =
+            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap();
+        let mh = hash.to_multihash_hex();
+        let uri = format!("magnet:?xt=urn:btmh:{mh}&dn=v2test");
+        let m = Magnet::parse(&uri).unwrap();
+        assert!(m.is_v2());
+        assert!(!m.is_hybrid());
+        assert_eq!(m.info_hashes.v2, Some(hash));
+        assert_eq!(m.display_name.as_deref(), Some("v2test"));
+    }
+
+    #[test]
+    fn parse_hybrid_magnet() {
+        let v1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let v2 =
+            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap();
+        let uri = format!(
+            "magnet:?xt=urn:btih:{}&xt=urn:btmh:{}",
+            v1.to_hex(),
+            v2.to_multihash_hex()
+        );
+        let m = Magnet::parse(&uri).unwrap();
+        assert!(m.is_hybrid());
+        assert_eq!(m.info_hashes.v1, Some(v1));
+        assert_eq!(m.info_hashes.v2, Some(v2));
+        // info_hash() backward compat returns v1
+        assert_eq!(m.info_hash(), v1);
+    }
+
+    #[test]
+    fn v2_round_trip() {
+        let hash =
+            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap();
+        let mh = hash.to_multihash_hex();
+        let uri = format!("magnet:?xt=urn:btmh:{mh}");
+        let m = Magnet::parse(&uri).unwrap();
+        let rebuilt = m.to_uri();
+        let m2 = Magnet::parse(&rebuilt).unwrap();
+        assert_eq!(m.info_hashes, m2.info_hashes);
+    }
+
+    #[test]
+    fn hybrid_round_trip() {
+        let v1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let v2 =
+            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap();
+        let uri = format!(
+            "magnet:?xt=urn:btih:{}&xt=urn:btmh:{}",
+            v1.to_hex(),
+            v2.to_multihash_hex()
+        );
+        let m = Magnet::parse(&uri).unwrap();
+        let rebuilt = m.to_uri();
+        let m2 = Magnet::parse(&rebuilt).unwrap();
+        assert_eq!(m.info_hashes, m2.info_hashes);
+    }
+
+    #[test]
+    fn reject_no_hash() {
+        assert!(Magnet::parse("magnet:?dn=test").is_err());
+    }
+
+    #[test]
+    fn v1_only_backward_compat() {
+        let uri = "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
+        let m = Magnet::parse(uri).unwrap();
+        assert!(!m.is_v2());
+        assert!(!m.is_hybrid());
+        assert_eq!(
+            m.info_hash(),
+            Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap()
+        );
     }
 }

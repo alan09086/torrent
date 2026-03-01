@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 
 # Hashing
 sha1 = "0.10"
+sha2 = "0.10"
 
 # Encoding (hex, base32 for magnets)
 hex = "0.4"

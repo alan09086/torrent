@@ -1037,7 +1037,7 @@ impl SessionActor {
     }
 
     async fn handle_add_magnet(&mut self, magnet: Magnet) -> crate::Result<Id20> {
-        let info_hash = magnet.info_hash;
+        let info_hash = magnet.info_hash();
         let display_name = magnet.display_name.clone().unwrap_or_default();
         if self.torrents.contains_key(&info_hash) {
             return Err(crate::Error::DuplicateTorrent(info_hash));
@@ -1852,12 +1852,14 @@ mod tests {
 
         let session = SessionHandle::start(test_settings()).await.unwrap();
         let magnet = Magnet {
-            info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            info_hashes: ferrite_core::InfoHashes::v1_only(
+                Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            ),
             display_name: Some("test-magnet".into()),
             trackers: vec![],
             peers: vec![],
         };
-        let expected_hash = magnet.info_hash;
+        let expected_hash = magnet.info_hash();
 
         let info_hash = session.add_magnet(magnet).await.unwrap();
         assert_eq!(info_hash, expected_hash);
@@ -1881,7 +1883,9 @@ mod tests {
 
         let session = SessionHandle::start(test_settings()).await.unwrap();
         let magnet = Magnet {
-            info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            info_hashes: ferrite_core::InfoHashes::v1_only(
+                Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            ),
             display_name: Some("test-magnet".into()),
             trackers: vec![],
             peers: vec![],
@@ -1915,7 +1919,9 @@ mod tests {
 
         // Add a magnet (also triggers LSD announce)
         let magnet = Magnet {
-            info_hash: Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            info_hashes: ferrite_core::InfoHashes::v1_only(
+                Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            ),
             display_name: Some("lsd-test".into()),
             trackers: vec![],
             peers: vec![],

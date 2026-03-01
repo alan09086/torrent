@@ -40,3 +40,13 @@ pub use ferrite_core::StorageMode;
 
 // Torrent creation (M30)
 pub use ferrite_core::{CreateTorrent, CreateTorrentResult};
+
+// BitTorrent v2 (M33, BEP 52)
+pub use ferrite_core::{
+    InfoHashes,
+    InfoDictV2, TorrentMetaV2, torrent_v2_from_bytes,
+    MerkleTree,
+    FileTreeNode, V2FileAttr, V2FileInfo,
+    TorrentMeta, torrent_from_bytes_any,
+    sha256,
+};

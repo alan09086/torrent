@@ -97,12 +97,12 @@ mod tests {
 
         assert_eq!(magnet.display_name.as_deref(), Some("test file"));
         assert_eq!(magnet.trackers.len(), 1);
-        assert_eq!(magnet.info_hash.to_hex(), "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
+        assert_eq!(magnet.info_hash().to_hex(), "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
 
         // Round-trip back to URI
         let rebuilt = magnet.to_uri();
         let reparsed = core::Magnet::parse(&rebuilt).unwrap();
-        assert_eq!(magnet.info_hash, reparsed.info_hash);
+        assert_eq!(magnet.info_hash(), reparsed.info_hash());
         assert_eq!(magnet.display_name, reparsed.display_name);
     }
 

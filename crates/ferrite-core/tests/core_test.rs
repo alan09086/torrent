@@ -122,7 +122,7 @@ fn magnet_with_known_hash() {
         torrent.info_hash.to_hex()
     );
     let magnet = Magnet::parse(&uri).unwrap();
-    assert_eq!(magnet.info_hash, torrent.info_hash);
+    assert_eq!(magnet.info_hash(), torrent.info_hash);
     assert_eq!(magnet.display_name.as_deref(), Some("test.dat"));
 }
 

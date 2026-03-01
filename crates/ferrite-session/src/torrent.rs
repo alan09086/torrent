@@ -298,14 +298,14 @@ impl TorrentHandle {
         };
 
         let tracker_manager =
-            TrackerManager::empty(magnet.info_hash, our_peer_id, config.listen_port);
+            TrackerManager::empty(magnet.info_hash(), our_peer_id, config.listen_port);
 
         let enable_dht = config.enable_dht;
 
         // Start DHT peer discovery if enabled and available
         let dht_peers_rx = if enable_dht {
             if let Some(ref dht) = dht {
-                match dht.get_peers(magnet.info_hash).await {
+                match dht.get_peers(magnet.info_hash()).await {
                     Ok(rx) => Some(rx),
                     Err(e) => {
                         warn!("failed to start DHT v4 get_peers: {e}");
@@ -321,7 +321,7 @@ impl TorrentHandle {
 
         let dht_v6_peers_rx = if enable_dht {
             if let Some(ref dht6) = dht_v6 {
-                match dht6.get_peers(magnet.info_hash).await {
+                match dht6.get_peers(magnet.info_hash()).await {
                     Ok(rx) => Some(rx),
                     Err(e) => {
                         debug!("failed to start DHT v6 get_peers: {e}");
@@ -354,7 +354,7 @@ impl TorrentHandle {
 
         let actor = TorrentActor {
             config,
-            info_hash: magnet.info_hash,
+            info_hash: magnet.info_hash(),
             our_peer_id,
             state: TorrentState::FetchingMetadata,
             disk: None,
@@ -377,7 +377,7 @@ impl TorrentHandle {
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker: Choker::new(4),
-            metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash)),
+            metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
             downloaded: 0,
             uploaded: 0,
             checking_progress: 0.0,
@@ -3148,7 +3148,9 @@ mod tests {
     #[tokio::test]
     async fn create_from_magnet() {
         let magnet = Magnet {
-            info_hash: Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            info_hashes: ferrite_core::InfoHashes::v1_only(
+                Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap(),
+            ),
             display_name: Some("test".into()),
             trackers: vec![],
             peers: vec![],
@@ -4064,7 +4066,9 @@ mod tests {
     #[tokio::test]
     async fn magnet_initial_stats() {
         let magnet = Magnet {
-            info_hash: Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            info_hashes: ferrite_core::InfoHashes::v1_only(
+                Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            ),
             display_name: Some("magnet test".into()),
             trackers: vec![],
             peers: vec![],
@@ -4209,7 +4213,9 @@ mod tests {
     #[tokio::test]
     async fn magnet_no_tracker_before_metadata() {
         let magnet = Magnet {
-            info_hash: Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap(),
+            info_hashes: ferrite_core::InfoHashes::v1_only(
+                Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap(),
+            ),
             display_name: Some("magnet test".into()),
             trackers: vec![],
             peers: vec![],
