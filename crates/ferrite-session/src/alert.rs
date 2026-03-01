@@ -41,8 +41,10 @@ bitflags::bitflags! {
         const PERFORMANCE  = 0x200;
         /// Port mapping (UPnP/NAT-PMP).
         const PORT_MAPPING = 0x400;
+        /// I2P session events.
+        const I2P          = 0x800;
         /// All categories enabled.
-        const ALL          = 0x7FF;
+        const ALL          = 0xFFF;
     }
 }
 
@@ -165,6 +167,17 @@ pub enum AlertKind {
     /// A holepunch connection attempt failed.
     HolepunchFailed { info_hash: Id20, addr: SocketAddr, error_code: Option<u32>, message: String },
 
+    // ── I2P (M41) ──
+    /// SAM session successfully created with an ephemeral destination.
+    I2pSessionCreated {
+        /// The b32 address of our I2P destination.
+        b32_address: String,
+    },
+    /// I2P error (SAM bridge unreachable, tunnel failure, etc.)
+    I2pError {
+        message: String,
+    },
+
     // ── Settings (M31) ──
     SettingsChanged,
 }
@@ -248,6 +261,10 @@ impl AlertKind {
             // HOLEPUNCH (BEP 55)
             HolepunchSucceeded { .. } => AlertCategory::PEER,
             HolepunchFailed { .. } => AlertCategory::PEER | AlertCategory::ERROR,
+
+            // I2P
+            I2pSessionCreated { .. } => AlertCategory::I2P | AlertCategory::STATUS,
+            I2pError { .. } => AlertCategory::I2P | AlertCategory::ERROR,
 
             // SETTINGS
             SettingsChanged => AlertCategory::STATUS,
@@ -346,6 +363,7 @@ mod tests {
         assert!(all.contains(AlertCategory::BLOCK));
         assert!(all.contains(AlertCategory::PERFORMANCE));
         assert!(all.contains(AlertCategory::PORT_MAPPING));
+        assert!(all.contains(AlertCategory::I2P));
     }
 
     #[test]
@@ -547,5 +565,39 @@ mod tests {
         });
         assert!(alert.category().contains(AlertCategory::PEER));
         assert!(alert.category().contains(AlertCategory::ERROR));
+    }
+
+    #[test]
+    fn i2p_session_created_alert_category() {
+        let alert = Alert::new(AlertKind::I2pSessionCreated {
+            b32_address: "abcdef1234567890abcdef1234567890abcdef1234567890abcd.b32.i2p".into(),
+        });
+        assert!(alert.category().contains(AlertCategory::I2P));
+        assert!(alert.category().contains(AlertCategory::STATUS));
+    }
+
+    #[test]
+    fn i2p_error_alert_category() {
+        let alert = Alert::new(AlertKind::I2pError {
+            message: "SAM bridge unreachable".into(),
+        });
+        assert!(alert.category().contains(AlertCategory::I2P));
+        assert!(alert.category().contains(AlertCategory::ERROR));
+    }
+
+    #[test]
+    fn alert_category_all_includes_i2p() {
+        let all = AlertCategory::ALL;
+        assert!(all.contains(AlertCategory::I2P));
+    }
+
+    #[test]
+    fn i2p_alert_serializes_to_json() {
+        let alert = Alert::new(AlertKind::I2pSessionCreated {
+            b32_address: "test.b32.i2p".into(),
+        });
+        let json = serde_json::to_string(&alert).unwrap();
+        let decoded: Alert = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded.kind, AlertKind::I2pSessionCreated { .. }));
     }
 }

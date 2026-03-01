@@ -122,6 +122,18 @@ fn default_dht_item_lifetime() -> u64 {
 fn default_dht_sample_interval() -> u64 {
     0
 }
+fn default_i2p_hostname() -> String {
+    "127.0.0.1".into()
+}
+fn default_i2p_port() -> u16 {
+    7656
+}
+fn default_i2p_tunnel_quantity() -> u8 {
+    3
+}
+fn default_i2p_tunnel_length() -> u8 {
+    3
+}
 
 // ── Settings ─────────────────────────────────────────────────────────
 
@@ -307,6 +319,33 @@ pub struct Settings {
     // ── uTP tuning ──
     #[serde(default = "default_utp_max_conns")]
     pub utp_max_connections: usize,
+
+    // ── I2P ──
+    /// Enable I2P anonymous network support (requires SAM bridge).
+    #[serde(default)]
+    pub enable_i2p: bool,
+    /// SAM bridge hostname (default: "127.0.0.1").
+    #[serde(default = "default_i2p_hostname")]
+    pub i2p_hostname: String,
+    /// SAM bridge port (default: 7656).
+    #[serde(default = "default_i2p_port")]
+    pub i2p_port: u16,
+    /// Number of inbound I2P tunnels (1-16, default: 3).
+    #[serde(default = "default_i2p_tunnel_quantity")]
+    pub i2p_inbound_quantity: u8,
+    /// Number of outbound I2P tunnels (1-16, default: 3).
+    #[serde(default = "default_i2p_tunnel_quantity")]
+    pub i2p_outbound_quantity: u8,
+    /// Number of hops in inbound I2P tunnels (0-7, default: 3).
+    #[serde(default = "default_i2p_tunnel_length")]
+    pub i2p_inbound_length: u8,
+    /// Number of hops in outbound I2P tunnels (0-7, default: 3).
+    #[serde(default = "default_i2p_tunnel_length")]
+    pub i2p_outbound_length: u8,
+    /// Allow mixing I2P and clearnet peers in the same torrent.
+    /// When false (default), I2P-enabled torrents only connect to I2P peers.
+    #[serde(default)]
+    pub allow_i2p_mixed: bool,
 }
 
 impl Default for Settings {
@@ -393,6 +432,15 @@ impl Default for Settings {
             natpmp_lifetime: 7200,
             // uTP tuning
             utp_max_connections: 256,
+            // I2P
+            enable_i2p: false,
+            i2p_hostname: "127.0.0.1".into(),
+            i2p_port: 7656,
+            i2p_inbound_quantity: 3,
+            i2p_outbound_quantity: 3,
+            i2p_inbound_length: 3,
+            i2p_outbound_length: 3,
+            allow_i2p_mixed: false,
         }
     }
 }
@@ -494,6 +542,29 @@ impl Settings {
             ));
         }
 
+        if self.enable_i2p {
+            if self.i2p_inbound_quantity == 0 || self.i2p_inbound_quantity > 16 {
+                return Err(crate::Error::InvalidSettings(
+                    "i2p_inbound_quantity must be 1-16".into(),
+                ));
+            }
+            if self.i2p_outbound_quantity == 0 || self.i2p_outbound_quantity > 16 {
+                return Err(crate::Error::InvalidSettings(
+                    "i2p_outbound_quantity must be 1-16".into(),
+                ));
+            }
+            if self.i2p_inbound_length > 7 {
+                return Err(crate::Error::InvalidSettings(
+                    "i2p_inbound_length must be 0-7".into(),
+                ));
+            }
+            if self.i2p_outbound_length > 7 {
+                return Err(crate::Error::InvalidSettings(
+                    "i2p_outbound_length must be 0-7".into(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -566,6 +637,16 @@ impl Settings {
         ferrite_utp::UtpConfig {
             bind_addr: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
             max_connections: self.utp_max_connections,
+        }
+    }
+
+    /// Build a `SamTunnelConfig` from the I2P-related settings.
+    pub(crate) fn to_sam_tunnel_config(&self) -> crate::i2p::SamTunnelConfig {
+        crate::i2p::SamTunnelConfig {
+            inbound_quantity: self.i2p_inbound_quantity,
+            outbound_quantity: self.i2p_outbound_quantity,
+            inbound_length: self.i2p_inbound_length,
+            outbound_length: self.i2p_outbound_length,
         }
     }
 }
@@ -641,6 +722,14 @@ impl PartialEq for Settings {
             && self.upnp_lease_duration == other.upnp_lease_duration
             && self.natpmp_lifetime == other.natpmp_lifetime
             && self.utp_max_connections == other.utp_max_connections
+            && self.enable_i2p == other.enable_i2p
+            && self.i2p_hostname == other.i2p_hostname
+            && self.i2p_port == other.i2p_port
+            && self.i2p_inbound_quantity == other.i2p_inbound_quantity
+            && self.i2p_outbound_quantity == other.i2p_outbound_quantity
+            && self.i2p_inbound_length == other.i2p_inbound_length
+            && self.i2p_outbound_length == other.i2p_outbound_length
+            && self.allow_i2p_mixed == other.allow_i2p_mixed
     }
 }
 
@@ -804,6 +893,8 @@ mod tests {
         assert_eq!(tc.hashing_threads, s.hashing_threads);
         assert_eq!(tc.max_concurrent_stream_reads, s.max_concurrent_stream_reads);
         assert_eq!(tc.anonymous_mode, s.anonymous_mode);
+        assert_eq!(tc.enable_i2p, s.enable_i2p);
+        assert_eq!(tc.allow_i2p_mixed, s.allow_i2p_mixed);
     }
 
     #[test]
@@ -915,5 +1006,81 @@ mod tests {
         let encoded = serde_json::to_string(&decoded).unwrap();
         let roundtrip: Settings = serde_json::from_str(&encoded).unwrap();
         assert!(!roundtrip.enable_holepunch);
+    }
+
+    #[test]
+    fn i2p_settings_defaults() {
+        let s = Settings::default();
+        assert!(!s.enable_i2p);
+        assert_eq!(s.i2p_hostname, "127.0.0.1");
+        assert_eq!(s.i2p_port, 7656);
+        assert_eq!(s.i2p_inbound_quantity, 3);
+        assert_eq!(s.i2p_outbound_quantity, 3);
+        assert_eq!(s.i2p_inbound_length, 3);
+        assert_eq!(s.i2p_outbound_length, 3);
+        assert!(!s.allow_i2p_mixed);
+    }
+
+    #[test]
+    fn i2p_settings_json_roundtrip() {
+        let mut s = Settings::default();
+        s.enable_i2p = true;
+        s.i2p_hostname = "10.0.0.1".into();
+        s.i2p_port = 7700;
+        s.i2p_inbound_quantity = 5;
+        s.i2p_outbound_quantity = 4;
+        s.i2p_inbound_length = 2;
+        s.i2p_outbound_length = 1;
+        s.allow_i2p_mixed = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn i2p_validation_quantity_zero() {
+        let mut s = Settings::default();
+        s.enable_i2p = true;
+        s.i2p_inbound_quantity = 0;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("i2p_inbound_quantity"));
+    }
+
+    #[test]
+    fn i2p_validation_quantity_too_high() {
+        let mut s = Settings::default();
+        s.enable_i2p = true;
+        s.i2p_outbound_quantity = 17;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("i2p_outbound_quantity"));
+    }
+
+    #[test]
+    fn i2p_validation_length_too_high() {
+        let mut s = Settings::default();
+        s.enable_i2p = true;
+        s.i2p_inbound_length = 8;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("i2p_inbound_length"));
+    }
+
+    #[test]
+    fn i2p_validation_passes_when_disabled() {
+        // Invalid values should not trigger errors when I2P is disabled
+        let mut s = Settings::default();
+        s.enable_i2p = false;
+        s.i2p_inbound_quantity = 0; // would be invalid if enabled
+        s.validate().unwrap(); // should pass
+    }
+
+    #[test]
+    fn i2p_validation_valid_config() {
+        let mut s = Settings::default();
+        s.enable_i2p = true;
+        s.i2p_inbound_quantity = 1;
+        s.i2p_outbound_quantity = 16;
+        s.i2p_inbound_length = 0;
+        s.i2p_outbound_length = 7;
+        s.validate().unwrap();
     }
 }
