@@ -15,6 +15,7 @@ use ferrite_wire::mse::EncryptionMode;
 use crate::alert::AlertCategory;
 use crate::choker::{ChokingAlgorithm, SeedChokingAlgorithm};
 use crate::proxy::ProxyConfig;
+use crate::rate_limiter::MixedModeAlgorithm;
 
 // ── Serde default helpers ────────────────────────────────────────────
 
@@ -138,6 +139,9 @@ fn default_seed_choking_algorithm() -> SeedChokingAlgorithm {
 fn default_choking_algorithm() -> ChokingAlgorithm {
     ChokingAlgorithm::FixedSlots
 }
+fn default_mixed_mode() -> MixedModeAlgorithm {
+    MixedModeAlgorithm::PeerProportional
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -237,6 +241,9 @@ pub struct Settings {
     pub auto_upload_slots_min: usize,
     #[serde(default = "default_auto_upload_slots_max")]
     pub auto_upload_slots_max: usize,
+    /// Mixed-mode TCP/uTP bandwidth allocation algorithm.
+    #[serde(default = "default_mixed_mode")]
+    pub mixed_mode_algorithm: MixedModeAlgorithm,
 
     // ── Queue management ──
     #[serde(default = "default_active_downloads")]
@@ -295,6 +302,10 @@ pub struct Settings {
     pub block_request_timeout_secs: u32,
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_stream_reads: usize,
+    /// Automatically switch to sequential piece picking when too many partial
+    /// pieces accumulate. Uses hysteresis (1.6x activate / 1.3x deactivate).
+    #[serde(default = "default_true")]
+    pub auto_sequential: bool,
 
     // ── Piece picker enhancements (M44) ──
     #[serde(default = "default_true")]
@@ -435,6 +446,7 @@ impl Default for Settings {
             auto_upload_slots: true,
             auto_upload_slots_min: 2,
             auto_upload_slots_max: 20,
+            mixed_mode_algorithm: MixedModeAlgorithm::PeerProportional,
             // Queue management
             active_downloads: 3,
             active_seeds: 5,
@@ -464,6 +476,7 @@ impl Default for Settings {
             request_queue_time: 3.0,
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
+            auto_sequential: true,
             // Piece picker enhancements (M44)
             piece_extent_affinity: true,
             suggest_mode: false,
@@ -755,6 +768,7 @@ impl PartialEq for Settings {
             && self.auto_upload_slots == other.auto_upload_slots
             && self.auto_upload_slots_min == other.auto_upload_slots_min
             && self.auto_upload_slots_max == other.auto_upload_slots_max
+            && self.mixed_mode_algorithm == other.mixed_mode_algorithm
             && self.active_downloads == other.active_downloads
             && self.active_seeds == other.active_seeds
             && self.active_limit == other.active_limit
@@ -779,6 +793,7 @@ impl PartialEq for Settings {
             && self.request_queue_time.to_bits() == other.request_queue_time.to_bits()
             && self.block_request_timeout_secs == other.block_request_timeout_secs
             && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
+            && self.auto_sequential == other.auto_sequential
             && self.piece_extent_affinity == other.piece_extent_affinity
             && self.suggest_mode == other.suggest_mode
             && self.max_suggest_pieces == other.max_suggest_pieces
@@ -870,6 +885,8 @@ mod tests {
         assert_eq!(s.upnp_lease_duration, 3600);
         assert_eq!(s.natpmp_lifetime, 7200);
         assert_eq!(s.utp_max_connections, 256);
+        assert_eq!(s.mixed_mode_algorithm, MixedModeAlgorithm::PeerProportional);
+        assert!(s.auto_sequential);
     }
 
     #[test]

@@ -61,6 +61,8 @@ pub use ferrite_session::{
     // Choking algorithms (M43)
     SeedChokingAlgorithm,
     ChokingAlgorithm,
+    // Mixed-mode bandwidth allocation (M45)
+    MixedModeAlgorithm,
     // Error types
     Error,
     Result,

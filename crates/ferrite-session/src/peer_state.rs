@@ -75,6 +75,8 @@ pub(crate) struct PeerState {
     pub supports_holepunch: bool,
     /// Whether this peer appears to be NATed (no incoming connections observed).
     pub appears_nated: bool,
+    /// Transport protocol used for this peer connection.
+    pub transport: Option<crate::rate_limiter::PeerTransport>,
 }
 
 #[allow(dead_code)]
@@ -111,6 +113,7 @@ impl PeerState {
             source,
             supports_holepunch: false,
             appears_nated: false,
+            transport: None,
         }
     }
 }

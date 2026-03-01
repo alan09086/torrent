@@ -71,3 +71,6 @@ pub use crate::session::{I2pDestination, I2pDestinationError};
 
 // Choking algorithms (M43)
 pub use crate::session::{SeedChokingAlgorithm, ChokingAlgorithm};
+
+// Mixed-mode bandwidth allocation (M45)
+pub use crate::session::MixedModeAlgorithm;
