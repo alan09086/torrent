@@ -3601,44 +3601,44 @@ impl TorrentActor {
         tokio::spawn(async move {
             // Try uTP first (5s timeout) — preferred for holepunch as NAT traversal
             // works better with UDP-based protocols
-            if enable_utp {
-                if let Some(socket) = utp_socket {
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        socket.connect(target),
-                    ).await {
-                        Ok(Ok(stream)) => {
-                            debug!(%target, "holepunch: uTP connection established");
-                            post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
-                                info_hash,
-                                addr: target,
-                            });
-                            let _ = run_peer(
-                                target,
-                                stream,
-                                info_hash,
-                                peer_id,
-                                bitfield,
-                                num_pieces,
-                                event_tx,
-                                cmd_rx,
-                                enable_dht,
-                                enable_fast,
-                                encryption_mode,
-                                true, // outbound
-                                anonymous_mode,
-                                info_bytes,
-                                plugins,
-                                enable_holepunch,
-                            ).await;
-                            return; // uTP succeeded — don't fall through to TCP
-                        }
-                        Ok(Err(e)) => {
-                            debug!(%target, error = %e, "holepunch: uTP connect failed, trying TCP");
-                        }
-                        Err(_) => {
-                            debug!(%target, "holepunch: uTP connect timed out, trying TCP");
-                        }
+            if enable_utp
+                && let Some(socket) = utp_socket
+            {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    socket.connect(target),
+                ).await {
+                    Ok(Ok(stream)) => {
+                        debug!(%target, "holepunch: uTP connection established");
+                        post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
+                            info_hash,
+                            addr: target,
+                        });
+                        let _ = run_peer(
+                            target,
+                            stream,
+                            info_hash,
+                            peer_id,
+                            bitfield,
+                            num_pieces,
+                            event_tx,
+                            cmd_rx,
+                            enable_dht,
+                            enable_fast,
+                            encryption_mode,
+                            true, // outbound
+                            anonymous_mode,
+                            info_bytes,
+                            plugins,
+                            enable_holepunch,
+                        ).await;
+                        return; // uTP succeeded — don't fall through to TCP
+                    }
+                    Ok(Err(e)) => {
+                        debug!(%target, error = %e, "holepunch: uTP connect failed, trying TCP");
+                    }
+                    Err(_) => {
+                        debug!(%target, "holepunch: uTP connect timed out, trying TCP");
                     }
                 }
             }

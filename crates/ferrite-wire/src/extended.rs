@@ -324,6 +324,15 @@ mod tests {
     }
 
     #[test]
+    fn ext_handshake_holepunch_can_be_removed() {
+        let mut hs = ExtHandshake::new();
+        hs.m.remove("ut_holepunch");
+        assert_eq!(hs.ext_id("ut_holepunch"), None);
+        assert_eq!(hs.ext_id("ut_metadata"), Some(1));
+        assert_eq!(hs.ext_id("ut_pex"), Some(2));
+    }
+
+    #[test]
     fn metadata_request_round_trip() {
         let msg = MetadataMessage::request(3);
         let bytes = msg.to_bytes().unwrap();

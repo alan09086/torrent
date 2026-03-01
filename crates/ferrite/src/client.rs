@@ -191,6 +191,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable BEP 55 holepunch extension for NAT traversal.
+    ///
+    /// When enabled, the client advertises `ut_holepunch` in the extension
+    /// handshake and can act as initiator, relay, or target for holepunch
+    /// connections. Default: true.
+    pub fn enable_holepunch(mut self, v: bool) -> Self {
+        self.settings.enable_holepunch = v;
+        self
+    }
+
     /// Enable or disable IPv6 dual-stack support (BEP 7, 24).
     ///
     /// When enabled, the session binds listeners on both IPv4 and IPv6,

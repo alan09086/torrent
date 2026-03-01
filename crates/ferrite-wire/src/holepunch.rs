@@ -353,4 +353,24 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 6881); // port
         assert_eq!(u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0); // err_code
     }
+
+    #[test]
+    fn extra_trailing_bytes_ignored() {
+        let mut data = HolepunchMessage::rendezvous("1.2.3.4:80".parse().unwrap())
+            .to_bytes()
+            .to_vec();
+        data.push(0xFF);
+        data.push(0xAA);
+        let parsed = HolepunchMessage::from_bytes(&data).unwrap();
+        assert_eq!(parsed.msg_type, HolepunchMsgType::Rendezvous);
+        assert_eq!(parsed.addr, "1.2.3.4:80".parse().unwrap());
+    }
+
+    #[test]
+    fn port_zero_accepted() {
+        let msg = HolepunchMessage::rendezvous("1.2.3.4:0".parse().unwrap());
+        let bytes = msg.to_bytes();
+        let parsed = HolepunchMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.addr.port(), 0);
+    }
 }
