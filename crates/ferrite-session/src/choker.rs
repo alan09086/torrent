@@ -82,12 +82,11 @@ pub(crate) trait ChokerStrategy: Send + Sync {
 
     /// Observe current throughput for rate-based slot adjustment.
     /// No-op by default (fixed-slots strategies ignore this).
-    #[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
     fn observe_throughput(&mut self, _throughput: u64) {}
 
     /// Return the dynamically computed slot count, if this strategy manages its own.
     /// Returns `None` by default (fixed-slots strategies defer to the `Choker`'s `unchoke_slots`).
-    #[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
+    #[allow(dead_code)] // Part of the trait API; called by RateBasedStrategy but not dispatched externally yet.
     fn dynamic_slots(&self) -> Option<usize> {
         None
     }
@@ -245,7 +244,6 @@ impl ChokerStrategy for FixedSlotsStrategy {
 /// When throughput increases, adds slots to utilize available bandwidth.
 /// When throughput drops significantly (>10%), removes slots to reduce
 /// overhead. Respects configured min/max bounds and upload rate limits.
-#[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
 pub(crate) struct RateBasedStrategy {
     /// Underlying fixed-slots strategy for peer ranking and optimistic unchoke.
     inner: FixedSlotsStrategy,
@@ -261,7 +259,6 @@ pub(crate) struct RateBasedStrategy {
     max_slots: usize,
 }
 
-#[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
 impl RateBasedStrategy {
     pub fn new(
         seed_algorithm: SeedChokingAlgorithm,
@@ -322,6 +319,7 @@ impl RateBasedStrategy {
     }
 
     /// Return the current dynamically-adjusted slot count.
+    #[cfg(test)]
     pub fn current_slots(&self) -> usize {
         self.dynamic_slots
     }
@@ -364,7 +362,7 @@ pub(crate) struct Choker {
     strategy: Box<dyn ChokerStrategy>,
     unchoke_slots: usize,
     seed_mode: bool,
-    #[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
+    #[allow(dead_code)] // Read via #[cfg(test)] accessor.
     choking_algorithm: ChokingAlgorithm,
 }
 

@@ -489,6 +489,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the seed-mode choking algorithm.
+    pub fn seed_choking_algorithm(mut self, algorithm: ferrite_session::SeedChokingAlgorithm) -> Self {
+        self.settings.seed_choking_algorithm = algorithm;
+        self
+    }
+
+    /// Set the choking algorithm.
+    pub fn choking_algorithm(mut self, algorithm: ferrite_session::ChokingAlgorithm) -> Self {
+        self.settings.choking_algorithm = algorithm;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings
