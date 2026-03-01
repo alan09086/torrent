@@ -3272,6 +3272,7 @@ impl TorrentActor {
             let use_proxy = proxy_config.proxy_type != crate::proxy::ProxyType::None
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
+            let enable_holepunch = self.config.enable_holepunch;
             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
             // Pick the uTP socket matching the peer's address family
             let utp_socket = if addr.is_ipv6() {
@@ -3311,6 +3312,7 @@ impl TorrentActor {
                                 anonymous_mode,
                                 info_bytes.clone(),
                                 Arc::clone(&plugins),
+                                enable_holepunch,
                             )
                             .await;
                             return;
@@ -3348,6 +3350,7 @@ impl TorrentActor {
                             anonymous_mode,
                             info_bytes,
                             plugins,
+                            enable_holepunch,
                         )
                         .await;
                     }
@@ -3427,6 +3430,7 @@ impl TorrentActor {
         let enable_fast = self.config.enable_fast;
         let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
         let anonymous_mode = self.config.anonymous_mode;
+        let enable_holepunch = self.config.enable_holepunch;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let plugins = Arc::clone(&self.plugins);
 
@@ -3447,6 +3451,7 @@ impl TorrentActor {
                 anonymous_mode,
                 info_bytes,
                 plugins,
+                enable_holepunch,
             )
             .await;
         });
