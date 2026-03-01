@@ -3844,6 +3844,8 @@ mod tests {
             proxy: crate::proxy::ProxyConfig::default(),
             anonymous_mode: false,
             share_mode: false,
+            enable_i2p: false,
+            allow_i2p_mixed: false,
         }
     }
 
