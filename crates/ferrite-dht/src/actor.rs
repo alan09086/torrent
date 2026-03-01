@@ -40,6 +40,10 @@ pub struct DhtConfig {
     pub enforce_node_id: bool,
     /// BEP 42: Restrict routing table to one node per IP address.
     pub restrict_routing_ips: bool,
+    /// BEP 44: Maximum number of stored DHT items (immutable + mutable).
+    pub dht_max_items: usize,
+    /// BEP 44: Lifetime of DHT items in seconds before expiry.
+    pub dht_item_lifetime_secs: u64,
 }
 
 impl Default for DhtConfig {
@@ -57,6 +61,8 @@ impl Default for DhtConfig {
             address_family: AddressFamily::V4,
             enforce_node_id: true,
             restrict_routing_ips: true,
+            dht_max_items: 700,
+            dht_item_lifetime_secs: 7200,
         }
     }
 }
@@ -76,6 +82,8 @@ impl DhtConfig {
             address_family: AddressFamily::V6,
             enforce_node_id: true,
             restrict_routing_ips: true,
+            dht_max_items: 700,
+            dht_item_lifetime_secs: 7200,
         }
     }
 }

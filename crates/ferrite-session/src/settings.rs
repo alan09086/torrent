@@ -113,6 +113,12 @@ fn default_natpmp_lifetime() -> u32 {
 fn default_utp_max_conns() -> usize {
     256
 }
+fn default_dht_max_items() -> usize {
+    700
+}
+fn default_dht_item_lifetime() -> u64 {
+    7200
+}
 
 // ── Settings ─────────────────────────────────────────────────────────
 
@@ -276,6 +282,12 @@ pub struct Settings {
     /// BEP 42: Restrict DHT routing table to one node per IP.
     #[serde(default = "default_true")]
     pub dht_restrict_routing_ips: bool,
+    /// Maximum number of BEP 44 items stored in the DHT (immutable + mutable).
+    #[serde(default = "default_dht_max_items")]
+    pub dht_max_items: usize,
+    /// Lifetime of BEP 44 DHT items in seconds before expiry (default: 7200 = 2 hours).
+    #[serde(default = "default_dht_item_lifetime")]
+    pub dht_item_lifetime_secs: u64,
 
     // ── NAT tuning ──
     #[serde(default = "default_upnp_lease")]
@@ -363,6 +375,8 @@ impl Default for Settings {
             dht_query_timeout_secs: 10,
             dht_enforce_node_id: true,
             dht_restrict_routing_ips: true,
+            dht_max_items: 700,
+            dht_item_lifetime_secs: 7200,
             // NAT tuning
             upnp_lease_duration: 3600,
             natpmp_lifetime: 7200,
@@ -387,6 +401,7 @@ impl Settings {
             max_concurrent_stream_reads: 2,
             hashing_threads: 1,
             disk_io_threads: 1,
+            dht_max_items: 100,
             ..Self::default()
         }
     }
@@ -502,6 +517,8 @@ impl Settings {
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
             enforce_node_id: self.dht_enforce_node_id,
             restrict_routing_ips: self.dht_restrict_routing_ips,
+            dht_max_items: self.dht_max_items,
+            dht_item_lifetime_secs: self.dht_item_lifetime_secs,
             ..ferrite_dht::DhtConfig::default()
         }
     }
@@ -512,6 +529,8 @@ impl Settings {
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
             enforce_node_id: self.dht_enforce_node_id,
             restrict_routing_ips: self.dht_restrict_routing_ips,
+            dht_max_items: self.dht_max_items,
+            dht_item_lifetime_secs: self.dht_item_lifetime_secs,
             ..ferrite_dht::DhtConfig::default_v6()
         }
     }
@@ -604,6 +623,8 @@ impl PartialEq for Settings {
             && self.dht_query_timeout_secs == other.dht_query_timeout_secs
             && self.dht_enforce_node_id == other.dht_enforce_node_id
             && self.dht_restrict_routing_ips == other.dht_restrict_routing_ips
+            && self.dht_max_items == other.dht_max_items
+            && self.dht_item_lifetime_secs == other.dht_item_lifetime_secs
             && self.upnp_lease_duration == other.upnp_lease_duration
             && self.natpmp_lifetime == other.natpmp_lifetime
             && self.utp_max_connections == other.utp_max_connections
@@ -821,6 +842,19 @@ mod tests {
     fn share_mode_default_false() {
         let cfg = crate::types::TorrentConfig::default();
         assert!(!cfg.share_mode);
+    }
+
+    #[test]
+    fn dht_storage_settings_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.dht_max_items, 700);
+        assert_eq!(s.dht_item_lifetime_secs, 7200);
+    }
+
+    #[test]
+    fn min_memory_restricts_dht_items() {
+        let s = Settings::min_memory();
+        assert_eq!(s.dht_max_items, 100);
     }
 
     #[test]
