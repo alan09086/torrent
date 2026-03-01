@@ -2013,6 +2013,44 @@ mod tests {
         session.shutdown().await.unwrap();
     }
 
+    // ---- Test: v2-only torrent addition ----
+
+    #[tokio::test]
+    async fn add_v2_only_torrent() {
+        use std::collections::BTreeMap;
+        use ferrite_bencode::BencodeValue;
+
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+
+        // Build a minimal v2-only torrent
+        let mut attr_map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
+        attr_map.insert(b"length".to_vec(), BencodeValue::Integer(16384));
+        let mut file_node: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
+        file_node.insert(b"".to_vec(), BencodeValue::Dict(attr_map));
+        let mut ft_map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
+        ft_map.insert(b"test.dat".to_vec(), BencodeValue::Dict(file_node));
+
+        let mut info_map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
+        info_map.insert(b"file tree".to_vec(), BencodeValue::Dict(ft_map));
+        info_map.insert(b"meta version".to_vec(), BencodeValue::Integer(2));
+        info_map.insert(b"name".to_vec(), BencodeValue::Bytes(b"v2test".to_vec()));
+        info_map.insert(b"piece length".to_vec(), BencodeValue::Integer(16384));
+
+        let mut root_map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
+        root_map.insert(b"info".to_vec(), BencodeValue::Dict(info_map));
+
+        let bytes = ferrite_bencode::to_bytes(&BencodeValue::Dict(root_map)).unwrap();
+        let meta = ferrite_core::torrent_from_bytes_any(&bytes).unwrap();
+        assert!(meta.is_v2());
+
+        // This should NOT return an error now (v2-only is supported)
+        let info_hash = session.add_torrent(meta, None).await.unwrap();
+        let list = session.list_torrents().await.unwrap();
+        assert!(list.contains(&info_hash));
+
+        session.shutdown().await.unwrap();
+    }
+
     // ---- Test 14: Save torrent resume data via session ----
 
     #[tokio::test]
