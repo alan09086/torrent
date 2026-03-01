@@ -501,6 +501,44 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable piece extent affinity for disk cache locality.
+    ///
+    /// When enabled, the piece picker prefers pieces adjacent to those already
+    /// downloaded, improving sequential disk access patterns. Default: true.
+    pub fn piece_extent_affinity(mut self, enabled: bool) -> Self {
+        self.settings.piece_extent_affinity = enabled;
+        self
+    }
+
+    /// Enable or disable suggest mode (BEP 6 SuggestPiece).
+    ///
+    /// When enabled, newly verified pieces are suggested to peers that don't
+    /// have them, helping improve piece diversity in the swarm. Default: false.
+    pub fn suggest_mode(mut self, enabled: bool) -> Self {
+        self.settings.suggest_mode = enabled;
+        self
+    }
+
+    /// Set the maximum number of SuggestPiece messages per peer.
+    ///
+    /// Limits how many pieces are suggested to each connected peer to avoid
+    /// flooding. Default: 10.
+    pub fn max_suggest_pieces(mut self, count: usize) -> Self {
+        self.settings.max_suggest_pieces = count;
+        self
+    }
+
+    /// Set the predictive piece announce delay in milliseconds.
+    ///
+    /// When > 0, a Have message is sent to peers as soon as all blocks of a
+    /// piece are received, before hash verification completes. This reduces
+    /// latency for piece availability at the cost of a possible false announce
+    /// if the piece fails verification. Default: 0 (disabled).
+    pub fn predictive_piece_announce(mut self, ms: u64) -> Self {
+        self.settings.predictive_piece_announce_ms = ms;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings
@@ -748,6 +786,20 @@ mod tests {
         assert_eq!(config.i2p_inbound_length, 2);
         assert_eq!(config.i2p_outbound_length, 1);
         assert!(config.allow_i2p_mixed);
+    }
+
+    #[test]
+    fn builder_m44_settings() {
+        let settings = ClientBuilder::new()
+            .piece_extent_affinity(false)
+            .suggest_mode(true)
+            .max_suggest_pieces(5)
+            .predictive_piece_announce(100)
+            .into_settings();
+        assert!(!settings.piece_extent_affinity);
+        assert!(settings.suggest_mode);
+        assert_eq!(settings.max_suggest_pieces, 5);
+        assert_eq!(settings.predictive_piece_announce_ms, 100);
     }
 
     #[test]

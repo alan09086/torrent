@@ -320,6 +320,7 @@ impl TorrentHandle {
             super_seed,
             have_buffer,
             suggested_to_peers: HashMap::new(),
+            predictive_have_sent: HashSet::new(),
             ban_manager,
             ip_filter,
             piece_contributors: HashMap::new(),
@@ -497,6 +498,7 @@ impl TorrentHandle {
             super_seed,
             have_buffer,
             suggested_to_peers: HashMap::new(),
+            predictive_have_sent: HashSet::new(),
             ban_manager,
             ip_filter,
             piece_contributors: HashMap::new(),
@@ -780,6 +782,9 @@ struct TorrentActor {
 
     /// M44: pieces we've suggested to each peer (avoid re-suggesting)
     suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
+
+    /// M44: pieces for which we've already sent predictive Have
+    predictive_have_sent: HashSet<u32>,
 
     // Smart banning (M25)
     ban_manager: crate::session::SharedBanManager,
@@ -1783,6 +1788,18 @@ impl TorrentActor {
         };
 
         if piece_complete {
+            // M44: Predictive piece announce — send Have before verification
+            if self.config.predictive_piece_announce_ms > 0
+                && !self.predictive_have_sent.contains(&index)
+            {
+                self.predictive_have_sent.insert(index);
+                for peer in self.peers.values() {
+                    if !peer.bitfield.get(index) {
+                        let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                    }
+                }
+            }
+
             self.verify_and_mark_piece(index).await;
         }
 
@@ -2240,13 +2257,16 @@ impl TorrentActor {
 
         // Broadcast Have to all peers (skip in super-seed mode)
         if self.super_seed.is_none() {
-            if self.have_buffer.is_enabled() {
-                self.have_buffer.push(index);
-            } else {
-                // Immediate mode — with redundancy elimination
-                for peer in self.peers.values() {
-                    if !peer.bitfield.get(index) {
-                        let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+            let already_announced = self.predictive_have_sent.remove(&index);
+            if !already_announced {
+                if self.have_buffer.is_enabled() {
+                    self.have_buffer.push(index);
+                } else {
+                    // Immediate mode — with redundancy elimination
+                    for peer in self.peers.values() {
+                        if !peer.bitfield.get(index) {
+                            let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                        }
                     }
                 }
             }
@@ -2325,6 +2345,8 @@ impl TorrentActor {
             .collect();
 
         warn!(index, contributors = contributors.len(), "piece hash verification failed");
+
+        self.predictive_have_sent.remove(&index);
 
         // Check if this is a parole failure
         if let Some(parole) = self.parole_pieces.remove(&index) {
