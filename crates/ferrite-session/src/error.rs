@@ -56,6 +56,9 @@ pub enum Error {
     #[error("session shutting down")]
     Shutdown,
 
+    #[error("I2P: {0}")]
+    I2p(#[from] crate::i2p::SamError),
+
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 }

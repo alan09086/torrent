@@ -262,6 +262,43 @@ impl SessionHandle {
             (None, None)
         };
 
+        // I2P SAM session
+        let sam_session = if settings.enable_i2p {
+            let tunnel_config = settings.to_sam_tunnel_config();
+            match crate::i2p::SamSession::create(
+                &settings.i2p_hostname,
+                settings.i2p_port,
+                "ferrite",
+                tunnel_config,
+            )
+            .await
+            {
+                Ok(session) => {
+                    let b32 = session.destination().to_b32_address();
+                    info!("I2P SAM session created: {}", b32);
+                    post_alert(
+                        &alert_tx,
+                        &alert_mask,
+                        AlertKind::I2pSessionCreated { b32_address: b32 },
+                    );
+                    Some(Arc::new(session))
+                }
+                Err(e) => {
+                    warn!("I2P SAM session failed: {e}");
+                    post_alert(
+                        &alert_tx,
+                        &alert_mask,
+                        AlertKind::I2pError {
+                            message: format!("SAM session creation failed: {e}"),
+                        },
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Start DHT instances
         let (dht_v4, dht_v4_ip_rx) = if settings.enable_dht {
             match DhtHandle::start(settings.to_dht_config()).await {
@@ -333,6 +370,7 @@ impl SessionHandle {
             dht_v4_ip_rx,
             dht_v6_ip_rx,
             plugins,
+            sam_session,
         };
 
         tokio::spawn(actor.run());
@@ -714,6 +752,8 @@ struct SessionActor {
     dht_v6_ip_rx: Option<mpsc::Receiver<std::net::IpAddr>>,
     /// Registered extension plugins, shared with all TorrentActors.
     plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    /// I2P SAM session (if enabled).
+    sam_session: Option<Arc<crate::i2p::SamSession>>,
 }
 
 impl SessionActor {
@@ -1048,6 +1088,7 @@ impl SessionActor {
             Arc::clone(&self.ban_manager),
             Arc::clone(&self.ip_filter),
             Arc::clone(&self.plugins),
+            self.sam_session.clone(),
         )
         .await?;
 
@@ -1109,6 +1150,7 @@ impl SessionActor {
             Arc::clone(&self.ban_manager),
             Arc::clone(&self.ip_filter),
             Arc::clone(&self.plugins),
+            self.sam_session.clone(),
         )
         .await?;
         self.torrents.insert(

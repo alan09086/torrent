@@ -639,6 +639,16 @@ impl Settings {
             max_connections: self.utp_max_connections,
         }
     }
+
+    /// Build a `SamTunnelConfig` from the I2P-related settings.
+    pub(crate) fn to_sam_tunnel_config(&self) -> crate::i2p::SamTunnelConfig {
+        crate::i2p::SamTunnelConfig {
+            inbound_quantity: self.i2p_inbound_quantity,
+            outbound_quantity: self.i2p_outbound_quantity,
+            inbound_length: self.i2p_inbound_length,
+            outbound_length: self.i2p_outbound_length,
+        }
+    }
 }
 
 // ── PartialEq (manual — f32/f64 fields need special handling) ────────
