@@ -8,6 +8,33 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.42.0 — 2026-03-01
+
+BEP 53 magnet file selection, dual-swarm announces, pure v2 torrent support. Eleven crates, 912 tests.
+
+### M36: BEP 53 + Dual-Swarm + Pure v2
+
+### Added
+- `FileSelection` enum (`Single(usize)` / `Range(usize, usize)`) for BEP 53 `so=` magnet parameter parsing
+- `FileSelection::parse()` — parses comma-separated indices and ranges (e.g., `0,2,4-6`)
+- `FileSelection::to_priorities()` — converts selections to `Vec<FilePriority>` for selective download
+- `FileSelection::to_so_value()` — serializes back to `so=` format for round-trip fidelity
+- `Magnet.selected_files: Option<Vec<FileSelection>>` — parsed from `so=` key, serialized in `to_uri()`
+- BEP 53 file selection applied in `try_assemble_metadata()` after file priorities initialized
+- `TrackerManager.info_hashes: InfoHashes` — dual-swarm tracker announces for hybrid torrents
+- `TrackerManager::set_info_hashes()` — update hashes after magnet metadata resolves
+- `TrackerManager::announce_with_hash()` — announce to specific hash swarm
+- `TorrentActor.dht_v2_peers_rx` / `dht_v6_v2_peers_rx` — dual-swarm DHT peer receivers
+- Dual-swarm DHT `get_peers()` and `announce()` for v2 truncated hash on hybrid torrents
+- Post-metadata wiring: `try_assemble_metadata()` detects hybrid/v2 via `torrent_from_bytes_any()`, updates version, info_hashes, TrackerManager, and starts v2 DHT lookups
+- `synthesize_v1_from_v2()` — creates virtual v1 metadata from v2 data for pure v2 torrent support
+- `TorrentMeta::best_v1_info_hash()` — convenience method for v1-compatible hash extraction
+- `FileSelection` re-exported in `ferrite::core` and `ferrite::prelude`
+
+### Changed
+- `handle_add_torrent()` no longer rejects `TorrentMeta::V2` — synthesizes v1 metadata instead
+- TrackerManager stores `InfoHashes` instead of bare `Id20`, enabling dual-swarm announces
+
 ## 0.41.0 — 2026-03-01
 
 Hybrid v1+v2 torrent support (BEP 52). Eleven crates, 895 tests.
