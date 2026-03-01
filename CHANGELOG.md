@@ -8,6 +8,27 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.47.0 — 2026-03-01
+
+I2P anonymous network support via SAM v3.1 protocol bridge — tunneled peer connections over the I2P network. Eleven crates, 1078 tests, 26 BEPs implemented.
+
+### M41: I2P Support (SAM v3.1)
+
+### Added
+- I2P anonymous network support via SAM v3.1 protocol bridge
+- `I2pDestination` type with I2P-specific Base64 encoding and `.b32.i2p` address generation
+- SAM v3.1 client: `SamSession`, `SamStream`, `SamReply` with full protocol lifecycle
+- SAM protocol commands: HELLO, SESSION CREATE, STREAM CONNECT, STREAM ACCEPT, NAMING LOOKUP
+- Control socket kept alive for session lifetime
+- 8 I2P settings: `enable_i2p`, `i2p_hostname`, `i2p_port`, tunnel lengths/quantities, `allow_i2p_mixed`
+- I2P `AlertCategory` flag (0x800) and `I2pSessionCreated`/`I2pError` alert variants
+- `PeerSource::I2p` variant for I2P peer identification
+- Session-level I2P initialization with automatic SAM session management
+- Torrent-level I2P peer accept loop with synthetic address mapping
+- `SamTunnelConfig` for tunnel parameter configuration
+- Facade: `I2pDestination`/`I2pDestinationError` re-exports, 8 `ClientBuilder` methods
+- 41 new tests (1078 total)
+
 ## 0.46.0 — 2026-03-01
 
 BEP 55 holepunch extension — NAT traversal between NATed peers via relay-mediated simultaneous connect. Eleven crates, 1037 tests, 26 BEPs implemented.
