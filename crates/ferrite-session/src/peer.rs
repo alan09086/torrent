@@ -482,11 +482,54 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        // BEP 52 hash messages — full handling added in M34c
-        Message::HashRequest { .. }
-        | Message::Hashes { .. }
-        | Message::HashReject { .. } => {
-            tracing::debug!("ignoring BEP 52 hash message from {addr} (not yet implemented)");
+        Message::HashRequest { pieces_root, base, index, count, proof_layers } => {
+            let request = ferrite_core::HashRequest {
+                file_root: pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            };
+            event_tx
+                .send(PeerEvent::IncomingHashRequest {
+                    peer_addr: addr,
+                    request,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        Message::Hashes { pieces_root, base, index, count, proof_layers, hashes } => {
+            let request = ferrite_core::HashRequest {
+                file_root: pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            };
+            event_tx
+                .send(PeerEvent::HashesReceived {
+                    peer_addr: addr,
+                    request,
+                    hashes,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        Message::HashReject { pieces_root, base, index, count, proof_layers } => {
+            let request = ferrite_core::HashRequest {
+                file_root: pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            };
+            event_tx
+                .send(PeerEvent::HashRequestRejected {
+                    peer_addr: addr,
+                    request,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
         }
     }
     Ok(None)
@@ -650,6 +693,28 @@ async fn handle_command(
             Message::Extended { ext_id: 0, payload }
         }
         PeerCommand::SendBitfield(data) => Message::Bitfield(data),
+        PeerCommand::SendHashRequest(req) => Message::HashRequest {
+            pieces_root: req.file_root,
+            base: req.base,
+            index: req.index,
+            count: req.count,
+            proof_layers: req.proof_layers,
+        },
+        PeerCommand::SendHashes { request, hashes } => Message::Hashes {
+            pieces_root: request.file_root,
+            base: request.base,
+            index: request.index,
+            count: request.count,
+            proof_layers: request.proof_layers,
+            hashes,
+        },
+        PeerCommand::SendHashReject(req) => Message::HashReject {
+            pieces_root: req.file_root,
+            base: req.base,
+            index: req.index,
+            count: req.count,
+            proof_layers: req.proof_layers,
+        },
         PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());

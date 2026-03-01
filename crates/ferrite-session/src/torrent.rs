@@ -1382,6 +1382,36 @@ impl TorrentActor {
             PeerEvent::WebSeedError { url, piece, message } => {
                 self.handle_web_seed_error(url, piece, message);
             }
+            PeerEvent::HashesReceived { peer_addr, request, hashes } => {
+                tracing::debug!(
+                    peer = %peer_addr,
+                    file_root = %request.file_root,
+                    base = request.base,
+                    index = request.index,
+                    count = request.count,
+                    num_hashes = hashes.len(),
+                    "received v2 hashes (handler pending M34c Task 6)"
+                );
+            }
+            PeerEvent::HashRequestRejected { peer_addr, request } => {
+                tracing::debug!(
+                    peer = %peer_addr,
+                    file_root = %request.file_root,
+                    base = request.base,
+                    index = request.index,
+                    "v2 hash request rejected (handler pending M34c Task 6)"
+                );
+            }
+            PeerEvent::IncomingHashRequest { peer_addr, request } => {
+                tracing::debug!(
+                    peer = %peer_addr,
+                    file_root = %request.file_root,
+                    base = request.base,
+                    index = request.index,
+                    count = request.count,
+                    "incoming v2 hash request (handler pending M34c Task 6)"
+                );
+            }
         }
     }
 

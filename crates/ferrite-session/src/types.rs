@@ -247,6 +247,22 @@ pub(crate) enum PeerEvent {
         piece: u32,
         message: String,
     },
+    /// BEP 52: Received hash response from peer.
+    HashesReceived {
+        peer_addr: SocketAddr,
+        request: ferrite_core::HashRequest,
+        hashes: Vec<ferrite_core::Id32>,
+    },
+    /// BEP 52: Peer rejected our hash request.
+    HashRequestRejected {
+        peer_addr: SocketAddr,
+        request: ferrite_core::HashRequest,
+    },
+    /// BEP 52: Peer sent a hash request to us.
+    IncomingHashRequest {
+        peer_addr: SocketAddr,
+        request: ferrite_core::HashRequest,
+    },
 }
 
 /// Commands sent from the `TorrentActor` to a `PeerTask`.
@@ -266,6 +282,15 @@ pub(crate) enum PeerCommand {
     SendExtHandshake(ferrite_wire::ExtHandshake),
     /// Send a full bitfield mid-connection (batched Have fallback).
     SendBitfield(Bytes),
+    /// BEP 52: Send a hash request to the peer.
+    SendHashRequest(ferrite_core::HashRequest),
+    /// BEP 52: Send hashes in response to a peer's request.
+    SendHashes {
+        request: ferrite_core::HashRequest,
+        hashes: Vec<ferrite_core::Id32>,
+    },
+    /// BEP 52: Reject a peer's hash request.
+    SendHashReject(ferrite_core::HashRequest),
     Shutdown,
 }
 
