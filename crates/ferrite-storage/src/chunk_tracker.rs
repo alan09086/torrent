@@ -15,6 +15,8 @@ pub struct ChunkTracker {
     in_progress: HashMap<u32, Bitfield>,
     /// Piece/chunk arithmetic.
     lengths: Lengths,
+    /// Per-block Merkle verification state (v2 only). None for v1 torrents.
+    block_verified: Option<HashMap<u32, Bitfield>>,
 }
 
 impl ChunkTracker {
@@ -25,6 +27,7 @@ impl ChunkTracker {
             have,
             in_progress: HashMap::new(),
             lengths,
+            block_verified: None,
         }
     }
 
@@ -34,6 +37,7 @@ impl ChunkTracker {
             have,
             in_progress: HashMap::new(),
             lengths,
+            block_verified: None,
         }
     }
 
@@ -63,9 +67,12 @@ impl ChunkTracker {
         self.in_progress.remove(&piece);
     }
 
-    /// Mark a piece as failed verification. Resets chunk-level tracking.
+    /// Mark a piece as failed verification. Resets chunk-level and block verification tracking.
     pub fn mark_failed(&mut self, piece: u32) {
         self.in_progress.remove(&piece);
+        if let Some(ref mut bv) = self.block_verified {
+            bv.remove(&piece);
+        }
     }
 
     /// Clear a piece from the have bitfield (share mode eviction).
@@ -112,6 +119,43 @@ impl ChunkTracker {
                 .filter_map(|ci| self.lengths.chunk_info(piece, ci))
                 .collect(),
         }
+    }
+
+    /// Enable v2 per-block Merkle verification tracking.
+    pub fn enable_v2_tracking(&mut self) {
+        self.block_verified = Some(HashMap::new());
+    }
+
+    /// Whether v2 block tracking is enabled.
+    pub fn has_v2_tracking(&self) -> bool {
+        self.block_verified.is_some()
+    }
+
+    /// Mark a specific block as Merkle-verified (v2).
+    pub fn mark_block_verified(&mut self, piece: u32, block_index: u32) {
+        if let Some(ref mut bv) = self.block_verified {
+            let num_chunks = self.lengths.chunks_in_piece(piece);
+            let bf = bv.entry(piece).or_insert_with(|| Bitfield::new(num_chunks));
+            bf.set(block_index);
+        }
+    }
+
+    /// Check if a specific block is Merkle-verified (v2).
+    pub fn is_block_verified(&self, piece: u32, block_index: u32) -> bool {
+        self.block_verified
+            .as_ref()
+            .and_then(|bv| bv.get(&piece))
+            .is_some_and(|bf| bf.get(block_index))
+    }
+
+    /// Check if all blocks in a piece are Merkle-verified (v2).
+    pub fn all_blocks_verified(&self, piece: u32) -> bool {
+        let Some(ref bv) = self.block_verified else {
+            return false;
+        };
+        let num_chunks = self.lengths.chunks_in_piece(piece);
+        bv.get(&piece)
+            .is_some_and(|bf| bf.count_ones() == num_chunks)
     }
 }
 
@@ -224,5 +268,56 @@ mod tests {
         ct.clear_piece(0);
         assert!(!ct.has_piece(0));
         assert_eq!(ct.bitfield().count_ones(), 0);
+    }
+
+    #[test]
+    fn v2_tracking_disabled_by_default() {
+        let ct = make_tracker();
+        assert!(!ct.is_block_verified(0, 0));
+        assert!(!ct.all_blocks_verified(0));
+    }
+
+    #[test]
+    fn enable_v2_and_mark_blocks() {
+        let mut ct = make_tracker();
+        ct.enable_v2_tracking();
+
+        assert!(!ct.is_block_verified(0, 0));
+        ct.mark_block_verified(0, 0);
+        assert!(ct.is_block_verified(0, 0));
+        assert!(!ct.is_block_verified(0, 1));
+    }
+
+    #[test]
+    fn all_blocks_verified_complete() {
+        let mut ct = make_tracker();
+        ct.enable_v2_tracking();
+
+        // Piece 0 has 4 chunks (from make_tracker: 50000 byte pieces, 16384 chunks)
+        for i in 0..4 {
+            ct.mark_block_verified(0, i);
+        }
+        assert!(ct.all_blocks_verified(0));
+    }
+
+    #[test]
+    fn all_blocks_verified_incomplete() {
+        let mut ct = make_tracker();
+        ct.enable_v2_tracking();
+
+        ct.mark_block_verified(0, 0);
+        ct.mark_block_verified(0, 2);
+        assert!(!ct.all_blocks_verified(0));
+    }
+
+    #[test]
+    fn mark_failed_clears_v2_state() {
+        let mut ct = make_tracker();
+        ct.enable_v2_tracking();
+
+        ct.mark_block_verified(0, 0);
+        ct.mark_block_verified(0, 1);
+        ct.mark_failed(0);
+        assert!(!ct.is_block_verified(0, 0));
     }
 }
