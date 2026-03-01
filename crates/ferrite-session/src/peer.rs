@@ -42,7 +42,7 @@ pub(crate) async fn run_peer(
     outbound: bool,
     anonymous_mode: bool,
     info_bytes: Option<Bytes>,
-    _plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 ) -> crate::Result<()> {
     use ferrite_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -99,9 +99,10 @@ pub(crate) async fn run_peer(
     let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
 
     // --- Phase 3: BEP 10 Extension Handshake ---
+    let plugin_names: Vec<&str> = plugins.iter().map(|p| p.name()).collect();
     let peer_supports_extensions = their_hs.supports_extensions();
     if peer_supports_extensions {
-        let mut ext_hs = ExtHandshake::new();
+        let mut ext_hs = ExtHandshake::new_with_plugins(&plugin_names);
         if anonymous_mode {
             ext_hs.v = None;
         }
@@ -163,7 +164,7 @@ pub(crate) async fn run_peer(
     let mut peer_ut_metadata: Option<u8> = None;
     let mut peer_ut_pex: Option<u8> = None;
     let mut peer_lt_trackers: Option<u8> = None;
-    let our_ext = ExtHandshake::new();
+    let our_ext = ExtHandshake::new_with_plugins(&plugin_names);
     let our_ut_metadata: Option<u8> = our_ext.ext_id("ut_metadata");
     let our_ut_pex: Option<u8> = our_ext.ext_id("ut_pex");
     let our_lt_trackers: Option<u8> = our_ext.ext_id("lt_trackers");

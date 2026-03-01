@@ -48,6 +48,18 @@ impl ExtHandshake {
         }
     }
 
+    /// Create a handshake advertising built-in + plugin extensions.
+    ///
+    /// Built-in extensions are assigned IDs 1–3. Plugin names are assigned
+    /// IDs starting at 10, in the order provided.
+    pub fn new_with_plugins(plugin_names: &[&str]) -> Self {
+        let mut hs = Self::new();
+        for (i, name) in plugin_names.iter().enumerate() {
+            hs.m.insert((*name).into(), 10 + i as u8);
+        }
+        hs
+    }
+
     /// Create a handshake advertising upload-only (BEP 21 seeder) status.
     pub fn new_upload_only() -> Self {
         let mut hs = Self::new();
@@ -280,6 +292,33 @@ mod tests {
         let hs = ExtHandshake::new();
         assert!(!hs.is_upload_only());
         assert_eq!(hs.upload_only, None);
+    }
+
+    #[test]
+    fn ext_handshake_with_plugins() {
+        let hs = ExtHandshake::new_with_plugins(&["ut_comment", "ut_holepunch"]);
+        // Built-ins unchanged
+        assert_eq!(hs.ext_id("ut_metadata"), Some(1));
+        assert_eq!(hs.ext_id("ut_pex"), Some(2));
+        assert_eq!(hs.ext_id("lt_trackers"), Some(3));
+        // Plugins at 10+
+        assert_eq!(hs.ext_id("ut_comment"), Some(10));
+        assert_eq!(hs.ext_id("ut_holepunch"), Some(11));
+    }
+
+    #[test]
+    fn ext_handshake_with_plugins_round_trip() {
+        let hs = ExtHandshake::new_with_plugins(&["ut_echo"]);
+        let bytes = hs.to_bytes().unwrap();
+        let parsed = ExtHandshake::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ext_id("ut_echo"), Some(10));
+        assert_eq!(parsed.ext_id("ut_metadata"), Some(1));
+    }
+
+    #[test]
+    fn ext_handshake_no_plugins() {
+        let hs = ExtHandshake::new_with_plugins(&[]);
+        assert_eq!(hs.m.len(), 3); // only built-ins
     }
 
     #[test]
