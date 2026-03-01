@@ -93,6 +93,38 @@ impl FileTreeNode {
             }
         }
     }
+
+    /// Convert a file tree back to a `BencodeValue` for serialization.
+    ///
+    /// Used by hybrid torrent creation to build the merged info dict.
+    pub fn to_bencode(&self) -> BencodeValue {
+        match self {
+            FileTreeNode::File(attr) => {
+                let mut file_dict = BTreeMap::new();
+                file_dict.insert(
+                    b"length".to_vec(),
+                    BencodeValue::Integer(attr.length as i64),
+                );
+                if let Some(root) = &attr.pieces_root {
+                    file_dict.insert(
+                        b"pieces root".to_vec(),
+                        BencodeValue::Bytes(root.as_bytes().to_vec()),
+                    );
+                }
+                // Wrap in the "" key that signals a file node
+                let mut node = BTreeMap::new();
+                node.insert(b"".to_vec(), BencodeValue::Dict(file_dict));
+                BencodeValue::Dict(node)
+            }
+            FileTreeNode::Directory(children) => {
+                let mut dict = BTreeMap::new();
+                for (name, child) in children {
+                    dict.insert(name.as_bytes().to_vec(), child.to_bencode());
+                }
+                BencodeValue::Dict(dict)
+            }
+        }
+    }
 }
 
 /// Parse file attributes from the `""` key's value dict.

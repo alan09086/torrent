@@ -12,9 +12,15 @@ use serde::Serialize;
 
 use bytes::Bytes;
 
+use crate::detect::TorrentMeta;
 use crate::error::{Error, Result};
-use crate::hash::Id20;
+use crate::file_tree::{FileTreeNode, V2FileAttr};
+use crate::hash::{Id20, Id32};
+use crate::info_hashes::InfoHashes;
+use crate::merkle::MerkleTree;
 use crate::metainfo::{FileEntry, InfoDict, TorrentMetaV1};
+use crate::metainfo_v2::{InfoDictV2, TorrentMetaV2};
+use crate::torrent_version::TorrentVersion;
 
 /// Auto-select piece size based on total content size (libtorrent-style).
 pub fn auto_piece_size(total: u64) -> u64 {
@@ -56,8 +62,8 @@ struct InputFile {
 /// Result of torrent creation.
 #[derive(Debug)]
 pub struct CreateTorrentResult {
-    /// Parsed torrent metadata.
-    pub meta: TorrentMetaV1,
+    /// Parsed torrent metadata (V1, V2, or Hybrid depending on `set_version()`).
+    pub meta: TorrentMeta,
     /// Raw `.torrent` file bytes.
     pub bytes: Vec<u8>,
 }
@@ -102,6 +108,7 @@ pub struct CreateTorrent {
     include_mtime: bool,
     include_symlinks: bool,
     pre_hashes: HashMap<u32, Id20>,
+    version: TorrentVersion,
 }
 
 impl CreateTorrent {
@@ -124,6 +131,7 @@ impl CreateTorrent {
             include_mtime: false,
             include_symlinks: false,
             pre_hashes: HashMap::new(),
+            version: TorrentVersion::V1Only,
         }
     }
 
@@ -262,6 +270,16 @@ impl CreateTorrent {
     /// Set a pre-computed SHA1 hash for a piece (skips disk read during generation).
     pub fn set_hash(mut self, piece: u32, hash: Id20) -> Self {
         self.pre_hashes.insert(piece, hash);
+        self
+    }
+
+    /// Set the torrent version to create.
+    ///
+    /// - `V1Only` (default) — standard SHA-1 .torrent (BEP 3)
+    /// - `Hybrid` — combined v1+v2 with both SHA-1 pieces and SHA-256 Merkle trees (BEP 52)
+    /// - `V2Only` — not yet supported (returns error during `generate()`)
+    pub fn set_version(mut self, version: TorrentVersion) -> Self {
+        self.version = version;
         self
     }
 
@@ -430,10 +448,9 @@ impl CreateTorrent {
             }
         };
 
-        // Compute info hash
-        let info_bytes = ferrite_bencode::to_bytes(&info)
-            .map_err(|e| Error::CreateTorrent(format!("serialize info: {e}")))?;
-        let info_hash = crate::sha1(&info_bytes);
+        if self.version == TorrentVersion::V2Only {
+            return Err(Error::CreateTorrent("v2-only creation not yet supported".into()));
+        }
 
         // Build announce / announce-list
         let (announce, announce_list) = build_tracker_lists(&self.trackers);
@@ -446,48 +463,237 @@ impl CreateTorrent {
                 .map(|d| d.as_secs() as i64)
         });
 
-        // Build output
-        let output = TorrentOutput {
-            announce,
-            announce_list,
-            comment: self.comment.clone(),
-            created_by: self.creator.clone(),
-            creation_date,
-            httpseeds: if self.http_seeds.is_empty() {
-                None
-            } else {
-                Some(self.http_seeds.clone())
-            },
-            info,
-            nodes: if self.dht_nodes.is_empty() {
-                None
-            } else {
-                Some(self.dht_nodes.clone())
-            },
-            url_list: if self.web_seeds.is_empty() {
-                None
-            } else {
-                Some(self.web_seeds.clone())
-            },
-        };
+        match self.version {
+            TorrentVersion::V1Only => {
+                // ── Standard v1 output ──
+                let info_bytes = ferrite_bencode::to_bytes(&info)
+                    .map_err(|e| Error::CreateTorrent(format!("serialize info: {e}")))?;
+                let info_hash = crate::sha1(&info_bytes);
 
-        let bytes = ferrite_bencode::to_bytes(&output)
-            .map_err(|e| Error::CreateTorrent(format!("serialize torrent: {e}")))?;
+                let output = TorrentOutput {
+                    announce,
+                    announce_list,
+                    comment: self.comment.clone(),
+                    created_by: self.creator.clone(),
+                    creation_date,
+                    httpseeds: if self.http_seeds.is_empty() { None } else { Some(self.http_seeds.clone()) },
+                    info,
+                    nodes: if self.dht_nodes.is_empty() { None } else { Some(self.dht_nodes.clone()) },
+                    url_list: if self.web_seeds.is_empty() { None } else { Some(self.web_seeds.clone()) },
+                };
 
-        let meta = TorrentMetaV1 {
-            info_hash,
-            announce: self.trackers.first().map(|(url, _)| url.clone()),
-            announce_list: output.announce_list,
-            comment: self.comment,
-            created_by: self.creator,
-            creation_date,
-            info: output.info,
-            url_list: self.web_seeds,
-            httpseeds: self.http_seeds,
-            info_bytes: Some(Bytes::from(info_bytes)),
-        };
+                let bytes = ferrite_bencode::to_bytes(&output)
+                    .map_err(|e| Error::CreateTorrent(format!("serialize torrent: {e}")))?;
 
-        Ok(CreateTorrentResult { meta, bytes })
+                let meta_v1 = TorrentMetaV1 {
+                    info_hash,
+                    announce: self.trackers.first().map(|(url, _)| url.clone()),
+                    announce_list: output.announce_list,
+                    comment: self.comment,
+                    created_by: self.creator,
+                    creation_date,
+                    info: output.info,
+                    url_list: self.web_seeds,
+                    httpseeds: self.http_seeds,
+                    info_bytes: Some(Bytes::from(info_bytes)),
+                };
+
+                Ok(CreateTorrentResult { meta: TorrentMeta::V1(meta_v1), bytes })
+            }
+
+            TorrentVersion::Hybrid => {
+                // ── Hybrid v1+v2 output ──
+                // Compute v2 Merkle trees per file (second pass)
+                let v2_data = compute_v2_merkle_data(&files_with_pads, piece_size)?;
+
+                // Build v2 file tree
+                let file_tree = build_v2_file_tree(&v2_data);
+
+                // Build merged info dict as BencodeValue with both v1 and v2 keys
+                let mut merged = std::collections::BTreeMap::<Vec<u8>, ferrite_bencode::BencodeValue>::new();
+
+                // v2: file tree
+                merged.insert(b"file tree".to_vec(), file_tree.to_bencode());
+
+                // v1: files list or single-file length
+                if is_single_file {
+                    merged.insert(b"length".to_vec(), ferrite_bencode::BencodeValue::Integer(info.length.unwrap() as i64));
+                } else {
+                    let file_list: Vec<ferrite_bencode::BencodeValue> = info.files.as_ref().unwrap().iter().map(|f| {
+                        let mut d = std::collections::BTreeMap::new();
+                        d.insert(b"length".to_vec(), ferrite_bencode::BencodeValue::Integer(f.length as i64));
+                        let path: Vec<ferrite_bencode::BencodeValue> = f.path.iter()
+                            .map(|p| ferrite_bencode::BencodeValue::Bytes(p.as_bytes().to_vec()))
+                            .collect();
+                        d.insert(b"path".to_vec(), ferrite_bencode::BencodeValue::List(path));
+                        if let Some(ref attr) = f.attr {
+                            d.insert(b"attr".to_vec(), ferrite_bencode::BencodeValue::Bytes(attr.as_bytes().to_vec()));
+                        }
+                        if let Some(mtime) = f.mtime {
+                            d.insert(b"mtime".to_vec(), ferrite_bencode::BencodeValue::Integer(mtime));
+                        }
+                        if let Some(ref sl) = f.symlink_path {
+                            let sl_list: Vec<ferrite_bencode::BencodeValue> = sl.iter()
+                                .map(|s| ferrite_bencode::BencodeValue::Bytes(s.as_bytes().to_vec()))
+                                .collect();
+                            d.insert(b"symlink path".to_vec(), ferrite_bencode::BencodeValue::List(sl_list));
+                        }
+                        ferrite_bencode::BencodeValue::Dict(d)
+                    }).collect();
+                    merged.insert(b"files".to_vec(), ferrite_bencode::BencodeValue::List(file_list));
+                }
+
+                // v2: meta version
+                merged.insert(b"meta version".to_vec(), ferrite_bencode::BencodeValue::Integer(2));
+
+                // shared: name
+                merged.insert(b"name".to_vec(), ferrite_bencode::BencodeValue::Bytes(info.name.as_bytes().to_vec()));
+
+                // shared: piece length
+                merged.insert(b"piece length".to_vec(), ferrite_bencode::BencodeValue::Integer(piece_size as i64));
+
+                // v1: pieces (concatenated SHA-1 hashes)
+                merged.insert(b"pieces".to_vec(), ferrite_bencode::BencodeValue::Bytes(pieces.clone()));
+
+                // optional: private
+                if self.private {
+                    merged.insert(b"private".to_vec(), ferrite_bencode::BencodeValue::Integer(1));
+                }
+
+                // optional: source
+                if let Some(ref source) = self.source {
+                    merged.insert(b"source".to_vec(), ferrite_bencode::BencodeValue::Bytes(source.as_bytes().to_vec()));
+                }
+
+                // Serialize merged info dict → compute both hashes
+                let merged_info_bytes = ferrite_bencode::to_bytes(&ferrite_bencode::BencodeValue::Dict(merged))
+                    .map_err(|e| Error::CreateTorrent(format!("serialize hybrid info: {e}")))?;
+                let info_hash_v1 = crate::sha1(&merged_info_bytes);
+                let info_hash_v2 = crate::sha256(&merged_info_bytes);
+
+                // Build piece_layers: pieces_root → concatenated piece-layer SHA-256 hashes
+                let mut piece_layers_map = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+                for fd in &v2_data {
+                    if let Some(root) = &fd.pieces_root
+                        && !fd.piece_layer.is_empty()
+                    {
+                        let concat: Vec<u8> = fd.piece_layer.iter()
+                            .flat_map(|h| h.as_bytes())
+                            .copied()
+                            .collect();
+                        piece_layers_map.insert(root.as_bytes().to_vec(), concat);
+                    }
+                }
+
+                // Build outer torrent dict manually (to include piece layers)
+                let mut outer = std::collections::BTreeMap::<Vec<u8>, ferrite_bencode::BencodeValue>::new();
+                if let Some(ref url) = announce {
+                    outer.insert(b"announce".to_vec(), ferrite_bencode::BencodeValue::Bytes(url.as_bytes().to_vec()));
+                }
+                if let Some(ref al) = announce_list {
+                    let al_val: Vec<ferrite_bencode::BencodeValue> = al.iter().map(|tier| {
+                        let t: Vec<ferrite_bencode::BencodeValue> = tier.iter()
+                            .map(|u| ferrite_bencode::BencodeValue::Bytes(u.as_bytes().to_vec()))
+                            .collect();
+                        ferrite_bencode::BencodeValue::List(t)
+                    }).collect();
+                    outer.insert(b"announce-list".to_vec(), ferrite_bencode::BencodeValue::List(al_val));
+                }
+                if let Some(ref comment) = self.comment {
+                    outer.insert(b"comment".to_vec(), ferrite_bencode::BencodeValue::Bytes(comment.as_bytes().to_vec()));
+                }
+                if let Some(ref creator) = self.creator {
+                    outer.insert(b"created by".to_vec(), ferrite_bencode::BencodeValue::Bytes(creator.as_bytes().to_vec()));
+                }
+                if let Some(cd) = creation_date {
+                    outer.insert(b"creation date".to_vec(), ferrite_bencode::BencodeValue::Integer(cd));
+                }
+                if !self.http_seeds.is_empty() {
+                    let seeds: Vec<ferrite_bencode::BencodeValue> = self.http_seeds.iter()
+                        .map(|s| ferrite_bencode::BencodeValue::Bytes(s.as_bytes().to_vec()))
+                        .collect();
+                    outer.insert(b"httpseeds".to_vec(), ferrite_bencode::BencodeValue::List(seeds));
+                }
+                // Info dict as raw bytes (preserve exact serialization for hash consistency)
+                outer.insert(b"info".to_vec(), ferrite_bencode::from_bytes::<ferrite_bencode::BencodeValue>(&merged_info_bytes)
+                    .map_err(|e| Error::CreateTorrent(format!("re-parse info: {e}")))?);
+                if !self.dht_nodes.is_empty() {
+                    let nodes: Vec<ferrite_bencode::BencodeValue> = self.dht_nodes.iter()
+                        .map(|(h, p)| ferrite_bencode::BencodeValue::List(vec![
+                            ferrite_bencode::BencodeValue::Bytes(h.as_bytes().to_vec()),
+                            ferrite_bencode::BencodeValue::Integer(*p as i64),
+                        ]))
+                        .collect();
+                    outer.insert(b"nodes".to_vec(), ferrite_bencode::BencodeValue::List(nodes));
+                }
+                // piece layers
+                if !piece_layers_map.is_empty() {
+                    let mut pl_dict = std::collections::BTreeMap::new();
+                    for (root, layer) in &piece_layers_map {
+                        pl_dict.insert(root.clone(), ferrite_bencode::BencodeValue::Bytes(layer.clone()));
+                    }
+                    outer.insert(b"piece layers".to_vec(), ferrite_bencode::BencodeValue::Dict(pl_dict));
+                }
+                if !self.web_seeds.is_empty() {
+                    let seeds: Vec<ferrite_bencode::BencodeValue> = self.web_seeds.iter()
+                        .map(|s| ferrite_bencode::BencodeValue::Bytes(s.as_bytes().to_vec()))
+                        .collect();
+                    outer.insert(b"url-list".to_vec(), ferrite_bencode::BencodeValue::List(seeds));
+                }
+
+                let bytes = ferrite_bencode::to_bytes(&ferrite_bencode::BencodeValue::Dict(outer))
+                    .map_err(|e| Error::CreateTorrent(format!("serialize hybrid torrent: {e}")))?;
+
+                // Build TorrentMetaV1 component
+                let meta_v1 = TorrentMetaV1 {
+                    info_hash: info_hash_v1,
+                    announce: self.trackers.first().map(|(url, _)| url.clone()),
+                    announce_list: announce_list.clone(),
+                    comment: self.comment.clone(),
+                    created_by: self.creator.clone(),
+                    creation_date,
+                    info,
+                    url_list: self.web_seeds.clone(),
+                    httpseeds: self.http_seeds.clone(),
+                    info_bytes: Some(Bytes::from(merged_info_bytes.clone())),
+                };
+
+                // Build TorrentMetaV2 component
+                let info_v2 = InfoDictV2 {
+                    name: meta_v1.info.name.clone(),
+                    piece_length: piece_size,
+                    meta_version: 2,
+                    file_tree,
+                };
+                let meta_v2 = TorrentMetaV2 {
+                    info_hashes: InfoHashes::hybrid(info_hash_v1, info_hash_v2),
+                    info_bytes: Some(Bytes::from(merged_info_bytes)),
+                    announce: meta_v1.announce.clone(),
+                    announce_list: meta_v1.announce_list.clone(),
+                    comment: self.comment,
+                    created_by: self.creator,
+                    creation_date,
+                    info: info_v2,
+                    piece_layers: v2_data.iter()
+                        .filter_map(|fd| {
+                            let root = fd.pieces_root?;
+                            if fd.piece_layer.is_empty() { return None; }
+                            Some((root, fd.piece_layer.iter()
+                                .flat_map(|h| h.as_bytes())
+                                .copied()
+                                .collect()))
+                        })
+                        .collect(),
+                };
+
+                Ok(CreateTorrentResult {
+                    meta: TorrentMeta::Hybrid(Box::new(meta_v1), Box::new(meta_v2)),
+                    bytes,
+                })
+            }
+
+            TorrentVersion::V2Only => unreachable!(), // handled above
+        }
     }
 }
 
@@ -689,6 +895,116 @@ fn build_tracker_lists(trackers: &[(String, usize)]) -> (Option<String>, Option<
     (announce, announce_list)
 }
 
+/// Per-file v2 Merkle data computed during hybrid torrent creation.
+struct V2FileData {
+    /// Torrent path components (excluding pad files).
+    torrent_path: Vec<String>,
+    /// File length in bytes.
+    length: u64,
+    /// Merkle tree root hash (None for empty files).
+    pieces_root: Option<Id32>,
+    /// Piece-layer hashes (only for files larger than piece_length).
+    piece_layer: Vec<Id32>,
+}
+
+/// Compute SHA-256 Merkle trees for each non-pad file.
+///
+/// This is a second pass through the file data — the first pass computed SHA-1
+/// piece hashes for v1. We re-read each file and hash 16 KiB blocks for v2.
+fn compute_v2_merkle_data(files: &[InputFile], piece_size: u64) -> Result<Vec<V2FileData>> {
+    let block_size = 16384u64;
+    let blocks_per_piece = (piece_size / block_size) as usize;
+    let mut result = Vec::new();
+
+    for file in files {
+        if file.is_pad {
+            continue;
+        }
+
+        if file.length == 0 {
+            result.push(V2FileData {
+                torrent_path: file.torrent_path.clone(),
+                length: 0,
+                pieces_root: None,
+                piece_layer: Vec::new(),
+            });
+            continue;
+        }
+
+        // Read file and SHA-256 each 16 KiB block
+        let num_blocks = file.length.div_ceil(block_size) as usize;
+        let mut block_hashes = Vec::with_capacity(num_blocks);
+        let mut handle = fs::File::open(&file.disk_path)?;
+        let mut buf = vec![0u8; block_size as usize];
+        let mut remaining = file.length;
+
+        while remaining > 0 {
+            let to_read = remaining.min(block_size) as usize;
+            handle.read_exact(&mut buf[..to_read])?;
+            // Hash only the actual data (last block may be shorter)
+            block_hashes.push(crate::sha256(&buf[..to_read]));
+            remaining -= to_read as u64;
+        }
+
+        let tree = MerkleTree::from_leaves(&block_hashes);
+        let root = tree.root();
+
+        // Piece layer only needed for files spanning multiple pieces
+        let piece_layer = if file.length > piece_size {
+            tree.piece_layer(blocks_per_piece).to_vec()
+        } else {
+            Vec::new()
+        };
+
+        result.push(V2FileData {
+            torrent_path: file.torrent_path.clone(),
+            length: file.length,
+            pieces_root: Some(root),
+            piece_layer,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Build a v2 FileTreeNode from computed Merkle data.
+///
+/// Single-file torrents produce a single-entry directory.
+/// Multi-file torrents build the nested path structure.
+fn build_v2_file_tree(v2_data: &[V2FileData]) -> FileTreeNode {
+    use std::collections::BTreeMap;
+
+    let mut root = BTreeMap::new();
+
+    for fd in v2_data {
+        let attr = V2FileAttr {
+            length: fd.length,
+            pieces_root: fd.pieces_root,
+        };
+        let file_node = FileTreeNode::File(attr);
+
+        // Walk path components to build nested directory structure
+        let mut current = &mut root;
+        for (i, component) in fd.torrent_path.iter().enumerate() {
+            if i == fd.torrent_path.len() - 1 {
+                // Last component: insert the file
+                current.insert(component.clone(), file_node);
+                break;
+            }
+            // Intermediate component: create/get directory
+            current = match current
+                .entry(component.clone())
+                .or_insert_with(|| FileTreeNode::Directory(BTreeMap::new()))
+            {
+                FileTreeNode::Directory(children) => children,
+                FileTreeNode::File(_) => unreachable!("path conflict in file tree"),
+            };
+        }
+    }
+
+    FileTreeNode::Directory(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,13 +1066,13 @@ mod tests {
             .generate()
             .unwrap();
 
-        assert_eq!(result.meta.info.total_length(), 65536);
-        assert!(result.meta.info.length.is_some());
-        assert!(result.meta.info.files.is_none());
+        assert_eq!(result.meta.as_v1().unwrap().info.total_length(), 65536);
+        assert!(result.meta.as_v1().unwrap().info.length.is_some());
+        assert!(result.meta.as_v1().unwrap().info.files.is_none());
 
         // Round-trip: re-parse the generated bytes
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
-        assert_eq!(parsed.info_hash, result.meta.info_hash);
+        assert_eq!(parsed.info_hash, result.meta.as_v1().unwrap().info_hash);
         assert_eq!(parsed.info.total_length(), 65536);
         assert_eq!(parsed.info.piece_length, 32768);
         assert_eq!(parsed.info.num_pieces(), 2);
@@ -773,17 +1089,17 @@ mod tests {
             .generate()
             .unwrap();
 
-        assert!(result.meta.info.files.is_some());
-        let files = result.meta.info.files.as_ref().unwrap();
+        assert!(result.meta.as_v1().unwrap().info.files.is_some());
+        let files = result.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         assert_eq!(files.len(), 2);
         // Files should be sorted: aaa.txt before subdir/bbb.bin
         assert_eq!(files[0].path, vec!["aaa.txt"]);
         assert_eq!(files[1].path, vec!["subdir", "bbb.bin"]);
-        assert_eq!(result.meta.info.total_length(), 12 + 1000);
+        assert_eq!(result.meta.as_v1().unwrap().info.total_length(), 12 + 1000);
 
         // Round-trip
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
-        assert_eq!(parsed.info_hash, result.meta.info_hash);
+        assert_eq!(parsed.info_hash, result.meta.as_v1().unwrap().info_hash);
         assert_eq!(parsed.info.name, "test-torrent");
     }
 
@@ -799,8 +1115,8 @@ mod tests {
             .generate()
             .unwrap();
 
-        assert_eq!(result.meta.info.private, Some(1));
-        assert_eq!(result.meta.info.source.as_deref(), Some("MyTracker"));
+        assert_eq!(result.meta.as_v1().unwrap().info.private, Some(1));
+        assert_eq!(result.meta.as_v1().unwrap().info.source.as_deref(), Some("MyTracker"));
 
         // Round-trip
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
@@ -822,10 +1138,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.meta.announce.as_deref(),
+            result.meta.as_v1().unwrap().announce.as_deref(),
             Some("http://tracker1.example.com/announce")
         );
-        let al = result.meta.announce_list.as_ref().unwrap();
+        let al = result.meta.as_v1().unwrap().announce_list.as_ref().unwrap();
         assert_eq!(al.len(), 2);
         assert_eq!(al[0].len(), 2); // tier 0: two trackers
         assert_eq!(al[1].len(), 1); // tier 1: one tracker
@@ -847,8 +1163,8 @@ mod tests {
             .generate()
             .unwrap();
 
-        assert_eq!(result.meta.url_list, vec!["http://web.example.com/files"]);
-        assert_eq!(result.meta.httpseeds, vec!["http://http.example.com/seed"]);
+        assert_eq!(result.meta.as_v1().unwrap().url_list, vec!["http://web.example.com/files"]);
+        assert_eq!(result.meta.as_v1().unwrap().httpseeds, vec!["http://http.example.com/seed"]);
 
         // Round-trip
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
@@ -868,7 +1184,7 @@ mod tests {
             .generate()
             .unwrap();
 
-        let files = result.meta.info.files.as_ref().unwrap();
+        let files = result.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         // Should have pad files after all files except the last
         let pad_count = files.iter().filter(|f| f.attr.as_deref() == Some("p")).count();
         // aaa.txt (12 bytes) → pad, subdir/bbb.bin (1000 bytes) → no pad (last)
@@ -892,7 +1208,7 @@ mod tests {
             .generate()
             .unwrap();
 
-        let files = result.meta.info.files.as_ref().unwrap();
+        let files = result.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         // aaa.txt (12 bytes, ≤ 500, no pad), subdir/bbb.bin (1000 bytes, last file, no pad)
         let pad_count = files.iter().filter(|f| f.attr.as_deref() == Some("p")).count();
         assert_eq!(pad_count, 0);
@@ -907,7 +1223,7 @@ mod tests {
             .generate()
             .unwrap();
 
-        let files2 = result2.meta.info.files.as_ref().unwrap();
+        let files2 = result2.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         let pad_count2 = files2.iter().filter(|f| f.attr.as_deref() == Some("p")).count();
         assert_eq!(pad_count2, 1);
     }
@@ -951,12 +1267,12 @@ mod tests {
 
         // Re-parse
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
-        assert_eq!(parsed.info_hash, result.meta.info_hash);
+        assert_eq!(parsed.info_hash, result.meta.as_v1().unwrap().info_hash);
 
         // Manual SHA1 of serialized info dict
-        let info_bytes = ferrite_bencode::to_bytes(&result.meta.info).unwrap();
+        let info_bytes = ferrite_bencode::to_bytes(&result.meta.as_v1().unwrap().info).unwrap();
         let manual_hash = crate::sha1(&info_bytes);
-        assert_eq!(manual_hash, result.meta.info_hash);
+        assert_eq!(manual_hash, result.meta.as_v1().unwrap().info_hash);
     }
 
     #[test]
@@ -998,7 +1314,7 @@ mod tests {
             .generate()
             .unwrap();
 
-        let files = result.meta.info.files.as_ref().unwrap();
+        let files = result.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         // All real files should have mtime set
         for f in files {
             if f.attr.as_deref() != Some("p") {
@@ -1020,7 +1336,7 @@ mod tests {
             .generate()
             .unwrap();
 
-        let piece0_hash = normal.meta.info.piece_hash(0).unwrap();
+        let piece0_hash = normal.meta.as_v1().unwrap().info.piece_hash(0).unwrap();
 
         // Now generate with pre-computed hash for piece 0
         let result = CreateTorrent::new()
@@ -1032,7 +1348,145 @@ mod tests {
             .unwrap();
 
         // Should produce identical output
-        assert_eq!(result.meta.info_hash, normal.meta.info_hash);
-        assert_eq!(result.meta.info.piece_hash(0), normal.meta.info.piece_hash(0));
+        assert_eq!(result.meta.as_v1().unwrap().info_hash, normal.meta.as_v1().unwrap().info_hash);
+        assert_eq!(result.meta.as_v1().unwrap().info.piece_hash(0), normal.meta.as_v1().unwrap().info.piece_hash(0));
+    }
+
+    // ── Hybrid torrent creation tests ────────────────────────────────────
+
+    #[test]
+    fn hybrid_single_file_round_trip() {
+        let f = make_test_file();
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::Hybrid)
+            .generate()
+            .unwrap();
+
+        // Should be a Hybrid variant
+        assert!(result.meta.is_hybrid());
+        assert!(result.meta.version().is_hybrid());
+
+        // v1 component
+        let v1 = result.meta.as_v1().unwrap();
+        assert_eq!(v1.info.total_length(), 65536);
+        assert!(v1.info.length.is_some());
+        assert!(v1.info.files.is_none());
+
+        // v2 component
+        let v2 = result.meta.as_v2().unwrap();
+        assert_eq!(v2.info.meta_version, 2);
+        assert_eq!(v2.info.piece_length, 32768);
+        // File tree should have one file
+        let files = v2.info.files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].attr.length, 65536);
+        // Merkle root should exist
+        assert!(files[0].attr.pieces_root.is_some());
+
+        // Both hashes should come from the same info bytes
+        assert!(v2.info_hashes.v1.is_some());
+        assert!(v2.info_hashes.v2.is_some());
+        assert_eq!(v2.info_hashes.v1.unwrap(), v1.info_hash);
+
+        // Round-trip: re-parse the generated bytes as v1
+        let parsed = torrent_from_bytes(&result.bytes).unwrap();
+        assert_eq!(parsed.info_hash, v1.info_hash);
+
+        // Re-parse as v2 (detect.rs should detect hybrid)
+        let detected = crate::detect::torrent_from_bytes_any(&result.bytes).unwrap();
+        assert!(detected.is_hybrid());
+    }
+
+    #[test]
+    fn hybrid_multi_file_round_trip() {
+        let dir = make_test_dir();
+        let result = CreateTorrent::new()
+            .add_directory(dir.path())
+            .set_name("hybrid-test")
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::Hybrid)
+            .generate()
+            .unwrap();
+
+        assert!(result.meta.is_hybrid());
+
+        let v1 = result.meta.as_v1().unwrap();
+        assert!(v1.info.files.is_some());
+        let v1_files = v1.info.files.as_ref().unwrap();
+        assert_eq!(v1_files.len(), 2);
+        assert_eq!(v1_files[0].path, vec!["aaa.txt"]);
+        assert_eq!(v1_files[1].path, vec!["subdir", "bbb.bin"]);
+
+        let v2 = result.meta.as_v2().unwrap();
+        let v2_files = v2.info.files();
+        assert_eq!(v2_files.len(), 2);
+
+        // Round-trip
+        let parsed = torrent_from_bytes(&result.bytes).unwrap();
+        assert_eq!(parsed.info_hash, v1.info_hash);
+    }
+
+    #[test]
+    fn hybrid_has_piece_layers_for_large_file() {
+        // Create a file larger than piece_size so piece_layers should be present
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&vec![0xCD; 65536]).unwrap();
+        f.flush().unwrap();
+
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(16384)  // 4 pieces
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::Hybrid)
+            .generate()
+            .unwrap();
+
+        assert!(result.meta.is_hybrid());
+        let v2 = result.meta.as_v2().unwrap();
+        // piece_layers should have an entry for this file (larger than piece_size)
+        assert!(!v2.piece_layers.is_empty(), "piece_layers should not be empty for large file");
+    }
+
+    #[test]
+    fn hybrid_info_hash_differs_from_v1_only() {
+        let f = make_test_file();
+
+        let v1_result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .generate()
+            .unwrap();
+
+        let hybrid_result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::Hybrid)
+            .generate()
+            .unwrap();
+
+        // Hybrid info dict has extra keys (file tree, meta version) so hashes differ
+        let v1_hash = v1_result.meta.as_v1().unwrap().info_hash;
+        let hybrid_v1_hash = hybrid_result.meta.as_v1().unwrap().info_hash;
+        assert_ne!(v1_hash, hybrid_v1_hash, "hybrid info dict should differ from v1-only");
+    }
+
+    #[test]
+    fn v2_only_creation_returns_error() {
+        let f = make_test_file();
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(65536)
+            .set_version(TorrentVersion::V2Only)
+            .generate();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("v2-only"), "error: {err}");
     }
 }
