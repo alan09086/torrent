@@ -46,5 +46,9 @@ pub use ferrite_dht::bep44::{
 };
 pub use ferrite_dht::storage::{DhtStorage, InMemoryDhtStorage};
 
+// BEP 51: DHT infohash indexing (sample_infohashes query)
+pub use ferrite_dht::SampleInfohashesResult;
+pub use ferrite_dht::krpc::SampleInfohashesResponse;
+
 // Re-export ed25519 types for BEP 44 mutable item signing
 pub use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey as Ed25519VerifyingKey};
