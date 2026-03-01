@@ -164,10 +164,17 @@ pub(crate) async fn run_peer(
     let mut peer_ut_metadata: Option<u8> = None;
     let mut peer_ut_pex: Option<u8> = None;
     let mut peer_lt_trackers: Option<u8> = None;
+    // Peer's extension IDs for plugin names (for sending responses using their IDs)
+    let mut peer_ext_ids: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
     let our_ext = ExtHandshake::new_with_plugins(&plugin_names);
     let our_ut_metadata: Option<u8> = our_ext.ext_id("ut_metadata");
     let our_ut_pex: Option<u8> = our_ext.ext_id("ut_pex");
     let our_lt_trackers: Option<u8> = our_ext.ext_id("lt_trackers");
+
+    // Notify plugins that a peer connected
+    for plugin in plugins.iter() {
+        plugin.on_peer_connected(&info_hash, addr);
+    }
 
     // --- Phase 5: Main loop ---
     let disconnect_reason: Option<String> = loop {
@@ -183,11 +190,14 @@ pub(crate) async fn run_peer(
                             &mut peer_ut_metadata,
                             &mut peer_ut_pex,
                             &mut peer_lt_trackers,
+                            &mut peer_ext_ids,
                             our_ut_metadata,
                             our_ut_pex,
                             our_lt_trackers,
                             both_support_fast,
                             info_bytes.as_ref(),
+                            &info_hash,
+                            &plugins,
                         ).await {
                             Ok(Some(response)) => {
                                 if let Err(e) = framed_write.send(response).await {
@@ -235,6 +245,11 @@ pub(crate) async fn run_peer(
         }
     };
 
+    // Notify plugins that a peer disconnected
+    for plugin in plugins.iter() {
+        plugin.on_peer_disconnected(&info_hash, addr);
+    }
+
     // Send disconnect event (best-effort)
     let _ = event_tx
         .send(PeerEvent::Disconnected {
@@ -261,11 +276,14 @@ async fn handle_message(
     peer_ut_metadata: &mut Option<u8>,
     peer_ut_pex: &mut Option<u8>,
     peer_lt_trackers: &mut Option<u8>,
+    peer_ext_ids: &mut std::collections::HashMap<String, u8>,
     our_ut_metadata: Option<u8>,
     our_ut_pex: Option<u8>,
     our_lt_trackers: Option<u8>,
     both_support_fast: bool,
     info_bytes: Option<&Bytes>,
+    info_hash: &Id20,
+    plugins: &[Box<dyn crate::extension::ExtensionPlugin>],
 ) -> crate::Result<Option<Message>> {
     match msg {
         Message::Choke => {
@@ -340,6 +358,16 @@ async fn handle_message(
             *peer_ut_metadata = ext_hs.ext_id("ut_metadata");
             *peer_ut_pex = ext_hs.ext_id("ut_pex");
             *peer_lt_trackers = ext_hs.ext_id("lt_trackers");
+            // Capture peer's extension IDs for registered plugins
+            for plugin in plugins.iter() {
+                if let Some(id) = ext_hs.ext_id(plugin.name()) {
+                    peer_ext_ids.insert(plugin.name().to_string(), id);
+                }
+            }
+            // Notify plugins of the peer's extension handshake
+            for plugin in plugins.iter() {
+                plugin.on_handshake(info_hash, addr, &ext_hs);
+            }
             event_tx
                 .send(PeerEvent::ExtHandshake {
                     peer_addr: addr,
@@ -362,7 +390,26 @@ async fn handle_message(
             } else if Some(ext_id) == our_lt_trackers {
                 handle_lt_trackers_message(&payload, event_tx).await?;
             } else {
-                warn!(%addr, ext_id, "unknown extension message");
+                // Dispatch to registered plugins (IDs 10+)
+                let mut handled = false;
+                for (i, plugin) in plugins.iter().enumerate() {
+                    let our_plugin_id = 10 + i as u8;
+                    if ext_id == our_plugin_id {
+                        if let Some(response) = plugin.on_message(info_hash, addr, &payload)
+                            && let Some(&peer_id) = peer_ext_ids.get(plugin.name())
+                        {
+                            return Ok(Some(Message::Extended {
+                                ext_id: peer_id,
+                                payload: Bytes::from(response),
+                            }));
+                        }
+                        handled = true;
+                        break;
+                    }
+                }
+                if !handled {
+                    warn!(%addr, ext_id, "unknown extension message");
+                }
             }
         }
         Message::Request { index, begin, length } => {
@@ -1769,6 +1816,156 @@ mod tests {
                 assert_eq!(meta_msg.data.as_deref(), Some(info_raw.as_ref()));
             }
             other => panic!("expected Extended data response, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    // ---- Plugin Extension Tests ----
+
+    /// Test plugin that echoes messages back verbatim.
+    struct TestEchoPlugin;
+
+    impl crate::extension::ExtensionPlugin for TestEchoPlugin {
+        fn name(&self) -> &str {
+            "ut_echo"
+        }
+
+        fn on_message(
+            &self,
+            _info_hash: &Id20,
+            _peer_addr: SocketAddr,
+            payload: &[u8],
+        ) -> Option<Vec<u8>> {
+            Some(payload.to_vec())
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_advertised_in_ext_handshake() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+        let plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>> =
+            std::sync::Arc::new(vec![Box::new(TestEchoPlugin)]);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                None,  // info_bytes
+                plugins,
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read our ext handshake — ut_echo should be advertised at ID 10
+        let msg = read_framed_message(&mut server_stream).await;
+        match msg {
+            Message::Extended { ext_id: 0, payload } => {
+                let ext_hs = ExtHandshake::from_bytes(&payload).unwrap();
+                assert_eq!(ext_hs.ext_id("ut_echo"), Some(10), "plugin should be at ID 10");
+                assert_eq!(ext_hs.ext_id("ut_metadata"), Some(1), "built-in unchanged");
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn plugin_message_echo_dispatch() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+        let plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>> =
+            std::sync::Arc::new(vec![Box::new(TestEchoPlugin)]);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                None,  // info_bytes
+                plugins,
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read our ext handshake
+        let msg = read_framed_message(&mut server_stream).await;
+        let our_ext_hs = match msg {
+            Message::Extended { ext_id: 0, payload } => {
+                ExtHandshake::from_bytes(&payload).unwrap()
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        };
+        let our_ut_echo_id = our_ext_hs.ext_id("ut_echo").unwrap();
+        assert_eq!(our_ut_echo_id, 10);
+
+        // Send remote ext handshake advertising ut_echo=42
+        let mut remote_ext = ExtHandshake::default();
+        remote_ext.m.insert("ut_metadata".into(), 3);
+        remote_ext.m.insert("ut_pex".into(), 4);
+        remote_ext.m.insert("ut_echo".into(), 42);
+        let ext_payload = remote_ext.to_bytes().unwrap();
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended { ext_id: 0, payload: ext_payload },
+        )
+        .await;
+
+        // Send a plugin message using OUR assigned ID (10)
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended {
+                ext_id: our_ut_echo_id,
+                payload: Bytes::from_static(b"hello plugin"),
+            },
+        )
+        .await;
+
+        // Read the echo response — should use the PEER's ut_echo ID (42)
+        let response = read_framed_message(&mut server_stream).await;
+        match response {
+            Message::Extended { ext_id, payload } => {
+                assert_eq!(ext_id, 42, "response should use peer's ut_echo id");
+                assert_eq!(payload.as_ref(), b"hello plugin");
+            }
+            other => panic!("expected echo response, got: {other:?}"),
         }
 
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
