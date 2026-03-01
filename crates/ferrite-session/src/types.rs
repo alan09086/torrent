@@ -9,6 +9,8 @@ use tokio::sync::oneshot;
 use ferrite_storage::Bitfield;
 use ferrite_wire::ExtHandshake;
 
+use crate::choker::{ChokingAlgorithm, SeedChokingAlgorithm};
+
 /// Configurable parameters for a torrent session.
 #[derive(Debug, Clone)]
 pub struct TorrentConfig {
@@ -71,6 +73,10 @@ pub struct TorrentConfig {
     pub allow_i2p_mixed: bool,
     /// SSL listen port for SSL torrent connections (0 = disabled).
     pub ssl_listen_port: u16,
+    /// Algorithm for ranking peers during seed-mode choking.
+    pub seed_choking_algorithm: SeedChokingAlgorithm,
+    /// Algorithm for determining the number of unchoke slots.
+    pub choking_algorithm: ChokingAlgorithm,
 }
 
 impl Default for TorrentConfig {
@@ -109,6 +115,8 @@ impl Default for TorrentConfig {
             enable_i2p: false,
             allow_i2p_mixed: false,
             ssl_listen_port: 0,
+            seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
+            choking_algorithm: ChokingAlgorithm::FixedSlots,
         }
     }
 }
@@ -149,6 +157,8 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             enable_i2p: s.enable_i2p,
             allow_i2p_mixed: s.allow_i2p_mixed,
             ssl_listen_port: s.ssl_listen_port,
+            seed_choking_algorithm: s.seed_choking_algorithm,
+            choking_algorithm: s.choking_algorithm,
         }
     }
 }
@@ -560,6 +570,23 @@ mod tests {
         s.ssl_listen_port = 4433;
         let tc = TorrentConfig::from(&s);
         assert_eq!(tc.ssl_listen_port, 4433);
+    }
+
+    #[test]
+    fn torrent_config_choking_defaults() {
+        let cfg = TorrentConfig::default();
+        assert_eq!(cfg.seed_choking_algorithm, SeedChokingAlgorithm::FastestUpload);
+        assert_eq!(cfg.choking_algorithm, ChokingAlgorithm::FixedSlots);
+    }
+
+    #[test]
+    fn torrent_config_from_settings_choking() {
+        let mut s = crate::settings::Settings::default();
+        s.seed_choking_algorithm = SeedChokingAlgorithm::RoundRobin;
+        s.choking_algorithm = ChokingAlgorithm::RateBased;
+        let cfg = TorrentConfig::from(&s);
+        assert_eq!(cfg.seed_choking_algorithm, SeedChokingAlgorithm::RoundRobin);
+        assert_eq!(cfg.choking_algorithm, ChokingAlgorithm::RateBased);
     }
 
     #[test]

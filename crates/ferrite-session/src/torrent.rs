@@ -4032,6 +4032,8 @@ mod tests {
             enable_i2p: false,
             allow_i2p_mixed: false,
             ssl_listen_port: 0,
+            seed_choking_algorithm: crate::choker::SeedChokingAlgorithm::FastestUpload,
+            choking_algorithm: crate::choker::ChokingAlgorithm::FixedSlots,
         }
     }
 
