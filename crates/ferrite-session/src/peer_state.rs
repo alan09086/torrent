@@ -69,6 +69,10 @@ pub(crate) struct PeerState {
     pub suggested_pieces: HashSet<u32>,
     /// How this peer was discovered.
     pub source: PeerSource,
+    /// BEP 55: peer advertised `ut_holepunch` support in their extension handshake.
+    pub supports_holepunch: bool,
+    /// Whether this peer appears to be NATed (no incoming connections observed).
+    pub appears_nated: bool,
 }
 
 #[allow(dead_code)]
@@ -103,6 +107,8 @@ impl PeerState {
             last_data_received: None,
             suggested_pieces: HashSet::new(),
             source,
+            supports_holepunch: false,
+            appears_nated: false,
         }
     }
 }
