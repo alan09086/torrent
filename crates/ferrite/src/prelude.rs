@@ -48,5 +48,8 @@ pub use crate::session::{IpFilter, ProxyConfig, ProxyType};
 // Peer source tracking (M32a)
 pub use crate::session::PeerSource;
 
+// Extension plugin interface (M32d)
+pub use crate::session::ExtensionPlugin;
+
 // Torrent creation (M30)
 pub use crate::core::CreateTorrent;

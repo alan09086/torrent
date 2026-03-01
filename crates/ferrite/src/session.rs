@@ -53,6 +53,8 @@ pub use ferrite_session::{
     DiskStats,
     // Peer source tracking (M32a)
     PeerSource,
+    // Extension plugin interface (M32d)
+    ExtensionPlugin,
     // Error types
     Error,
     Result,

@@ -592,6 +592,43 @@ mod tests {
     }
 
     #[test]
+    fn extension_plugin_accessible_through_facade() {
+        use crate::prelude::*;
+
+        struct TestPlugin;
+
+        impl ExtensionPlugin for TestPlugin {
+            fn name(&self) -> &str {
+                "ut_test"
+            }
+        }
+
+        let plugin: Box<dyn ExtensionPlugin> = Box::new(TestPlugin);
+        assert_eq!(plugin.name(), "ut_test");
+
+        // BencodeValue accessible for on_handshake return type
+        let _val = crate::bencode::BencodeValue::Integer(42);
+    }
+
+    #[test]
+    fn client_builder_add_extension() {
+        struct DummyPlugin;
+        impl session::ExtensionPlugin for DummyPlugin {
+            fn name(&self) -> &str {
+                "ut_dummy"
+            }
+        }
+
+        let builder = crate::ClientBuilder::new()
+            .listen_port(0)
+            .download_dir("/tmp")
+            .add_extension(Box::new(DummyPlugin));
+
+        // Verify builder chains correctly — the extension is stored internally
+        let _ = builder.into_settings();
+    }
+
+    #[test]
     fn tracker_scrape_types_accessible_through_facade() {
         // ScrapeInfo construction
         let info = tracker::ScrapeInfo {
