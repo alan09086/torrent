@@ -85,6 +85,14 @@ cargo clippy --workspace -- -D warnings
 - `ChunkTracker`: v1 chunk tracking + optional v2 block-level Merkle verification (`enable_v2_tracking()`, `mark_block_verified()`, `all_blocks_verified()`)
 - `DiskHandle`: `verify_piece_v2()`, `hash_block()` async methods for v2 disk I/O
 
+### BEP 52 Session Integration (`ferrite-session/src/torrent.rs`, M34c)
+- `TorrentActor` v2 fields: `hash_picker: Option<HashPicker>`, `is_v2: bool`, `meta_v2: Option<TorrentMetaV2>`
+- `verify_and_mark_piece()` dispatches to v1 (SHA-1) or v2 (per-block SHA-256 Merkle) path
+- `on_piece_verified()` / `on_piece_hash_failed()` — shared post-verification logic (Have broadcast, completion check, smart banning)
+- `handle_hashes_received()` — validates Merkle proof via `HashPicker::add_hashes()`, resolves deferred pieces
+- `PeerEvent`/`PeerCommand` v2 variants for hash message exchange (wire IDs 21-23)
+- `FastResumeData` v2 fields: `info_hash2` (SHA-256), `trees` (piece-layer hash cache)
+
 ### Session Configuration (`ferrite-session/src/settings.rs`)
 - `Settings` — unified 56-field session configuration (replaces former `SessionConfig`)
 - Presets: `Settings::min_memory()`, `Settings::high_performance()`

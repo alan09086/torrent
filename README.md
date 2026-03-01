@@ -29,17 +29,17 @@ ferrite              Public facade API
 | Crate | Description | Tests |
 |-------|-------------|-------|
 | `ferrite-bencode` | Serde-based bencode serialization | 14 |
-| `ferrite-core` | Id20/Id32, TorrentMetaV1/V2, InfoHashes, MerkleTree, MerkleTreeState, HashRequest, HashPicker, Magnet (v1+v2), Lengths, PeerId, FastResumeData, FilePriority, StorageMode, CreateTorrent | 137 |
+| `ferrite-core` | Id20/Id32, TorrentMetaV1/V2, InfoHashes, MerkleTree, MerkleTreeState, HashRequest, HashPicker, Magnet (v1+v2), Lengths, PeerId, FastResumeData, FilePriority, StorageMode, CreateTorrent | 140 |
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption | 65 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 | 55 |
 | `ferrite-storage` | Bitfield, FileMap, ChunkTracker (v1+v2 block tracking), TorrentStorage trait (SHA-1 + SHA-256), MmapStorage, ARC disk cache | 63 |
-| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor, v1+v2 hashing), unified Settings, runtime config, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers, smart banning, parallel hashing, IP filtering + proxy, file streaming, BEP 9 metadata serving, BEP 40 peer priority, per-class rate limits, move storage, share mode, extension plugins | 372 |
+| `ferrite-session` | Session manager, peer tasks, torrent actor, async disk I/O (DiskActor, v1+v2 hashing), BEP 52 v2 Merkle verification + hash exchange, unified Settings, runtime config, BEP 6/14/16/21, seeding, super seeding, persistence, selective download, bandwidth limiting, alerts, queue management, uTP integration, NAT port mapping, dual-stack IPv6, HTTP/web seeding (BEP 19/17), batched Have, tracker scrape + lt_trackers, smart banning, parallel hashing, IP filtering + proxy, file streaming, BEP 9 metadata serving, BEP 40 peer priority, per-class rate limits, move storage, share mode, extension plugins | 372 |
 | `ferrite-utp` | uTP (BEP 29) micro transport protocol with LEDBAT congestion control | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD automatic port mapping | 20 |
 | `ferrite` | Public facade: full API + ClientBuilder + prelude + unified error | 35 |
 
-**Total: 880 tests, zero clippy warnings.**
+**Total: 883 tests, zero clippy warnings.**
 
 ## Design Decisions
 

@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.40.0 — 2026-02-28
+
+BEP 52 session integration — full v2 verification flow. Eleven crates, 883 tests.
+
+### M34c: BEP 52 Session Integration
+
+### Added
+- `FastResumeData` v2 fields: `info_hash2` (SHA-256) and `trees` (piece-layer hash cache)
+- `PeerEvent` v2 variants: `HashesReceived`, `HashRequestRejected`, `IncomingHashRequest`
+- `PeerCommand` v2 variants: `SendHashRequest`, `SendHashes`, `SendHashReject`
+- Peer task hash message handlers: wire `Message` ↔ `HashRequest` conversion
+- `TorrentActor` v2 fields: `hash_picker`, `is_v2`, `meta_v2`
+- `verify_and_mark_piece_v2()` — per-block SHA-256 Merkle verification via `HashPicker`
+- Shared `on_piece_verified()` / `on_piece_hash_failed()` — refactored from v1-only to v1+v2
+- Hash event handlers: `handle_hashes_received()` with Merkle proof validation, `handle_incoming_hash_request()` (reject-only for now)
+
+### Notes
+- All gap analysis amendments applied (Gaps 1, 3, 5, 6, 10)
+- v1 torrents completely unaffected — v2 path only activates when `is_v2 = true`
+- Hash request serving (seeding v2) deferred to M35
+
 ## 0.39.0 — 2026-02-28
 
 BEP 52 storage v2 and disk I/O. Eleven crates, 880 tests.
