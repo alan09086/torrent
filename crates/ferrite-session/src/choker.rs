@@ -1,5 +1,41 @@
 use std::net::SocketAddr;
 
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Algorithm enums
+// ---------------------------------------------------------------------------
+
+/// Choking algorithm used when we are seeding.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum SeedChokingAlgorithm {
+    /// Unchoke peers we upload to fastest.
+    #[default]
+    FastestUpload,
+    /// Round-robin through all interested peers.
+    RoundRobin,
+    /// Prefer leechers over seeds (anti-leech).
+    AntiLeech,
+}
+
+/// Top-level choking algorithm variant.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum ChokingAlgorithm {
+    /// Fixed number of unchoke slots (libtorrent default).
+    #[default]
+    FixedSlots,
+    /// Rate-based unchoking (auto-adjusts slots).
+    RateBased,
+}
+
+// ---------------------------------------------------------------------------
+// PeerInfo
+// ---------------------------------------------------------------------------
+
 /// Information about a peer used by the choking algorithm.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // consumed by torrent module (not yet implemented)
@@ -13,7 +49,13 @@ pub(crate) struct PeerInfo {
     pub interested: bool,
     /// BEP 21: peer declared upload-only status.
     pub upload_only: bool,
+    /// Whether this peer is a seed (has all pieces).
+    pub is_seed: bool,
 }
+
+// ---------------------------------------------------------------------------
+// ChokeDecision
+// ---------------------------------------------------------------------------
 
 /// Result of a choking decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +66,173 @@ pub(crate) struct ChokeDecision {
     /// Peers that should be choked.
     pub to_choke: Vec<SocketAddr>,
 }
+
+// ---------------------------------------------------------------------------
+// ChokerStrategy trait
+// ---------------------------------------------------------------------------
+
+/// Trait for pluggable choking strategies.
+#[allow(dead_code)]
+pub(crate) trait ChokerStrategy: Send {
+    /// Given the current peer list, decide who to unchoke/choke.
+    fn decide(
+        &mut self,
+        peers: &[PeerInfo],
+        unchoke_slots: usize,
+        seed_mode: bool,
+    ) -> ChokeDecision;
+
+    /// Rotate the optimistic unchoke peer.
+    fn rotate_optimistic(&mut self, peers: &[PeerInfo]);
+}
+
+// ---------------------------------------------------------------------------
+// FixedSlotsStrategy
+// ---------------------------------------------------------------------------
+
+/// Fixed-slots choking strategy.
+///
+/// Leech mode: tit-for-tat (sort by download rate descending).
+/// Seed mode: configurable via [`SeedChokingAlgorithm`].
+#[allow(dead_code)]
+pub(crate) struct FixedSlotsStrategy {
+    optimistic_peer: Option<SocketAddr>,
+    seed_algorithm: SeedChokingAlgorithm,
+    round_robin_offset: usize,
+}
+
+#[allow(dead_code)]
+impl FixedSlotsStrategy {
+    pub fn new(seed_algorithm: SeedChokingAlgorithm) -> Self {
+        Self {
+            optimistic_peer: None,
+            seed_algorithm,
+            round_robin_offset: 0,
+        }
+    }
+
+    /// Select an optimistic unchoke peer.
+    ///
+    /// If the current optimistic peer is interested and not in the regular set,
+    /// keep it. Otherwise pick the first interested peer not in the regular set.
+    fn select_optimistic(
+        &self,
+        interested: &[&PeerInfo],
+        regular_unchokes: &[SocketAddr],
+    ) -> Option<SocketAddr> {
+        // Keep existing optimistic peer if it qualifies.
+        if let Some(opt) = self.optimistic_peer {
+            let still_interested = interested.iter().any(|p| p.addr == opt && !p.upload_only);
+            let already_regular = regular_unchokes.contains(&opt);
+            if still_interested && !already_regular {
+                return Some(opt);
+            }
+        }
+
+        // Pick first interested peer not already in regular unchokes (exclude upload-only).
+        interested
+            .iter()
+            .find(|p| !regular_unchokes.contains(&p.addr) && !p.upload_only)
+            .map(|p| p.addr)
+    }
+
+    /// Sort interested peers according to the seed-mode algorithm.
+    fn sort_seed_mode(&mut self, interested: &mut [&PeerInfo], unchoke_slots: usize) {
+        match self.seed_algorithm {
+            SeedChokingAlgorithm::FastestUpload => {
+                interested.sort_by(|a, b| b.upload_rate.cmp(&a.upload_rate));
+            }
+            SeedChokingAlgorithm::RoundRobin => {
+                // Sort by addr for a deterministic order, then rotate.
+                interested.sort_by(|a, b| a.addr.cmp(&b.addr));
+                if !interested.is_empty() {
+                    let offset = self.round_robin_offset % interested.len();
+                    interested.rotate_left(offset);
+                    self.round_robin_offset = self
+                        .round_robin_offset
+                        .wrapping_add(unchoke_slots)
+                        % interested.len();
+                }
+            }
+            SeedChokingAlgorithm::AntiLeech => {
+                // Non-seed peers first (sorted by upload rate desc), then seeds.
+                interested.sort_by(|a, b| {
+                    match (a.is_seed, b.is_seed) {
+                        (false, true) => std::cmp::Ordering::Less,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        _ => b.upload_rate.cmp(&a.upload_rate),
+                    }
+                });
+            }
+        }
+    }
+}
+
+impl ChokerStrategy for FixedSlotsStrategy {
+    fn decide(
+        &mut self,
+        peers: &[PeerInfo],
+        unchoke_slots: usize,
+        seed_mode: bool,
+    ) -> ChokeDecision {
+        let all_addrs: Vec<SocketAddr> = peers.iter().map(|p| p.addr).collect();
+
+        // Interested peers sorted by rate descending.
+        let mut interested: Vec<&PeerInfo> = peers.iter().filter(|p| p.interested).collect();
+        if seed_mode {
+            self.sort_seed_mode(&mut interested, unchoke_slots);
+        } else {
+            // Leech mode: unchoke peers that upload to us fastest (tit-for-tat)
+            interested.sort_by(|a, b| b.download_rate.cmp(&a.download_rate));
+        }
+
+        // Regular unchokes: top N.
+        let regular_count = unchoke_slots.min(interested.len());
+        let regular_unchokes: Vec<SocketAddr> =
+            interested[..regular_count].iter().map(|p| p.addr).collect();
+
+        // Optimistic unchoke selection.
+        let optimistic = self.select_optimistic(&interested, &regular_unchokes);
+        self.optimistic_peer = optimistic;
+
+        // Build the final unchoke set.
+        let mut to_unchoke = regular_unchokes;
+        if let Some(opt) = optimistic
+            && !to_unchoke.contains(&opt)
+        {
+            to_unchoke.push(opt);
+        }
+
+        // Everyone not in to_unchoke gets choked.
+        let to_choke: Vec<SocketAddr> = all_addrs
+            .into_iter()
+            .filter(|a| !to_unchoke.contains(a))
+            .collect();
+
+        ChokeDecision {
+            to_unchoke,
+            to_choke,
+        }
+    }
+
+    fn rotate_optimistic(&mut self, peers: &[PeerInfo]) {
+        let mut interested: Vec<&PeerInfo> = peers
+            .iter()
+            .filter(|p| p.interested && !p.upload_only)
+            .collect();
+        // Sort ascending by download rate so the first non-optimistic is picked.
+        interested.sort_by(|a, b| a.download_rate.cmp(&b.download_rate));
+
+        self.optimistic_peer = interested
+            .iter()
+            .find(|p| Some(p.addr) != self.optimistic_peer)
+            .map(|p| p.addr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Choker (existing — kept intact for Task 3-4)
+// ---------------------------------------------------------------------------
 
 /// Tit-for-tat choking algorithm.
 ///
@@ -163,6 +372,7 @@ mod tests {
             upload_rate: 0,
             interested,
             upload_only: false,
+            is_seed: false,
         }
     }
 
@@ -173,8 +383,13 @@ mod tests {
             upload_rate,
             interested,
             upload_only: false,
+            is_seed: false,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Existing Choker tests (unchanged logic, updated PeerInfo construction)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn unchoke_top_n() {
@@ -356,6 +571,7 @@ mod tests {
                 upload_rate: 0,
                 interested: true,
                 upload_only: true,
+                is_seed: false,
             },
             PeerInfo {
                 addr: addr(6884),
@@ -363,6 +579,7 @@ mod tests {
                 upload_rate: 0,
                 interested: true,
                 upload_only: true,
+                is_seed: false,
             },
         ];
 
@@ -392,6 +609,7 @@ mod tests {
                 upload_rate: 500,
                 interested: true,
                 upload_only: true, // upload-only but high upload rate
+                is_seed: false,
             },
             seed_peer(6882, 300, true),
             seed_peer(6883, 100, true),
@@ -402,5 +620,148 @@ mod tests {
         // Upload-only peer at 6881 has highest upload rate, should be in regular unchokes
         assert!(decision.to_unchoke.contains(&addr(6881)));
         assert!(decision.to_unchoke.contains(&addr(6882)));
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests: algorithm enums
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn seed_choking_algorithm_default() {
+        assert_eq!(SeedChokingAlgorithm::default(), SeedChokingAlgorithm::FastestUpload);
+    }
+
+    #[test]
+    fn choking_algorithm_default() {
+        assert_eq!(ChokingAlgorithm::default(), ChokingAlgorithm::FixedSlots);
+    }
+
+    #[test]
+    fn seed_choking_algorithm_serde_round_trip() {
+        for variant in [
+            SeedChokingAlgorithm::FastestUpload,
+            SeedChokingAlgorithm::RoundRobin,
+            SeedChokingAlgorithm::AntiLeech,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let decoded: SeedChokingAlgorithm = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    #[test]
+    fn choking_algorithm_serde_round_trip() {
+        for variant in [ChokingAlgorithm::FixedSlots, ChokingAlgorithm::RateBased] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let decoded: ChokingAlgorithm = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests: FixedSlotsStrategy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fixed_slots_strategy_leech_mode() {
+        let mut strategy = FixedSlotsStrategy::new(SeedChokingAlgorithm::FastestUpload);
+        let peers = vec![
+            peer(6881, 100, true),
+            peer(6882, 500, true),
+            peer(6883, 300, true),
+            peer(6884, 200, true),
+            peer(6885, 400, true),
+            peer(6886, 50, true),
+        ];
+
+        let decision = strategy.decide(&peers, 4, false);
+
+        // Top 4 by download_rate: 500 (6882), 400 (6885), 300 (6883), 200 (6884).
+        assert!(decision.to_unchoke.contains(&addr(6882)));
+        assert!(decision.to_unchoke.contains(&addr(6885)));
+        assert!(decision.to_unchoke.contains(&addr(6883)));
+        assert!(decision.to_unchoke.contains(&addr(6884)));
+
+        // 4 regular + 1 optimistic = 5
+        assert_eq!(decision.to_unchoke.len(), 5);
+        assert_eq!(decision.to_choke.len(), 1);
+    }
+
+    #[test]
+    fn fixed_slots_round_robin_rotates() {
+        let mut strategy = FixedSlotsStrategy::new(SeedChokingAlgorithm::RoundRobin);
+        // 5 interested peers, 2 unchoke slots — should rotate through them.
+        let peers = vec![
+            seed_peer(6881, 100, true),
+            seed_peer(6882, 200, true),
+            seed_peer(6883, 300, true),
+            seed_peer(6884, 400, true),
+            seed_peer(6885, 500, true),
+        ];
+
+        let d1 = strategy.decide(&peers, 2, true);
+        let d2 = strategy.decide(&peers, 2, true);
+
+        // The two rounds should select different regular unchoke sets because
+        // the offset advances by unchoke_slots each round.
+        // Extract the first two from each (regular unchokes before optimistic).
+        // We just need to verify they are not identical sets.
+        let set1: Vec<SocketAddr> = d1.to_unchoke.iter().copied().collect();
+        let set2: Vec<SocketAddr> = d2.to_unchoke.iter().copied().collect();
+        assert_ne!(set1, set2, "round-robin should rotate unchoke set");
+    }
+
+    #[test]
+    fn fixed_slots_anti_leech_prefers_non_seeds() {
+        let mut strategy = FixedSlotsStrategy::new(SeedChokingAlgorithm::AntiLeech);
+        let peers = vec![
+            // Two seed peers (is_seed = true)
+            PeerInfo {
+                addr: addr(6881),
+                download_rate: 0,
+                upload_rate: 500,
+                interested: true,
+                upload_only: false,
+                is_seed: true,
+            },
+            PeerInfo {
+                addr: addr(6882),
+                download_rate: 0,
+                upload_rate: 400,
+                interested: true,
+                upload_only: false,
+                is_seed: true,
+            },
+            // Two leecher peers (is_seed = false) with lower upload rates
+            PeerInfo {
+                addr: addr(6883),
+                download_rate: 0,
+                upload_rate: 100,
+                interested: true,
+                upload_only: false,
+                is_seed: false,
+            },
+            PeerInfo {
+                addr: addr(6884),
+                download_rate: 0,
+                upload_rate: 50,
+                interested: true,
+                upload_only: false,
+                is_seed: false,
+            },
+        ];
+
+        // 2 slots: anti-leech should prefer the 2 non-seed peers over seeds.
+        let decision = strategy.decide(&peers, 2, true);
+
+        // The regular unchokes should be the two leechers (non-seeds).
+        assert!(
+            decision.to_unchoke.contains(&addr(6883)),
+            "non-seed peer 6883 should be unchoked"
+        );
+        assert!(
+            decision.to_unchoke.contains(&addr(6884)),
+            "non-seed peer 6884 should be unchoked"
+        );
     }
 }

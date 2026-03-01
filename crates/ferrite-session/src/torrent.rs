@@ -3126,6 +3126,7 @@ impl TorrentActor {
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
                 upload_only: p.upload_only,
+                is_seed: p.upload_only, // TODO(M43): use actual seed detection
             })
             .collect();
 
@@ -3279,6 +3280,7 @@ impl TorrentActor {
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
                 upload_only: p.upload_only,
+                is_seed: p.upload_only, // TODO(M43): use actual seed detection
             })
             .collect();
 
