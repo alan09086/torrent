@@ -14,6 +14,7 @@ mod metainfo_v2;
 mod peer_id;
 mod resume_data;
 mod file_priority;
+mod hash_request;
 mod storage_mode;
 
 pub use create::{CreateTorrent, CreateTorrentResult};
@@ -30,6 +31,7 @@ pub use metainfo::{FileEntry, FileInfo, InfoDict, TorrentMetaV1, torrent_from_by
 pub use metainfo_v2::{InfoDictV2, TorrentMetaV2, torrent_v2_from_bytes};
 pub use peer_id::PeerId;
 pub use resume_data::{FastResumeData, UnfinishedPiece};
+pub use hash_request::{HashRequest, validate_hash_request};
 pub use storage_mode::StorageMode;
 
 /// Network address family for dual-stack support.
