@@ -3944,6 +3944,7 @@ mod tests {
             share_mode: false,
             enable_i2p: false,
             allow_i2p_mixed: false,
+            ssl_listen_port: 0,
         }
     }
 

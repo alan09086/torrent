@@ -69,6 +69,8 @@ pub struct TorrentConfig {
     pub enable_i2p: bool,
     /// Whether to allow mixing I2P and clearnet peers.
     pub allow_i2p_mixed: bool,
+    /// SSL listen port for SSL torrent connections (0 = disabled).
+    pub ssl_listen_port: u16,
 }
 
 impl Default for TorrentConfig {
@@ -106,6 +108,7 @@ impl Default for TorrentConfig {
             share_mode: false,
             enable_i2p: false,
             allow_i2p_mixed: false,
+            ssl_listen_port: 0,
         }
     }
 }
@@ -145,6 +148,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             share_mode: s.default_share_mode,
             enable_i2p: s.enable_i2p,
             allow_i2p_mixed: s.allow_i2p_mixed,
+            ssl_listen_port: s.ssl_listen_port,
         }
     }
 }
@@ -513,6 +517,20 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert!(!cfg.enable_i2p);
         assert!(!cfg.allow_i2p_mixed);
+    }
+
+    #[test]
+    fn torrent_config_ssl_listen_port_default() {
+        let cfg = TorrentConfig::default();
+        assert_eq!(cfg.ssl_listen_port, 0);
+    }
+
+    #[test]
+    fn torrent_config_ssl_listen_port_from_settings() {
+        let mut s = crate::settings::Settings::default();
+        s.ssl_listen_port = 4433;
+        let tc = TorrentConfig::from(&s);
+        assert_eq!(tc.ssl_listen_port, 4433);
     }
 
     #[test]

@@ -178,6 +178,10 @@ pub enum AlertKind {
         message: String,
     },
 
+    // ── SSL (M42) ──
+    /// SSL/TLS error for an SSL torrent (handshake failure, cert validation, etc.).
+    SslTorrentError { info_hash: Id20, message: String },
+
     // ── Settings (M31) ──
     SettingsChanged,
 }
@@ -265,6 +269,9 @@ impl AlertKind {
             // I2P
             I2pSessionCreated { .. } => AlertCategory::I2P | AlertCategory::STATUS,
             I2pError { .. } => AlertCategory::I2P | AlertCategory::ERROR,
+
+            // SSL
+            SslTorrentError { .. } => AlertCategory::ERROR,
 
             // SETTINGS
             SettingsChanged => AlertCategory::STATUS,
@@ -589,6 +596,26 @@ mod tests {
     fn alert_category_all_includes_i2p() {
         let all = AlertCategory::ALL;
         assert!(all.contains(AlertCategory::I2P));
+    }
+
+    #[test]
+    fn ssl_torrent_error_alert_has_error_category() {
+        let alert = Alert::new(AlertKind::SslTorrentError {
+            info_hash: Id20::from([0u8; 20]),
+            message: "handshake failed".into(),
+        });
+        assert!(alert.category().contains(AlertCategory::ERROR));
+    }
+
+    #[test]
+    fn ssl_torrent_error_alert_serializes_to_json() {
+        let alert = Alert::new(AlertKind::SslTorrentError {
+            info_hash: Id20::from([0u8; 20]),
+            message: "cert validation failed".into(),
+        });
+        let json = serde_json::to_string(&alert).unwrap();
+        let decoded: Alert = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded.kind, AlertKind::SslTorrentError { .. }));
     }
 
     #[test]
