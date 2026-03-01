@@ -11,6 +11,7 @@ use tracing::{debug, trace, warn};
 
 use ferrite_core::{AddressFamily, Id20};
 
+use crate::bep44::{self, ImmutableItem, MutableItem, MAX_SALT_SIZE, MAX_VALUE_SIZE};
 use crate::compact::CompactNodeInfo;
 use crate::error::{Error, Result};
 use crate::krpc::{
@@ -19,6 +20,7 @@ use crate::krpc::{
 use crate::node_id::{self, ExternalIpVoter, IpVoteSource};
 use crate::peer_store::PeerStore;
 use crate::routing_table::{RoutingTable, K};
+use crate::storage::{DhtStorage, InMemoryDhtStorage};
 
 /// Configuration for the DHT.
 #[derive(Debug, Clone)]
@@ -98,6 +100,8 @@ pub struct DhtStats {
     pub pending_queries: usize,
     pub total_queries_sent: u64,
     pub total_responses_received: u64,
+    /// Number of BEP 44 items stored (immutable + mutable).
+    pub dht_item_count: usize,
 }
 
 /// A cloneable handle to the DHT actor.
@@ -212,6 +216,8 @@ struct DhtActor {
     rx: mpsc::Receiver<DhtCommand>,
     routing_table: RoutingTable,
     peer_store: PeerStore,
+    /// BEP 44 item storage (immutable + mutable).
+    item_store: Box<dyn DhtStorage + Send>,
     pending: HashMap<u16, PendingQuery>,
     next_txn_id: u16,
     stats: ActorStats,
@@ -242,6 +248,12 @@ enum PendingQueryKind {
     FindNode { target: Id20 },
     GetPeers { info_hash: Id20 },
     AnnouncePeer,
+    /// BEP 44: outgoing get item query.
+    #[allow(dead_code)]
+    GetItem { target: Id20 },
+    /// BEP 44: outgoing put item query.
+    #[allow(dead_code)]
+    PutItem,
 }
 
 struct LookupState {
@@ -271,6 +283,7 @@ impl DhtActor {
         let restrict_ips = config.restrict_routing_ips;
         debug!(id = %own_id, family = ?address_family, "DHT node ID");
 
+        let max_items = config.dht_max_items;
         DhtActor {
             config,
             address_family,
@@ -278,6 +291,7 @@ impl DhtActor {
             rx,
             routing_table: RoutingTable::new_with_config(own_id, restrict_ips),
             peer_store: PeerStore::new(),
+            item_store: Box::new(InMemoryDhtStorage::new(max_items)),
             pending: HashMap::new(),
             next_txn_id: 1,
             stats: ActorStats {
@@ -344,9 +358,12 @@ impl DhtActor {
                     self.maintenance().await;
                 }
 
-                // Peer store cleanup
+                // Peer store and item store cleanup
                 _ = cleanup_tick.tick() => {
                     self.peer_store.cleanup();
+                    self.item_store.expire(
+                        Duration::from_secs(self.config.dht_item_lifetime_secs)
+                    );
                 }
             }
         }
@@ -498,20 +515,246 @@ impl DhtActor {
                     id: *self.routing_table.own_id(),
                 }
             }
-            // BEP 44 get/put — handled in Task 4 (M38)
-            KrpcQuery::Get { .. } | KrpcQuery::Put { .. } => {
-                let err_msg = KrpcMessage {
-                    transaction_id: msg.transaction_id,
-                    body: KrpcBody::Error {
-                        code: 204,
-                        message: "method not implemented".into(),
-                    },
-                    sender_ip: Some(addr),
-                };
-                if let Ok(bytes) = err_msg.to_bytes() {
-                    let _ = self.socket.send_to(&bytes, addr).await;
+            // BEP 44: get item from DHT storage
+            KrpcQuery::Get { id: _, target, seq: requested_seq } => {
+                let ip = addr.ip();
+                let token = self.peer_store.generate_token(&ip);
+
+                // Try immutable lookup first
+                if let Some(item) = self.item_store.get_immutable(target) {
+                    KrpcResponse::GetItem {
+                        id: *self.routing_table.own_id(),
+                        token: Some(token),
+                        nodes: Vec::new(),
+                        nodes6: Vec::new(),
+                        value: Some(item.value),
+                        key: None,
+                        signature: None,
+                        seq: None,
+                    }
+                } else if let Some(item) = self.item_store.get_mutable_by_target(target) {
+                    // Check if requester wants only items with seq > requested_seq
+                    if let Some(min_seq) = requested_seq {
+                        if item.seq <= *min_seq {
+                            // Return token + nodes but no value (requester already has this or newer)
+                            let closest = self.routing_table.closest(target, K);
+                            let nodes: Vec<CompactNodeInfo> = closest
+                                .into_iter()
+                                .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+                                .collect();
+                            KrpcResponse::GetItem {
+                                id: *self.routing_table.own_id(),
+                                token: Some(token),
+                                nodes,
+                                nodes6: Vec::new(),
+                                value: None,
+                                key: Some(item.public_key),
+                                signature: Some(item.signature),
+                                seq: Some(item.seq),
+                            }
+                        } else {
+                            KrpcResponse::GetItem {
+                                id: *self.routing_table.own_id(),
+                                token: Some(token),
+                                nodes: Vec::new(),
+                                nodes6: Vec::new(),
+                                value: Some(item.value),
+                                key: Some(item.public_key),
+                                signature: Some(item.signature),
+                                seq: Some(item.seq),
+                            }
+                        }
+                    } else {
+                        KrpcResponse::GetItem {
+                            id: *self.routing_table.own_id(),
+                            token: Some(token),
+                            nodes: Vec::new(),
+                            nodes6: Vec::new(),
+                            value: Some(item.value),
+                            key: Some(item.public_key),
+                            signature: Some(item.signature),
+                            seq: Some(item.seq),
+                        }
+                    }
+                } else {
+                    // Not found — return closer nodes
+                    let closest = self.routing_table.closest(target, K);
+                    let nodes: Vec<CompactNodeInfo> = closest
+                        .into_iter()
+                        .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+                        .collect();
+                    KrpcResponse::GetItem {
+                        id: *self.routing_table.own_id(),
+                        token: Some(token),
+                        nodes,
+                        nodes6: Vec::new(),
+                        value: None,
+                        key: None,
+                        signature: None,
+                        seq: None,
+                    }
                 }
-                return;
+            }
+            // BEP 44: put item into DHT storage
+            KrpcQuery::Put {
+                id: _,
+                token,
+                value,
+                key,
+                signature,
+                seq,
+                salt,
+                cas,
+            } => {
+                let ip = addr.ip();
+
+                // Validate token
+                if !self.peer_store.validate_token(token, &ip) {
+                    let err_msg = KrpcMessage {
+                        transaction_id: msg.transaction_id,
+                        body: KrpcBody::Error {
+                            code: 203,
+                            message: "invalid token".into(),
+                        },
+                        sender_ip: Some(addr),
+                    };
+                    if let Ok(bytes) = err_msg.to_bytes() {
+                        let _ = self.socket.send_to(&bytes, addr).await;
+                    }
+                    return;
+                }
+
+                // Validate value size
+                if value.len() > MAX_VALUE_SIZE {
+                    let err_msg = KrpcMessage {
+                        transaction_id: msg.transaction_id,
+                        body: KrpcBody::Error {
+                            code: 205,
+                            message: "message (v field) too big".into(),
+                        },
+                        sender_ip: Some(addr),
+                    };
+                    if let Ok(bytes) = err_msg.to_bytes() {
+                        let _ = self.socket.send_to(&bytes, addr).await;
+                    }
+                    return;
+                }
+
+                if let (Some(k), Some(sig), Some(seq_val)) = (key, signature, seq) {
+                    // Mutable item
+                    let salt_bytes = salt.clone().unwrap_or_default();
+
+                    // Validate salt size
+                    if salt_bytes.len() > MAX_SALT_SIZE {
+                        let err_msg = KrpcMessage {
+                            transaction_id: msg.transaction_id,
+                            body: KrpcBody::Error {
+                                code: 207,
+                                message: "salt (salt field) too big".into(),
+                            },
+                            sender_ip: Some(addr),
+                        };
+                        if let Ok(bytes) = err_msg.to_bytes() {
+                            let _ = self.socket.send_to(&bytes, addr).await;
+                        }
+                        return;
+                    }
+
+                    let item = MutableItem {
+                        value: value.clone(),
+                        public_key: *k,
+                        signature: *sig,
+                        seq: *seq_val,
+                        salt: salt_bytes,
+                        target: bep44::compute_mutable_target(k, salt.as_deref().unwrap_or(&[])),
+                    };
+
+                    // Verify signature
+                    if !item.verify() {
+                        let err_msg = KrpcMessage {
+                            transaction_id: msg.transaction_id,
+                            body: KrpcBody::Error {
+                                code: 206,
+                                message: "invalid signature".into(),
+                            },
+                            sender_ip: Some(addr),
+                        };
+                        if let Ok(bytes) = err_msg.to_bytes() {
+                            let _ = self.socket.send_to(&bytes, addr).await;
+                        }
+                        return;
+                    }
+
+                    // CAS check
+                    if let Some(expected_seq) = cas
+                        && let Some(existing) = self.item_store.get_mutable(k, &item.salt)
+                        && existing.seq != *expected_seq
+                    {
+                        let err_msg = KrpcMessage {
+                            transaction_id: msg.transaction_id,
+                            body: KrpcBody::Error {
+                                code: 301,
+                                message: format!(
+                                    "CAS mismatch: expected seq {}, got {}",
+                                    expected_seq, existing.seq
+                                ),
+                            },
+                            sender_ip: Some(addr),
+                        };
+                        if let Ok(bytes) = err_msg.to_bytes() {
+                            let _ = self.socket.send_to(&bytes, addr).await;
+                        }
+                        return;
+                    }
+
+                    // Seq monotonicity check
+                    if let Some(existing) = self.item_store.get_mutable(k, &item.salt)
+                        && *seq_val <= existing.seq
+                    {
+                        let err_msg = KrpcMessage {
+                            transaction_id: msg.transaction_id,
+                            body: KrpcBody::Error {
+                                code: 302,
+                                message: format!(
+                                    "sequence number not newer: {} <= {}",
+                                    seq_val, existing.seq
+                                ),
+                            },
+                            sender_ip: Some(addr),
+                        };
+                        if let Ok(bytes) = err_msg.to_bytes() {
+                            let _ = self.socket.send_to(&bytes, addr).await;
+                        }
+                        return;
+                    }
+
+                    self.item_store.put_mutable(item);
+                } else {
+                    // Immutable item
+                    match ImmutableItem::new(value.clone()) {
+                        Ok(item) => {
+                            self.item_store.put_immutable(item);
+                        }
+                        Err(_) => {
+                            let err_msg = KrpcMessage {
+                                transaction_id: msg.transaction_id,
+                                body: KrpcBody::Error {
+                                    code: 205,
+                                    message: "message (v field) too big".into(),
+                                },
+                                sender_ip: Some(addr),
+                            };
+                            if let Ok(bytes) = err_msg.to_bytes() {
+                                let _ = self.socket.send_to(&bytes, addr).await;
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                KrpcResponse::NodeId {
+                    id: *self.routing_table.own_id(),
+                }
             }
         };
 
@@ -862,6 +1105,7 @@ impl DhtActor {
     }
 
     fn make_stats(&self) -> DhtStats {
+        let (immutable, mutable) = self.item_store.count();
         DhtStats {
             routing_table_size: self.routing_table.len(),
             bucket_count: self.routing_table.bucket_count(),
@@ -870,6 +1114,7 @@ impl DhtActor {
             pending_queries: self.pending.len(),
             total_queries_sent: self.stats.total_queries_sent,
             total_responses_received: self.stats.total_responses_received,
+            dht_item_count: immutable + mutable,
         }
     }
 }
