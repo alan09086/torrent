@@ -263,7 +263,7 @@ impl TorrentHandle {
             share_max_pieces: if is_share_mode { 64 } else { 0 },
             plugins,
             hash_picker: None,
-            is_v2: false,
+            version: ferrite_core::TorrentVersion::V1Only,
             meta_v2: None,
         };
 
@@ -418,7 +418,7 @@ impl TorrentHandle {
             share_max_pieces: if is_share_mode { 64 } else { 0 },
             plugins,
             hash_picker: None,
-            is_v2: false,
+            version: ferrite_core::TorrentVersion::V1Only,
             meta_v2: None,
         };
 
@@ -688,10 +688,10 @@ struct TorrentActor {
     // Extension plugins (M32d)
     plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 
-    // BEP 52 v2 support (M34)
+    // BEP 52 v2/hybrid support (M34-M35)
     hash_picker: Option<ferrite_core::HashPicker>,
-    is_v2: bool,
-    #[allow(dead_code)] // populated when v2 torrent parsing is wired (M35)
+    version: ferrite_core::TorrentVersion,
+    #[allow(dead_code)] // read in hybrid verification (M35 Task 4)
     meta_v2: Option<ferrite_core::TorrentMetaV2>,
 }
 
@@ -1736,10 +1736,16 @@ impl TorrentActor {
     }
 
     async fn verify_and_mark_piece(&mut self, index: u32) {
-        if self.is_v2 {
-            self.verify_and_mark_piece_v2(index).await;
-        } else {
-            self.verify_and_mark_piece_v1(index).await;
+        match self.version {
+            ferrite_core::TorrentVersion::V1Only => {
+                self.verify_and_mark_piece_v1(index).await;
+            }
+            ferrite_core::TorrentVersion::V2Only => {
+                self.verify_and_mark_piece_v2(index).await;
+            }
+            ferrite_core::TorrentVersion::Hybrid => {
+                self.verify_and_mark_piece_hybrid(index).await;
+            }
         }
     }
 
@@ -1838,6 +1844,14 @@ impl TorrentActor {
             self.on_piece_verified(index).await;
         }
         // else: Unknown state — blocks stored, will resolve when piece-layer hashes arrive
+    }
+
+    /// Dual SHA-1 + SHA-256 verification for hybrid torrents.
+    /// Stub: full implementation in Task 4.
+    async fn verify_and_mark_piece_hybrid(&mut self, index: u32) {
+        // TODO: M35 Task 4 — full hybrid verification with HashResult tribool
+        // For now, fall through to v1 verification
+        self.verify_and_mark_piece_v1(index).await;
     }
 
     /// Common success path after a piece passes verification (v1 SHA-1 or v2 Merkle).
