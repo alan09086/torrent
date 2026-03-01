@@ -1000,7 +1000,7 @@ impl TorrentActor {
         let paths = file_paths.clone();
         tokio::task::spawn_blocking(move || relocate_files(&src, &dst, &paths))
             .await
-            .map_err(|e| crate::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .map_err(|e| crate::Error::Io(std::io::Error::other(e)))?
             .map_err(crate::Error::Io)?;
 
         // Unregister old storage
