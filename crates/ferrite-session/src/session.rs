@@ -299,6 +299,40 @@ impl SessionHandle {
             None
         };
 
+        // SSL manager (M42): create if ssl_listen_port != 0 or cert paths are provided
+        let ssl_manager = if settings.ssl_listen_port != 0
+            || settings.ssl_cert_path.is_some()
+        {
+            match crate::ssl_manager::SslManager::new(&settings) {
+                Ok(mgr) => {
+                    info!("SSL manager initialized");
+                    Some(Arc::new(mgr))
+                }
+                Err(e) => {
+                    warn!(error = %e, "SSL manager initialization failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // SSL listener (M42): bind if ssl_listen_port != 0
+        let ssl_listener = if settings.ssl_listen_port != 0 {
+            match tokio::net::TcpListener::bind(("0.0.0.0", settings.ssl_listen_port)).await {
+                Ok(l) => {
+                    info!(port = settings.ssl_listen_port, "SSL listener started");
+                    Some(l)
+                }
+                Err(e) => {
+                    warn!(port = settings.ssl_listen_port, error = %e, "SSL listener bind failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Start DHT instances
         let (dht_v4, dht_v4_ip_rx) = if settings.enable_dht {
             match DhtHandle::start(settings.to_dht_config()).await {
@@ -371,6 +405,8 @@ impl SessionHandle {
             dht_v6_ip_rx,
             plugins,
             sam_session,
+            ssl_manager,
+            ssl_listener,
         };
 
         tokio::spawn(actor.run());
@@ -754,6 +790,10 @@ struct SessionActor {
     plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
     /// I2P SAM session (if enabled).
     sam_session: Option<Arc<crate::i2p::SamSession>>,
+    /// SSL manager for SSL torrent certificate handling (M42).
+    ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+    /// SSL/TLS TCP listener (separate port from the main listener) (M42).
+    ssl_listener: Option<tokio::net::TcpListener>,
 }
 
 impl SessionActor {
@@ -906,6 +946,18 @@ impl SessionActor {
                 result = accept_utp(&mut self.utp_listener_v6) => {
                     if let Ok((stream, addr)) = result {
                         self.handle_utp_inbound(stream, addr);
+                    }
+                }
+                // SSL inbound connections (M42)
+                result = async {
+                    if let Some(ref listener) = self.ssl_listener {
+                        listener.accept().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Ok((stream, addr)) = result {
+                        self.handle_ssl_incoming(stream, addr).await;
                     }
                 }
                 // Global rate limiter refill (100ms)
@@ -1089,6 +1141,7 @@ impl SessionActor {
             Arc::clone(&self.ip_filter),
             Arc::clone(&self.plugins),
             self.sam_session.clone(),
+            self.ssl_manager.clone(),
         )
         .await?;
 
@@ -1151,6 +1204,7 @@ impl SessionActor {
             Arc::clone(&self.ip_filter),
             Arc::clone(&self.plugins),
             self.sam_session.clone(),
+            self.ssl_manager.clone(),
         )
         .await?;
         self.torrents.insert(
@@ -1601,6 +1655,105 @@ impl SessionActor {
                 }
             }
         });
+    }
+
+    /// Handle an incoming SSL/TLS connection (M42).
+    ///
+    /// Uses `LazyConfigAcceptor` to peek at the TLS ClientHello and extract
+    /// the SNI (hex-encoded info hash) to route the connection to the right
+    /// torrent. The full TLS handshake uses the torrent's CA cert to build
+    /// the server config.
+    async fn handle_ssl_incoming(
+        &mut self,
+        stream: tokio::net::TcpStream,
+        addr: std::net::SocketAddr,
+    ) {
+        use tokio_rustls::LazyConfigAcceptor;
+
+        let acceptor = LazyConfigAcceptor::new(
+            rustls::server::Acceptor::default(),
+            stream,
+        );
+
+        let start_handshake = match acceptor.await {
+            Ok(sh) => sh,
+            Err(e) => {
+                debug!(%addr, error = %e, "SSL ClientHello read failed");
+                return;
+            }
+        };
+
+        // Extract SNI from ClientHello
+        let client_hello = start_handshake.client_hello();
+        let sni = match client_hello.server_name() {
+            Some(name) => name.to_string(),
+            None => {
+                debug!(%addr, "SSL connection missing SNI");
+                return;
+            }
+        };
+
+        // SNI is hex-encoded info hash (40 chars for SHA-1)
+        let info_hash = match Id20::from_hex(&sni) {
+            Ok(h) => h,
+            Err(_) => {
+                debug!(%addr, sni = %sni, "SSL SNI is not a valid info hash");
+                return;
+            }
+        };
+
+        // Look up the torrent
+        let torrent = match self.torrents.get(&info_hash) {
+            Some(t) => t,
+            None => {
+                debug!(%addr, %info_hash, "SSL connection for unknown torrent");
+                return;
+            }
+        };
+
+        // Get the SSL CA cert from the torrent's metadata
+        let ssl_cert = match torrent.meta.as_ref().and_then(|m| m.ssl_cert.as_ref()) {
+            Some(cert) => cert.clone(),
+            None => {
+                debug!(%addr, %info_hash, "SSL connection for non-SSL torrent");
+                return;
+            }
+        };
+
+        // Build server config using the torrent's CA cert
+        let server_config = match self.ssl_manager.as_ref() {
+            Some(mgr) => match mgr.server_config(&ssl_cert) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    warn!(%addr, %info_hash, error = %e, "failed to build SSL server config");
+                    return;
+                }
+            },
+            None => {
+                debug!(%addr, "SSL manager not initialized");
+                return;
+            }
+        };
+
+        // Complete the TLS handshake
+        let tls_stream = match start_handshake.into_stream(server_config).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(%addr, %info_hash, error = %e, "SSL handshake failed");
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::SslTorrentError {
+                        info_hash,
+                        message: format!("inbound TLS handshake from {addr}: {e}"),
+                    },
+                );
+                return;
+            }
+        };
+
+        // Route to the torrent actor via SpawnSslPeer command
+        let _ = torrent.handle.spawn_ssl_peer(addr, tls_stream).await;
     }
 
     async fn shutdown_all(&mut self) {

@@ -328,6 +328,28 @@ pub(crate) enum PeerCommand {
     Shutdown,
 }
 
+/// Helper trait combining [`AsyncRead`] + [`AsyncWrite`] for trait-object erasure.
+///
+/// Rust doesn't allow `dyn AsyncRead + AsyncWrite` directly, so this trait
+/// combines both into a single trait that can be used as a trait object.
+pub(crate) trait AsyncReadWrite:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
+
+impl<T> AsyncReadWrite for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+/// Boxed async stream (AsyncRead + AsyncWrite + Unpin + Send) with a Debug impl.
+///
+/// Used for incoming SSL peer connections where the concrete TLS type is erased.
+pub(crate) struct BoxedAsyncStream(pub Box<dyn AsyncReadWrite>);
+
+impl std::fmt::Debug for BoxedAsyncStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BoxedAsyncStream(..)")
+    }
+}
+
 /// Commands sent from a `TorrentHandle` to the `TorrentActor`.
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by torrent module (not yet implemented)
@@ -373,6 +395,13 @@ pub(crate) enum TorrentCommand {
     MoveStorage {
         new_path: PathBuf,
         reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Incoming SSL peer routed from the session-level SSL listener (M42).
+    ///
+    /// The TLS handshake has already been completed by the session actor.
+    SpawnSslPeer {
+        addr: SocketAddr,
+        stream: BoxedAsyncStream,
     },
 }
 
