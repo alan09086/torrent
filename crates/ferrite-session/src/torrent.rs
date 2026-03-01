@@ -136,6 +136,20 @@ impl TorrentHandle {
             config.enable_pex = false;
         }
 
+        let info_hashes = match (&version, &meta_v2) {
+            (ferrite_core::TorrentVersion::Hybrid, Some(v2_meta)) => {
+                if let Some(v2_hash) = v2_meta.info_hashes.v2 {
+                    ferrite_core::InfoHashes::hybrid(meta.info_hash, v2_hash)
+                } else {
+                    ferrite_core::InfoHashes::v1_only(meta.info_hash)
+                }
+            }
+            (ferrite_core::TorrentVersion::V2Only, Some(v2_meta)) => {
+                v2_meta.info_hashes.clone()
+            }
+            _ => ferrite_core::InfoHashes::v1_only(meta.info_hash),
+        };
+
         let num_pieces = meta.info.num_pieces() as u32;
         let lengths = Lengths::new(
             meta.info.total_length(),
@@ -161,8 +175,9 @@ impl TorrentHandle {
             Err(_) => TcpListener::bind(("0.0.0.0", config.listen_port)).await.ok(),
         };
 
-        let tracker_manager =
+        let mut tracker_manager =
             TrackerManager::from_torrent(&meta, our_peer_id, config.listen_port);
+        tracker_manager.set_info_hashes(info_hashes.clone());
 
         let enable_dht = config.enable_dht;
 
@@ -197,6 +212,29 @@ impl TorrentHandle {
             }
         } else {
             None
+        };
+
+        // Dual-swarm: also search for v2 hash peers if hybrid
+        let v2_as_v1 = if info_hashes.is_hybrid() {
+            info_hashes.v2.map(|v2| Id20(v2.0[..20].try_into().unwrap()))
+        } else {
+            None
+        };
+        let (dht_v2_peers_rx, dht_v6_v2_peers_rx) = if enable_dht && v2_as_v1.is_some() {
+            let v2_id = v2_as_v1.unwrap();
+            let rx4 = if let Some(ref dht) = dht {
+                dht.get_peers(v2_id).await.ok()
+            } else {
+                None
+            };
+            let rx6 = if let Some(ref dht6) = dht_v6 {
+                dht6.get_peers(v2_id).await.ok()
+            } else {
+                None
+            };
+            (rx4, rx6)
+        } else {
+            (None, None)
         };
 
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
@@ -282,6 +320,9 @@ impl TorrentHandle {
             hash_picker: None,
             version,
             meta_v2,
+            info_hashes,
+            dht_v2_peers_rx,
+            dht_v6_v2_peers_rx,
             magnet_selected_files: None,
         };
 
@@ -367,6 +408,7 @@ impl TorrentHandle {
         let have_buffer = crate::have_buffer::HaveBuffer::new(0, config.have_send_delay_ms);
         let is_share_mode = config.share_mode;
         let magnet_selected_files = magnet.selected_files.clone();
+        let info_hashes = magnet.info_hashes.clone();
 
         let (piece_ready_tx, _) = broadcast::channel(64);
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
@@ -439,6 +481,9 @@ impl TorrentHandle {
             hash_picker: None,
             version: ferrite_core::TorrentVersion::V1Only,
             meta_v2: None,
+            info_hashes,
+            dht_v2_peers_rx: None,
+            dht_v6_v2_peers_rx: None,
             magnet_selected_files,
         };
 
@@ -714,6 +759,13 @@ struct TorrentActor {
     #[allow(dead_code)] // stored for hybrid torrent re-serialization (M35 Task 5)
     meta_v2: Option<ferrite_core::TorrentMetaV2>,
 
+    /// Full info hashes for dual-swarm support (v1 + v2 for hybrid).
+    info_hashes: ferrite_core::InfoHashes,
+
+    /// Dual-swarm DHT peer receivers (v2 hash in hybrid torrents).
+    dht_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    dht_v6_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+
     /// BEP 53: deferred file selection from magnet `so=` parameter.
     /// Applied after metadata is received to set file priorities.
     magnet_selected_files: Option<Vec<ferrite_core::FileSelection>>,
@@ -761,8 +813,9 @@ impl TorrentActor {
         refill_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
-        // DHT announce (v4 + v6)
+        // DHT announce (v4 + v6) — dual-swarm for hybrid torrents
         if self.state == TorrentState::Downloading && self.config.enable_dht {
+            // Primary hash (v1 or best_v1)
             if let Some(ref dht) = self.dht
                 && let Err(e) = dht.announce(self.info_hash, self.config.listen_port).await
             {
@@ -772,6 +825,24 @@ impl TorrentActor {
                 && let Err(e) = dht6.announce(self.info_hash, self.config.listen_port).await
             {
                 debug!("DHT v6 announce failed: {e}");
+            }
+            // Dual-swarm: also announce v2 hash (truncated) for hybrid torrents
+            if self.info_hashes.is_hybrid() {
+                if let Some(v2) = self.info_hashes.v2 {
+                    let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                    if v2_as_v1 != self.info_hash {
+                        if let Some(ref dht) = self.dht
+                            && let Err(e) = dht.announce(v2_as_v1, self.config.listen_port).await
+                        {
+                            debug!("DHT v4 dual-swarm announce failed: {e}");
+                        }
+                        if let Some(ref dht6) = self.dht_v6
+                            && let Err(e) = dht6.announce(v2_as_v1, self.config.listen_port).await
+                        {
+                            debug!("DHT v6 dual-swarm announce failed: {e}");
+                        }
+                    }
+                }
             }
         }
 
@@ -900,6 +971,28 @@ impl TorrentActor {
                                 Err(e) => debug!("DHT v6 re-search failed: {e}"),
                             }
                         }
+                        // Dual-swarm: re-search v2 hash
+                        if self.info_hashes.is_hybrid() {
+                            if let Some(v2) = self.info_hashes.v2 {
+                                let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                                if self.dht_v2_peers_rx.is_none()
+                                    && let Some(ref dht) = self.dht
+                                {
+                                    match dht.get_peers(v2_as_v1).await {
+                                        Ok(rx) => self.dht_v2_peers_rx = Some(rx),
+                                        Err(e) => debug!("DHT v4 v2-swarm re-search failed: {e}"),
+                                    }
+                                }
+                                if self.dht_v6_v2_peers_rx.is_none()
+                                    && let Some(ref dht6) = self.dht_v6
+                                {
+                                    match dht6.get_peers(v2_as_v1).await {
+                                        Ok(rx) => self.dht_v6_v2_peers_rx = Some(rx),
+                                        Err(e) => debug!("DHT v6 v2-swarm re-search failed: {e}"),
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 // Tracker re-announce timer
@@ -957,6 +1050,42 @@ impl TorrentActor {
                         None => {
                             debug!("DHT v6 peer search exhausted");
                             self.dht_v6_peers_rx = None;
+                        }
+                    }
+                }
+                // Dual-swarm: DHT v4 v2-hash peer discovery (hybrid)
+                result = async {
+                    match &mut self.dht_v2_peers_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Some(peers) => {
+                            debug!(count = peers.len(), "DHT v4 v2-swarm returned peers");
+                            self.handle_add_peers(peers, PeerSource::Dht);
+                        }
+                        None => {
+                            debug!("DHT v4 v2-swarm peer search exhausted");
+                            self.dht_v2_peers_rx = None;
+                        }
+                    }
+                }
+                // Dual-swarm: DHT v6 v2-hash peer discovery (hybrid)
+                result = async {
+                    match &mut self.dht_v6_v2_peers_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Some(peers) => {
+                            debug!(count = peers.len(), "DHT v6 v2-swarm returned peers");
+                            self.handle_add_peers(peers, PeerSource::Dht);
+                        }
+                        None => {
+                            debug!("DHT v6 v2-swarm peer search exhausted");
+                            self.dht_v6_v2_peers_rx = None;
                         }
                     }
                 }
@@ -2325,6 +2454,43 @@ impl TorrentActor {
                         // Populate tracker manager with newly parsed metadata
                         if let Some(ref meta) = self.meta {
                             self.tracker_manager.set_metadata(meta);
+                        }
+
+                        // Detect hybrid/v2 from metadata and update dual-swarm state
+                        // (Gap 1 & 2: propagate info_hashes to tracker + DHT after magnet resolves)
+                        if let Ok(detected) = ferrite_core::torrent_from_bytes_any(&torrent_bytes) {
+                            let new_version = detected.version();
+                            if new_version != ferrite_core::TorrentVersion::V1Only {
+                                let new_hashes = detected.info_hashes();
+                                self.version = new_version;
+                                self.info_hashes = new_hashes.clone();
+                                self.tracker_manager.set_info_hashes(new_hashes.clone());
+                                if let Some(v2_meta) = detected.as_v2() {
+                                    self.meta_v2 = Some(v2_meta.clone());
+                                }
+                                // Start v2 DHT lookups for hybrid torrents
+                                if new_hashes.is_hybrid() {
+                                    if let Some(v2) = new_hashes.v2 {
+                                        let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                                        if v2_as_v1 != self.info_hash {
+                                            if self.dht_v2_peers_rx.is_none() {
+                                                if let Some(ref dht) = self.dht {
+                                                    if let Ok(rx) = dht.get_peers(v2_as_v1).await {
+                                                        self.dht_v2_peers_rx = Some(rx);
+                                                    }
+                                                }
+                                            }
+                                            if self.dht_v6_v2_peers_rx.is_none() {
+                                                if let Some(ref dht6) = self.dht_v6 {
+                                                    if let Ok(rx) = dht6.get_peers(v2_as_v1).await {
+                                                        self.dht_v6_v2_peers_rx = Some(rx);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         let name = self.meta.as_ref().map(|m| m.info.name.clone()).unwrap_or_default();
