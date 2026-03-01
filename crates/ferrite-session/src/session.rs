@@ -1869,6 +1869,7 @@ mod tests {
             display_name: Some("test-magnet".into()),
             trackers: vec![],
             peers: vec![],
+            selected_files: None,
         };
         let expected_hash = magnet.info_hash();
 
@@ -1900,6 +1901,7 @@ mod tests {
             display_name: Some("test-magnet".into()),
             trackers: vec![],
             peers: vec![],
+            selected_files: None,
         };
 
         session.add_magnet(magnet.clone()).await.unwrap();
@@ -1936,6 +1938,7 @@ mod tests {
             display_name: Some("lsd-test".into()),
             trackers: vec![],
             peers: vec![],
+            selected_files: None,
         };
         session.add_magnet(magnet).await.unwrap();
 

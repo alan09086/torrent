@@ -282,6 +282,7 @@ impl TorrentHandle {
             hash_picker: None,
             version,
             meta_v2,
+            magnet_selected_files: None,
         };
 
         tokio::spawn(actor.run());
@@ -365,6 +366,7 @@ impl TorrentHandle {
         };
         let have_buffer = crate::have_buffer::HaveBuffer::new(0, config.have_send_delay_ms);
         let is_share_mode = config.share_mode;
+        let magnet_selected_files = magnet.selected_files.clone();
 
         let (piece_ready_tx, _) = broadcast::channel(64);
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
@@ -437,6 +439,7 @@ impl TorrentHandle {
             hash_picker: None,
             version: ferrite_core::TorrentVersion::V1Only,
             meta_v2: None,
+            magnet_selected_files,
         };
 
         tokio::spawn(actor.run());
@@ -710,6 +713,10 @@ struct TorrentActor {
     version: ferrite_core::TorrentVersion,
     #[allow(dead_code)] // stored for hybrid torrent re-serialization (M35 Task 5)
     meta_v2: Option<ferrite_core::TorrentMetaV2>,
+
+    /// BEP 53: deferred file selection from magnet `so=` parameter.
+    /// Applied after metadata is received to set file priorities.
+    magnet_selected_files: Option<Vec<ferrite_core::FileSelection>>,
 }
 
 impl TorrentActor {
@@ -2295,6 +2302,16 @@ impl TorrentActor {
                         meta.info_bytes = Some(Bytes::from(info_bytes));
                         self.meta = Some(meta);
                         self.file_priorities = vec![FilePriority::Normal; file_lengths.len()];
+
+                        // BEP 53: apply magnet so= file selection
+                        if let Some(ref selections) = self.magnet_selected_files {
+                            self.file_priorities = ferrite_core::FileSelection::to_priorities(
+                                selections,
+                                file_lengths.len(),
+                            );
+                            self.magnet_selected_files = None;
+                        }
+
                         self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
                             &self.file_priorities, &file_lengths, self.lengths.as_ref().unwrap(),
                         );
@@ -3455,6 +3472,7 @@ mod tests {
             display_name: Some("test".into()),
             trackers: vec![],
             peers: vec![],
+            selected_files: None,
         };
         let config = test_config();
 
@@ -4373,6 +4391,7 @@ mod tests {
             display_name: Some("magnet test".into()),
             trackers: vec![],
             peers: vec![],
+            selected_files: None,
         };
 
         let (atx, amask) = test_alert_channel();
@@ -4520,6 +4539,7 @@ mod tests {
             display_name: Some("magnet test".into()),
             trackers: vec![],
             peers: vec![],
+            selected_files: None,
         };
 
         let (atx, amask) = test_alert_channel();
