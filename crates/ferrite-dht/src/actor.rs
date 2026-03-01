@@ -924,6 +924,12 @@ impl DhtActor {
                     id: *self.routing_table.own_id(),
                 }
             }
+            // BEP 51: sample_infohashes — stub, wired in Task 3
+            KrpcQuery::SampleInfohashes { .. } => {
+                KrpcResponse::NodeId {
+                    id: *self.routing_table.own_id(),
+                }
+            }
         };
 
         let reply = KrpcMessage {
