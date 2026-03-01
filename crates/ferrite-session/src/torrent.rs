@@ -4053,6 +4053,10 @@ mod tests {
             ssl_listen_port: 0,
             seed_choking_algorithm: crate::choker::SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: crate::choker::ChokingAlgorithm::FixedSlots,
+            piece_extent_affinity: true,
+            suggest_mode: false,
+            max_suggest_pieces: 10,
+            predictive_piece_announce_ms: 0,
         }
     }
 

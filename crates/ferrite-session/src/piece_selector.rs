@@ -6,19 +6,41 @@ use ferrite_storage::Bitfield;
 
 /// Speed category for a peer based on download rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub(crate) enum PeerSpeed {
-    Slow,   // < 10 KB/s
-    Medium, // 10 KB/s .. < 100 KB/s
-    Fast,   // >= 100 KB/s
+    Slow,
+    Medium,
+    Fast,
+}
+
+impl PeerSpeed {
+    pub fn from_rate(bytes_per_sec: f64) -> Self {
+        PeerSpeedClassifier::default().classify(bytes_per_sec)
+    }
+}
+
+/// Configurable speed classifier with adjustable thresholds.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct PeerSpeedClassifier {
+    pub slow_threshold: f64,
+    pub fast_threshold: f64,
+}
+
+impl Default for PeerSpeedClassifier {
+    fn default() -> Self {
+        Self {
+            slow_threshold: 10_240.0,
+            fast_threshold: 102_400.0,
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl PeerSpeed {
-    pub fn from_rate(bytes_per_sec: f64) -> Self {
-        if bytes_per_sec < 10_240.0 {
+impl PeerSpeedClassifier {
+    pub fn classify(&self, bytes_per_sec: f64) -> PeerSpeed {
+        if bytes_per_sec < self.slow_threshold {
             PeerSpeed::Slow
-        } else if bytes_per_sec < 102_400.0 {
+        } else if bytes_per_sec < self.fast_threshold {
             PeerSpeed::Medium
         } else {
             PeerSpeed::Fast
@@ -28,13 +50,11 @@ impl PeerSpeed {
 
 /// Tracks which blocks of an in-flight piece are assigned to which peer.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct InFlightPiece {
     pub assigned_blocks: HashMap<(u32, u32), SocketAddr>,
     pub total_blocks: u32,
 }
 
-#[allow(dead_code)]
 impl InFlightPiece {
     pub fn new(total_blocks: u32) -> Self {
         Self {
@@ -53,7 +73,6 @@ impl InFlightPiece {
 }
 
 /// Context for a single peer's pick cycle.
-#[allow(dead_code)]
 pub(crate) struct PickContext<'a> {
     pub peer_addr: SocketAddr,
     pub peer_has: &'a Bitfield,
@@ -71,15 +90,16 @@ pub(crate) struct PickContext<'a> {
     pub initial_picker_threshold: u32,
     pub connected_peer_count: usize,
     pub whole_pieces_threshold: u32,
+    #[allow(dead_code)]
     pub piece_size: u32,
 }
 
 /// Result of a pick: which piece and blocks to request.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct PickResult {
     pub piece: u32,
     pub blocks: Vec<(u32, u32)>,
+    #[allow(dead_code)]
     pub exclusive: bool,
 }
 
@@ -88,14 +108,12 @@ pub(crate) struct PickResult {
 /// Tracks how many peers have each piece and selects the rarest piece
 /// that a given peer has, we don't have, and is not already in flight.
 /// Ties are broken by lowest index.
-#[allow(dead_code)] // consumed by torrent module (not yet implemented)
 pub(crate) struct PieceSelector {
     availability: Vec<u32>,
     num_pieces: u32,
     seed_count: u32,
 }
 
-#[allow(dead_code)]
 impl PieceSelector {
     /// Create a new selector with all availability counts at zero.
     pub fn new(num_pieces: u32) -> Self {
@@ -133,6 +151,7 @@ impl PieceSelector {
     }
 
     /// Decrement availability for a single piece (saturating).
+    #[allow(dead_code)]
     pub fn decrement(&mut self, index: u32) {
         if (index as usize) < self.availability.len() {
             self.availability[index as usize] =
@@ -144,6 +163,7 @@ impl PieceSelector {
     ///
     /// Returns the piece index with the lowest non-zero availability among
     /// candidates. Ties are broken by lowest index.
+    #[allow(dead_code)]
     pub fn pick(
         &self,
         peer_has: &Bitfield,
@@ -191,10 +211,12 @@ impl PieceSelector {
         &self.availability
     }
 
+    #[allow(dead_code)]
     pub fn add_seed(&mut self) {
         self.seed_count += 1;
     }
 
+    #[allow(dead_code)]
     pub fn remove_seed(&mut self) {
         self.seed_count = self.seed_count.saturating_sub(1);
     }
@@ -1307,5 +1329,23 @@ mod tests {
 
         // Out-of-range index: should return seed_count only
         assert_eq!(sel.effective_availability(99), 1);
+    }
+
+    #[test]
+    fn peer_speed_default_classification() {
+        assert_eq!(PeerSpeed::from_rate(0.0), PeerSpeed::Slow);
+        assert_eq!(PeerSpeed::from_rate(5_000.0), PeerSpeed::Slow);
+        assert_eq!(PeerSpeed::from_rate(10_240.0), PeerSpeed::Medium);
+        assert_eq!(PeerSpeed::from_rate(50_000.0), PeerSpeed::Medium);
+        assert_eq!(PeerSpeed::from_rate(102_400.0), PeerSpeed::Fast);
+        assert_eq!(PeerSpeed::from_rate(1_000_000.0), PeerSpeed::Fast);
+    }
+
+    #[test]
+    fn peer_speed_custom_classifier() {
+        let classifier = PeerSpeedClassifier { slow_threshold: 1_000.0, fast_threshold: 50_000.0 };
+        assert_eq!(classifier.classify(500.0), PeerSpeed::Slow);
+        assert_eq!(classifier.classify(1_000.0), PeerSpeed::Medium);
+        assert_eq!(classifier.classify(50_000.0), PeerSpeed::Fast);
     }
 }
