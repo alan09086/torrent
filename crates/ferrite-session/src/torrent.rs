@@ -2941,6 +2941,7 @@ impl TorrentActor {
             connected_peer_count: self.peers.len(),
             whole_pieces_threshold: self.config.whole_pieces_threshold,
             piece_size: self.lengths.as_ref().map(|l| l.piece_length() as u32).unwrap_or(262144),
+            extent_affinity: self.config.piece_extent_affinity,
         };
 
         let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {

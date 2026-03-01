@@ -90,8 +90,8 @@ pub(crate) struct PickContext<'a> {
     pub initial_picker_threshold: u32,
     pub connected_peer_count: usize,
     pub whole_pieces_threshold: u32,
-    #[allow(dead_code)]
     pub piece_size: u32,
+    pub extent_affinity: bool,
 }
 
 /// Result of a pick: which piece and blocks to request.
@@ -397,8 +397,51 @@ impl PieceSelector {
         self.pick_rarest_new(ctx, missing_chunks)
     }
 
+    /// Size of an extent group in bytes (4 MiB).
+    const EXTENT_SIZE: u64 = 4 * 1024 * 1024;
+
+    /// Compute the extent index for a piece given the piece size.
+    pub(crate) fn extent_of(piece: u32, piece_size: u32) -> u32 {
+        let byte_offset = piece as u64 * piece_size as u64;
+        (byte_offset / Self::EXTENT_SIZE) as u32
+    }
+
+    /// Find the preferred extent based on which extents have pieces currently in-flight.
+    fn preferred_extent(&self, ctx: &PickContext<'_>) -> Option<u32> {
+        let mut extent_counts: HashMap<u32, u32> = HashMap::new();
+        for &piece in ctx.in_flight_pieces.keys() {
+            let extent = Self::extent_of(piece, ctx.piece_size);
+            *extent_counts.entry(extent).or_default() += 1;
+        }
+        extent_counts
+            .into_iter()
+            .max_by_key(|&(_, count)| count)
+            .map(|(extent, _)| extent)
+    }
+
     /// Rarest-first among pieces not in-flight.
+    ///
+    /// When extent affinity is enabled, tries the preferred extent first,
+    /// then falls back to any extent if no candidates remain in that extent.
     fn pick_rarest_new<F>(
+        &self,
+        ctx: &PickContext<'_>,
+        missing_chunks: &F,
+    ) -> Option<PickResult>
+    where
+        F: Fn(u32) -> Vec<(u32, u32)>,
+    {
+        if ctx.extent_affinity
+            && let Some(extent) = self.preferred_extent(ctx)
+            && let Some(result) = self.pick_rarest_in_extent(ctx, missing_chunks, extent)
+        {
+            return Some(result);
+        }
+        self.pick_rarest_any(ctx, missing_chunks)
+    }
+
+    /// Standard rarest-first picking with no extent filter.
+    fn pick_rarest_any<F>(
         &self,
         ctx: &PickContext<'_>,
         missing_chunks: &F,
@@ -410,6 +453,46 @@ impl PieceSelector {
         let mut best_avail: u32 = u32::MAX;
 
         for i in 0..self.num_pieces {
+            if !ctx.peer_has.get(i) || ctx.we_have.get(i) || !ctx.wanted.get(i) {
+                continue;
+            }
+            if ctx.in_flight_pieces.contains_key(&i) {
+                continue;
+            }
+            let avail = self.effective_availability(i);
+            if avail == 0 {
+                continue;
+            }
+            if avail < best_avail {
+                best_avail = avail;
+                best_index = Some(i);
+            }
+        }
+
+        best_index.map(|piece| {
+            let blocks = missing_chunks(piece);
+            let exclusive = self.should_whole_piece(ctx, &blocks);
+            PickResult { piece, blocks, exclusive }
+        })
+    }
+
+    /// Rarest-first picking filtered to pieces within a specific extent.
+    fn pick_rarest_in_extent<F>(
+        &self,
+        ctx: &PickContext<'_>,
+        missing_chunks: &F,
+        extent: u32,
+    ) -> Option<PickResult>
+    where
+        F: Fn(u32) -> Vec<(u32, u32)>,
+    {
+        let mut best_index: Option<u32> = None;
+        let mut best_avail: u32 = u32::MAX;
+
+        for i in 0..self.num_pieces {
+            if Self::extent_of(i, ctx.piece_size) != extent {
+                continue;
+            }
             if !ctx.peer_has.get(i) || ctx.we_have.get(i) || !ctx.wanted.get(i) {
                 continue;
             }
@@ -891,6 +974,7 @@ mod tests {
             connected_peer_count: 10,
             whole_pieces_threshold: 20,
             piece_size: 262_144,
+            extent_affinity: false,
         }
     }
 
@@ -1347,5 +1431,130 @@ mod tests {
         assert_eq!(classifier.classify(500.0), PeerSpeed::Slow);
         assert_eq!(classifier.classify(1_000.0), PeerSpeed::Medium);
         assert_eq!(classifier.classify(50_000.0), PeerSpeed::Fast);
+    }
+
+    // ── Extent affinity tests ─────────────────────────────────────────
+
+    #[test]
+    fn extent_of_computation() {
+        // 256 KiB pieces, 4 MiB extent = 16 pieces per extent
+        assert_eq!(PieceSelector::extent_of(0, 262_144), 0);
+        assert_eq!(PieceSelector::extent_of(15, 262_144), 0);
+        assert_eq!(PieceSelector::extent_of(16, 262_144), 1);
+        assert_eq!(PieceSelector::extent_of(31, 262_144), 1);
+        assert_eq!(PieceSelector::extent_of(32, 262_144), 2);
+        // 1 MiB pieces = 4 pieces per extent
+        assert_eq!(PieceSelector::extent_of(0, 1_048_576), 0);
+        assert_eq!(PieceSelector::extent_of(3, 1_048_576), 0);
+        assert_eq!(PieceSelector::extent_of(4, 1_048_576), 1);
+    }
+
+    #[test]
+    fn extent_affinity_prefers_active_extent() {
+        // Set up 32 pieces across 2 extents. Make piece 20 globally rarest (extent 1),
+        // but have in-flight activity in extent 0. With affinity, should pick from extent 0.
+        let mut sel = PieceSelector::new(32);
+        for i in 0..32 { sel.availability[i] = 2; }
+        sel.availability[20] = 1; // globally rarest, extent 1
+        sel.availability[5] = 1;  // rarest in extent 0
+
+        let mut peer_has = Bitfield::new(32);
+        for i in 0..32 { peer_has.set(i); }
+        let we_have = Bitfield::new(32);
+        let mut wanted = Bitfield::new(32);
+        for i in 0..32 { wanted.set(i); }
+
+        // Piece 10 in-flight in extent 0
+        let mut ifp = InFlightPiece::new(2);
+        ifp.assigned_blocks.insert((10, 0), addr(9999));
+        let mut in_flight = HashMap::new();
+        in_flight.insert(10u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        let mut ctx = default_pick_context(
+            addr(5555), &peer_has, &we_have, &wanted,
+            &in_flight, &streaming, &time_critical, &suggested,
+        );
+        ctx.extent_affinity = true;
+        ctx.piece_size = 262_144;
+        ctx.completed_count = 100;
+
+        let chunks = |_piece: u32| vec![(0, 16384)];
+        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        assert_eq!(result.piece, 5); // extent 0, not 20 (extent 1)
+    }
+
+    #[test]
+    fn extent_affinity_disabled_picks_global_rarest() {
+        // Same setup but with affinity disabled — should pick lowest-index rarest
+        let mut sel = PieceSelector::new(32);
+        for i in 0..32 { sel.availability[i] = 2; }
+        sel.availability[20] = 1;
+        sel.availability[5] = 1;
+
+        let mut peer_has = Bitfield::new(32);
+        for i in 0..32 { peer_has.set(i); }
+        let we_have = Bitfield::new(32);
+        let mut wanted = Bitfield::new(32);
+        for i in 0..32 { wanted.set(i); }
+
+        let mut ifp = InFlightPiece::new(2);
+        ifp.assigned_blocks.insert((10, 0), addr(9999));
+        let mut in_flight = HashMap::new();
+        in_flight.insert(10u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        let mut ctx = default_pick_context(
+            addr(5555), &peer_has, &we_have, &wanted,
+            &in_flight, &streaming, &time_critical, &suggested,
+        );
+        ctx.extent_affinity = false;
+        ctx.piece_size = 262_144;
+        ctx.completed_count = 100;
+
+        let chunks = |_piece: u32| vec![(0, 16384)];
+        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        assert_eq!(result.piece, 5); // lowest-index rarest (tie-break)
+    }
+
+    #[test]
+    fn extent_affinity_fallback_when_extent_exhausted() {
+        // All pieces in active extent already downloaded — falls back to other extents
+        let mut sel = PieceSelector::new(32);
+        for i in 0..32 { sel.availability[i] = 2; }
+
+        let mut peer_has = Bitfield::new(32);
+        for i in 0..32 { peer_has.set(i); }
+        let mut we_have = Bitfield::new(32);
+        for i in 0..16 { we_have.set(i); } // have all extent 0
+        let mut wanted = Bitfield::new(32);
+        for i in 0..32 { wanted.set(i); }
+
+        let mut ifp = InFlightPiece::new(2);
+        ifp.assigned_blocks.insert((10, 0), addr(9999));
+        let mut in_flight = HashMap::new();
+        in_flight.insert(10u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        let mut ctx = default_pick_context(
+            addr(5555), &peer_has, &we_have, &wanted,
+            &in_flight, &streaming, &time_critical, &suggested,
+        );
+        ctx.extent_affinity = true;
+        ctx.piece_size = 262_144;
+        ctx.completed_count = 100;
+
+        let chunks = |_piece: u32| vec![(0, 16384)];
+        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        assert!(result.piece >= 16); // falls back to extent 1
     }
 }
