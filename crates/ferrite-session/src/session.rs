@@ -957,14 +957,19 @@ impl SessionActor {
         torrent_meta: ferrite_core::TorrentMeta,
         storage: Option<Arc<dyn TorrentStorage>>,
     ) -> crate::Result<Id20> {
-        // Extract the v1 component — required for session logic.
-        // Pure v2 torrents are not yet supported through the session path.
         let version = torrent_meta.version();
         let meta_v2 = torrent_meta.as_v2().cloned();
-        let meta = torrent_meta
-            .as_v1()
-            .cloned()
-            .ok_or_else(|| crate::Error::Config("pure v2 torrents not yet supported in session".into()))?;
+
+        // For v2-only torrents, synthesize a minimal v1 metadata wrapper.
+        // The session uses info_hash (Id20) as the primary key, so we use
+        // the SHA-256 truncated to 20 bytes (as per BEP 52 tracker/DHT compat).
+        let meta = match torrent_meta.as_v1() {
+            Some(v1) => v1.clone(),
+            None => {
+                let v2 = torrent_meta.as_v2().unwrap();
+                synthesize_v1_from_v2(v2)?
+            }
+        };
 
         let info_hash = meta.info_hash;
 
@@ -1584,6 +1589,66 @@ async fn recv_nat_event(
         },
         None => std::future::pending().await,
     }
+}
+
+/// Synthesize a minimal `TorrentMetaV1` from a `TorrentMetaV2` for session compatibility.
+///
+/// The session engine uses v1 structures internally (info hash as Id20, InfoDict for
+/// piece hashing, etc.). For v2-only torrents, we create a "virtual" v1 representation
+/// with the truncated SHA-256 hash as the info_hash.
+fn synthesize_v1_from_v2(v2: &ferrite_core::TorrentMetaV2) -> crate::Result<ferrite_core::TorrentMetaV1> {
+    use ferrite_core::{InfoDict, FileEntry};
+
+    let info_hash = v2.info_hashes.best_v1();
+
+    // Build file entries from v2 file tree
+    let v2_files = v2.info.files();
+    let file_entries: Vec<FileEntry> = v2_files
+        .iter()
+        .map(|f| FileEntry {
+            length: f.attr.length,
+            path: f.path.clone(),
+            attr: None,
+            mtime: None,
+            symlink_path: None,
+        })
+        .collect();
+
+    // v2-only torrents have no v1 piece hashes — use placeholder pieces field.
+    // Verification is done via v2 Merkle trees, not v1 SHA-1 hashes.
+    let num_pieces = v2.info.num_pieces() as usize;
+    let pieces = vec![0u8; num_pieces * 20];
+
+    let info = InfoDict {
+        name: v2.info.name.clone(),
+        piece_length: v2.info.piece_length,
+        pieces,
+        length: if file_entries.len() == 1 {
+            Some(file_entries[0].length)
+        } else {
+            None
+        },
+        files: if file_entries.len() > 1 {
+            Some(file_entries)
+        } else {
+            None
+        },
+        private: None,
+        source: None,
+    };
+
+    Ok(ferrite_core::TorrentMetaV1 {
+        info_hash,
+        announce: v2.announce.clone(),
+        announce_list: v2.announce_list.clone(),
+        comment: v2.comment.clone(),
+        created_by: v2.created_by.clone(),
+        creation_date: v2.creation_date,
+        info,
+        info_bytes: None,
+        url_list: Vec::new(),
+        httpseeds: Vec::new(),
+    })
 }
 
 #[cfg(test)]

@@ -79,6 +79,14 @@ impl TorrentMeta {
             TorrentMeta::V1(_) => None,
         }
     }
+
+    /// Get the best v1-compatible info hash for session identification.
+    ///
+    /// For v1 and hybrid: returns the v1 SHA-1 info hash.
+    /// For v2-only: returns the v2 SHA-256 hash truncated to 20 bytes.
+    pub fn best_v1_info_hash(&self) -> crate::hash::Id20 {
+        self.info_hashes().best_v1()
+    }
 }
 
 impl From<TorrentMetaV1> for TorrentMeta {
