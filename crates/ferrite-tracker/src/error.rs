@@ -25,4 +25,7 @@ pub enum Error {
 
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
+
+    #[error("URL security policy violation: {0}")]
+    SecurityViolation(String),
 }

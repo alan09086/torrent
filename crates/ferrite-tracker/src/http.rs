@@ -48,7 +48,7 @@ impl HttpTracker {
     pub fn new() -> Self {
         HttpTracker {
             client: reqwest::Client::builder()
-                .user_agent("Ferrite/0.1.0")
+                .user_agent("Ferrite/0.53.0")
                 .build()
                 .expect("failed to build HTTP client"),
         }
@@ -60,12 +60,79 @@ impl HttpTracker {
     /// HTTP requests are routed through it.
     pub fn with_proxy(proxy_url: Option<&str>) -> Self {
         let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.1.0");
+            .user_agent("Ferrite/0.53.0");
         if let Some(url) = proxy_url
             && let Ok(proxy) = reqwest::Proxy::all(url)
         {
             builder = builder.proxy(proxy);
         }
+        HttpTracker {
+            client: builder.build().expect("failed to build HTTP client"),
+        }
+    }
+
+    /// Create an HTTP tracker client with URL security features.
+    ///
+    /// When `ssrf_mitigation` is enabled, a custom redirect policy blocks
+    /// redirects from global (public) URLs to private/loopback IP addresses.
+    /// When `validate_tls` is false, TLS certificate validation is disabled.
+    pub fn with_security(
+        proxy_url: Option<&str>,
+        validate_tls: bool,
+        ssrf_mitigation: bool,
+    ) -> Self {
+        let mut builder = reqwest::Client::builder()
+            .user_agent("Ferrite/0.53.0");
+
+        if ssrf_mitigation {
+            let policy = reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error(std::io::Error::other("too many redirects"));
+                }
+
+                let original = &attempt.previous()[0];
+                let redirect = attempt.url();
+
+                // Check if the original URL was on a global (non-local) address.
+                let orig_local = match original.host() {
+                    Some(url::Host::Ipv4(ip)) => is_private_ipv4(ip),
+                    // IPv6: loopback-only; ULA/link-local caught by url_guard
+                    // in ferrite-session (crate boundary prevents reuse).
+                    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                    Some(url::Host::Domain(d)) => d == "localhost",
+                    None => false,
+                };
+
+                if !orig_local {
+                    let redirect_local = match redirect.host() {
+                        Some(url::Host::Ipv4(ip)) => is_private_ipv4(ip),
+                        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                        Some(url::Host::Domain(d)) => d == "localhost",
+                        None => false,
+                    };
+
+                    if redirect_local {
+                        return attempt.error(std::io::Error::other(
+                            "redirect from public to private IP blocked (SSRF)",
+                        ));
+                    }
+                }
+
+                attempt.follow()
+            });
+            builder = builder.redirect(policy);
+        }
+
+        if !validate_tls {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        if let Some(url) = proxy_url
+            && let Ok(proxy) = reqwest::Proxy::all(url)
+        {
+            builder = builder.proxy(proxy);
+        }
+
         HttpTracker {
             client: builder.build().expect("failed to build HTTP client"),
         }
@@ -225,6 +292,11 @@ impl Default for HttpTracker {
     }
 }
 
+/// Returns `true` if the IPv4 address is loopback, private (RFC 1918), or link-local.
+fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback() || ip.is_private() || ip.is_link_local()
+}
+
 /// URL-encode raw bytes (percent-encoding).
 fn url_encode_bytes(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len() * 3);
@@ -345,5 +417,19 @@ mod tests {
             result[1],
             "[2001:db8::1]:8080".parse::<std::net::SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn http_tracker_with_security_builds() {
+        // Basic smoke test: with_security with SSRF mitigation enabled builds.
+        let tracker = HttpTracker::with_security(None, true, true);
+        drop(tracker);
+    }
+
+    #[test]
+    fn http_tracker_with_security_no_tls_validation() {
+        // Builds with TLS validation disabled and SSRF mitigation off.
+        let tracker = HttpTracker::with_security(None, false, false);
+        drop(tracker);
     }
 }

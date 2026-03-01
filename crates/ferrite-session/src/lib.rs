@@ -28,6 +28,7 @@ pub(crate) mod ip_filter;
 pub(crate) mod proxy;
 pub(crate) mod pipeline;
 pub(crate) mod peer_priority;
+pub(crate) mod url_guard;
 pub mod i2p;
 #[allow(dead_code)] // Wired in during Phase 3c (session SSL integration).
 pub(crate) mod ssl_manager;

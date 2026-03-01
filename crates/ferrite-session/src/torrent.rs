@@ -178,7 +178,7 @@ impl TorrentHandle {
         };
 
         let mut tracker_manager =
-            TrackerManager::from_torrent(&meta, our_peer_id, config.listen_port);
+            TrackerManager::from_torrent_filtered(&meta, our_peer_id, config.listen_port, &config.url_security);
         tracker_manager.set_info_hashes(info_hashes.clone());
 
         let enable_dht = config.enable_dht;
@@ -1652,7 +1652,7 @@ impl TorrentActor {
             }
             PeerEvent::TrackersReceived { tracker_urls } => {
                 for url in tracker_urls {
-                    if self.tracker_manager.add_tracker_url(&url) {
+                    if self.tracker_manager.add_tracker_url_validated(&url, &self.config.url_security) {
                         debug!(url = %url, "added tracker from lt_trackers");
                     }
                 }
@@ -2751,7 +2751,8 @@ impl TorrentActor {
 
                         // Populate tracker manager with newly parsed metadata
                         if let Some(ref meta) = self.meta {
-                            self.tracker_manager.set_metadata(meta);
+                            self.tracker_manager
+                                .set_metadata_filtered(meta, &self.config.url_security);
                         }
 
                         // Detect hybrid/v2 from metadata and update dual-swarm state
@@ -2838,6 +2839,12 @@ impl TorrentActor {
                 break;
             }
 
+            // Security validation
+            if let Err(e) = crate::url_guard::validate_web_seed_url(url, &self.config.url_security) {
+                warn!(%url, %e, "web seed URL rejected by security policy");
+                continue;
+            }
+
             let url_builder = if meta.info.length.is_some() {
                 crate::web_seed::WebSeedUrlBuilder::single(url.clone(), meta.info.name.clone())
             } else {
@@ -2864,6 +2871,7 @@ impl TorrentActor {
                 self.info_hash,
                 cmd_rx,
                 self.event_tx.clone(),
+                &self.config.url_security,
             );
             tokio::spawn(task.run());
             self.web_seeds.insert(url.clone(), cmd_tx);
@@ -2877,6 +2885,12 @@ impl TorrentActor {
             }
             if self.web_seeds.len() >= self.config.max_web_seeds {
                 break;
+            }
+
+            // Security validation
+            if let Err(e) = crate::url_guard::validate_web_seed_url(url, &self.config.url_security) {
+                warn!(%url, %e, "web seed URL rejected by security policy");
+                continue;
             }
 
             // BEP 17 doesn't use URL builder for per-file paths; it sends parameterized URLs
@@ -2895,6 +2909,7 @@ impl TorrentActor {
                 self.info_hash,
                 cmd_rx,
                 self.event_tx.clone(),
+                &self.config.url_security,
             );
             tokio::spawn(task.run());
             self.web_seeds.insert(url.clone(), cmd_tx);
@@ -4393,6 +4408,7 @@ mod tests {
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
+            url_security: crate::url_guard::UrlSecurityConfig::default(),
         }
     }
 

@@ -426,6 +426,18 @@ pub struct Settings {
     /// Seconds between turnover checks (default: 300, 0 = disabled).
     #[serde(default = "default_peer_turnover_interval")]
     pub peer_turnover_interval: u64,
+
+    // ── Security ──
+    /// Enable SSRF mitigation: restrict localhost tracker paths, block
+    /// public-to-private redirects, and reject query strings on local web seeds.
+    #[serde(default = "default_true")]
+    pub ssrf_mitigation: bool,
+    /// Allow internationalised (non-ASCII) domain names in tracker/web seed URLs.
+    #[serde(default)]
+    pub allow_idna: bool,
+    /// Require HTTPS for HTTP tracker announces (UDP trackers are unaffected).
+    #[serde(default = "default_true")]
+    pub validate_https_trackers: bool,
 }
 
 impl Default for Settings {
@@ -539,6 +551,10 @@ impl Default for Settings {
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
+            // Security
+            ssrf_mitigation: true,
+            allow_idna: false,
+            validate_https_trackers: true,
         }
     }
 }
@@ -861,6 +877,9 @@ impl PartialEq for Settings {
             && self.peer_turnover.to_bits() == other.peer_turnover.to_bits()
             && self.peer_turnover_cutoff.to_bits() == other.peer_turnover_cutoff.to_bits()
             && self.peer_turnover_interval == other.peer_turnover_interval
+            && self.ssrf_mitigation == other.ssrf_mitigation
+            && self.allow_idna == other.allow_idna
+            && self.validate_https_trackers == other.validate_https_trackers
     }
 }
 
@@ -1355,5 +1374,45 @@ mod tests {
         let mut s = Settings::default();
         s.peer_turnover_interval = 0;
         s.validate().unwrap();
+    }
+
+    #[test]
+    fn security_settings_defaults() {
+        let s = Settings::default();
+        assert!(s.ssrf_mitigation);
+        assert!(!s.allow_idna);
+        assert!(s.validate_https_trackers);
+    }
+
+    #[test]
+    fn security_settings_json_round_trip() {
+        let mut s = Settings::default();
+        s.ssrf_mitigation = false;
+        s.allow_idna = true;
+        s.validate_https_trackers = false;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn security_settings_missing_use_defaults() {
+        // An empty JSON object should deserialize security fields to defaults.
+        let decoded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(decoded.ssrf_mitigation);
+        assert!(!decoded.allow_idna);
+        assert!(decoded.validate_https_trackers);
+    }
+
+    #[test]
+    fn url_security_config_from_settings() {
+        let mut s = Settings::default();
+        s.ssrf_mitigation = false;
+        s.allow_idna = true;
+        s.validate_https_trackers = false;
+        let cfg = crate::url_guard::UrlSecurityConfig::from(&s);
+        assert!(!cfg.ssrf_mitigation);
+        assert!(cfg.allow_idna);
+        assert!(!cfg.validate_https_trackers);
     }
 }
