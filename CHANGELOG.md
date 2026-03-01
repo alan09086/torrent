@@ -4,6 +4,76 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.36.0 — 2026-02-28
+
+Extension plugin interface for custom BEP 10 extensions. Eleven crates, 796 tests.
+
+### M32d: Extension Plugin Interface
+
+### Added
+- `ExtensionPlugin` trait — custom BEP 10 extension message handler with lifecycle hooks
+- Plugin callbacks: `name()`, `on_handshake()`, `on_message()`, `on_peer_connected()`, `on_peer_disconnected()`
+- `ClientBuilder::add_extension()` — register plugins at session creation
+- `ExtHandshake::new_with_plugins()` — dynamic extension ID allocation (built-in 1-3, plugins 10+)
+- Plugin dispatch in peer task: index-based ID matching, peer ext ID tracking, response routing
+- `Arc<Vec<Box<dyn ExtensionPlugin>>>` threading from session → torrent → peer tasks
+- Facade re-exports: `ExtensionPlugin` in `ferrite::session` and `ferrite::prelude`
+- 10 new tests across extension, peer, wire, and facade modules
+
+## 0.35.0 — 2026-02-28
+
+Live storage relocation and share/relay mode. Eleven crates, 786 tests.
+
+### M32c: Move Storage + Share Mode
+
+### Added
+- `TorrentCommand::MoveStorage` — relocate torrent files to a new directory at runtime
+- `relocate_files()` helper — atomic file relocation with rename/copy+delete fallback
+- `TorrentHandle::move_storage()` and `SessionHandle::move_torrent_storage()` public API
+- `AlertKind::StorageMoved` alert variant
+- `TorrentState::Sharing` — share/relay mode state
+- `share_mode` config on Settings and TorrentConfig (requires fast extension)
+- Share mode behaviour: skip disk registration, in-memory piece relay via WriteBuffer
+- LRU eviction via `ChunkTracker::oldest_piece()` for bounded memory relay
+- `PeerCommand::RejectRequest` for evicted pieces
+- 10 new tests across torrent, types, and settings modules
+
+## 0.34.0 — 2026-02-28
+
+BEP 40 canonical peer priority and per-transport-class rate limiting. Eleven crates, 776 tests.
+
+### M32b: BEP 40 + Per-Class Rate Limits
+
+### Added
+- `canonical_peer_priority()` using CRC32C in new `peer_priority.rs` module (BEP 40)
+- `NatEvent::ExternalIpDiscovered` — external IP from PCP/NAT-PMP responses
+- `external_ip` field on Settings, SessionActor, and TorrentActor
+- `TorrentCommand::UpdateExternalIp` for propagating external IP to torrents
+- Available peers sorted by BEP 40 canonical priority when external IP known
+- `PeerTransport` enum (Tcp, Utp) in `peer_state.rs`
+- `RateLimiterSet` — per-transport-class rate limiting with check-before-consume pattern
+- 4 new Settings fields: `tcp_upload_rate_limit`, `tcp_download_rate_limit`, `utp_upload_rate_limit`, `utp_download_rate_limit`
+- `ClientBuilder` methods for per-class rate limit configuration
+- 12 new tests across peer_priority, rate_limiter, settings, and facade modules
+
+## 0.33.0 — 2026-02-28
+
+Bidirectional BEP 9 metadata serving and peer source tracking. Eleven crates, 764 tests.
+
+### M32a: Metadata Serving + Peer Source Tracking
+
+### Added
+- `info_bytes: Option<Bytes>` on `TorrentMetaV1` — raw info dict bytes for metadata serving
+- `info_bytes` populated in `torrent_from_bytes()` and `CreateTorrent::generate()`
+- `info_bytes` populated from magnet metadata assembly in `try_assemble_metadata()`
+- Inline metadata request handling in `run_peer()` with `build_metadata_response()` helper
+- 16 KiB metadata piece chunking with reject for out-of-range pieces
+- `PeerSource` enum (Tracker, Dht, Pex, Lsd, Incoming, Resume)
+- `available_peers` upgraded to `Vec<(SocketAddr, PeerSource)>` with all 7 call sites updated
+- `peers_by_source: HashMap<PeerSource, usize>` in `TorrentStats`
+- Facade re-exports: `PeerSource` in `ferrite::session` and `ferrite::prelude`
+- 10 new tests across metainfo, peer, torrent, and facade modules
+
 ## 0.32.0 — 2026-02-28
 
 Unified settings pack with runtime configuration, presets, and serialization. Eleven crates, 754+ tests.
