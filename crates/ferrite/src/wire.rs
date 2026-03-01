@@ -28,3 +28,6 @@ pub use ferrite_wire::{
 
 // Message Stream Encryption / Protocol Encryption (MSE/PE)
 pub use ferrite_wire::mse;
+
+// SSL torrent TLS transport (M42)
+pub use ferrite_wire::ssl;

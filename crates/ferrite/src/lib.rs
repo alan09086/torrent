@@ -650,6 +650,26 @@ mod tests {
     }
 
     #[test]
+    fn ssl_types_accessible_through_facade() {
+        // SslConfig is accessible via the wire module
+        let config = wire::ssl::SslConfig {
+            ca_cert_pem: vec![],
+            our_cert_pem: vec![],
+            our_key_pem: vec![],
+        };
+        assert!(config.ca_cert_pem.is_empty());
+
+        // generate_self_signed_cert is accessible
+        let (cert, key) = wire::ssl::generate_self_signed_cert().unwrap();
+        assert!(!cert.is_empty());
+        assert!(!key.is_empty());
+
+        // build_client_config and build_server_config are accessible (test compilation)
+        let _: fn(&wire::ssl::SslConfig) -> wire::Result<_> = wire::ssl::build_client_config;
+        let _: fn(&wire::ssl::SslConfig) -> wire::Result<_> = wire::ssl::build_server_config;
+    }
+
+    #[test]
     fn tracker_scrape_types_accessible_through_facade() {
         // ScrapeInfo construction
         let info = tracker::ScrapeInfo {

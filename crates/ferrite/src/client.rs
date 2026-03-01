@@ -456,6 +456,33 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the TCP listen port for incoming SSL torrent connections.
+    ///
+    /// When non-zero, a TLS listener is bound on this port for torrents with
+    /// `ssl-cert` in their info dict. SNI-based routing dispatches connections
+    /// to the correct torrent. Default: 0 (disabled).
+    pub fn ssl_listen_port(mut self, v: u16) -> Self {
+        self.settings.ssl_listen_port = v;
+        self
+    }
+
+    /// Set the path to a PEM-encoded certificate file for SSL torrent connections.
+    ///
+    /// If not set, a self-signed certificate is auto-generated on first use
+    /// and persisted to `resume_data_dir`. Must be paired with `ssl_key_path`.
+    pub fn ssl_cert_path(mut self, v: impl Into<PathBuf>) -> Self {
+        self.settings.ssl_cert_path = Some(v.into());
+        self
+    }
+
+    /// Set the path to a PEM-encoded private key file for SSL torrent connections.
+    ///
+    /// Must be paired with `ssl_cert_path`.
+    pub fn ssl_key_path(mut self, v: impl Into<PathBuf>) -> Self {
+        self.settings.ssl_key_path = Some(v.into());
+        self
+    }
+
     /// Set the disk I/O channel capacity. Default: 1024.
     pub fn disk_channel_capacity(mut self, n: usize) -> Self {
         self.settings.disk_channel_capacity = n;
@@ -657,6 +684,24 @@ mod tests {
         assert!(config.force_proxy);
         assert!(config.anonymous_mode);
         assert!(!config.apply_ip_filter_to_trackers);
+    }
+
+    #[test]
+    fn client_builder_ssl_config() {
+        let config = ClientBuilder::new()
+            .ssl_listen_port(4433)
+            .ssl_cert_path("/tmp/cert.pem")
+            .ssl_key_path("/tmp/key.pem")
+            .into_settings();
+        assert_eq!(config.ssl_listen_port, 4433);
+        assert_eq!(
+            config.ssl_cert_path,
+            Some(std::path::PathBuf::from("/tmp/cert.pem"))
+        );
+        assert_eq!(
+            config.ssl_key_path,
+            Some(std::path::PathBuf::from("/tmp/key.pem"))
+        );
     }
 
     #[test]
