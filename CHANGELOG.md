@@ -8,6 +8,24 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.44.0 — 2026-03-01
+
+BEP 44 DHT arbitrary data storage — put/get immutable and mutable items with ed25519 signatures. Eleven crates, 995 tests, 24 BEPs implemented.
+
+### M38: BEP 44 DHT Arbitrary Data Storage
+
+### Added
+- BEP 44: DHT arbitrary data storage (put/get immutable and mutable items)
+- `DhtStorage` trait and `InMemoryDhtStorage` pluggable backend with LRU eviction
+- `DhtHandle` public API: `put_immutable()`, `get_immutable()`, `put_mutable()`, `get_mutable()`
+- KRPC `get`/`put` query encoding/decoding with transaction-aware response disambiguation
+- Full BEP 44 validation: value size, salt size, ed25519 signatures, CAS, sequence monotonicity
+- `ImmutableItem`, `MutableItem` types with signing/verification
+- `dht_max_items`, `dht_item_lifetime_secs` settings + ClientBuilder methods
+- 5 DHT item alert variants (forward-compatibility stubs)
+- `ed25519-dalek` dependency for ed25519 signing
+- 49 new tests (995 total)
+
 ## 0.43.0 — 2026-03-01
 
 BEP 42 DHT security extension — node ID verification, IP voting, routing table hardening. Eleven crates, 946 tests, 23 BEPs implemented.
