@@ -256,6 +256,15 @@ impl TorrentHandle {
             config.max_concurrent_stream_reads,
         );
 
+        let choker = Choker::with_algorithms(
+            4,
+            config.seed_choking_algorithm,
+            config.choking_algorithm,
+            config.upload_rate_limit,
+            2,
+            20,
+        );
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -280,7 +289,7 @@ impl TorrentHandle {
             end_game: EndGame::new(),
             peers: HashMap::new(),
             available_peers: Vec::new(),
-            choker: Choker::new(4),
+            choker,
             metadata_downloader: None,
             downloaded: 0,
             uploaded: 0,
@@ -423,6 +432,15 @@ impl TorrentHandle {
             config.max_concurrent_stream_reads,
         );
 
+        let choker = Choker::with_algorithms(
+            4,
+            config.seed_choking_algorithm,
+            config.choking_algorithm,
+            config.upload_rate_limit,
+            2,
+            20,
+        );
+
         let actor = TorrentActor {
             config,
             info_hash: magnet.info_hash(),
@@ -447,7 +465,7 @@ impl TorrentHandle {
             end_game: EndGame::new(),
             peers: HashMap::new(),
             available_peers: Vec::new(),
-            choker: Choker::new(4),
+            choker,
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
             downloaded: 0,
             uploaded: 0,
@@ -1013,6 +1031,7 @@ impl TorrentActor {
                     self.update_peer_rates();
                     // Auto upload slot tuning
                     self.slot_tuner.observe(self.upload_bytes_interval);
+                    self.choker.observe_throughput(self.upload_bytes_interval);
                     self.upload_bytes_interval = 0;
                     self.choker.set_unchoke_slots(self.slot_tuner.current_slots());
                     self.run_choker().await;
@@ -3126,7 +3145,7 @@ impl TorrentActor {
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
                 upload_only: p.upload_only,
-                is_seed: p.upload_only, // TODO(M43): use actual seed detection
+                is_seed: p.upload_only || (self.num_pieces > 0 && p.bitfield.count_ones() == self.num_pieces),
             })
             .collect();
 
@@ -3280,7 +3299,7 @@ impl TorrentActor {
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
                 upload_only: p.upload_only,
-                is_seed: p.upload_only, // TODO(M43): use actual seed detection
+                is_seed: p.upload_only || (self.num_pieces > 0 && p.bitfield.count_ones() == self.num_pieces),
             })
             .collect();
 

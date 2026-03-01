@@ -373,6 +373,7 @@ impl Choker {
     ///
     /// Uses [`FixedSlotsStrategy`] with [`SeedChokingAlgorithm::FastestUpload`],
     /// matching the behavior of the original monolithic `Choker`.
+    #[cfg(test)]
     pub fn new(unchoke_slots: usize) -> Self {
         Self {
             strategy: Box::new(FixedSlotsStrategy::new(SeedChokingAlgorithm::FastestUpload)),
@@ -383,7 +384,6 @@ impl Choker {
     }
 
     /// Create a choker with explicit algorithm configuration.
-    #[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
     pub fn with_algorithms(
         unchoke_slots: usize,
         seed_algorithm: SeedChokingAlgorithm,
@@ -424,13 +424,12 @@ impl Choker {
     }
 
     /// Observe current aggregate throughput for rate-based slot adjustment.
-    #[allow(dead_code)] // Wired in during Task 6 (TorrentActor integration).
     pub fn observe_throughput(&mut self, throughput: u64) {
         self.strategy.observe_throughput(throughput);
     }
 
     /// Return the choking algorithm variant.
-    #[allow(dead_code)] // Wired in during Task 5 (Settings + TorrentConfig integration).
+    #[cfg(test)]
     pub fn choking_algorithm(&self) -> ChokingAlgorithm {
         self.choking_algorithm
     }
