@@ -68,6 +68,12 @@ impl ChunkTracker {
         self.in_progress.remove(&piece);
     }
 
+    /// Clear a piece from the have bitfield (share mode eviction).
+    /// Does NOT affect in_progress tracking.
+    pub fn clear_piece(&mut self, piece: u32) {
+        self.have.clear(piece);
+    }
+
     /// Check whether a specific chunk has been received (but piece not yet verified).
     pub fn has_chunk(&self, piece: u32, begin: u32) -> bool {
         if self.have.get(piece) {
@@ -208,5 +214,15 @@ mod tests {
         assert!(ct.has_piece(0));
         assert!(!ct.has_piece(1));
         assert!(ct.missing_chunks(0).is_empty());
+    }
+
+    #[test]
+    fn clear_piece_removes_from_have() {
+        let mut ct = make_tracker();
+        ct.mark_verified(0);
+        assert!(ct.has_piece(0));
+        ct.clear_piece(0);
+        assert!(!ct.has_piece(0));
+        assert_eq!(ct.bitfield().count_ones(), 0);
     }
 }

@@ -190,6 +190,7 @@ impl TorrentHandle {
             None
         };
         let have_buffer = crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
+        let is_share_mode = config.share_mode;
 
         let (piece_ready_tx, _) = broadcast::channel(64);
         let initial_have = chunk_tracker.bitfield().clone();
@@ -257,6 +258,8 @@ impl TorrentHandle {
             piece_contributors: HashMap::new(),
             parole_pieces: HashMap::new(),
             external_ip: None,
+            share_lru: std::collections::VecDeque::new(),
+            share_max_pieces: if is_share_mode { 64 } else { 0 },
         };
 
         tokio::spawn(actor.run());
@@ -338,6 +341,7 @@ impl TorrentHandle {
             None
         };
         let have_buffer = crate::have_buffer::HaveBuffer::new(0, config.have_send_delay_ms);
+        let is_share_mode = config.share_mode;
 
         let (piece_ready_tx, _) = broadcast::channel(64);
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
@@ -404,6 +408,8 @@ impl TorrentHandle {
             piece_contributors: HashMap::new(),
             parole_pieces: HashMap::new(),
             external_ip: None,
+            share_lru: std::collections::VecDeque::new(),
+            share_max_pieces: if is_share_mode { 64 } else { 0 },
         };
 
         tokio::spawn(actor.run());
@@ -661,6 +667,13 @@ struct TorrentActor {
 
     // BEP 40 peer priority (M32b)
     external_ip: Option<std::net::IpAddr>,
+
+    // Share mode (M32c): LRU tracker for in-memory piece relay.
+    // Tracks which pieces are currently "live" (servable) in share mode.
+    // Oldest pieces are evicted when capacity is reached.
+    share_lru: std::collections::VecDeque<u32>,
+    /// Max pieces to keep live in share mode (0 = share mode disabled).
+    share_max_pieces: usize,
 }
 
 impl TorrentActor {
@@ -1128,7 +1141,9 @@ impl TorrentActor {
             return;
         }
         // Determine appropriate state
-        if let Some(ref ct) = self.chunk_tracker
+        if self.config.share_mode {
+            self.transition_state(TorrentState::Sharing);
+        } else if let Some(ref ct) = self.chunk_tracker
             && ct.bitfield().count_ones() == self.num_pieces
         {
             self.transition_state(TorrentState::Seeding);
@@ -1540,7 +1555,9 @@ impl TorrentActor {
             info!(verified_count, total, "resumed with existing pieces");
         }
 
-        if verified_count == self.num_pieces {
+        if self.config.share_mode {
+            self.transition_state(TorrentState::Sharing);
+        } else if verified_count == self.num_pieces {
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
             info!("all pieces verified, starting as seeder");
@@ -1739,8 +1756,27 @@ impl TorrentActor {
                 }
             }
 
-            // Check if download is complete
-            if let Some(ref ct) = self.chunk_tracker
+            // Share mode LRU: track piece, evict oldest if over capacity.
+            // In share mode, we never "finish" — we keep cycling pieces.
+            if self.share_max_pieces > 0 {
+                self.share_lru.push_back(index);
+                while self.share_lru.len() > self.share_max_pieces {
+                    if let Some(evicted) = self.share_lru.pop_front() {
+                        if let Some(ref mut ct) = self.chunk_tracker {
+                            ct.clear_piece(evicted);
+                        }
+                        // Re-add to wanted so it can be re-downloaded later
+                        if evicted < self.wanted_pieces.len() {
+                            self.wanted_pieces.set(evicted);
+                        }
+                        debug!(evicted, "share mode: evicted piece from LRU");
+                    }
+                }
+            }
+
+            // Check if download is complete (skip in share mode — never finishes)
+            if self.share_max_pieces == 0
+                && let Some(ref ct) = self.chunk_tracker
                 && ct.bitfield().count_ones() == self.num_pieces
             {
                 info!("download complete, transitioning to seeding");
@@ -1954,7 +1990,11 @@ impl TorrentActor {
                         self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
                             &self.file_priorities, &file_lengths, self.lengths.as_ref().unwrap(),
                         );
-                        self.transition_state(TorrentState::Downloading);
+                        if self.config.share_mode {
+                            self.transition_state(TorrentState::Sharing);
+                        } else {
+                            self.transition_state(TorrentState::Downloading);
+                        }
                         self.metadata_downloader = None;
 
                         // Populate tracker manager with newly parsed metadata
@@ -2546,8 +2586,10 @@ impl TorrentActor {
             None => return,
         };
 
-        // Collect servable requests: peer is unchoked and we have the piece
+        // Collect servable requests: peer is unchoked and we have the piece.
+        // In share mode, also collect requests for evicted pieces to reject.
         let mut to_serve: Vec<(SocketAddr, u32, u32, u32)> = Vec::new();
+        let mut to_reject: Vec<(SocketAddr, u32, u32, u32)> = Vec::new();
         for peer in self.peers.values() {
             if peer.am_choking {
                 continue;
@@ -2555,7 +2597,22 @@ impl TorrentActor {
             for &(index, begin, length) in &peer.incoming_requests {
                 if chunk_tracker.has_piece(index) {
                     to_serve.push((peer.addr, index, begin, length));
+                } else if self.share_max_pieces > 0 && self.config.enable_fast {
+                    // Share mode: reject requests for pieces we no longer have
+                    to_reject.push((peer.addr, index, begin, length));
                 }
+            }
+        }
+
+        // Send RejectRequest for evicted share mode pieces
+        for (addr, index, begin, length) in to_reject {
+            if let Some(peer) = self.peers.get_mut(&addr) {
+                peer.incoming_requests
+                    .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
+                let _ = peer
+                    .cmd_tx
+                    .send(PeerCommand::RejectRequest { index, begin, length })
+                    .await;
             }
         }
 
