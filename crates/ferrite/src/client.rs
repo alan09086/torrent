@@ -551,6 +551,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the peer turnover fraction (0.0–1.0).
+    pub fn peer_turnover(mut self, fraction: f64) -> Self {
+        self.settings.peer_turnover = fraction;
+        self
+    }
+
+    /// Set the peer turnover cutoff (0.0–1.0).
+    pub fn peer_turnover_cutoff(mut self, cutoff: f64) -> Self {
+        self.settings.peer_turnover_cutoff = cutoff;
+        self
+    }
+
+    /// Set the peer turnover interval in seconds (0 = disabled).
+    pub fn peer_turnover_interval(mut self, secs: u64) -> Self {
+        self.settings.peer_turnover_interval = secs;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings

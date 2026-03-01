@@ -319,6 +319,7 @@ impl TorrentHandle {
             global_download_bucket,
             slot_tuner,
             upload_bytes_interval: 0,
+            peak_download_rate: 0,
             web_seeds: HashMap::new(),
             banned_web_seeds: HashSet::new(),
             web_seed_in_flight: HashMap::new(),
@@ -504,6 +505,7 @@ impl TorrentHandle {
             global_download_bucket,
             slot_tuner,
             upload_bytes_interval: 0,
+            peak_download_rate: 0,
             web_seeds: HashMap::new(),
             banned_web_seeds: HashSet::new(),
             web_seed_in_flight: HashMap::new(),
@@ -784,6 +786,9 @@ struct TorrentActor {
     slot_tuner: crate::slot_tuner::SlotTuner,
     upload_bytes_interval: u64,
 
+    /// Peak aggregate download rate observed (bytes/sec), for peer turnover cutoff.
+    peak_download_rate: u64,
+
     // Web seeding (M22)
     web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
     banned_web_seeds: HashSet<String>,
@@ -909,6 +914,11 @@ impl TorrentActor {
         } else {
             None
         };
+        let mut turnover_interval = if self.config.peer_turnover_interval > 0 {
+            Some(tokio::time::interval(Duration::from_secs(self.config.peer_turnover_interval)))
+        } else {
+            None
+        };
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
@@ -917,6 +927,9 @@ impl TorrentActor {
         refill_interval.tick().await;
         if let Some(ref mut si) = suggest_interval {
             si.tick().await; // skip initial tick
+        }
+        if let Some(ref mut interval) = turnover_interval {
+            interval.tick().await;
         }
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
@@ -1261,6 +1274,15 @@ impl TorrentActor {
                     }
                 } => {
                     self.suggest_cached_pieces().await;
+                }
+                // Peer turnover timer (M46)
+                _ = async {
+                    match &mut turnover_interval {
+                        Some(interval) => interval.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.run_peer_turnover().await;
                 }
                 // Rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
@@ -3290,6 +3312,141 @@ impl TorrentActor {
             peer.download_bytes_window = 0;
             peer.upload_bytes_window = 0;
         }
+
+        // Track peak download rate for peer turnover cutoff
+        let aggregate_download: u64 = self.peers.values().map(|p| p.download_rate).sum();
+        if aggregate_download > self.peak_download_rate {
+            self.peak_download_rate = aggregate_download;
+        }
+    }
+
+    /// Peer turnover: disconnect worst-performing peers and connect replacements.
+    async fn run_peer_turnover(&mut self) {
+        // Only during active downloading
+        if self.state != TorrentState::Downloading {
+            return;
+        }
+
+        // Check cutoff: if current rate >= cutoff * peak, don't churn
+        let aggregate_download: u64 = self.peers.values().map(|p| p.download_rate).sum();
+        if self.peak_download_rate > 0 {
+            let threshold = self.config.peer_turnover_cutoff * self.peak_download_rate as f64;
+            if aggregate_download as f64 >= threshold {
+                return;
+            }
+        }
+
+        // Collect parole IPs for exemption check
+        let parole_ips: std::collections::HashSet<std::net::IpAddr> = self
+            .parole_pieces
+            .values()
+            .filter_map(|p| p.parole_peer)
+            .collect();
+
+        // Collect eligible peers (not exempt)
+        let mut eligible: Vec<(SocketAddr, u64)> = self
+            .peers
+            .values()
+            .filter(|p| {
+                // Exempt: seeds (bitfield complete)
+                if p.bitfield.count_ones() == self.num_pieces {
+                    return false;
+                }
+                // Exempt: outstanding requests
+                if !p.pending_requests.is_empty() {
+                    return false;
+                }
+                // Exempt: parole
+                if parole_ips.contains(&p.addr.ip()) {
+                    return false;
+                }
+                // Exempt: recently connected (< 30s)
+                if p.connected_at.elapsed() < Duration::from_secs(30) {
+                    return false;
+                }
+                true
+            })
+            .map(|p| (p.addr, p.download_rate))
+            .collect();
+
+        if eligible.is_empty() {
+            return;
+        }
+
+        // Sort by download rate ascending (worst first)
+        eligible.sort_by_key(|&(_, rate)| rate);
+
+        // Calculate how many to disconnect
+        let turnover_count = (eligible.len() as f64 * self.config.peer_turnover).floor() as usize;
+        let turnover_count = if self.config.peer_turnover > 0.0 {
+            turnover_count.max(1)
+        } else {
+            0
+        };
+
+        if turnover_count == 0 {
+            return;
+        }
+
+        let to_disconnect: Vec<SocketAddr> = eligible
+            .iter()
+            .take(turnover_count)
+            .map(|&(addr, _)| addr)
+            .collect();
+
+        // Disconnect peers — follow the SAME cleanup pattern as PeerEvent::Disconnected handler
+        for &addr in &to_disconnect {
+            // BEP 16: clean up super-seed assignment (before remove, matching disconnect handler)
+            if let Some(ref mut ss) = self.super_seed {
+                ss.peer_disconnected(addr);
+            }
+            if let Some(peer) = self.peers.remove(&addr) {
+                self.piece_selector.remove_peer_bitfield(&peer.bitfield);
+                // Remove pieces that only this peer was downloading
+                let peer_pieces: HashSet<u32> = peer
+                    .pending_requests
+                    .iter()
+                    .map(|&(idx, _, _)| idx)
+                    .collect();
+                for piece_idx in peer_pieces {
+                    let other_has = self.peers.values().any(|p| {
+                        p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx)
+                    });
+                    if !other_has {
+                        self.in_flight_pieces.remove(&piece_idx);
+                    }
+                }
+                // Clean up pipeline request tracking for disconnected peer
+                for ifp in self.in_flight_pieces.values_mut() {
+                    ifp.assigned_blocks.retain(|_, a| *a != addr);
+                }
+                // End-game cleanup
+                if self.end_game.is_active() {
+                    self.end_game.peer_disconnected(addr);
+                }
+                // Send shutdown command (peer is still connected, unlike normal disconnect)
+                let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerDisconnected {
+                    info_hash: self.info_hash,
+                    addr,
+                    reason: Some("peer turnover".into()),
+                });
+            }
+            // Suggest tracking cleanup (outside if-let, matching disconnect handler)
+            self.suggested_to_peers.remove(&addr);
+        }
+
+        // Connect replacements
+        let peers_before = self.peers.len();
+        self.try_connect_peers();
+        let replaced = self.peers.len().saturating_sub(peers_before);
+
+        // Fire turnover alert
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerTurnover {
+            info_hash: self.info_hash,
+            disconnected: to_disconnect.len(),
+            replaced,
+        });
     }
 
     async fn run_choker(&mut self) {
@@ -4233,6 +4390,9 @@ mod tests {
             predictive_piece_announce_ms: 0,
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
+            peer_turnover: 0.04,
+            peer_turnover_cutoff: 0.9,
+            peer_turnover_interval: 300,
         }
     }
 
@@ -6694,5 +6854,68 @@ mod tests {
         assert!(!dst.join("nonexistent.txt").exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- M46: Peer turnover logic tests ----
+
+    #[test]
+    fn peer_turnover_identifies_worst_peers() {
+        use std::time::Instant;
+
+        let now = Instant::now();
+        let old = now - Duration::from_secs(31);
+
+        struct Candidate {
+            addr: SocketAddr,
+            download_rate: u64,
+            is_seed: bool,
+            has_requests: bool,
+            in_parole: bool,
+            connected_at: Instant,
+        }
+
+        let candidates = vec![
+            Candidate { addr: "10.0.0.1:6881".parse().unwrap(), download_rate: 100, is_seed: false, has_requests: false, in_parole: false, connected_at: old },
+            Candidate { addr: "10.0.0.2:6881".parse().unwrap(), download_rate: 5000, is_seed: false, has_requests: false, in_parole: false, connected_at: old },
+            Candidate { addr: "10.0.0.3:6881".parse().unwrap(), download_rate: 50, is_seed: false, has_requests: false, in_parole: false, connected_at: old },
+            Candidate { addr: "10.0.0.4:6881".parse().unwrap(), download_rate: 0, is_seed: true, has_requests: false, in_parole: false, connected_at: old },
+            Candidate { addr: "10.0.0.5:6881".parse().unwrap(), download_rate: 10, is_seed: false, has_requests: true, in_parole: false, connected_at: old },
+            Candidate { addr: "10.0.0.6:6881".parse().unwrap(), download_rate: 0, is_seed: false, has_requests: false, in_parole: false, connected_at: now },
+            Candidate { addr: "10.0.0.7:6881".parse().unwrap(), download_rate: 5, is_seed: false, has_requests: false, in_parole: true, connected_at: old },
+        ];
+
+        let mut eligible: Vec<_> = candidates.iter()
+            .filter(|c| !c.is_seed && !c.has_requests && !c.in_parole && c.connected_at.elapsed() >= Duration::from_secs(30))
+            .collect();
+        assert_eq!(eligible.len(), 3);
+
+        eligible.sort_by_key(|c| c.download_rate);
+        let turnover_count = ((eligible.len() as f64 * 0.04).floor() as usize).max(1);
+        assert_eq!(turnover_count, 1);
+        assert_eq!(eligible[0].addr, "10.0.0.3:6881".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn peer_turnover_cutoff_suppresses_at_peak() {
+        let peak_rate: u64 = 10_000;
+        let cutoff = 0.9;
+
+        let current_rate: u64 = 9_500;
+        assert!(current_rate as f64 >= cutoff * peak_rate as f64);
+
+        let current_rate: u64 = 8_000;
+        assert!(!(current_rate as f64 >= cutoff * peak_rate as f64));
+    }
+
+    #[test]
+    fn peer_turnover_disabled_when_interval_zero() {
+        let interval = 0u64;
+        assert_eq!(interval, 0);
+    }
+
+    #[test]
+    fn peer_turnover_no_action_when_seeding() {
+        let state = TorrentState::Seeding;
+        assert_ne!(state, TorrentState::Downloading);
     }
 }

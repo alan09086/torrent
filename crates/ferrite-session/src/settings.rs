@@ -142,6 +142,15 @@ fn default_choking_algorithm() -> ChokingAlgorithm {
 fn default_mixed_mode() -> MixedModeAlgorithm {
     MixedModeAlgorithm::PeerProportional
 }
+fn default_peer_turnover() -> f64 {
+    0.04
+}
+fn default_peer_turnover_cutoff() -> f64 {
+    0.9
+}
+fn default_peer_turnover_interval() -> u64 {
+    300
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -406,6 +415,17 @@ pub struct Settings {
     /// Algorithm for determining the number of unchoke slots.
     #[serde(default = "default_choking_algorithm")]
     pub choking_algorithm: ChokingAlgorithm,
+
+    // ── Peer turnover ──
+    /// Fraction of peers to disconnect per turnover interval (0.0–1.0, default: 0.04).
+    #[serde(default = "default_peer_turnover")]
+    pub peer_turnover: f64,
+    /// Only trigger turnover if download rate < this fraction of peak rate (0.0–1.0, default: 0.9).
+    #[serde(default = "default_peer_turnover_cutoff")]
+    pub peer_turnover_cutoff: f64,
+    /// Seconds between turnover checks (default: 300, 0 = disabled).
+    #[serde(default = "default_peer_turnover_interval")]
+    pub peer_turnover_interval: u64,
 }
 
 impl Default for Settings {
@@ -515,6 +535,10 @@ impl Default for Settings {
             // Choking algorithms
             seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: ChokingAlgorithm::FixedSlots,
+            // Peer turnover
+            peer_turnover: 0.04,
+            peer_turnover_cutoff: 0.9,
+            peer_turnover_interval: 300,
         }
     }
 }
@@ -621,6 +645,17 @@ impl Settings {
         if self.ssl_cert_path.is_some() != self.ssl_key_path.is_some() {
             return Err(crate::Error::InvalidSettings(
                 "ssl_cert_path and ssl_key_path must both be set or both absent".into(),
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&self.peer_turnover) {
+            return Err(crate::Error::InvalidSettings(
+                "peer_turnover must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.peer_turnover_cutoff) {
+            return Err(crate::Error::InvalidSettings(
+                "peer_turnover_cutoff must be between 0.0 and 1.0".into(),
             ));
         }
 
@@ -823,6 +858,9 @@ impl PartialEq for Settings {
             && self.ssl_key_path == other.ssl_key_path
             && self.seed_choking_algorithm == other.seed_choking_algorithm
             && self.choking_algorithm == other.choking_algorithm
+            && self.peer_turnover.to_bits() == other.peer_turnover.to_bits()
+            && self.peer_turnover_cutoff.to_bits() == other.peer_turnover_cutoff.to_bits()
+            && self.peer_turnover_interval == other.peer_turnover_interval
     }
 }
 
@@ -1274,5 +1312,48 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn peer_turnover_defaults() {
+        let s = Settings::default();
+        assert!((s.peer_turnover - 0.04).abs() < f64::EPSILON);
+        assert!((s.peer_turnover_cutoff - 0.9).abs() < f64::EPSILON);
+        assert_eq!(s.peer_turnover_interval, 300);
+    }
+
+    #[test]
+    fn peer_turnover_json_round_trip() {
+        let mut s = Settings::default();
+        s.peer_turnover = 0.1;
+        s.peer_turnover_cutoff = 0.8;
+        s.peer_turnover_interval = 120;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert!((decoded.peer_turnover - 0.1).abs() < f64::EPSILON);
+        assert!((decoded.peer_turnover_cutoff - 0.8).abs() < f64::EPSILON);
+        assert_eq!(decoded.peer_turnover_interval, 120);
+    }
+
+    #[test]
+    fn peer_turnover_validation() {
+        let mut s = Settings::default();
+        s.peer_turnover = 1.5;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("peer_turnover"));
+
+        let mut s = Settings::default();
+        s.peer_turnover = -0.1;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("peer_turnover"));
+
+        let mut s = Settings::default();
+        s.peer_turnover_cutoff = 1.5;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("peer_turnover_cutoff"));
+
+        let mut s = Settings::default();
+        s.peer_turnover_interval = 0;
+        s.validate().unwrap();
     }
 }

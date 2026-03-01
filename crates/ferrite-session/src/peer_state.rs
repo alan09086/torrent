@@ -67,6 +67,8 @@ pub(crate) struct PeerState {
     pub snubbed: bool,
     /// Last time we received data from this peer.
     pub last_data_received: Option<std::time::Instant>,
+    /// When this peer connection was established.
+    pub connected_at: std::time::Instant,
     /// BEP 6: pieces suggested by this peer.
     pub suggested_pieces: HashSet<u32>,
     /// How this peer was discovered.
@@ -109,6 +111,7 @@ impl PeerState {
             pipeline: PeerPipelineState::new(250, 3.0),
             snubbed: false,
             last_data_received: None,
+            connected_at: std::time::Instant::now(),
             suggested_pieces: HashSet::new(),
             source,
             supports_holepunch: false,
@@ -147,6 +150,18 @@ mod tests {
             let roundtrip: PeerSource = serde_json::from_str(&json).unwrap();
             assert_eq!(roundtrip, source);
         }
+    }
+
+    #[test]
+    fn peer_state_has_connected_at() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let peer = PeerState::new(
+            "127.0.0.1:6881".parse().unwrap(),
+            100,
+            tx,
+            PeerSource::Tracker,
+        );
+        assert!(peer.connected_at.elapsed().as_secs() < 1);
     }
 
     #[test]

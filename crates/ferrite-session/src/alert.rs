@@ -132,6 +132,9 @@ pub enum AlertKind {
     // ── IP filtering (PEER) ──
     PeerBlocked { addr: SocketAddr },
 
+    /// Periodic turnover disconnected underperforming peers and connected replacements.
+    PeerTurnover { info_hash: Id20, disconnected: usize, replaced: usize },
+
     // ── Web seeding (STATUS) ──
     WebSeedBanned { info_hash: Id20, url: String },
 
@@ -254,6 +257,7 @@ impl AlertKind {
 
             // IP FILTER
             PeerBlocked { .. } => AlertCategory::PEER,
+            PeerTurnover { .. } => AlertCategory::PEER,
 
             // WEB SEED
             WebSeedBanned { .. } => AlertCategory::STATUS,
@@ -626,5 +630,15 @@ mod tests {
         let json = serde_json::to_string(&alert).unwrap();
         let decoded: Alert = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded.kind, AlertKind::I2pSessionCreated { .. }));
+    }
+
+    #[test]
+    fn peer_turnover_alert_has_peer_category() {
+        let alert = Alert::new(AlertKind::PeerTurnover {
+            info_hash: Id20::from([0u8; 20]),
+            disconnected: 2,
+            replaced: 1,
+        });
+        assert!(alert.category().contains(AlertCategory::PEER));
     }
 }
