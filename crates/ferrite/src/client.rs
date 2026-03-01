@@ -361,6 +361,18 @@ impl ClientBuilder {
         self
     }
 
+    /// BEP 44: Set the maximum number of stored DHT items. Default: 700.
+    pub fn dht_max_items(mut self, v: usize) -> Self {
+        self.settings.dht_max_items = v;
+        self
+    }
+
+    /// BEP 44: Set the DHT item lifetime in seconds. Default: 7200.
+    pub fn dht_item_lifetime_secs(mut self, v: u64) -> Self {
+        self.settings.dht_item_lifetime_secs = v;
+        self
+    }
+
     /// Set the UPnP lease duration in seconds. Default: 3600.
     pub fn upnp_lease_duration(mut self, secs: u32) -> Self {
         self.settings.upnp_lease_duration = secs;
