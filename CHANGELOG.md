@@ -8,6 +8,38 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.48.0 — 2026-03-01
+
+BEP 35 SSL torrents — TLS-encrypted peer connections with per-torrent CA trust, SNI-based routing, and self-signed certificate generation. Eleven crates, 1104 tests, 27 BEPs implemented.
+
+### M42: SSL Torrents (BEP 35)
+
+### Added
+- SSL/TLS transport layer using rustls 0.23 with ring crypto provider
+- `ssl_cert` field on `InfoDict`, `InfoDictV2`, `TorrentMetaV1`, `TorrentMetaV2` for PEM-encoded CA certificates
+- `TorrentMeta::ssl_cert()` and `is_ssl()` accessor methods
+- `SslConfig` struct for per-torrent TLS configuration (client + server configs)
+- `connect_tls()` and `accept_tls()` for TLS stream wrapping with SNI-based info hash routing
+- `generate_self_signed_cert()` using rcgen for peer certificate generation
+- Custom `SslTorrentServerVerifier` that validates peer certs against torrent-embedded CA
+- `SslManager` for certificate lifecycle management — generation, loading, and per-torrent config caching
+- SSL listener in `SessionActor` using `LazyConfigAcceptor` for SNI-based torrent routing
+- `SpawnSslPeer` torrent command for session-to-torrent SSL peer handoff
+- SSL wrapping in `try_connect_peers()` TCP path for outgoing connections
+- `ssl_listen_port`, `ssl_cert_path`, `ssl_key_path` settings fields
+- `SslTorrentError` alert variant
+- `set_ssl_cert()` on `CreateTorrent` builder for SSL torrent creation
+- `BoxedAsyncStream` type alias for unified plain/TLS stream handling
+- Facade: 3 `ClientBuilder` methods (`ssl_listen_port`, `ssl_cert_path`, `ssl_key_path`)
+- SSL re-exports in `ferrite::wire::ssl`
+- 26 new tests (1104 total)
+
+### Changed
+- `ferrite-wire` now depends on rustls 0.23, tokio-rustls 0.26, rustls-pemfile 2, rcgen 0.13
+- Explicit `builder_with_provider()` pattern for rustls workspace compatibility (avoids CryptoProvider auto-detection issues)
+- v2 metadata parsing extracts `ssl-cert` from BencodeValue dict
+- `v2_to_v1_compat()` propagates ssl_cert when synthesizing v1 from v2
+
 ## 0.47.0 — 2026-03-01
 
 I2P anonymous network support via SAM v3.1 protocol bridge — tunneled peer connections over the I2P network. Eleven crates, 1078 tests, 26 BEPs implemented.
