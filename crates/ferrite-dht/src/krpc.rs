@@ -48,6 +48,8 @@ impl TransactionId {
 pub struct KrpcMessage {
     pub transaction_id: TransactionId,
     pub body: KrpcBody,
+    /// BEP 42: Compact IP+port of the message recipient, included in responses.
+    pub sender_ip: Option<std::net::SocketAddr>,
 }
 
 /// The body of a KRPC message.
@@ -151,6 +153,11 @@ impl KrpcMessage {
         let mut dict = BTreeMap::<Vec<u8>, BencodeValue>::new();
         dict.insert(b"t".to_vec(), BencodeValue::Bytes(self.transaction_id.0.to_vec()));
 
+        if let Some(addr) = &self.sender_ip {
+            let ip_bytes = encode_compact_addr(addr);
+            dict.insert(b"ip".to_vec(), BencodeValue::Bytes(ip_bytes));
+        }
+
         match &self.body {
             KrpcBody::Query(query) => {
                 dict.insert(b"y".to_vec(), BencodeValue::Bytes(b"q".to_vec()));
@@ -225,9 +232,15 @@ impl KrpcMessage {
             }
         };
 
+        let sender_ip = dict
+            .get(&b"ip"[..])
+            .and_then(|v| v.as_bytes_raw())
+            .and_then(decode_compact_addr);
+
         Ok(KrpcMessage {
             transaction_id,
             body,
+            sender_ip,
         })
     }
 }
@@ -329,9 +342,46 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
     BencodeValue::Dict(values)
 }
 
-// ---- Internal decoding helpers ----
+// ---- Compact address helpers (BEP 42 `ip` field) ----
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+/// Encode a socket address to compact binary format (BEP 42 `ip` field).
+fn encode_compact_addr(addr: &SocketAddr) -> Vec<u8> {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let mut buf = Vec::with_capacity(6);
+            buf.extend_from_slice(&v4.ip().octets());
+            buf.extend_from_slice(&v4.port().to_be_bytes());
+            buf
+        }
+        SocketAddr::V6(v6) => {
+            let mut buf = Vec::with_capacity(18);
+            buf.extend_from_slice(&v6.ip().octets());
+            buf.extend_from_slice(&v6.port().to_be_bytes());
+            buf
+        }
+    }
+}
+
+/// Decode a compact binary socket address (BEP 42 `ip` field).
+fn decode_compact_addr(data: &[u8]) -> Option<SocketAddr> {
+    match data.len() {
+        6 => {
+            let ip = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
+            let port = u16::from_be_bytes([data[4], data[5]]);
+            Some(SocketAddr::V4(SocketAddrV4::new(ip, port)))
+        }
+        18 => {
+            let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&data[..16]).unwrap());
+            let port = u16::from_be_bytes([data[16], data[17]]);
+            Some(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0)))
+        }
+        _ => None,
+    }
+}
+
+// ---- Internal decoding helpers ----
 
 fn decode_query(
     method: &[u8],
@@ -542,6 +592,7 @@ mod tests {
         let msg = KrpcMessage {
             transaction_id: TransactionId::from_u16(42),
             body: KrpcBody::Query(KrpcQuery::Ping { id: test_id() }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -553,6 +604,7 @@ mod tests {
         let msg = KrpcMessage {
             transaction_id: TransactionId::from_u16(42),
             body: KrpcBody::Response(KrpcResponse::NodeId { id: test_id() }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -567,6 +619,7 @@ mod tests {
                 id: test_id(),
                 target: target_id(),
             }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -586,6 +639,7 @@ mod tests {
                 nodes,
                 nodes6: Vec::new(),
             }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -600,6 +654,7 @@ mod tests {
                 id: test_id(),
                 info_hash: target_id(),
             }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -617,6 +672,7 @@ mod tests {
                 nodes: Vec::new(),
                 nodes6: Vec::new(),
             })),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -637,6 +693,7 @@ mod tests {
                 }],
                 nodes6: Vec::new(),
             })),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -654,6 +711,7 @@ mod tests {
                 implied_port: true,
                 token: b"aoeusnth".to_vec(),
             }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -668,6 +726,7 @@ mod tests {
                 code: 201,
                 message: "A Generic Error Occurred".into(),
             },
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -745,6 +804,7 @@ mod tests {
                 nodes,
                 nodes6,
             }),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -766,6 +826,7 @@ mod tests {
                 nodes: Vec::new(),
                 nodes6,
             })),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
@@ -786,9 +847,48 @@ mod tests {
                 nodes: Vec::new(),
                 nodes6: Vec::new(),
             })),
+            sender_ip: None,
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    // --- BEP 42 ip field tests ---
+
+    #[test]
+    fn response_with_ip_field_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(42),
+            body: KrpcBody::Response(KrpcResponse::NodeId { id: test_id() }),
+            sender_ip: Some("203.0.113.5:6881".parse().unwrap()),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.sender_ip, Some("203.0.113.5:6881".parse().unwrap()));
+    }
+
+    #[test]
+    fn response_with_ipv6_ip_field_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(42),
+            body: KrpcBody::Response(KrpcResponse::NodeId { id: test_id() }),
+            sender_ip: Some("[2001:db8::1]:6881".parse().unwrap()),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.sender_ip, Some("[2001:db8::1]:6881".parse().unwrap()));
+    }
+
+    #[test]
+    fn message_without_ip_field_parses_as_none() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(42),
+            body: KrpcBody::Response(KrpcResponse::NodeId { id: test_id() }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert!(decoded.sender_ip.is_none());
     }
 }

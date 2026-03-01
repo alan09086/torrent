@@ -263,34 +263,34 @@ impl SessionHandle {
         };
 
         // Start DHT instances
-        let dht_v4 = if settings.enable_dht {
+        let (dht_v4, dht_v4_ip_rx) = if settings.enable_dht {
             match DhtHandle::start(settings.to_dht_config()).await {
-                Ok(handle) => {
+                Ok((handle, ip_rx)) => {
                     info!("DHT v4 started");
-                    Some(handle)
+                    (Some(handle), Some(ip_rx))
                 }
                 Err(e) => {
                     warn!("DHT v4 start failed: {e}");
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
-        let dht_v6 = if settings.enable_dht && settings.enable_ipv6 {
+        let (dht_v6, dht_v6_ip_rx) = if settings.enable_dht && settings.enable_ipv6 {
             match DhtHandle::start(settings.to_dht_config_v6()).await {
-                Ok(handle) => {
+                Ok((handle, ip_rx)) => {
                     info!("DHT v6 started");
-                    Some(handle)
+                    (Some(handle), Some(ip_rx))
                 }
                 Err(e) => {
                     debug!("DHT v6 start failed (non-fatal): {e}");
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         let ban_config = crate::ban::BanConfig::from(&settings);
@@ -330,6 +330,8 @@ impl SessionHandle {
             disk_manager,
             disk_actor_handle,
             external_ip,
+            dht_v4_ip_rx,
+            dht_v6_ip_rx,
             plugins,
         };
 
@@ -706,6 +708,10 @@ struct SessionActor {
     disk_actor_handle: tokio::task::JoinHandle<()>,
     /// External IP discovered via NAT traversal or configured manually (BEP 40).
     external_ip: Option<std::net::IpAddr>,
+    /// BEP 42: External IP consensus from DHT v4 KRPC responses.
+    dht_v4_ip_rx: Option<mpsc::Receiver<std::net::IpAddr>>,
+    /// BEP 42: External IP consensus from DHT v6 KRPC responses.
+    dht_v6_ip_rx: Option<mpsc::Receiver<std::net::IpAddr>>,
     /// Registered extension plugins, shared with all TorrentActors.
     plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 }
@@ -898,7 +904,30 @@ impl SessionActor {
                             for entry in self.torrents.values() {
                                 let _ = entry.handle.update_external_ip(ip).await;
                             }
+                            // BEP 42: notify DHT instances of external IP
+                            if let Some(dht) = &self.dht_v4 {
+                                let _ = dht.update_external_ip(ip, ferrite_dht::IpVoteSource::Nat).await;
+                            }
+                            if let Some(dht) = &self.dht_v6 {
+                                let _ = dht.update_external_ip(ip, ferrite_dht::IpVoteSource::Nat).await;
+                            }
                         }
+                    }
+                }
+                // BEP 42: DHT v4 external IP consensus
+                Some(ip) = recv_dht_ip(&mut self.dht_v4_ip_rx) => {
+                    info!(%ip, "external IP discovered via DHT v4 (BEP 42)");
+                    self.external_ip = Some(ip);
+                    for entry in self.torrents.values() {
+                        let _ = entry.handle.update_external_ip(ip).await;
+                    }
+                }
+                // BEP 42: DHT v6 external IP consensus
+                Some(ip) = recv_dht_ip(&mut self.dht_v6_ip_rx) => {
+                    info!(%ip, "external IP discovered via DHT v6 (BEP 42)");
+                    self.external_ip = Some(ip);
+                    for entry in self.torrents.values() {
+                        let _ = entry.handle.update_external_ip(ip).await;
                     }
                 }
             }
@@ -1587,6 +1616,14 @@ async fn recv_nat_event(
             Some(event) => event,
             None => std::future::pending().await,
         },
+        None => std::future::pending().await,
+    }
+}
+
+/// Receive from an optional DHT IP consensus channel, pending forever if absent.
+async fn recv_dht_ip(rx: &mut Option<mpsc::Receiver<std::net::IpAddr>>) -> Option<std::net::IpAddr> {
+    match rx {
+        Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
 }

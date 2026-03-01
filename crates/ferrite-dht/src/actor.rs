@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::krpc::{
     GetPeersResponse, KrpcBody, KrpcMessage, KrpcQuery, KrpcResponse, TransactionId,
 };
+use crate::node_id::{self, ExternalIpVoter, IpVoteSource};
 use crate::peer_store::PeerStore;
 use crate::routing_table::{RoutingTable, K};
 
@@ -34,6 +35,11 @@ pub struct DhtConfig {
     pub query_timeout: Duration,
     /// Address family for this DHT instance (determines compact format and DNS filtering).
     pub address_family: AddressFamily,
+    /// BEP 42: Enforce node ID verification when inserting into routing table.
+    /// Nodes with IDs that don't match their IP are rejected.
+    pub enforce_node_id: bool,
+    /// BEP 42: Restrict routing table to one node per IP address.
+    pub restrict_routing_ips: bool,
 }
 
 impl Default for DhtConfig {
@@ -49,6 +55,8 @@ impl Default for DhtConfig {
             queries_per_second: 50,
             query_timeout: Duration::from_secs(10),
             address_family: AddressFamily::V4,
+            enforce_node_id: true,
+            restrict_routing_ips: true,
         }
     }
 }
@@ -66,6 +74,8 @@ impl DhtConfig {
             queries_per_second: 50,
             query_timeout: Duration::from_secs(10),
             address_family: AddressFamily::V6,
+            enforce_node_id: true,
+            restrict_routing_ips: true,
         }
     }
 }
@@ -101,23 +111,39 @@ enum DhtCommand {
     Stats {
         reply: oneshot::Sender<DhtStats>,
     },
+    UpdateExternalIp {
+        ip: std::net::IpAddr,
+        source: IpVoteSource,
+    },
     Shutdown,
 }
 
 impl DhtHandle {
-    /// Start the DHT actor and return a handle.
-    pub async fn start(config: DhtConfig) -> Result<Self> {
+    /// Start the DHT actor and return a handle plus an IP consensus channel.
+    ///
+    /// The consensus channel fires when the BEP 42 ExternalIpVoter reaches
+    /// agreement on our external IP address.
+    pub async fn start(config: DhtConfig) -> Result<(Self, mpsc::Receiver<std::net::IpAddr>)> {
         let socket = UdpSocket::bind(config.bind_addr).await?;
         let local_addr = socket.local_addr()?;
         debug!(addr = %local_addr, "DHT socket bound");
 
         let (tx, rx) = mpsc::channel(256);
+        let (ip_consensus_tx, ip_consensus_rx) = mpsc::channel(4);
         let handle = DhtHandle { tx };
 
-        let actor = DhtActor::new(config, socket, rx);
+        let actor = DhtActor::new(config, socket, rx, ip_consensus_tx);
         tokio::spawn(actor.run());
 
-        Ok(handle)
+        Ok((handle, ip_consensus_rx))
+    }
+
+    /// Notify the DHT of our external IP (from NAT/tracker discovery).
+    pub async fn update_external_ip(&self, ip: std::net::IpAddr, source: IpVoteSource) -> Result<()> {
+        self.tx
+            .send(DhtCommand::UpdateExternalIp { ip, source })
+            .await
+            .map_err(|_| Error::Shutdown)
     }
 
     /// Discover peers for an info_hash.
@@ -183,6 +209,10 @@ struct DhtActor {
     stats: ActorStats,
     /// Active get_peers lookups.
     lookups: HashMap<Id20, LookupState>,
+    /// BEP 42 external IP voter: aggregates IP reports from KRPC responses.
+    ip_voter: ExternalIpVoter,
+    /// Callback channel: fires when voter consensus changes.
+    ip_consensus_tx: mpsc::Sender<std::net::IpAddr>,
 }
 
 struct ActorStats {
@@ -222,9 +252,15 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 impl DhtActor {
-    fn new(config: DhtConfig, socket: UdpSocket, rx: mpsc::Receiver<DhtCommand>) -> Self {
+    fn new(
+        config: DhtConfig,
+        socket: UdpSocket,
+        rx: mpsc::Receiver<DhtCommand>,
+        ip_consensus_tx: mpsc::Sender<std::net::IpAddr>,
+    ) -> Self {
         let own_id = config.own_id.unwrap_or_else(generate_node_id);
         let address_family = config.address_family;
+        let restrict_ips = config.restrict_routing_ips;
         debug!(id = %own_id, family = ?address_family, "DHT node ID");
 
         DhtActor {
@@ -232,7 +268,7 @@ impl DhtActor {
             address_family,
             socket,
             rx,
-            routing_table: RoutingTable::new(own_id),
+            routing_table: RoutingTable::new_with_config(own_id, restrict_ips),
             peer_store: PeerStore::new(),
             pending: HashMap::new(),
             next_txn_id: 1,
@@ -241,6 +277,8 @@ impl DhtActor {
                 total_responses_received: 0,
             },
             lookups: HashMap::new(),
+            ip_voter: ExternalIpVoter::new(10),
+            ip_consensus_tx,
         }
     }
 
@@ -277,6 +315,14 @@ impl DhtActor {
                         }
                         Some(DhtCommand::Stats { reply }) => {
                             let _ = reply.send(self.make_stats());
+                        }
+                        Some(DhtCommand::UpdateExternalIp { ip, source }) => {
+                            let source_id = source.source_id();
+                            if let Some(consensus_ip) = self.ip_voter.add_vote(source_id, ip) {
+                                debug!(%consensus_ip, "BEP 42: external IP consensus (via NAT/tracker)");
+                                let _ = self.ip_consensus_tx.try_send(consensus_ip);
+                                self.regenerate_node_id(consensus_ip);
+                            }
                         }
                         Some(DhtCommand::Shutdown) | None => {
                             debug!("DHT shutting down");
@@ -362,7 +408,7 @@ impl DhtActor {
             return; // Reject wrong address family
         }
         let sender_id = *query.sender_id();
-        self.routing_table.insert(sender_id, addr);
+        self.checked_insert(sender_id, addr);
 
         let response = match query {
             KrpcQuery::Ping { id: _ } => KrpcResponse::NodeId {
@@ -430,6 +476,7 @@ impl DhtActor {
                             code: 203,
                             message: "invalid token".into(),
                         },
+                        sender_ip: Some(addr),
                     };
                     if let Ok(bytes) = err_msg.to_bytes() {
                         let _ = self.socket.send_to(&bytes, addr).await;
@@ -448,6 +495,7 @@ impl DhtActor {
         let reply = KrpcMessage {
             transaction_id: msg.transaction_id,
             body: KrpcBody::Response(response),
+            sender_ip: Some(addr), // BEP 42: tell the querier their IP
         };
         if let Ok(bytes) = reply.to_bytes() {
             let _ = self.socket.send_to(&bytes, addr).await;
@@ -460,8 +508,18 @@ impl DhtActor {
         }
         self.stats.total_responses_received += 1;
 
+        // BEP 42: feed the ip field into the voter
+        if let Some(reported_ip) = msg.sender_ip {
+            let source_id = hash_source_addr(&addr);
+            if let Some(consensus_ip) = self.ip_voter.add_vote(source_id, reported_ip.ip()) {
+                debug!(%consensus_ip, "BEP 42: external IP consensus changed");
+                let _ = self.ip_consensus_tx.try_send(consensus_ip);
+                self.regenerate_node_id(consensus_ip);
+            }
+        }
+
         let sender_id = *resp.sender_id();
-        self.routing_table.insert(sender_id, addr);
+        self.checked_insert(sender_id, addr);
 
         let txn = msg.transaction_id.as_u16();
         let pending = match self.pending.remove(&txn) {
@@ -476,12 +534,12 @@ impl DhtActor {
             (PendingQueryKind::FindNode { target: _ }, KrpcResponse::FindNode { nodes, nodes6, .. }) => {
                 for node in nodes {
                     if self.matches_family(&node.addr) {
-                        self.routing_table.insert(node.id, node.addr);
+                        self.checked_insert(node.id, node.addr);
                     }
                 }
                 for node in nodes6 {
                     if self.matches_family(&node.addr) {
-                        self.routing_table.insert(node.id, node.addr);
+                        self.checked_insert(node.id, node.addr);
                     }
                 }
             }
@@ -492,12 +550,12 @@ impl DhtActor {
                 // Add discovered nodes to routing table (filter by address family)
                 for node in &gp.nodes {
                     if self.matches_family(&node.addr) {
-                        self.routing_table.insert(node.id, node.addr);
+                        self.checked_insert(node.id, node.addr);
                     }
                 }
                 for node in &gp.nodes6 {
                     if self.matches_family(&node.addr) {
-                        self.routing_table.insert(node.id, node.addr);
+                        self.checked_insert(node.id, node.addr);
                     }
                 }
 
@@ -643,6 +701,7 @@ impl DhtActor {
                     implied_port: false,
                     token: token.clone(),
                 }),
+                sender_ip: None,
             };
             if let Ok(bytes) = msg.to_bytes() {
                 let _ = self.socket.send_to(&bytes, addr).await;
@@ -706,6 +765,7 @@ impl DhtActor {
                 id: own_id,
                 target,
             }),
+            sender_ip: None,
         };
         if let Ok(bytes) = msg.to_bytes() {
             let _ = self.socket.send_to(&bytes, addr).await;
@@ -730,6 +790,7 @@ impl DhtActor {
                 id: own_id,
                 info_hash,
             }),
+            sender_ip: None,
         };
         if let Ok(bytes) = msg.to_bytes() {
             let _ = self.socket.send_to(&bytes, addr).await;
@@ -754,6 +815,29 @@ impl DhtActor {
         txn
     }
 
+    /// Insert a node into the routing table, enforcing BEP 42 if enabled.
+    fn checked_insert(&mut self, id: Id20, addr: SocketAddr) -> bool {
+        if self.config.enforce_node_id && !node_id::is_valid_node_id(&id, addr.ip()) {
+            trace!(
+                node_id = %id,
+                ip = %addr.ip(),
+                "BEP 42: rejecting node with invalid ID for IP"
+            );
+            return false;
+        }
+        self.routing_table.insert(id, addr)
+    }
+
+    /// Regenerate our node ID to be BEP 42-compliant for the given external IP.
+    fn regenerate_node_id(&mut self, external_ip: std::net::IpAddr) {
+        let r = self.routing_table.own_id().0[19] & 0x07;
+        let new_id = node_id::generate_node_id(external_ip, r);
+        let restrict_ips = self.config.restrict_routing_ips;
+        debug!(old_id = %self.routing_table.own_id(), new_id = %new_id, "BEP 42: regenerating node ID");
+        self.routing_table = RoutingTable::new_with_config(new_id, restrict_ips);
+        // Note: routing table is now empty — bootstrap will repopulate it
+    }
+
     fn make_stats(&self) -> DhtStats {
         DhtStats {
             routing_table_size: self.routing_table.len(),
@@ -773,6 +857,14 @@ fn pending_node_id(_pending: &PendingQuery) -> Id20 {
     // so we can't mark_failed by ID. In a full implementation,
     // we'd track this. For now, return ZERO to skip.
     Id20::ZERO
+}
+
+/// Hash a socket address to a u64 for use as a voter source ID.
+fn hash_source_addr(addr: &SocketAddr) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    addr.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Generate a random node ID for this DHT node.
@@ -821,7 +913,7 @@ mod tests {
             bootstrap_nodes: Vec::new(), // No bootstrap for test
             ..DhtConfig::default()
         };
-        let handle = DhtHandle::start(config).await.unwrap();
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.routing_table_size, 0);
         handle.shutdown().await.unwrap();
@@ -834,7 +926,7 @@ mod tests {
             bootstrap_nodes: Vec::new(),
             ..DhtConfig::default()
         };
-        let handle = DhtHandle::start(config).await.unwrap();
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.routing_table_size, 0);
         assert_eq!(stats.bucket_count, 1);
@@ -858,8 +950,8 @@ mod tests {
             ..DhtConfig::default()
         };
 
-        let handle_a = DhtHandle::start(config_a).await.unwrap();
-        let handle_b = DhtHandle::start(config_b).await.unwrap();
+        let (handle_a, _ip_rx_a) = DhtHandle::start(config_a).await.unwrap();
+        let (handle_b, _ip_rx_b) = DhtHandle::start(config_b).await.unwrap();
 
         // Give them a moment to bind
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -881,7 +973,7 @@ mod tests {
             bootstrap_nodes: Vec::new(),
             ..DhtConfig::default()
         };
-        let handle = DhtHandle::start(config).await.unwrap();
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
 
         let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
         let _rx = handle.get_peers(info_hash).await.unwrap();
@@ -902,7 +994,7 @@ mod tests {
             bootstrap_nodes: Vec::new(),
             ..DhtConfig::default()
         };
-        let handle = DhtHandle::start(config).await.unwrap();
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
 
         // Get the DHT port from stats (indirect — we'd need to expose local_addr)
         // For now, just verify it doesn't crash on shutdown
@@ -933,7 +1025,7 @@ mod tests {
             bootstrap_nodes: Vec::new(),
             ..DhtConfig::default_v6()
         };
-        let handle = DhtHandle::start(config).await.unwrap();
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.routing_table_size, 0);
         handle.shutdown().await.unwrap();
@@ -946,7 +1038,7 @@ mod tests {
             bootstrap_nodes: Vec::new(),
             ..DhtConfig::default_v6()
         };
-        let handle = DhtHandle::start(config).await.unwrap();
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.routing_table_size, 0);
         assert_eq!(stats.bucket_count, 1);
@@ -966,5 +1058,42 @@ mod tests {
         assert!(!v6_addr.is_ipv4());
         assert!(matches!(actor_v6, AddressFamily::V6) && v6_addr.is_ipv6());
         assert!(!v4_addr.is_ipv6());
+    }
+
+    #[test]
+    fn dht_config_security_defaults() {
+        let config = DhtConfig::default();
+        assert!(config.enforce_node_id);
+        assert!(config.restrict_routing_ips);
+
+        let config_v6 = DhtConfig::default_v6();
+        assert!(config_v6.enforce_node_id);
+        assert!(config_v6.restrict_routing_ips);
+    }
+
+    #[tokio::test]
+    async fn dht_handle_start_returns_ip_channel() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_update_external_ip() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+        handle
+            .update_external_ip("203.0.113.5".parse().unwrap(), IpVoteSource::Nat)
+            .await
+            .unwrap();
+        handle.shutdown().await.unwrap();
     }
 }

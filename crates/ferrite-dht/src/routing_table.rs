@@ -4,7 +4,8 @@
 //! a binary-tree of k-buckets. Each bucket holds up to `K` (8) nodes.
 //! Buckets are split when the bucket containing our own ID overflows.
 
-use std::net::SocketAddr;
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use ferrite_core::Id20;
@@ -65,6 +66,10 @@ impl KBucket {
 pub struct RoutingTable {
     own_id: Id20,
     buckets: Vec<KBucket>,
+    /// When enabled, tracks IPs to enforce one-node-per-IP (BEP 42).
+    ip_set: HashSet<IpAddr>,
+    /// Whether to enforce one-node-per-IP restriction.
+    restrict_ips: bool,
 }
 
 /// Result of an insert operation.
@@ -81,9 +86,16 @@ pub enum InsertResult {
 impl RoutingTable {
     /// Create a new routing table with the given own node ID.
     pub fn new(own_id: Id20) -> Self {
+        Self::new_with_config(own_id, false)
+    }
+
+    /// Create a new routing table with IP restriction setting.
+    pub fn new_with_config(own_id: Id20, restrict_ips: bool) -> Self {
         RoutingTable {
             own_id,
             buckets: vec![KBucket::new()],
+            ip_set: HashSet::new(),
+            restrict_ips,
         }
     }
 
@@ -116,14 +128,30 @@ impl RoutingTable {
     }
 
     fn insert_inner(&mut self, id: Id20, addr: SocketAddr) -> bool {
+        let ip = addr.ip();
+
+        // BEP 42: check if another node with this IP exists (and it's not the same node)
+        if self.restrict_ips && self.ip_set.contains(&ip) {
+            let bucket_idx = self.bucket_index(&id);
+            if self.buckets[bucket_idx].find(&id).is_none() {
+                return false; // Different node, same IP — reject
+            }
+        }
+
         let bucket_idx = self.bucket_index(&id);
         let bucket = &mut self.buckets[bucket_idx];
 
         // Already known — update last_seen and address
         if let Some(pos) = bucket.find(&id) {
+            let old_ip = bucket.nodes[pos].addr.ip();
             bucket.nodes[pos].last_seen = Instant::now();
             bucket.nodes[pos].addr = addr;
             bucket.nodes[pos].fail_count = 0;
+            // Update IP tracking if address changed
+            if self.restrict_ips && old_ip != ip {
+                self.ip_set.remove(&old_ip);
+                self.ip_set.insert(ip);
+            }
             return true;
         }
 
@@ -135,6 +163,9 @@ impl RoutingTable {
                 last_seen: Instant::now(),
                 fail_count: 0,
             });
+            if self.restrict_ips {
+                self.ip_set.insert(ip);
+            }
             return true;
         }
 
@@ -142,12 +173,19 @@ impl RoutingTable {
         if let Some(worst_idx) = bucket.worst_node()
             && bucket.nodes[worst_idx].fail_count > 0
         {
+            // Remove old node's IP from tracking (gap fix #7)
+            if self.restrict_ips {
+                self.ip_set.remove(&bucket.nodes[worst_idx].addr.ip());
+            }
             bucket.nodes[worst_idx] = RoutingNode {
                 id,
                 addr,
                 last_seen: Instant::now(),
                 fail_count: 0,
             };
+            if self.restrict_ips {
+                self.ip_set.insert(ip);
+            }
             return true;
         }
 
@@ -166,6 +204,9 @@ impl RoutingTable {
         let bucket_idx = self.bucket_index(id);
         let bucket = &mut self.buckets[bucket_idx];
         if let Some(pos) = bucket.find(id) {
+            if self.restrict_ips {
+                self.ip_set.remove(&bucket.nodes[pos].addr.ip());
+            }
             bucket.nodes.remove(pos);
             true
         } else {
@@ -435,5 +476,74 @@ mod tests {
         let rt = RoutingTable::new(Id20::ZERO);
         let rand_id = rt.random_id_in_bucket(0);
         assert_ne!(rand_id, Id20::ZERO);
+    }
+
+    // ── BEP 42 IP restriction tests ────────────────────────────────
+
+    #[test]
+    fn restrict_ips_rejects_second_node_same_ip() {
+        let mut rt = RoutingTable::new_with_config(Id20::ZERO, true);
+        let ip_addr: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        assert!(rt.insert(id(1), ip_addr));
+        // Second node with same IP but different ID — rejected
+        let ip_addr2: SocketAddr = "10.0.0.1:6882".parse().unwrap();
+        assert!(!rt.insert(id(2), ip_addr2));
+        assert_eq!(rt.len(), 1);
+    }
+
+    #[test]
+    fn restrict_ips_allows_same_node_update() {
+        let mut rt = RoutingTable::new_with_config(Id20::ZERO, true);
+        let addr1: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        let addr2: SocketAddr = "10.0.0.1:6882".parse().unwrap();
+        assert!(rt.insert(id(1), addr1));
+        // Same node ID updating its port — allowed
+        assert!(rt.insert(id(1), addr2));
+        assert_eq!(rt.len(), 1);
+        assert_eq!(rt.get(&id(1)).unwrap().addr, addr2);
+    }
+
+    #[test]
+    fn no_restrict_ips_allows_multiple_nodes_same_ip() {
+        let mut rt = RoutingTable::new_with_config(Id20::ZERO, false);
+        let addr1: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        let addr2: SocketAddr = "10.0.0.1:6882".parse().unwrap();
+        assert!(rt.insert(id(1), addr1));
+        assert!(rt.insert(id(2), addr2));
+        assert_eq!(rt.len(), 2);
+    }
+
+    #[test]
+    fn restrict_ips_remove_frees_ip_slot() {
+        let mut rt = RoutingTable::new_with_config(Id20::ZERO, true);
+        let addr: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        assert!(rt.insert(id(1), addr));
+        assert!(rt.remove(&id(1)));
+        // IP slot is now free — different node with same IP can insert
+        assert!(rt.insert(id(2), addr));
+        assert_eq!(rt.len(), 1);
+    }
+
+    #[test]
+    fn restrict_ips_eviction_frees_ip_slot() {
+        let mut rt = RoutingTable::new_with_config(Id20::ZERO, true);
+        // Fill bucket to capacity, each with different IP
+        for i in 1..=K as u8 {
+            let a: SocketAddr = format!("10.0.0.{}:6881", i).parse().unwrap();
+            rt.insert(id(i), a);
+        }
+        assert_eq!(rt.len(), K);
+
+        // Mark a node as failed
+        rt.mark_failed(&id(1));
+        rt.mark_failed(&id(1));
+
+        // New node with a different IP should evict the failed node
+        let new_addr: SocketAddr = "10.0.0.100:6881".parse().unwrap();
+        assert!(rt.insert(id(100), new_addr));
+        assert_eq!(rt.len(), K);
+        // The old IP (10.0.0.1) should be freed
+        let old_addr: SocketAddr = "10.0.0.1:6882".parse().unwrap();
+        assert!(rt.insert(id(200), old_addr));
     }
 }

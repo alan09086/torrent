@@ -31,3 +31,9 @@ pub use ferrite_dht::compact::{
 };
 pub use ferrite_dht::peer_store::PeerStore;
 pub use ferrite_dht::routing_table::K;
+
+// BEP 42: Node ID generation/verification and IP voting
+pub use ferrite_dht::node_id::{
+    generate_node_id, is_valid_node_id, is_bep42_exempt,
+    ExternalIpVoter, IpVoteSource,
+};

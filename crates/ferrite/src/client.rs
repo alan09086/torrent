@@ -349,6 +349,18 @@ impl ClientBuilder {
         self
     }
 
+    /// BEP 42: Enforce node ID verification in the DHT routing table. Default: true.
+    pub fn dht_enforce_node_id(mut self, v: bool) -> Self {
+        self.settings.dht_enforce_node_id = v;
+        self
+    }
+
+    /// BEP 42: Restrict the DHT routing table to one node per IP. Default: true.
+    pub fn dht_restrict_routing_ips(mut self, v: bool) -> Self {
+        self.settings.dht_restrict_routing_ips = v;
+        self
+    }
+
     /// Set the UPnP lease duration in seconds. Default: 3600.
     pub fn upnp_lease_duration(mut self, secs: u32) -> Self {
         self.settings.upnp_lease_duration = secs;

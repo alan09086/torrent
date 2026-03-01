@@ -14,6 +14,7 @@ pub mod compact;
 pub mod krpc;
 pub mod routing_table;
 pub mod peer_store;
+pub mod node_id;
 mod actor;
 
 pub use compact::{
@@ -26,3 +27,4 @@ pub use error::{Error, Result};
 pub use krpc::{KrpcMessage, KrpcBody, KrpcQuery, KrpcResponse, GetPeersResponse, TransactionId};
 pub use routing_table::RoutingTable;
 pub use actor::{DhtHandle, DhtConfig, DhtStats};
+pub use node_id::{generate_node_id, is_valid_node_id, is_bep42_exempt, ExternalIpVoter, IpVoteSource};

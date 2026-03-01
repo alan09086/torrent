@@ -270,6 +270,12 @@ pub struct Settings {
     pub dht_queries_per_second: usize,
     #[serde(default = "default_dht_timeout")]
     pub dht_query_timeout_secs: u64,
+    /// BEP 42: Enforce node ID verification in DHT routing table.
+    #[serde(default = "default_true")]
+    pub dht_enforce_node_id: bool,
+    /// BEP 42: Restrict DHT routing table to one node per IP.
+    #[serde(default = "default_true")]
+    pub dht_restrict_routing_ips: bool,
 
     // ── NAT tuning ──
     #[serde(default = "default_upnp_lease")]
@@ -355,6 +361,8 @@ impl Default for Settings {
             // DHT tuning
             dht_queries_per_second: 50,
             dht_query_timeout_secs: 10,
+            dht_enforce_node_id: true,
+            dht_restrict_routing_ips: true,
             // NAT tuning
             upnp_lease_duration: 3600,
             natpmp_lifetime: 7200,
@@ -492,6 +500,8 @@ impl Settings {
         ferrite_dht::DhtConfig {
             queries_per_second: self.dht_queries_per_second,
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
+            enforce_node_id: self.dht_enforce_node_id,
+            restrict_routing_ips: self.dht_restrict_routing_ips,
             ..ferrite_dht::DhtConfig::default()
         }
     }
@@ -500,6 +510,8 @@ impl Settings {
         ferrite_dht::DhtConfig {
             queries_per_second: self.dht_queries_per_second,
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
+            enforce_node_id: self.dht_enforce_node_id,
+            restrict_routing_ips: self.dht_restrict_routing_ips,
             ..ferrite_dht::DhtConfig::default_v6()
         }
     }
@@ -590,6 +602,8 @@ impl PartialEq for Settings {
             && self.apply_ip_filter_to_trackers == other.apply_ip_filter_to_trackers
             && self.dht_queries_per_second == other.dht_queries_per_second
             && self.dht_query_timeout_secs == other.dht_query_timeout_secs
+            && self.dht_enforce_node_id == other.dht_enforce_node_id
+            && self.dht_restrict_routing_ips == other.dht_restrict_routing_ips
             && self.upnp_lease_duration == other.upnp_lease_duration
             && self.natpmp_lifetime == other.natpmp_lifetime
             && self.utp_max_connections == other.utp_max_connections
@@ -650,6 +664,8 @@ mod tests {
         assert!(s.apply_ip_filter_to_trackers);
         assert_eq!(s.dht_queries_per_second, 50);
         assert_eq!(s.dht_query_timeout_secs, 10);
+        assert!(s.dht_enforce_node_id);
+        assert!(s.dht_restrict_routing_ips);
         assert_eq!(s.upnp_lease_duration, 3600);
         assert_eq!(s.natpmp_lifetime, 7200);
         assert_eq!(s.utp_max_connections, 256);
@@ -805,5 +821,18 @@ mod tests {
     fn share_mode_default_false() {
         let cfg = crate::types::TorrentConfig::default();
         assert!(!cfg.share_mode);
+    }
+
+    #[test]
+    fn dht_config_inherits_security_settings() {
+        let mut s = Settings::default();
+        s.dht_enforce_node_id = false;
+        let dht = s.to_dht_config();
+        assert!(!dht.enforce_node_id);
+        assert!(dht.restrict_routing_ips);
+
+        let dht_v6 = s.to_dht_config_v6();
+        assert!(!dht_v6.enforce_node_id);
+        assert!(dht_v6.restrict_routing_ips);
     }
 }

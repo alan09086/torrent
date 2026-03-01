@@ -84,6 +84,8 @@ pub enum AlertKind {
     // ── DHT ──
     DhtBootstrapComplete,
     DhtGetPeers { info_hash: Id20, num_peers: usize },
+    /// BEP 42: A DHT node was rejected because its ID doesn't match its IP.
+    DhtNodeIdViolation { node_id: Id20, addr: SocketAddr },
 
     // ── Session (STATUS) ──
     ListenSucceeded { port: u16 },
@@ -178,6 +180,7 @@ impl AlertKind {
 
             // DHT
             DhtBootstrapComplete | DhtGetPeers { .. } => AlertCategory::DHT,
+            DhtNodeIdViolation { .. } => AlertCategory::DHT | AlertCategory::ERROR,
 
             // STORAGE
             FileRenamed { .. }
@@ -445,5 +448,15 @@ mod tests {
             url: "http://example.com/files".into(),
         });
         assert!(alert.category().contains(AlertCategory::STATUS));
+    }
+
+    #[test]
+    fn dht_node_id_violation_alert_category() {
+        let alert = Alert::new(AlertKind::DhtNodeIdViolation {
+            node_id: Id20::from([0u8; 20]),
+            addr: "203.0.113.5:6881".parse().unwrap(),
+        });
+        assert!(alert.category().contains(AlertCategory::DHT));
+        assert!(alert.category().contains(AlertCategory::ERROR));
     }
 }
