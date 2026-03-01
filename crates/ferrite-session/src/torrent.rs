@@ -262,6 +262,9 @@ impl TorrentHandle {
             share_lru: std::collections::VecDeque::new(),
             share_max_pieces: if is_share_mode { 64 } else { 0 },
             plugins,
+            hash_picker: None,
+            is_v2: false,
+            meta_v2: None,
         };
 
         tokio::spawn(actor.run());
@@ -414,6 +417,9 @@ impl TorrentHandle {
             share_lru: std::collections::VecDeque::new(),
             share_max_pieces: if is_share_mode { 64 } else { 0 },
             plugins,
+            hash_picker: None,
+            is_v2: false,
+            meta_v2: None,
         };
 
         tokio::spawn(actor.run());
@@ -681,6 +687,12 @@ struct TorrentActor {
 
     // Extension plugins (M32d)
     plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+
+    // BEP 52 v2 support (M34)
+    hash_picker: Option<ferrite_core::HashPicker>,
+    is_v2: bool,
+    #[allow(dead_code)] // populated when v2 torrent parsing is wired (M35)
+    meta_v2: Option<ferrite_core::TorrentMetaV2>,
 }
 
 impl TorrentActor {
@@ -1383,34 +1395,16 @@ impl TorrentActor {
                 self.handle_web_seed_error(url, piece, message);
             }
             PeerEvent::HashesReceived { peer_addr, request, hashes } => {
-                tracing::debug!(
-                    peer = %peer_addr,
-                    file_root = %request.file_root,
-                    base = request.base,
-                    index = request.index,
-                    count = request.count,
-                    num_hashes = hashes.len(),
-                    "received v2 hashes (handler pending M34c Task 6)"
-                );
+                self.handle_hashes_received(peer_addr, request, hashes).await;
             }
             PeerEvent::HashRequestRejected { peer_addr, request } => {
-                tracing::debug!(
-                    peer = %peer_addr,
-                    file_root = %request.file_root,
-                    base = request.base,
-                    index = request.index,
-                    "v2 hash request rejected (handler pending M34c Task 6)"
-                );
+                if let Some(ref mut picker) = self.hash_picker {
+                    picker.hashes_rejected(&request);
+                }
+                debug!(peer = %peer_addr, file_root = %request.file_root, "v2 hash request rejected");
             }
             PeerEvent::IncomingHashRequest { peer_addr, request } => {
-                tracing::debug!(
-                    peer = %peer_addr,
-                    file_root = %request.file_root,
-                    base = request.base,
-                    index = request.index,
-                    count = request.count,
-                    "incoming v2 hash request (handler pending M34c Task 6)"
-                );
+                self.handle_incoming_hash_request(peer_addr, request).await;
             }
         }
     }
@@ -1742,6 +1736,15 @@ impl TorrentActor {
     }
 
     async fn verify_and_mark_piece(&mut self, index: u32) {
+        if self.is_v2 {
+            self.verify_and_mark_piece_v2(index).await;
+        } else {
+            self.verify_and_mark_piece_v1(index).await;
+        }
+    }
+
+    /// SHA-1 piece verification (v1 torrents).
+    async fn verify_and_mark_piece_v1(&mut self, index: u32) {
         let expected_hash = self
             .meta
             .as_ref()
@@ -1756,120 +1759,258 @@ impl TorrentActor {
         };
 
         if verified {
-            if let Some(ref mut ct) = self.chunk_tracker {
-                ct.mark_verified(index);
-            }
-            self.in_flight_pieces.remove(&index);
-            self.piece_contributors.remove(&index);
-            info!(index, "piece verified");
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PieceFinished {
-                info_hash: self.info_hash,
-                piece: index,
-            });
-
-            // Notify FileStream consumers of piece completion
-            let _ = self.piece_ready_tx.send(index);
-            if let Some(ref ct) = self.chunk_tracker {
-                let _ = self.have_watch_tx.send(ct.bitfield().clone());
-            }
-
-            // Handle parole success: the parole peer delivered a good piece,
-            // so the original contributors are the likely offenders.
-            if let Some(parole) = self.parole_pieces.remove(&index) {
-                self.apply_parole_success(index, parole).await;
-            }
-
-            // Broadcast Have to all peers (skip in super-seed mode)
-            if self.super_seed.is_none() {
-                if self.have_buffer.is_enabled() {
-                    self.have_buffer.push(index);
-                } else {
-                    // Immediate mode — with redundancy elimination
-                    for peer in self.peers.values() {
-                        if !peer.bitfield.get(index) {
-                            let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
-                        }
-                    }
-                }
-            }
-
-            // Share mode LRU: track piece, evict oldest if over capacity.
-            // In share mode, we never "finish" — we keep cycling pieces.
-            if self.share_max_pieces > 0 {
-                self.share_lru.push_back(index);
-                while self.share_lru.len() > self.share_max_pieces {
-                    if let Some(evicted) = self.share_lru.pop_front() {
-                        if let Some(ref mut ct) = self.chunk_tracker {
-                            ct.clear_piece(evicted);
-                        }
-                        // Re-add to wanted so it can be re-downloaded later
-                        if evicted < self.wanted_pieces.len() {
-                            self.wanted_pieces.set(evicted);
-                        }
-                        debug!(evicted, "share mode: evicted piece from LRU");
-                    }
-                }
-            }
-
-            // Check if download is complete (skip in share mode — never finishes)
-            if self.share_max_pieces == 0
-                && let Some(ref ct) = self.chunk_tracker
-                && ct.bitfield().count_ones() == self.num_pieces
-            {
-                info!("download complete, transitioning to seeding");
-                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentFinished {
-                    info_hash: self.info_hash,
-                });
-                self.end_game.deactivate();
-                self.transition_state(TorrentState::Seeding);
-                self.choker.set_seed_mode(true);
-                // BEP 21: broadcast upload-only status
-                if self.config.upload_only_announce {
-                    let hs = ferrite_wire::ExtHandshake::new_upload_only();
-                    for peer in self.peers.values() {
-                        let _ = peer.cmd_tx.send(PeerCommand::SendExtHandshake(hs.clone())).await;
-                    }
-                }
-                // Announce completion to trackers
-                let result = self
-                    .tracker_manager
-                    .announce_completed(self.uploaded, self.downloaded)
-                    .await;
-                self.fire_tracker_alerts(&result.outcomes);
-            }
+            self.on_piece_verified(index).await;
         } else {
-            // Collect contributors before clearing
-            let contributors: Vec<std::net::IpAddr> = self.piece_contributors
-                .remove(&index)
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            self.on_piece_hash_failed(index).await;
+        }
+    }
 
-            warn!(index, contributors = contributors.len(), "piece hash verification failed");
+    /// SHA-256 per-block Merkle verification (v2 torrents, BEP 52).
+    async fn verify_and_mark_piece_v2(&mut self, index: u32) {
+        let disk = match &self.disk {
+            Some(d) => d.clone(),
+            None => return,
+        };
 
-            // Check if this is a parole failure
-            if let Some(parole) = self.parole_pieces.remove(&index) {
-                self.apply_parole_failure(index, parole);
-            } else {
-                // First failure: enter parole if enabled
-                self.enter_parole(index, contributors.clone());
-            }
+        let lengths = match &self.lengths {
+            Some(l) => l.clone(),
+            None => return,
+        };
 
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
-                info_hash: self.info_hash,
-                piece: index,
-                contributors,
-            });
-            if let Some(ref mut ct) = self.chunk_tracker {
-                ct.mark_failed(index);
-            }
-            self.in_flight_pieces.remove(&index);
-            // Hash failure in end-game: deactivate and resume normal mode
-            if self.end_game.is_active() {
-                self.end_game.deactivate();
-                info!(index, "end-game deactivated due to hash failure");
+        // Flush write buffer before reading back for hashing
+        if let Err(e) = disk.flush_piece(index).await {
+            warn!(index, "failed to flush piece for v2 verification: {e}");
+            return;
+        }
+
+        // Compute SHA-256 of each 16 KiB block and feed to Merkle tree
+        let num_chunks = lengths.chunks_in_piece(index);
+        let blocks_per_piece = (lengths.piece_length() as u32) / DEFAULT_CHUNK_SIZE;
+        let mut all_ok = true;
+        let mut any_failed = false;
+
+        for chunk_idx in 0..num_chunks {
+            let (begin, length) = match lengths.chunk_info(index, chunk_idx) {
+                Some(info) => info,
+                None => continue,
+            };
+
+            let block_hash = match disk.hash_block(index, begin, length, DiskJobFlags::empty()).await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(index, chunk_idx, "failed to hash block: {e}");
+                    all_ok = false;
+                    break;
+                }
+            };
+
+            if let Some(ref mut picker) = self.hash_picker {
+                // Gap 6: single-file assumption — multi-file mapping deferred to M35
+                let file_index = 0;
+                let global_block = index * blocks_per_piece + chunk_idx;
+                // Gap 10: 3-arg set_block_hash (offset removed)
+                match picker.set_block_hash(file_index, global_block, block_hash) {
+                    ferrite_core::SetBlockResult::Ok => {
+                        if let Some(ref mut ct) = self.chunk_tracker {
+                            ct.mark_block_verified(index, chunk_idx);
+                        }
+                    }
+                    ferrite_core::SetBlockResult::Unknown => {
+                        // Piece-layer hash not yet available — stored for deferred verification
+                        // Gap 3: don't mark as verified, just continue
+                        debug!(index, chunk_idx, "block hash stored, awaiting piece-layer hashes");
+                    }
+                    ferrite_core::SetBlockResult::HashFailed => {
+                        warn!(index, chunk_idx, "block hash failed Merkle verification");
+                        any_failed = true;
+                        break;
+                    }
+                }
             }
         }
+
+        if any_failed {
+            self.on_piece_hash_failed(index).await;
+        } else if all_ok
+            && self.chunk_tracker.as_ref().is_some_and(|ct| ct.all_blocks_verified(index))
+        {
+            // All blocks verified — piece is good
+            self.on_piece_verified(index).await;
+        }
+        // else: Unknown state — blocks stored, will resolve when piece-layer hashes arrive
+    }
+
+    /// Common success path after a piece passes verification (v1 SHA-1 or v2 Merkle).
+    async fn on_piece_verified(&mut self, index: u32) {
+        if let Some(ref mut ct) = self.chunk_tracker {
+            ct.mark_verified(index);
+        }
+        self.in_flight_pieces.remove(&index);
+        self.piece_contributors.remove(&index);
+        info!(index, "piece verified");
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PieceFinished {
+            info_hash: self.info_hash,
+            piece: index,
+        });
+
+        // Notify FileStream consumers of piece completion
+        let _ = self.piece_ready_tx.send(index);
+        if let Some(ref ct) = self.chunk_tracker {
+            let _ = self.have_watch_tx.send(ct.bitfield().clone());
+        }
+
+        // Handle parole success: the parole peer delivered a good piece,
+        // so the original contributors are the likely offenders.
+        if let Some(parole) = self.parole_pieces.remove(&index) {
+            self.apply_parole_success(index, parole).await;
+        }
+
+        // Broadcast Have to all peers (skip in super-seed mode)
+        if self.super_seed.is_none() {
+            if self.have_buffer.is_enabled() {
+                self.have_buffer.push(index);
+            } else {
+                // Immediate mode — with redundancy elimination
+                for peer in self.peers.values() {
+                    if !peer.bitfield.get(index) {
+                        let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                    }
+                }
+            }
+        }
+
+        // Share mode LRU: track piece, evict oldest if over capacity.
+        // In share mode, we never "finish" — we keep cycling pieces.
+        if self.share_max_pieces > 0 {
+            self.share_lru.push_back(index);
+            while self.share_lru.len() > self.share_max_pieces {
+                if let Some(evicted) = self.share_lru.pop_front() {
+                    if let Some(ref mut ct) = self.chunk_tracker {
+                        ct.clear_piece(evicted);
+                    }
+                    // Re-add to wanted so it can be re-downloaded later
+                    if evicted < self.wanted_pieces.len() {
+                        self.wanted_pieces.set(evicted);
+                    }
+                    debug!(evicted, "share mode: evicted piece from LRU");
+                }
+            }
+        }
+
+        // Check if download is complete (skip in share mode — never finishes)
+        if self.share_max_pieces == 0
+            && let Some(ref ct) = self.chunk_tracker
+            && ct.bitfield().count_ones() == self.num_pieces
+        {
+            info!("download complete, transitioning to seeding");
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentFinished {
+                info_hash: self.info_hash,
+            });
+            self.end_game.deactivate();
+            self.transition_state(TorrentState::Seeding);
+            self.choker.set_seed_mode(true);
+            // BEP 21: broadcast upload-only status
+            if self.config.upload_only_announce {
+                let hs = ferrite_wire::ExtHandshake::new_upload_only();
+                for peer in self.peers.values() {
+                    let _ = peer.cmd_tx.send(PeerCommand::SendExtHandshake(hs.clone())).await;
+                }
+            }
+            // Announce completion to trackers
+            let result = self
+                .tracker_manager
+                .announce_completed(self.uploaded, self.downloaded)
+                .await;
+            self.fire_tracker_alerts(&result.outcomes);
+        }
+    }
+
+    /// Common failure path after a piece fails hash verification.
+    async fn on_piece_hash_failed(&mut self, index: u32) {
+        let contributors: Vec<std::net::IpAddr> = self.piece_contributors
+            .remove(&index)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        warn!(index, contributors = contributors.len(), "piece hash verification failed");
+
+        // Check if this is a parole failure
+        if let Some(parole) = self.parole_pieces.remove(&index) {
+            self.apply_parole_failure(index, parole);
+        } else {
+            // First failure: enter parole if enabled
+            self.enter_parole(index, contributors.clone());
+        }
+
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
+            info_hash: self.info_hash,
+            piece: index,
+            contributors,
+        });
+        if let Some(ref mut ct) = self.chunk_tracker {
+            ct.mark_failed(index);
+        }
+        self.in_flight_pieces.remove(&index);
+        // Hash failure in end-game: deactivate and resume normal mode
+        if self.end_game.is_active() {
+            self.end_game.deactivate();
+            info!(index, "end-game deactivated due to hash failure");
+        }
+    }
+
+    // ── BEP 52 hash event handlers (M34) ────────────────────────────────
+
+    /// Process received piece-layer or block-layer hashes from a peer.
+    async fn handle_hashes_received(
+        &mut self,
+        peer_addr: SocketAddr,
+        request: ferrite_core::HashRequest,
+        hashes: Vec<ferrite_core::Id32>,
+    ) {
+        let Some(ref mut picker) = self.hash_picker else {
+            debug!(peer = %peer_addr, "received hashes but no hash picker (v1 torrent)");
+            return;
+        };
+
+        match picker.add_hashes(&request, &hashes) {
+            Ok(result) => {
+                if !result.valid {
+                    warn!(peer = %peer_addr, "received hashes failed Merkle proof validation");
+                    return;
+                }
+                for piece in result.hash_passed {
+                    self.on_piece_verified(piece).await;
+                }
+                for piece in result.hash_failed {
+                    warn!(piece, "piece failed after hash layer received");
+                    post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
+                        info_hash: self.info_hash,
+                        piece,
+                        contributors: Vec::new(),
+                    });
+                }
+            }
+            Err(e) => {
+                warn!(peer = %peer_addr, "invalid hashes: {e}");
+            }
+        }
+    }
+
+    /// Handle an incoming hash request from a peer (serve or reject).
+    async fn handle_incoming_hash_request(
+        &self,
+        peer_addr: SocketAddr,
+        request: ferrite_core::HashRequest,
+    ) {
+        let peer = match self.peers.get(&peer_addr) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Reject if we don't have a hash picker (v1 torrent or no metadata yet)
+        // TODO(M35): serve hashes from our Merkle tree state when seeding v2
+        let _ = peer.cmd_tx.send(PeerCommand::SendHashReject(request)).await;
     }
 
     // ── Smart banning helpers (M25) ────────────────────────────────────
