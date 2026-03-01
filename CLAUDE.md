@@ -34,6 +34,7 @@ cargo clippy --workspace -- -D warnings
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
 - Plan files: `docs/plans/YYYY-MM-DD-ferrite-<milestone>-<topic>.md`
+- **After every milestone**: update `README.md` (badges, test counts, BEP table, roadmap, version table) and `CHANGELOG.md` (new version entry with Added/Changed sections). Commit separately as `docs: update README and CHANGELOG for <milestone>`
 
 ## Remotes
 
