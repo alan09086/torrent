@@ -18,9 +18,11 @@ mod hash_picker;
 mod hash_request;
 mod merkle_state;
 mod storage_mode;
+mod torrent_version;
 
 pub use create::{CreateTorrent, CreateTorrentResult};
 pub use detect::{TorrentMeta, torrent_from_bytes_any};
+pub use torrent_version::TorrentVersion;
 pub use error::{Error, Result};
 pub use file_tree::{FileTreeNode, V2FileAttr, V2FileInfo};
 pub use file_priority::FilePriority;
