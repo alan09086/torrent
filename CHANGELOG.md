@@ -8,6 +8,22 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.45.0 — 2026-03-01
+
+BEP 51 DHT infohash indexing — `sample_infohashes` query for discovering info hashes in the DHT. Eleven crates, 1007 tests, 25 BEPs implemented.
+
+### M39: BEP 51 DHT Infohash Indexing
+
+### Added
+- BEP 51: DHT infohash indexing (`sample_infohashes` query/response)
+- `PeerStore::random_info_hashes()` — Fisher-Yates partial shuffle sampling
+- `DhtHandle::sample_infohashes()` — public async API for querying DHT nodes
+- `SampleInfohashesResult` and `SampleInfohashesResponse` KRPC types
+- DHT actor incoming/outgoing `sample_infohashes` query handling
+- `DhtSampleInfohashes` alert variant
+- `dht_sample_infohashes_interval` settings field (forward-compat)
+- 12 new tests (1007 total)
+
 ## 0.44.0 — 2026-03-01
 
 BEP 44 DHT arbitrary data storage — put/get immutable and mutable items with ed25519 signatures. Eleven crates, 995 tests, 24 BEPs implemented.
