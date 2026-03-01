@@ -49,6 +49,8 @@ pub use ferrite_core::{
     FileTreeNode, V2FileAttr, V2FileInfo,
     TorrentMeta, torrent_from_bytes_any,
     sha256,
+    // Hybrid v1+v2 (M35)
+    TorrentVersion,
 };
 
 // BEP 52 Wire + Hash Picker (M34a)
