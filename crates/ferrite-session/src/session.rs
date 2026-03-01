@@ -163,8 +163,16 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Start a new session with the given settings.
+    /// Start a new session with the given settings and no plugins.
     pub async fn start(settings: Settings) -> crate::Result<Self> {
+        Self::start_with_plugins(settings, Arc::new(Vec::new())).await
+    }
+
+    /// Start a new session with the given settings and extension plugins.
+    pub async fn start_with_plugins(
+        settings: Settings,
+        plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    ) -> crate::Result<Self> {
         let mut settings = settings;
 
         // Force proxy mode: all connections must go through proxy.
@@ -322,6 +330,7 @@ impl SessionHandle {
             disk_manager,
             disk_actor_handle,
             external_ip,
+            plugins,
         };
 
         tokio::spawn(actor.run());
@@ -697,6 +706,8 @@ struct SessionActor {
     disk_actor_handle: tokio::task::JoinHandle<()>,
     /// External IP discovered via NAT traversal or configured manually (BEP 40).
     external_ip: Option<std::net::IpAddr>,
+    /// Registered extension plugins, shared with all TorrentActors.
+    plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 }
 
 impl SessionActor {
@@ -991,6 +1002,7 @@ impl SessionActor {
             self.utp_socket_v6.clone(),
             Arc::clone(&self.ban_manager),
             Arc::clone(&self.ip_filter),
+            Arc::clone(&self.plugins),
         )
         .await?;
 
@@ -1051,6 +1063,7 @@ impl SessionActor {
             self.utp_socket_v6.clone(),
             Arc::clone(&self.ban_manager),
             Arc::clone(&self.ip_filter),
+            Arc::clone(&self.plugins),
         )
         .await?;
         self.torrents.insert(

@@ -42,6 +42,7 @@ pub(crate) async fn run_peer(
     outbound: bool,
     anonymous_mode: bool,
     info_bytes: Option<Bytes>,
+    _plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 ) -> crate::Result<()> {
     use ferrite_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -727,6 +728,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -776,6 +778,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -825,6 +828,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -886,6 +890,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -935,6 +940,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -993,6 +999,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1051,6 +1058,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1096,6 +1104,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1180,6 +1189,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1232,6 +1242,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1283,6 +1294,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1347,6 +1359,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1442,6 +1455,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1488,6 +1502,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1534,6 +1549,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1594,6 +1610,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1637,6 +1654,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });
@@ -1699,6 +1717,7 @@ mod tests {
                 false, // outbound
                 false, // anonymous_mode
                 Some(info_bytes),
+                std::sync::Arc::new(Vec::new()), // plugins
             )
             .await
         });

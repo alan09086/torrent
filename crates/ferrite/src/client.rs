@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferrite_core::{Magnet, TorrentMetaV1};
-use ferrite_session::Settings;
+use ferrite_session::{ExtensionPlugin, Settings};
 use ferrite_storage::TorrentStorage;
 
 /// Ergonomic builder for creating a ferrite session.
@@ -27,6 +27,7 @@ use ferrite_storage::TorrentStorage;
 /// ```
 pub struct ClientBuilder {
     settings: Settings,
+    plugins: Vec<Box<dyn ExtensionPlugin>>,
 }
 
 impl ClientBuilder {
@@ -34,7 +35,18 @@ impl ClientBuilder {
     pub fn new() -> Self {
         Self {
             settings: Settings::default(),
+            plugins: Vec::new(),
         }
+    }
+
+    /// Register a custom BEP 10 extension plugin.
+    ///
+    /// Plugins are assigned extension IDs starting at 10 in registration order.
+    /// Built-in extensions (ut_metadata=1, ut_pex=2, lt_trackers=3) cannot be
+    /// overridden.
+    pub fn add_extension(mut self, plugin: Box<dyn ExtensionPlugin>) -> Self {
+        self.plugins.push(plugin);
+        self
     }
 
     /// Set the TCP listen port for incoming peer connections.
@@ -368,7 +380,8 @@ impl ClientBuilder {
 
     /// Start the session, spawning the background actor.
     pub async fn start(self) -> ferrite_session::Result<ferrite_session::SessionHandle> {
-        ferrite_session::SessionHandle::start(self.settings).await
+        let plugins = Arc::new(self.plugins);
+        ferrite_session::SessionHandle::start_with_plugins(self.settings, plugins).await
     }
 }
 
