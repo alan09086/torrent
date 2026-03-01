@@ -174,6 +174,89 @@ impl TrackerManager {
         }
     }
 
+    /// Create a TrackerManager from torrent metadata with URL security filtering.
+    ///
+    /// Same as [`from_torrent`](Self::from_torrent), but each URL is validated
+    /// through [`validate_tracker_url`](crate::url_guard::validate_tracker_url).
+    /// URLs that fail validation are logged at warn level and skipped.
+    #[allow(dead_code)] // Wired in during Task 3 (TorrentActor integration).
+    pub fn from_torrent_filtered(
+        meta: &TorrentMetaV1,
+        peer_id: Id20,
+        port: u16,
+        security: &crate::url_guard::UrlSecurityConfig,
+    ) -> Self {
+        let mut trackers = Vec::new();
+        let mut seen_urls = std::collections::HashSet::new();
+
+        // BEP 12: announce_list takes priority if present
+        if let Some(ref tiers) = meta.announce_list {
+            for (tier_idx, tier) in tiers.iter().enumerate() {
+                for url in tier {
+                    let url = url.trim().to_string();
+                    if url.is_empty() || !seen_urls.insert(url.clone()) {
+                        continue;
+                    }
+                    if let Err(e) = crate::url_guard::validate_tracker_url(&url, security) {
+                        warn!(%url, %e, "tracker URL rejected by security policy");
+                        continue;
+                    }
+                    if let Some(protocol) = classify_url(&url) {
+                        trackers.push(TrackerEntry {
+                            url,
+                            tier: tier_idx,
+                            protocol,
+                            state: TrackerState::NeedsAnnounce,
+                            tracker_id: None,
+                            next_announce: Instant::now(),
+                            interval: DEFAULT_INTERVAL,
+                            backoff: Duration::ZERO,
+                            scrape_info: None,
+                            consecutive_failures: 0,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Fallback: single announce URL (only if not already in announce_list)
+        if let Some(ref url) = meta.announce {
+            let url = url.trim().to_string();
+            if !url.is_empty() && seen_urls.insert(url.clone()) {
+                if let Err(e) = crate::url_guard::validate_tracker_url(&url, security) {
+                    warn!(%url, %e, "tracker URL rejected by security policy");
+                } else if let Some(protocol) = classify_url(&url) {
+                    trackers.push(TrackerEntry {
+                        url,
+                        tier: if trackers.is_empty() {
+                            0
+                        } else {
+                            trackers.last().unwrap().tier + 1
+                        },
+                        protocol,
+                        state: TrackerState::NeedsAnnounce,
+                        tracker_id: None,
+                        next_announce: Instant::now(),
+                        interval: DEFAULT_INTERVAL,
+                        backoff: Duration::ZERO,
+                        scrape_info: None,
+                        consecutive_failures: 0,
+                    });
+                }
+            }
+        }
+
+        TrackerManager {
+            trackers,
+            info_hash: meta.info_hash,
+            info_hashes: InfoHashes::v1_only(meta.info_hash),
+            peer_id,
+            port,
+            http_client: HttpTracker::new(),
+            udp_client: UdpTracker::new(),
+        }
+    }
+
     /// Create an empty TrackerManager (for magnet links before metadata arrives).
     pub fn empty(info_hash: Id20, peer_id: Id20, port: u16) -> Self {
         TrackerManager {
@@ -190,6 +273,17 @@ impl TrackerManager {
     /// Populate trackers from metadata once it's been fetched (magnet link flow).
     pub fn set_metadata(&mut self, meta: &TorrentMetaV1) {
         let fresh = Self::from_torrent(meta, self.peer_id, self.port);
+        self.trackers = fresh.trackers;
+    }
+
+    /// Populate trackers from metadata with URL security filtering (magnet link flow).
+    #[allow(dead_code)] // Wired in during Task 3 (TorrentActor integration).
+    pub fn set_metadata_filtered(
+        &mut self,
+        meta: &TorrentMetaV1,
+        security: &crate::url_guard::UrlSecurityConfig,
+    ) {
+        let fresh = Self::from_torrent_filtered(meta, self.peer_id, self.port, security);
         self.trackers = fresh.trackers;
     }
 
@@ -493,6 +587,27 @@ impl TrackerManager {
             consecutive_failures: 0,
         });
         true
+    }
+
+    /// Add a new tracker URL with URL security validation.
+    ///
+    /// Returns `true` if the URL was added, `false` if it failed validation,
+    /// was empty, had an unknown protocol, or was a duplicate.
+    #[allow(dead_code)] // Wired in during Task 3 (TorrentActor integration).
+    pub fn add_tracker_url_validated(
+        &mut self,
+        url: &str,
+        security: &crate::url_guard::UrlSecurityConfig,
+    ) -> bool {
+        let url = url.trim();
+        if url.is_empty() {
+            return false;
+        }
+        if let Err(e) = crate::url_guard::validate_tracker_url(url, security) {
+            warn!(%url, %e, "tracker URL rejected by security policy");
+            return false;
+        }
+        self.add_tracker_url(url)
     }
 
     /// Scrape trackers to get seeder/leecher counts.
@@ -818,5 +933,63 @@ mod tests {
         assert!(!mgr.add_tracker_url(""));
         assert!(!mgr.add_tracker_url("   "));
         assert_eq!(mgr.tracker_count(), 1);
+    }
+
+    fn ssrf_config() -> crate::url_guard::UrlSecurityConfig {
+        crate::url_guard::UrlSecurityConfig {
+            ssrf_mitigation: true,
+            allow_idna: false,
+            validate_https_trackers: true,
+        }
+    }
+
+    #[test]
+    fn localhost_tracker_announce_path_accepted() {
+        // A localhost URL with /announce path should be accepted by the filter.
+        let meta = torrent_with_trackers(
+            Some("http://127.0.0.1:8080/announce"),
+            None,
+        );
+        let cfg = ssrf_config();
+        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg);
+        assert_eq!(mgr.tracker_count(), 1);
+        assert_eq!(mgr.trackers[0].url, "http://127.0.0.1:8080/announce");
+    }
+
+    #[test]
+    fn localhost_tracker_bad_path_filtered() {
+        // A localhost URL with a non-/announce path should be rejected,
+        // while a global URL should pass.
+        let meta = torrent_with_trackers(
+            None,
+            Some(vec![vec![
+                "http://127.0.0.1:8080/api/admin",
+                "http://tracker.example.com/announce",
+            ]]),
+        );
+        let cfg = ssrf_config();
+        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg);
+        assert_eq!(mgr.tracker_count(), 1);
+        assert_eq!(mgr.trackers[0].url, "http://tracker.example.com/announce");
+    }
+
+    #[test]
+    fn add_tracker_url_validates() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let cfg = ssrf_config();
+        let mut mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg);
+        assert_eq!(mgr.tracker_count(), 1);
+
+        // Valid URL should be added.
+        assert!(mgr.add_tracker_url_validated("http://other.example.com/announce", &cfg));
+        assert_eq!(mgr.tracker_count(), 2);
+
+        // Localhost with bad path should be rejected.
+        assert!(!mgr.add_tracker_url_validated("http://127.0.0.1:8080/api/admin", &cfg));
+        assert_eq!(mgr.tracker_count(), 2);
+
+        // UDP URL should pass (UDP skips SSRF checks).
+        assert!(mgr.add_tracker_url_validated("udp://tracker.example.com:6969/announce", &cfg));
+        assert_eq!(mgr.tracker_count(), 3);
     }
 }

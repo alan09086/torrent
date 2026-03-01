@@ -124,7 +124,7 @@ fn has_idna_domain(url: &Url) -> bool {
 /// - UDP trackers skip SSRF checks (they don't follow HTTP redirects) but
 ///   still undergo IDNA validation.
 /// - HTTP/HTTPS trackers check IDNA + localhost path restrictions.
-#[allow(dead_code)] // Wired in during Task 2 (TrackerManager integration).
+#[allow(dead_code)] // Called from TrackerManager, which is wired in during Task 3.
 pub(crate) fn validate_tracker_url(
     url_str: &str,
     config: &UrlSecurityConfig,
