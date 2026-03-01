@@ -65,6 +65,10 @@ pub struct TorrentConfig {
     /// Share mode: relay pieces in memory without writing to disk.
     /// Requires `enable_fast` for RejectRequest when evicting pieces.
     pub share_mode: bool,
+    /// Whether this torrent should use I2P for peer connections.
+    pub enable_i2p: bool,
+    /// Whether to allow mixing I2P and clearnet peers.
+    pub allow_i2p_mixed: bool,
 }
 
 impl Default for TorrentConfig {
@@ -100,6 +104,8 @@ impl Default for TorrentConfig {
             proxy: crate::proxy::ProxyConfig::default(),
             anonymous_mode: false,
             share_mode: false,
+            enable_i2p: false,
+            allow_i2p_mixed: false,
         }
     }
 }
@@ -137,6 +143,8 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             proxy: s.proxy.clone(),
             anonymous_mode: s.anonymous_mode,
             share_mode: s.default_share_mode,
+            enable_i2p: s.enable_i2p,
+            allow_i2p_mixed: s.allow_i2p_mixed,
         }
     }
 }
@@ -498,6 +506,13 @@ mod tests {
         assert_eq!(json, "\"Sharing\"");
         let decoded: TorrentState = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, TorrentState::Sharing);
+    }
+
+    #[test]
+    fn torrent_config_i2p_defaults() {
+        let cfg = TorrentConfig::default();
+        assert!(!cfg.enable_i2p);
+        assert!(!cfg.allow_i2p_mixed);
     }
 
     #[test]

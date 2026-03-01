@@ -19,6 +19,8 @@ pub enum PeerSource {
     Lsd,
     Incoming,
     ResumeData,
+    /// Discovered via I2P SAM bridge.
+    I2p,
 }
 
 /// Per-peer state tracked by the torrent actor.
@@ -135,11 +137,21 @@ mod tests {
             PeerSource::Lsd,
             PeerSource::Incoming,
             PeerSource::ResumeData,
+            PeerSource::I2p,
         ];
         for source in variants {
             let json = serde_json::to_string(&source).unwrap();
             let roundtrip: PeerSource = serde_json::from_str(&json).unwrap();
             assert_eq!(roundtrip, source);
         }
+    }
+
+    #[test]
+    fn peer_source_i2p_serialization() {
+        let source = PeerSource::I2p;
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(json, "\"I2p\"");
+        let roundtrip: PeerSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, PeerSource::I2p);
     }
 }
