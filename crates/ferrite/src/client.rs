@@ -569,6 +569,34 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable SSRF mitigation for tracker and web seed URLs.
+    ///
+    /// When enabled (default), localhost tracker paths are restricted to `/announce`,
+    /// local-network web seed URLs with query strings are rejected, and HTTP redirects
+    /// from public to private IPs are blocked.
+    pub fn ssrf_mitigation(mut self, v: bool) -> Self {
+        self.settings.ssrf_mitigation = v;
+        self
+    }
+
+    /// Allow or reject internationalised (non-ASCII) domain names in URLs.
+    ///
+    /// When false (default), tracker and web seed URLs with IDNA/punycode domains
+    /// are rejected to prevent homograph attacks.
+    pub fn allow_idna(mut self, v: bool) -> Self {
+        self.settings.allow_idna = v;
+        self
+    }
+
+    /// Enable or disable HTTPS validation for HTTP tracker announces.
+    ///
+    /// When true (default), the HTTP client validates TLS certificates.
+    /// When false, invalid certificates are accepted (useful for self-signed trackers).
+    pub fn validate_https_trackers(mut self, v: bool) -> Self {
+        self.settings.validate_https_trackers = v;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings
@@ -830,6 +858,25 @@ mod tests {
         assert!(settings.suggest_mode);
         assert_eq!(settings.max_suggest_pieces, 5);
         assert_eq!(settings.predictive_piece_announce_ms, 100);
+    }
+
+    #[test]
+    fn client_builder_url_security_config() {
+        // Defaults: SSRF on, IDNA rejected, HTTPS validated
+        let config = ClientBuilder::new().into_settings();
+        assert!(config.ssrf_mitigation);
+        assert!(!config.allow_idna);
+        assert!(config.validate_https_trackers);
+
+        // Explicitly configured
+        let config = ClientBuilder::new()
+            .ssrf_mitigation(false)
+            .allow_idna(true)
+            .validate_https_trackers(false)
+            .into_settings();
+        assert!(!config.ssrf_mitigation);
+        assert!(config.allow_idna);
+        assert!(!config.validate_https_trackers);
     }
 
     #[test]

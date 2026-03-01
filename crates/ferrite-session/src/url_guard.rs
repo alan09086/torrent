@@ -47,7 +47,6 @@ impl From<&crate::settings::Settings> for UrlSecurityConfig {
 // ── Errors ────────────────────────────────────────────────────────────
 
 /// Errors returned by URL validation functions.
-#[allow(dead_code)] // Wired in during Task 2 (TrackerManager) and Task 3 (WebSeed).
 #[derive(Debug, thiserror::Error)]
 pub enum UrlGuardError {
     #[error("invalid URL: {0}")]
@@ -60,6 +59,7 @@ pub enum UrlGuardError {
     LocalNetworkQueryString,
 
     #[error("SSRF: redirect from global URL to private/local IP {0} blocked")]
+    #[allow(dead_code)] // Used by validate_redirect() which is called from reqwest redirect policies.
     RedirectToPrivateIp(IpAddr),
 
     #[error("internationalised domain name (IDNA) rejected: {0}")]
@@ -124,7 +124,6 @@ fn has_idna_domain(url: &Url) -> bool {
 /// - UDP trackers skip SSRF checks (they don't follow HTTP redirects) but
 ///   still undergo IDNA validation.
 /// - HTTP/HTTPS trackers check IDNA + localhost path restrictions.
-#[allow(dead_code)] // Called from TrackerManager, which is wired in during Task 3.
 pub(crate) fn validate_tracker_url(
     url_str: &str,
     config: &UrlSecurityConfig,
@@ -155,7 +154,6 @@ pub(crate) fn validate_tracker_url(
 ///
 /// - IDNA check.
 /// - Local-network URLs must not have a query string (prevents info leakage).
-#[allow(dead_code)] // Wired in during Task 3 (WebSeed integration).
 pub(crate) fn validate_web_seed_url(
     url_str: &str,
     config: &UrlSecurityConfig,
@@ -178,7 +176,7 @@ pub(crate) fn validate_web_seed_url(
 /// Validate an HTTP redirect target against SSRF policy.
 ///
 /// Blocks redirects from a public (non-local) origin to a private/local IP.
-#[allow(dead_code)] // Wired in during Task 2/3.
+#[allow(dead_code)] // Public API for callers to pre-check redirects; also tested in scenario tests.
 pub(crate) fn validate_redirect(
     original_url: &Url,
     redirect_url: &Url,
@@ -218,7 +216,6 @@ pub(crate) fn validate_redirect(
 ///
 /// If SSRF mitigation is enabled, redirects from public to private IPs are
 /// rejected. Otherwise a standard 10-hop redirect policy is used.
-#[allow(dead_code)] // Wired in during Task 2/3.
 pub(crate) fn build_redirect_policy(
     config: &UrlSecurityConfig,
 ) -> reqwest::redirect::Policy {
@@ -261,7 +258,6 @@ pub(crate) fn build_redirect_policy(
 }
 
 /// Build a configured reqwest HTTP client with SSRF-safe redirect policy.
-#[allow(dead_code)] // Wired in during Task 2/3.
 pub(crate) fn build_http_client(
     config: &UrlSecurityConfig,
     proxy_url: Option<&str>,
@@ -596,5 +592,66 @@ mod tests {
         let mut cfg = ssrf_config();
         cfg.ssrf_mitigation = false;
         let _policy = build_redirect_policy(&cfg);
+    }
+
+    // ── Integration / scenario tests ──
+
+    #[test]
+    fn scenario_malicious_torrent_ssrf_via_tracker() {
+        let cfg = ssrf_config();
+        let err = validate_tracker_url("http://127.0.0.1:9090/api/admin/delete-all", &cfg)
+            .unwrap_err();
+        assert!(matches!(err, UrlGuardError::LocalhostBadPath(_)));
+        assert!(validate_tracker_url("http://127.0.0.1:9090/announce", &cfg).is_ok());
+    }
+
+    #[test]
+    fn scenario_malicious_torrent_ssrf_via_web_seed() {
+        let cfg = ssrf_config();
+        let err = validate_web_seed_url("http://192.168.1.1/api?action=reboot", &cfg).unwrap_err();
+        assert!(matches!(err, UrlGuardError::LocalNetworkQueryString));
+    }
+
+    #[test]
+    fn scenario_redirect_ssrf() {
+        let cfg = ssrf_config();
+        let orig = Url::parse("http://evil-tracker.example.com/announce").unwrap();
+        let redir = Url::parse("http://169.254.169.254/metadata/v1/").unwrap();
+        let err = validate_redirect(&orig, &redir, &cfg).unwrap_err();
+        assert!(matches!(err, UrlGuardError::RedirectToPrivateIp(_)));
+    }
+
+    #[test]
+    fn scenario_legitimate_local_tracker() {
+        let cfg = ssrf_config();
+        assert!(validate_tracker_url("http://192.168.1.100:6969/announce", &cfg).is_ok());
+        assert!(validate_tracker_url("http://[fe80::1]:6969/announce", &cfg).is_ok());
+    }
+
+    #[test]
+    fn scenario_homograph_attack() {
+        let cfg = ssrf_config();
+        // Cyrillic 'а' (U+0430) looks identical to Latin 'a'.
+        // The url crate punycode-encodes non-ASCII hostnames, so test with the
+        // pre-encoded form. With allow_idna: false the xn-- label is rejected,
+        // preventing homograph-based tracker substitution attacks.
+        assert!(matches!(
+            validate_tracker_url("http://xn--nxasmq6b.evil.com/announce", &cfg),
+            Err(UrlGuardError::IdnaDomain(_))
+        ));
+    }
+
+    #[test]
+    fn scenario_all_protections_disabled() {
+        let cfg = UrlSecurityConfig {
+            ssrf_mitigation: false,
+            allow_idna: true,
+            validate_https_trackers: true,
+        };
+        assert!(validate_tracker_url("http://127.0.0.1:9090/admin", &cfg).is_ok());
+        assert!(validate_web_seed_url("http://10.0.0.1/data?cmd=exec", &cfg).is_ok());
+        let orig = Url::parse("http://tracker.example.com/announce").unwrap();
+        let redir = Url::parse("http://127.0.0.1/admin").unwrap();
+        assert!(validate_redirect(&orig, &redir, &cfg).is_ok());
     }
 }

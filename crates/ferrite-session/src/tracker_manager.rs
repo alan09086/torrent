@@ -103,10 +103,11 @@ pub(crate) struct TrackerManager {
 }
 
 impl TrackerManager {
-    /// Create a TrackerManager from torrent metadata.
+    /// Create a TrackerManager from torrent metadata (unfiltered, for tests only).
     ///
     /// Parses `announce` and `announce_list` (BEP 12) fields, deduplicates URLs,
     /// and classifies each as HTTP or UDP.
+    #[cfg(test)]
     pub fn from_torrent(meta: &TorrentMetaV1, peer_id: Id20, port: u16) -> Self {
         let mut trackers = Vec::new();
         let mut seen_urls = std::collections::HashSet::new();
@@ -270,14 +271,14 @@ impl TrackerManager {
         }
     }
 
-    /// Populate trackers from metadata once it's been fetched (magnet link flow).
+    /// Populate trackers from metadata once it's been fetched (unfiltered, for tests only).
+    #[cfg(test)]
     pub fn set_metadata(&mut self, meta: &TorrentMetaV1) {
         let fresh = Self::from_torrent(meta, self.peer_id, self.port);
         self.trackers = fresh.trackers;
     }
 
     /// Populate trackers from metadata with URL security filtering (magnet link flow).
-    #[allow(dead_code)] // Wired in during Task 3 (TorrentActor integration).
     pub fn set_metadata_filtered(
         &mut self,
         meta: &TorrentMetaV1,

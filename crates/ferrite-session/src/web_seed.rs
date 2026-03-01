@@ -187,11 +187,9 @@ impl WebSeedTask {
         info_hash: Id20,
         cmd_rx: mpsc::Receiver<WebSeedCommand>,
         event_tx: mpsc::Sender<PeerEvent>,
+        security: &crate::url_guard::UrlSecurityConfig,
     ) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .expect("failed to build reqwest client");
+        let http_client = crate::url_guard::build_http_client(security, None, "Ferrite/0.53.0");
 
         Self {
             url,
@@ -506,5 +504,33 @@ mod tests {
         assert!(url.starts_with("http://seed.example.com/seed?info_hash=%AA"));
         assert!(url.contains("&piece=5&"));
         assert!(url.ends_with("&ranges=0-262143"));
+    }
+
+    #[test]
+    fn web_seed_url_validation_global_passes() {
+        let cfg = crate::url_guard::UrlSecurityConfig {
+            ssrf_mitigation: true,
+            allow_idna: false,
+            validate_https_trackers: true,
+        };
+        assert!(crate::url_guard::validate_web_seed_url(
+            "http://cdn.example.com/files/torrent/",
+            &cfg,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn web_seed_url_validation_local_query_rejected() {
+        let cfg = crate::url_guard::UrlSecurityConfig {
+            ssrf_mitigation: true,
+            allow_idna: false,
+            validate_https_trackers: true,
+        };
+        assert!(crate::url_guard::validate_web_seed_url(
+            "http://192.168.1.100/files/?secret=abc",
+            &cfg,
+        )
+        .is_err());
     }
 }
