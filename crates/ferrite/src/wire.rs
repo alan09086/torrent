@@ -15,6 +15,10 @@ pub use ferrite_wire::{
     // Metadata exchange (BEP 9)
     MetadataMessage,
     MetadataMessageType,
+    // BEP 55 Holepunch Extension
+    HolepunchMessage,
+    HolepunchMsgType,
+    HolepunchError,
     // BEP 6 Fast Extension
     allowed_fast_set,
     // Error types

@@ -43,6 +43,7 @@ pub(crate) async fn run_peer(
     anonymous_mode: bool,
     info_bytes: Option<Bytes>,
     plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    enable_holepunch: bool,
 ) -> crate::Result<()> {
     use ferrite_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -103,6 +104,9 @@ pub(crate) async fn run_peer(
     let peer_supports_extensions = their_hs.supports_extensions();
     if peer_supports_extensions {
         let mut ext_hs = ExtHandshake::new_with_plugins(&plugin_names);
+        if !enable_holepunch {
+            ext_hs.m.remove("ut_holepunch");
+        }
         if anonymous_mode {
             ext_hs.v = None;
         }
@@ -164,12 +168,18 @@ pub(crate) async fn run_peer(
     let mut peer_ut_metadata: Option<u8> = None;
     let mut peer_ut_pex: Option<u8> = None;
     let mut peer_lt_trackers: Option<u8> = None;
+    let mut peer_ut_holepunch: Option<u8> = None;
     // Peer's extension IDs for plugin names (for sending responses using their IDs)
     let mut peer_ext_ids: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
     let our_ext = ExtHandshake::new_with_plugins(&plugin_names);
     let our_ut_metadata: Option<u8> = our_ext.ext_id("ut_metadata");
     let our_ut_pex: Option<u8> = our_ext.ext_id("ut_pex");
     let our_lt_trackers: Option<u8> = our_ext.ext_id("lt_trackers");
+    let our_ut_holepunch: Option<u8> = if enable_holepunch {
+        our_ext.ext_id("ut_holepunch")
+    } else {
+        None
+    };
 
     // Notify plugins that a peer connected
     for plugin in plugins.iter() {
@@ -190,10 +200,12 @@ pub(crate) async fn run_peer(
                             &mut peer_ut_metadata,
                             &mut peer_ut_pex,
                             &mut peer_lt_trackers,
+                            &mut peer_ut_holepunch,
                             &mut peer_ext_ids,
                             our_ut_metadata,
                             our_ut_pex,
                             our_lt_trackers,
+                            our_ut_holepunch,
                             both_support_fast,
                             info_bytes.as_ref(),
                             &info_hash,
@@ -231,6 +243,7 @@ pub(crate) async fn run_peer(
                             cmd,
                             &mut framed_write,
                             peer_ut_metadata,
+                            peer_ut_holepunch,
                         ).await {
                             warn!(%addr, "error sending message: {e}");
                             break Some(e.to_string());
@@ -276,10 +289,12 @@ async fn handle_message(
     peer_ut_metadata: &mut Option<u8>,
     peer_ut_pex: &mut Option<u8>,
     peer_lt_trackers: &mut Option<u8>,
+    peer_ut_holepunch: &mut Option<u8>,
     peer_ext_ids: &mut std::collections::HashMap<String, u8>,
     our_ut_metadata: Option<u8>,
     our_ut_pex: Option<u8>,
     our_lt_trackers: Option<u8>,
+    our_ut_holepunch: Option<u8>,
     both_support_fast: bool,
     info_bytes: Option<&Bytes>,
     info_hash: &Id20,
@@ -358,6 +373,7 @@ async fn handle_message(
             *peer_ut_metadata = ext_hs.ext_id("ut_metadata");
             *peer_ut_pex = ext_hs.ext_id("ut_pex");
             *peer_lt_trackers = ext_hs.ext_id("lt_trackers");
+            *peer_ut_holepunch = ext_hs.ext_id("ut_holepunch");
             // Capture peer's extension IDs for registered plugins
             for plugin in plugins.iter() {
                 if let Some(id) = ext_hs.ext_id(plugin.name()) {
@@ -389,6 +405,8 @@ async fn handle_message(
                 handle_pex_message(&payload, event_tx).await?;
             } else if Some(ext_id) == our_lt_trackers {
                 handle_lt_trackers_message(&payload, event_tx).await?;
+            } else if Some(ext_id) == our_ut_holepunch {
+                handle_holepunch_message(addr, &payload, event_tx).await?;
             } else {
                 // Dispatch to registered plugins (IDs 10+)
                 let mut handled = false;
@@ -632,11 +650,53 @@ async fn handle_lt_trackers_message(
     Ok(())
 }
 
+/// Handle an incoming ut_holepunch extension message (BEP 55).
+async fn handle_holepunch_message(
+    addr: SocketAddr,
+    payload: &[u8],
+    event_tx: &mpsc::Sender<PeerEvent>,
+) -> crate::Result<()> {
+    use ferrite_wire::{HolepunchMessage, HolepunchMsgType};
+    let msg = HolepunchMessage::from_bytes(payload)?;
+    match msg.msg_type {
+        HolepunchMsgType::Rendezvous => {
+            event_tx
+                .send(PeerEvent::HolepunchRendezvous {
+                    peer_addr: addr,
+                    target: msg.addr,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        HolepunchMsgType::Connect => {
+            event_tx
+                .send(PeerEvent::HolepunchConnect {
+                    peer_addr: addr,
+                    target: msg.addr,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+        HolepunchMsgType::Error => {
+            event_tx
+                .send(PeerEvent::HolepunchError {
+                    peer_addr: addr,
+                    target: msg.addr,
+                    error_code: msg.error_code,
+                })
+                .await
+                .map_err(|_| crate::Error::Shutdown)?;
+        }
+    }
+    Ok(())
+}
+
 /// Handle a command from the TorrentActor.
 async fn handle_command(
     cmd: PeerCommand,
     framed_write: &mut FramedWrite<tokio::io::WriteHalf<impl AsyncWrite>, MessageCodec>,
     peer_ut_metadata: Option<u8>,
+    peer_ut_holepunch: Option<u8>,
 ) -> crate::Result<()> {
     let msg = match cmd {
         PeerCommand::Request {
@@ -715,6 +775,16 @@ async fn handle_command(
             count: req.count,
             proof_layers: req.proof_layers,
         },
+        PeerCommand::SendHolepunch(hp_msg) => {
+            if let Some(ext_id) = peer_ut_holepunch {
+                let payload = hp_msg.to_bytes();
+                framed_write
+                    .send(Message::Extended { ext_id, payload })
+                    .await
+                    .map_err(crate::Error::Wire)?;
+            }
+            return Ok(());
+        }
         PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());
@@ -848,6 +918,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -898,6 +969,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -948,6 +1020,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1010,6 +1083,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1060,6 +1134,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1119,6 +1194,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1178,6 +1254,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1224,6 +1301,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1309,6 +1387,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1362,6 +1441,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1414,6 +1494,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1479,6 +1560,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1575,6 +1657,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1622,6 +1705,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1669,6 +1753,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1730,6 +1815,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1774,6 +1860,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1837,6 +1924,7 @@ mod tests {
                 false, // anonymous_mode
                 Some(info_bytes),
                 std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1941,6 +2029,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 plugins,
+                true,  // enable_holepunch
             )
             .await
         });
@@ -1990,6 +2079,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 plugins,
+                true,  // enable_holepunch
             )
             .await
         });
@@ -2037,6 +2127,357 @@ mod tests {
                 assert_eq!(payload.as_ref(), b"hello plugin");
             }
             other => panic!("expected echo response, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    // ---- Holepunch Message Tests (BEP 55) ----
+
+    #[tokio::test]
+    async fn holepunch_rendezvous_event() {
+        use ferrite_wire::HolepunchMessage;
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let addr = test_addr();
+        let target: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let msg = HolepunchMessage::rendezvous(target);
+        handle_holepunch_message(addr, &msg.to_bytes(), &event_tx)
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PeerEvent::HolepunchRendezvous {
+                peer_addr,
+                target: t,
+            } => {
+                assert_eq!(peer_addr, addr);
+                assert_eq!(t, target);
+            }
+            other => panic!("expected HolepunchRendezvous, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn holepunch_connect_event() {
+        use ferrite_wire::HolepunchMessage;
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let addr = test_addr();
+        let target: SocketAddr = "192.168.1.100:6881".parse().unwrap();
+        let msg = HolepunchMessage::connect(target);
+        handle_holepunch_message(addr, &msg.to_bytes(), &event_tx)
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PeerEvent::HolepunchConnect {
+                peer_addr,
+                target: t,
+            } => {
+                assert_eq!(peer_addr, addr);
+                assert_eq!(t, target);
+            }
+            other => panic!("expected HolepunchConnect, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn holepunch_error_event() {
+        use ferrite_wire::{HolepunchError, HolepunchMessage};
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let addr = test_addr();
+        let target: SocketAddr = "172.16.0.5:51413".parse().unwrap();
+        let msg = HolepunchMessage::error(target, HolepunchError::NotConnected);
+        handle_holepunch_message(addr, &msg.to_bytes(), &event_tx)
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PeerEvent::HolepunchError {
+                peer_addr,
+                target: t,
+                error_code,
+            } => {
+                assert_eq!(peer_addr, addr);
+                assert_eq!(t, target);
+                assert_eq!(error_code, 2); // NotConnected
+            }
+            other => panic!("expected HolepunchError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn holepunch_disabled_removes_from_ext_handshake() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
+                false, // enable_holepunch = DISABLED
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read the extension handshake — ut_holepunch should NOT be present
+        let msg = read_framed_message(&mut server_stream).await;
+        match msg {
+            Message::Extended { ext_id: 0, payload } => {
+                let ext_hs = ExtHandshake::from_bytes(&payload).unwrap();
+                assert!(
+                    ext_hs.ext_id("ut_holepunch").is_none(),
+                    "ut_holepunch should not be advertised when disabled"
+                );
+                // Other built-ins should still be present
+                assert!(ext_hs.ext_id("ut_metadata").is_some());
+                assert!(ext_hs.ext_id("ut_pex").is_some());
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn holepunch_enabled_advertised_in_ext_handshake() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch = ENABLED
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read the extension handshake — ut_holepunch SHOULD be present
+        let msg = read_framed_message(&mut server_stream).await;
+        match msg {
+            Message::Extended { ext_id: 0, payload } => {
+                let ext_hs = ExtHandshake::from_bytes(&payload).unwrap();
+                assert_eq!(
+                    ext_hs.ext_id("ut_holepunch"),
+                    Some(4),
+                    "ut_holepunch should be advertised at ID 4"
+                );
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn send_holepunch_command_sends_extended_message() {
+        use ferrite_wire::HolepunchMessage;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Do extension handshake — remote advertises ut_holepunch=7
+        let ext_hs_msg = read_framed_message(&mut server_stream).await;
+        let _our_ext_hs = match &ext_hs_msg {
+            Message::Extended { ext_id: 0, payload } => {
+                ExtHandshake::from_bytes(payload).unwrap()
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        };
+
+        // Send remote ext handshake with ut_holepunch=7
+        let mut remote_ext = ExtHandshake::default();
+        remote_ext.m.insert("ut_metadata".into(), 3);
+        remote_ext.m.insert("ut_holepunch".into(), 7);
+        let ext_payload = remote_ext.to_bytes().unwrap();
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended {
+                ext_id: 0,
+                payload: ext_payload,
+            },
+        )
+        .await;
+
+        // Consume the ext handshake event
+        let evt = event_rx.recv().await.unwrap();
+        assert!(matches!(evt, PeerEvent::ExtHandshake { .. }));
+
+        // Send a holepunch message via PeerCommand
+        let target: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let hp_msg = HolepunchMessage::connect(target);
+        cmd_tx
+            .send(PeerCommand::SendHolepunch(hp_msg.clone()))
+            .await
+            .unwrap();
+
+        // Read the extended message from the wire — should use remote's ut_holepunch ID (7)
+        let msg = read_framed_message(&mut server_stream).await;
+        match msg {
+            Message::Extended { ext_id, payload } => {
+                assert_eq!(ext_id, 7, "should use remote's ut_holepunch ID");
+                let parsed = HolepunchMessage::from_bytes(&payload).unwrap();
+                assert_eq!(parsed, hp_msg);
+            }
+            other => panic!("expected Extended holepunch message, got: {other:?}"),
+        }
+
+        cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn incoming_holepunch_routed_to_event() {
+        use ferrite_wire::HolepunchMessage;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let info_hash = test_info_hash();
+        let bitfield = Bitfield::new(10);
+
+        let handle = tokio::spawn(async move {
+            run_peer(
+                test_addr(),
+                client_stream,
+                info_hash,
+                test_peer_id(),
+                bitfield,
+                10,
+                event_tx,
+                cmd_rx,
+                false,
+                false,
+                ferrite_wire::mse::EncryptionMode::Disabled,
+                false, // outbound
+                false, // anonymous_mode
+                None,  // info_bytes
+                std::sync::Arc::new(Vec::new()), // plugins
+                true,  // enable_holepunch
+            )
+            .await
+        });
+
+        do_remote_handshake(&mut server_stream, info_hash, remote_peer_id()).await;
+
+        // Read our ext handshake to find our ut_holepunch ID
+        let ext_hs_msg = read_framed_message(&mut server_stream).await;
+        let our_ut_holepunch_id = match &ext_hs_msg {
+            Message::Extended { ext_id: 0, payload } => {
+                let hs = ExtHandshake::from_bytes(payload).unwrap();
+                hs.ext_id("ut_holepunch").unwrap()
+            }
+            other => panic!("expected ext handshake, got: {other:?}"),
+        };
+        assert_eq!(our_ut_holepunch_id, 4);
+
+        // Send remote ext handshake (so peer enters main loop properly)
+        let mut remote_ext = ExtHandshake::default();
+        remote_ext.m.insert("ut_metadata".into(), 3);
+        let ext_payload = remote_ext.to_bytes().unwrap();
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended {
+                ext_id: 0,
+                payload: ext_payload,
+            },
+        )
+        .await;
+
+        // Consume the ext handshake event
+        let evt = event_rx.recv().await.unwrap();
+        assert!(matches!(evt, PeerEvent::ExtHandshake { .. }));
+
+        // Send a holepunch Rendezvous message using OUR assigned ID (4)
+        let target: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let hp_msg = HolepunchMessage::rendezvous(target);
+        write_framed_message(
+            &mut server_stream,
+            &Message::Extended {
+                ext_id: our_ut_holepunch_id,
+                payload: hp_msg.to_bytes(),
+            },
+        )
+        .await;
+
+        // Should receive a HolepunchRendezvous event
+        let evt = event_rx.recv().await.unwrap();
+        match evt {
+            PeerEvent::HolepunchRendezvous {
+                peer_addr,
+                target: t,
+            } => {
+                assert_eq!(peer_addr, test_addr());
+                assert_eq!(t, target);
+            }
+            other => panic!("expected HolepunchRendezvous, got: {other:?}"),
         }
 
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();

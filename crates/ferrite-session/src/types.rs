@@ -31,6 +31,8 @@ pub struct TorrentConfig {
     pub enable_utp: bool,
     /// Enable HTTP/web seeding (BEP 19, BEP 17).
     pub enable_web_seed: bool,
+    /// Enable BEP 55 holepunch extension for NAT traversal.
+    pub enable_holepunch: bool,
     /// Maximum concurrent web seed connections.
     pub max_web_seeds: usize,
     /// BEP 16: super seeding mode — reveal pieces one-per-peer for maximum diversity.
@@ -82,6 +84,7 @@ impl Default for TorrentConfig {
             encryption_mode: ferrite_wire::mse::EncryptionMode::Enabled,
             enable_utp: true,
             enable_web_seed: true,
+            enable_holepunch: true,
             max_web_seeds: 4,
             super_seeding: false,
             upload_only_announce: true,
@@ -118,6 +121,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             encryption_mode: s.encryption_mode,
             enable_utp: s.enable_utp,
             enable_web_seed: s.enable_web_seed,
+            enable_holepunch: s.enable_holepunch,
             max_web_seeds: 4,
             super_seeding: s.default_super_seeding,
             upload_only_announce: s.upload_only_announce,
@@ -263,6 +267,22 @@ pub(crate) enum PeerEvent {
         peer_addr: SocketAddr,
         request: ferrite_core::HashRequest,
     },
+    /// BEP 55: Received a Rendezvous request (we are the relay).
+    HolepunchRendezvous {
+        peer_addr: SocketAddr,
+        target: SocketAddr,
+    },
+    /// BEP 55: Received a Connect message (we should initiate simultaneous connect).
+    HolepunchConnect {
+        peer_addr: SocketAddr,
+        target: SocketAddr,
+    },
+    /// BEP 55: Received an Error message from the relay.
+    HolepunchError {
+        peer_addr: SocketAddr,
+        target: SocketAddr,
+        error_code: u32,
+    },
 }
 
 /// Commands sent from the `TorrentActor` to a `PeerTask`.
@@ -291,6 +311,8 @@ pub(crate) enum PeerCommand {
     },
     /// BEP 52: Reject a peer's hash request.
     SendHashReject(ferrite_core::HashRequest),
+    /// BEP 55: Send a holepunch message to this peer.
+    SendHolepunch(ferrite_wire::HolepunchMessage),
     Shutdown,
 }
 
@@ -476,5 +498,22 @@ mod tests {
         assert_eq!(json, "\"Sharing\"");
         let decoded: TorrentState = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, TorrentState::Sharing);
+    }
+
+    #[test]
+    fn torrent_config_holepunch_default() {
+        let cfg = TorrentConfig::default();
+        assert!(cfg.enable_holepunch);
+
+        // Also verify it inherits from Settings
+        let s = crate::settings::Settings::default();
+        let tc = TorrentConfig::from(&s);
+        assert!(tc.enable_holepunch);
+
+        // And when disabled in Settings
+        let mut s2 = crate::settings::Settings::default();
+        s2.enable_holepunch = false;
+        let tc2 = TorrentConfig::from(&s2);
+        assert!(!tc2.enable_holepunch);
     }
 }

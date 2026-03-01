@@ -1423,6 +1423,9 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     // BEP 21: mark upload-only peers
                     peer.upload_only = handshake.is_upload_only();
+                    // BEP 55: detect holepunch support
+                    peer.supports_holepunch = handshake.ext_id("ut_holepunch").is_some();
+                    peer.appears_nated = peer.source != PeerSource::Incoming;
                     peer.ext_handshake = Some(handshake);
                 }
             }
@@ -1557,6 +1560,28 @@ impl TorrentActor {
             }
             PeerEvent::IncomingHashRequest { peer_addr, request } => {
                 self.handle_incoming_hash_request(peer_addr, request).await;
+            }
+            PeerEvent::HolepunchRendezvous { peer_addr, target } => {
+                if self.config.enable_holepunch {
+                    self.handle_holepunch_rendezvous(peer_addr, target).await;
+                }
+            }
+            PeerEvent::HolepunchConnect { peer_addr: _, target } => {
+                if self.config.enable_holepunch {
+                    self.handle_holepunch_connect(target).await;
+                }
+            }
+            PeerEvent::HolepunchError { peer_addr: _, target, error_code } => {
+                let message = ferrite_wire::HolepunchError::from_u32(error_code)
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| format!("unknown error code {error_code}"));
+                debug!(%target, %error_code, %message, "holepunch rendezvous failed");
+                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HolepunchFailed {
+                    info_hash: self.info_hash,
+                    addr: target,
+                    error_code: Some(error_code),
+                    message,
+                });
             }
         }
     }
@@ -3260,6 +3285,7 @@ impl TorrentActor {
             let use_proxy = proxy_config.proxy_type != crate::proxy::ProxyType::None
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
+            let enable_holepunch = self.config.enable_holepunch;
             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
             // Pick the uTP socket matching the peer's address family
             let utp_socket = if addr.is_ipv6() {
@@ -3299,6 +3325,7 @@ impl TorrentActor {
                                 anonymous_mode,
                                 info_bytes.clone(),
                                 Arc::clone(&plugins),
+                                enable_holepunch,
                             )
                             .await;
                             return;
@@ -3336,6 +3363,7 @@ impl TorrentActor {
                             anonymous_mode,
                             info_bytes,
                             plugins,
+                            enable_holepunch,
                         )
                         .await;
                     }
@@ -3415,6 +3443,7 @@ impl TorrentActor {
         let enable_fast = self.config.enable_fast;
         let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
         let anonymous_mode = self.config.anonymous_mode;
+        let enable_holepunch = self.config.enable_holepunch;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let plugins = Arc::clone(&self.plugins);
 
@@ -3435,9 +3464,283 @@ impl TorrentActor {
                 anonymous_mode,
                 info_bytes,
                 plugins,
+                enable_holepunch,
             )
             .await;
         });
+    }
+
+    // ── BEP 55 Holepunch (M40) ──
+
+    /// Handle a Rendezvous request from an initiator peer.
+    ///
+    /// We act as relay: validate the request, then forward Connect messages to
+    /// both the initiator and the target so they can perform simultaneous open.
+    async fn handle_holepunch_rendezvous(&mut self, initiator_addr: SocketAddr, target: SocketAddr) {
+        use ferrite_wire::HolepunchMessage;
+
+        debug!(%initiator_addr, %target, "holepunch: processing rendezvous request");
+
+        // Cannot relay to ourselves
+        if target == initiator_addr {
+            debug!(%initiator_addr, "holepunch: rendezvous target == initiator (NoSelf)");
+            if let Some(peer) = self.peers.get(&initiator_addr) {
+                let _ = peer.cmd_tx.send(PeerCommand::SendHolepunch(
+                    HolepunchMessage::error(target, ferrite_wire::HolepunchError::NoSelf),
+                )).await;
+            }
+            return;
+        }
+
+        // Target must be connected to us
+        let target_peer = match self.peers.get(&target) {
+            Some(p) => p,
+            None => {
+                debug!(%initiator_addr, %target, "holepunch: target not connected (NotConnected)");
+                if let Some(peer) = self.peers.get(&initiator_addr) {
+                    let _ = peer.cmd_tx.send(PeerCommand::SendHolepunch(
+                        HolepunchMessage::error(target, ferrite_wire::HolepunchError::NotConnected),
+                    )).await;
+                }
+                return;
+            }
+        };
+
+        // Target must support holepunch
+        if !target_peer.supports_holepunch {
+            debug!(%initiator_addr, %target, "holepunch: target doesn't support holepunch (NoSupport)");
+            if let Some(peer) = self.peers.get(&initiator_addr) {
+                let _ = peer.cmd_tx.send(PeerCommand::SendHolepunch(
+                    HolepunchMessage::error(target, ferrite_wire::HolepunchError::NoSupport),
+                )).await;
+            }
+            return;
+        }
+
+        // Forward Connect to target: "connect to the initiator"
+        let _ = target_peer.cmd_tx.send(PeerCommand::SendHolepunch(
+            HolepunchMessage::connect(initiator_addr),
+        )).await;
+
+        // Forward Connect to initiator: "connect to the target"
+        if let Some(initiator) = self.peers.get(&initiator_addr) {
+            let _ = initiator.cmd_tx.send(PeerCommand::SendHolepunch(
+                HolepunchMessage::connect(target),
+            )).await;
+        }
+
+        debug!(%initiator_addr, %target, "holepunch: relayed connect to both peers");
+    }
+
+    /// Handle a Connect message from the relay — initiate simultaneous open
+    /// by connecting to the target via uTP (preferred) then TCP fallback.
+    async fn handle_holepunch_connect(&mut self, target: SocketAddr) {
+        debug!(%target, "holepunch: received connect, initiating simultaneous open");
+
+        // Don't connect if we're already connected to the target
+        if self.peers.contains_key(&target) {
+            debug!(%target, "holepunch: already connected to target, ignoring");
+            return;
+        }
+
+        // Check peer limit
+        if self.peers.len() >= self.config.max_peers {
+            debug!(%target, "holepunch: at max peers, ignoring connect");
+            return;
+        }
+
+        // Skip banned/filtered peers
+        if self.ban_manager.read().unwrap().is_banned(&target.ip()) {
+            debug!(%target, "holepunch: target is banned");
+            return;
+        }
+        if self.ip_filter.read().unwrap().is_blocked(target.ip()) {
+            debug!(%target, "holepunch: target is IP-filtered");
+            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerBlocked { addr: target });
+            return;
+        }
+
+        // Set up peer state and channels (same pattern as try_connect_peers)
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let bitfield = if self.super_seed.is_some() {
+            Bitfield::new(self.num_pieces)
+        } else {
+            self.chunk_tracker
+                .as_ref()
+                .map(|ct| ct.bitfield().clone())
+                .unwrap_or_else(|| Bitfield::new(self.num_pieces))
+        };
+
+        self.peers.insert(target, PeerState::new(target, self.num_pieces, cmd_tx, PeerSource::Pex));
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
+            info_hash: self.info_hash,
+            addr: target,
+        });
+
+        // Capture variables for the spawned task (mirrors try_connect_peers)
+        let info_hash = self.info_hash;
+        let peer_id = self.our_peer_id;
+        let num_pieces = self.num_pieces;
+        let event_tx = self.event_tx.clone();
+        let alert_tx = self.alert_tx.clone();
+        let alert_mask = Arc::clone(&self.alert_mask);
+        let enable_dht = self.config.enable_dht;
+        let enable_fast = self.config.enable_fast;
+        let encryption_mode = self.config.encryption_mode;
+        let enable_utp = self.config.enable_utp;
+        let anonymous_mode = self.config.anonymous_mode;
+        let enable_holepunch = self.config.enable_holepunch;
+        let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
+        let utp_socket = if target.is_ipv6() {
+            self.utp_socket_v6.clone()
+        } else {
+            self.utp_socket.clone()
+        };
+        let plugins = Arc::clone(&self.plugins);
+
+        tokio::spawn(async move {
+            // Try uTP first (5s timeout) — preferred for holepunch as NAT traversal
+            // works better with UDP-based protocols
+            if enable_utp
+                && let Some(socket) = utp_socket
+            {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    socket.connect(target),
+                ).await {
+                    Ok(Ok(stream)) => {
+                        debug!(%target, "holepunch: uTP connection established");
+                        post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
+                            info_hash,
+                            addr: target,
+                        });
+                        let _ = run_peer(
+                            target,
+                            stream,
+                            info_hash,
+                            peer_id,
+                            bitfield,
+                            num_pieces,
+                            event_tx,
+                            cmd_rx,
+                            enable_dht,
+                            enable_fast,
+                            encryption_mode,
+                            true, // outbound
+                            anonymous_mode,
+                            info_bytes,
+                            plugins,
+                            enable_holepunch,
+                        ).await;
+                        return; // uTP succeeded — don't fall through to TCP
+                    }
+                    Ok(Err(e)) => {
+                        debug!(%target, error = %e, "holepunch: uTP connect failed, trying TCP");
+                    }
+                    Err(_) => {
+                        debug!(%target, "holepunch: uTP connect timed out, trying TCP");
+                    }
+                }
+            }
+
+            // TCP fallback — only reached if uTP didn't succeed
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::net::TcpStream::connect(target),
+            ).await {
+                Ok(Ok(stream)) => {
+                    debug!(%target, "holepunch: TCP connection established");
+                    post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
+                        info_hash,
+                        addr: target,
+                    });
+                    let _ = run_peer(
+                        target,
+                        stream,
+                        info_hash,
+                        peer_id,
+                        bitfield,
+                        num_pieces,
+                        event_tx,
+                        cmd_rx,
+                        enable_dht,
+                        enable_fast,
+                        encryption_mode,
+                        true, // outbound
+                        anonymous_mode,
+                        info_bytes,
+                        plugins,
+                        enable_holepunch,
+                    ).await;
+                }
+                Ok(Err(e)) => {
+                    let message = format!("TCP connect failed: {e}");
+                    debug!(%target, %message, "holepunch: connection failed");
+                    post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchFailed {
+                        info_hash,
+                        addr: target,
+                        error_code: None,
+                        message,
+                    });
+                    let _ = event_tx.send(PeerEvent::Disconnected {
+                        peer_addr: target,
+                        reason: Some(format!("holepunch TCP connect failed: {e}")),
+                    }).await;
+                }
+                Err(_) => {
+                    let message = "TCP connect timed out".to_string();
+                    debug!(%target, "holepunch: TCP connect timed out");
+                    post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchFailed {
+                        info_hash,
+                        addr: target,
+                        error_code: None,
+                        message,
+                    });
+                    let _ = event_tx.send(PeerEvent::Disconnected {
+                        peer_addr: target,
+                        reason: Some("holepunch TCP connect timed out".to_string()),
+                    }).await;
+                }
+            }
+        });
+    }
+
+    /// Try to initiate a holepunch connection to `target` via a connected relay peer.
+    ///
+    /// Finds a relay peer that supports holepunch and sends a Rendezvous message
+    /// asking the relay to broker a connection to `target`.
+    #[allow(dead_code)] // will be wired into peer discovery in Task 7
+    async fn try_holepunch(&mut self, target: SocketAddr) {
+        use ferrite_wire::HolepunchMessage;
+
+        if !self.config.enable_holepunch {
+            return;
+        }
+
+        // Don't holepunch if already connected
+        if self.peers.contains_key(&target) {
+            return;
+        }
+
+        // Find a relay: a connected peer that supports holepunch and has completed
+        // the extension handshake (and isn't the target itself)
+        let relay_addr = self.peers.iter()
+            .find(|(addr, peer)| {
+                **addr != target && peer.supports_holepunch && peer.ext_handshake.is_some()
+            })
+            .map(|(addr, _)| *addr);
+
+        let Some(relay_addr) = relay_addr else {
+            debug!(%target, "holepunch: no suitable relay found");
+            return;
+        };
+
+        debug!(%target, %relay_addr, "holepunch: sending rendezvous via relay");
+        if let Some(relay) = self.peers.get(&relay_addr) {
+            let _ = relay.cmd_tx.send(PeerCommand::SendHolepunch(
+                HolepunchMessage::rendezvous(target),
+            )).await;
+        }
     }
 }
 
@@ -3525,6 +3828,7 @@ mod tests {
             encryption_mode: ferrite_wire::mse::EncryptionMode::Disabled,
             enable_utp: false,
             enable_web_seed: true,
+            enable_holepunch: false,
             max_web_seeds: 4,
             super_seeding: false,
             upload_only_announce: true,

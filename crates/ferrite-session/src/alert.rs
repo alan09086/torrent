@@ -159,6 +159,12 @@ pub enum AlertKind {
     /// A BEP 44 DHT operation failed.
     DhtItemError { target: Id20, message: String },
 
+    // ── BEP 55 Holepunch (M40) ──
+    /// A holepunch connection attempt succeeded.
+    HolepunchSucceeded { info_hash: Id20, addr: SocketAddr },
+    /// A holepunch connection attempt failed.
+    HolepunchFailed { info_hash: Id20, addr: SocketAddr, error_code: Option<u32>, message: String },
+
     // ── Settings (M31) ──
     SettingsChanged,
 }
@@ -238,6 +244,10 @@ impl AlertKind {
             // PORT_MAPPING
             PortMappingSucceeded { .. } => AlertCategory::PORT_MAPPING,
             PortMappingFailed { .. } => AlertCategory::PORT_MAPPING | AlertCategory::ERROR,
+
+            // HOLEPUNCH (BEP 55)
+            HolepunchSucceeded { .. } => AlertCategory::PEER,
+            HolepunchFailed { .. } => AlertCategory::PEER | AlertCategory::ERROR,
 
             // SETTINGS
             SettingsChanged => AlertCategory::STATUS,
@@ -514,6 +524,28 @@ mod tests {
             message: "test".into(),
         });
         assert!(alert.category().contains(AlertCategory::DHT));
+        assert!(alert.category().contains(AlertCategory::ERROR));
+    }
+
+    #[test]
+    fn holepunch_succeeded_alert_has_peer_category() {
+        let alert = Alert::new(AlertKind::HolepunchSucceeded {
+            info_hash: Id20::from([0u8; 20]),
+            addr: "203.0.113.5:6881".parse().unwrap(),
+        });
+        assert!(alert.category().contains(AlertCategory::PEER));
+        assert!(!alert.category().contains(AlertCategory::ERROR));
+    }
+
+    #[test]
+    fn holepunch_failed_alert_has_peer_and_error_category() {
+        let alert = Alert::new(AlertKind::HolepunchFailed {
+            info_hash: Id20::from([0u8; 20]),
+            addr: "203.0.113.5:6881".parse().unwrap(),
+            error_code: Some(1),
+            message: "no support".into(),
+        });
+        assert!(alert.category().contains(AlertCategory::PEER));
         assert!(alert.category().contains(AlertCategory::ERROR));
     }
 }
