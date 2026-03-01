@@ -65,6 +65,8 @@ pub struct TorrentMetaV1 {
     pub httpseeds: Vec<String>,
     /// Raw info dict bytes for BEP 9 metadata serving.
     pub info_bytes: Option<Bytes>,
+    /// PEM-encoded SSL CA certificate from the info dict, if present.
+    pub ssl_cert: Option<Vec<u8>>,
 }
 
 /// The "info" dictionary from a .torrent file.
@@ -90,6 +92,11 @@ pub struct InfoDict {
     /// Source tag (private tracker identification).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source: Option<String>,
+    /// BEP 35 / SSL torrent: PEM-encoded X.509 CA certificate.
+    /// When present, all peer connections must use TLS with certs chaining to this CA.
+    #[serde(rename = "ssl-cert", skip_serializing_if = "Option::is_none", default)]
+    #[serde(with = "serde_bytes")]
+    pub ssl_cert: Option<Vec<u8>>,
 }
 
 /// A file entry in multi-file mode.
@@ -155,6 +162,8 @@ pub fn torrent_from_bytes(data: &[u8]) -> Result<TorrentMetaV1, Error> {
     // Step 3: Validate the info dict
     validate_info(&raw.info)?;
 
+    let ssl_cert = raw.info.ssl_cert.clone();
+
     Ok(TorrentMetaV1 {
         info_hash,
         announce: raw.announce,
@@ -166,6 +175,7 @@ pub fn torrent_from_bytes(data: &[u8]) -> Result<TorrentMetaV1, Error> {
         url_list: raw.url_list.0,
         httpseeds: raw.httpseeds,
         info_bytes: Some(info_raw),
+        ssl_cert,
     })
 }
 
@@ -327,5 +337,42 @@ mod tests {
         // Re-hashing the stored bytes should produce the same info hash
         let rehash = crate::sha1(&info_bytes);
         assert_eq!(rehash, meta.info_hash);
+    }
+
+    #[test]
+    fn ssl_cert_parsed_from_info_dict() {
+        // Build a torrent with ssl-cert in the info dict.
+        let cert_pem = b"-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n";
+        let cert_len = cert_pem.len();
+
+        // Minimal info dict with ssl-cert inserted (keys must be sorted)
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d");
+        info.extend_from_slice(b"6:lengthi1048576e");
+        info.extend_from_slice(b"4:name4:test");
+        info.extend_from_slice(b"12:piece lengthi262144e");
+        info.extend_from_slice(b"6:pieces20:");
+        info.extend_from_slice(&[0u8; 20]);
+        info.extend_from_slice(format!("8:ssl-cert{}:", cert_len).as_bytes());
+        info.extend_from_slice(cert_pem);
+        info.extend_from_slice(b"e");
+
+        let mut torrent = Vec::new();
+        torrent.extend_from_slice(b"d4:info");
+        torrent.extend_from_slice(&info);
+        torrent.extend_from_slice(b"e");
+
+        let meta = torrent_from_bytes(&torrent).unwrap();
+        assert!(meta.ssl_cert.is_some());
+        assert_eq!(meta.ssl_cert.as_deref().unwrap(), cert_pem);
+        assert_eq!(meta.info.ssl_cert.as_deref().unwrap(), cert_pem);
+    }
+
+    #[test]
+    fn ssl_cert_absent_by_default() {
+        let data = make_torrent_bytes_sorted(b"", b"");
+        let meta = torrent_from_bytes(&data).unwrap();
+        assert!(meta.ssl_cert.is_none());
+        assert!(meta.info.ssl_cert.is_none());
     }
 }

@@ -1714,6 +1714,7 @@ fn synthesize_v1_from_v2(v2: &ferrite_core::TorrentMetaV2) -> crate::Result<ferr
         },
         private: None,
         source: None,
+        ssl_cert: v2.ssl_cert.clone(),
     };
 
     Ok(ferrite_core::TorrentMetaV1 {
@@ -1727,6 +1728,7 @@ fn synthesize_v1_from_v2(v2: &ferrite_core::TorrentMetaV2) -> crate::Result<ferr
         info_bytes: None,
         url_list: Vec::new(),
         httpseeds: Vec::new(),
+        ssl_cert: v2.ssl_cert.clone(),
     })
 }
 

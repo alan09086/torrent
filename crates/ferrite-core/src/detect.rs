@@ -87,6 +87,20 @@ impl TorrentMeta {
     pub fn best_v1_info_hash(&self) -> crate::hash::Id20 {
         self.info_hashes().best_v1()
     }
+
+    /// Get the SSL CA certificate bytes (PEM), if this is an SSL torrent.
+    pub fn ssl_cert(&self) -> Option<&[u8]> {
+        match self {
+            TorrentMeta::V1(v1) => v1.ssl_cert.as_deref(),
+            TorrentMeta::V2(v2) => v2.ssl_cert.as_deref(),
+            TorrentMeta::Hybrid(v1, _) => v1.ssl_cert.as_deref(),
+        }
+    }
+
+    /// Whether this torrent requires SSL peer connections.
+    pub fn is_ssl(&self) -> bool {
+        self.ssl_cert().is_some()
+    }
 }
 
 impl From<TorrentMetaV1> for TorrentMeta {
@@ -288,5 +302,14 @@ mod tests {
         let meta = torrent_from_bytes_any(data).unwrap();
         assert!(meta.as_v1().is_some());
         assert!(meta.as_v2().is_none());
+    }
+
+    #[test]
+    fn torrent_meta_ssl_accessors() {
+        // Non-SSL torrent
+        let data = b"d4:infod6:lengthi100e4:name4:test12:piece lengthi256e6:pieces20:\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00ee";
+        let meta = torrent_from_bytes_any(data).unwrap();
+        assert!(!meta.is_ssl());
+        assert!(meta.ssl_cert().is_none());
     }
 }
