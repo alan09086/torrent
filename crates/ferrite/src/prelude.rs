@@ -30,6 +30,9 @@ pub use crate::session::SessionState;
 // File priority (M12)
 pub use crate::core::FilePriority;
 
+// BEP 53 file selection (M36)
+pub use crate::core::FileSelection;
+
 // Encryption mode (M17)
 pub use crate::wire::mse::EncryptionMode;
 

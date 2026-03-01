@@ -239,19 +239,19 @@ impl TrackerManager {
         all_outcomes.extend(result.outcomes);
 
         // Dual-swarm: also announce with v2 hash (truncated) if hybrid
-        if self.info_hashes.is_hybrid() {
-            if let Some(v2) = self.info_hashes.v2 {
-                let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
-                // Only announce the v2 hash if it differs from the v1 hash
-                if v2_as_v1 != self.info_hash {
-                    let result = self.announce_with_hash(v2_as_v1, event, uploaded, downloaded, left).await;
-                    for peer in result.peers {
-                        if seen_peers.insert(peer) {
-                            all_peers.push(peer);
-                        }
+        if self.info_hashes.is_hybrid()
+            && let Some(v2) = self.info_hashes.v2
+        {
+            let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+            // Only announce the v2 hash if it differs from the v1 hash
+            if v2_as_v1 != self.info_hash {
+                let result = self.announce_with_hash(v2_as_v1, event, uploaded, downloaded, left).await;
+                for peer in result.peers {
+                    if seen_peers.insert(peer) {
+                        all_peers.push(peer);
                     }
-                    all_outcomes.extend(result.outcomes);
                 }
+                all_outcomes.extend(result.outcomes);
             }
         }
 

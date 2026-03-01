@@ -220,8 +220,7 @@ impl TorrentHandle {
         } else {
             None
         };
-        let (dht_v2_peers_rx, dht_v6_v2_peers_rx) = if enable_dht && v2_as_v1.is_some() {
-            let v2_id = v2_as_v1.unwrap();
+        let (dht_v2_peers_rx, dht_v6_v2_peers_rx) = if let (true, Some(v2_id)) = (enable_dht, v2_as_v1) {
             let rx4 = if let Some(ref dht) = dht {
                 dht.get_peers(v2_id).await.ok()
             } else {
@@ -827,20 +826,20 @@ impl TorrentActor {
                 debug!("DHT v6 announce failed: {e}");
             }
             // Dual-swarm: also announce v2 hash (truncated) for hybrid torrents
-            if self.info_hashes.is_hybrid() {
-                if let Some(v2) = self.info_hashes.v2 {
-                    let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
-                    if v2_as_v1 != self.info_hash {
-                        if let Some(ref dht) = self.dht
-                            && let Err(e) = dht.announce(v2_as_v1, self.config.listen_port).await
-                        {
-                            debug!("DHT v4 dual-swarm announce failed: {e}");
-                        }
-                        if let Some(ref dht6) = self.dht_v6
-                            && let Err(e) = dht6.announce(v2_as_v1, self.config.listen_port).await
-                        {
-                            debug!("DHT v6 dual-swarm announce failed: {e}");
-                        }
+            if self.info_hashes.is_hybrid()
+                && let Some(v2) = self.info_hashes.v2
+            {
+                let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                if v2_as_v1 != self.info_hash {
+                    if let Some(ref dht) = self.dht
+                        && let Err(e) = dht.announce(v2_as_v1, self.config.listen_port).await
+                    {
+                        debug!("DHT v4 dual-swarm announce failed: {e}");
+                    }
+                    if let Some(ref dht6) = self.dht_v6
+                        && let Err(e) = dht6.announce(v2_as_v1, self.config.listen_port).await
+                    {
+                        debug!("DHT v6 dual-swarm announce failed: {e}");
                     }
                 }
             }
@@ -972,24 +971,24 @@ impl TorrentActor {
                             }
                         }
                         // Dual-swarm: re-search v2 hash
-                        if self.info_hashes.is_hybrid() {
-                            if let Some(v2) = self.info_hashes.v2 {
-                                let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
-                                if self.dht_v2_peers_rx.is_none()
-                                    && let Some(ref dht) = self.dht
-                                {
-                                    match dht.get_peers(v2_as_v1).await {
-                                        Ok(rx) => self.dht_v2_peers_rx = Some(rx),
-                                        Err(e) => debug!("DHT v4 v2-swarm re-search failed: {e}"),
-                                    }
+                        if self.info_hashes.is_hybrid()
+                            && let Some(v2) = self.info_hashes.v2
+                        {
+                            let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                            if self.dht_v2_peers_rx.is_none()
+                                && let Some(ref dht) = self.dht
+                            {
+                                match dht.get_peers(v2_as_v1).await {
+                                    Ok(rx) => self.dht_v2_peers_rx = Some(rx),
+                                    Err(e) => debug!("DHT v4 v2-swarm re-search failed: {e}"),
                                 }
-                                if self.dht_v6_v2_peers_rx.is_none()
-                                    && let Some(ref dht6) = self.dht_v6
-                                {
-                                    match dht6.get_peers(v2_as_v1).await {
-                                        Ok(rx) => self.dht_v6_v2_peers_rx = Some(rx),
-                                        Err(e) => debug!("DHT v6 v2-swarm re-search failed: {e}"),
-                                    }
+                            }
+                            if self.dht_v6_v2_peers_rx.is_none()
+                                && let Some(ref dht6) = self.dht_v6
+                            {
+                                match dht6.get_peers(v2_as_v1).await {
+                                    Ok(rx) => self.dht_v6_v2_peers_rx = Some(rx),
+                                    Err(e) => debug!("DHT v6 v2-swarm re-search failed: {e}"),
                                 }
                             }
                         }
@@ -2469,24 +2468,22 @@ impl TorrentActor {
                                     self.meta_v2 = Some(v2_meta.clone());
                                 }
                                 // Start v2 DHT lookups for hybrid torrents
-                                if new_hashes.is_hybrid() {
-                                    if let Some(v2) = new_hashes.v2 {
-                                        let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
-                                        if v2_as_v1 != self.info_hash {
-                                            if self.dht_v2_peers_rx.is_none() {
-                                                if let Some(ref dht) = self.dht {
-                                                    if let Ok(rx) = dht.get_peers(v2_as_v1).await {
-                                                        self.dht_v2_peers_rx = Some(rx);
-                                                    }
-                                                }
-                                            }
-                                            if self.dht_v6_v2_peers_rx.is_none() {
-                                                if let Some(ref dht6) = self.dht_v6 {
-                                                    if let Ok(rx) = dht6.get_peers(v2_as_v1).await {
-                                                        self.dht_v6_v2_peers_rx = Some(rx);
-                                                    }
-                                                }
-                                            }
+                                if new_hashes.is_hybrid()
+                                    && let Some(v2) = new_hashes.v2
+                                {
+                                    let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                                    if v2_as_v1 != self.info_hash {
+                                        if self.dht_v2_peers_rx.is_none()
+                                            && let Some(ref dht) = self.dht
+                                            && let Ok(rx) = dht.get_peers(v2_as_v1).await
+                                        {
+                                            self.dht_v2_peers_rx = Some(rx);
+                                        }
+                                        if self.dht_v6_v2_peers_rx.is_none()
+                                            && let Some(ref dht6) = self.dht_v6
+                                            && let Ok(rx) = dht6.get_peers(v2_as_v1).await
+                                        {
+                                            self.dht_v6_v2_peers_rx = Some(rx);
                                         }
                                     }
                                 }

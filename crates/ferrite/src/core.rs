@@ -32,6 +32,9 @@ pub use ferrite_core::{FastResumeData, UnfinishedPiece};
 // File priority (M12)
 pub use ferrite_core::FilePriority;
 
+// BEP 53 file selection (M36)
+pub use ferrite_core::FileSelection;
+
 // Address family (M21 IPv6)
 pub use ferrite_core::AddressFamily;
 
