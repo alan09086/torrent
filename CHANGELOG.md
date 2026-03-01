@@ -8,6 +8,29 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.51.0 — 2026-03-01
+
+Mixed-mode TCP/uTP bandwidth algorithm and auto-sequential hysteresis. Eleven crates, 1145 tests, 27 BEPs implemented.
+
+### M45: Mixed-Mode TCP/uTP + Auto-Sequential
+
+### Added
+- `MixedModeAlgorithm` enum: `PreferTcp` (90/10 split) and `PeerProportional` (bandwidth proportional to peer count)
+- `RateLimiterSet::apply_mixed_mode()` dynamically adjusts per-class upload rates based on transport composition
+- Peer transport tracking: `PeerState.transport` field, `PeerEvent::TransportIdentified` event
+- Transport identification for outgoing connections (uTP/TCP) and incoming peers
+- `transport_peer_counts()` helper on TorrentActor for TCP vs uTP peer census
+- Mixed-mode tick in refill interval: adjusts per-class upload rates every 100ms
+- Auto-sequential hysteresis: `evaluate_auto_sequential()` with dual thresholds (activate at 1.6x, deactivate at 1.3x) replacing ad-hoc inline check
+- `auto_sequential_active` state on TorrentActor, evaluated every unchoke interval (10s)
+- 2 new settings: `mixed_mode_algorithm`, `auto_sequential`
+- Facade: `MixedModeAlgorithm` in prelude, 2 `ClientBuilder` methods
+- 8 new tests (1145 total)
+
+### Changed
+- Auto-sequential evaluation moved from inline per-pick to TorrentActor unchoke tick with hysteresis state
+- `PickContext` extended with `auto_sequential_active` field
+
 ## 0.50.0 — 2026-03-01
 
 Piece picker enhancements — extent affinity for disk cache locality, BEP 6 SuggestPiece mode, predictive piece announce, and configurable peer speed classification. Eleven crates, 1137 tests, 27 BEPs implemented.
