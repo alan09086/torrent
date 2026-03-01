@@ -37,6 +37,7 @@ impl ExtHandshake {
         m.insert("ut_metadata".into(), 1);
         m.insert("ut_pex".into(), 2);
         m.insert("lt_trackers".into(), 3);
+        m.insert("ut_holepunch".into(), 4);
 
         ExtHandshake {
             m,
@@ -50,7 +51,7 @@ impl ExtHandshake {
 
     /// Create a handshake advertising built-in + plugin extensions.
     ///
-    /// Built-in extensions are assigned IDs 1–3. Plugin names are assigned
+    /// Built-in extensions are assigned IDs 1–4. Plugin names are assigned
     /// IDs starting at 10, in the order provided.
     pub fn new_with_plugins(plugin_names: &[&str]) -> Self {
         let mut hs = Self::new();
@@ -274,6 +275,7 @@ mod tests {
         assert_eq!(hs.ext_id("ut_metadata"), Some(1));
         assert_eq!(hs.ext_id("ut_pex"), Some(2));
         assert_eq!(hs.ext_id("lt_trackers"), Some(3));
+        assert_eq!(hs.ext_id("ut_holepunch"), Some(4));
         assert_eq!(hs.ext_id("unknown"), None);
     }
 
@@ -318,7 +320,7 @@ mod tests {
     #[test]
     fn ext_handshake_no_plugins() {
         let hs = ExtHandshake::new_with_plugins(&[]);
-        assert_eq!(hs.m.len(), 3); // only built-ins
+        assert_eq!(hs.m.len(), 4); // only built-ins
     }
 
     #[test]
