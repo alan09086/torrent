@@ -483,4 +483,31 @@ mod tests {
         assert!(decoded.url_seeds.is_empty());
         assert!(decoded.http_seeds.is_empty());
     }
+
+    #[test]
+    fn resume_data_hybrid_both_hashes() {
+        // Hybrid torrents store both v1 (SHA-1, 20 bytes) and v2 (SHA-256, 32 bytes)
+        let mut resume = FastResumeData::new(
+            vec![0x11; 20],
+            "hybrid-torrent".into(),
+            "/downloads".into(),
+        );
+        resume.info_hash2 = Some(vec![0x22; 32]);
+        resume.trees.insert(
+            hex::encode([0x33; 32]),
+            vec![0x44; 96], // 3 piece hashes
+        );
+
+        let encoded = ferrite_bencode::to_bytes(&resume).unwrap();
+        let decoded: FastResumeData = ferrite_bencode::from_bytes(&encoded).unwrap();
+
+        // Both hashes present and distinct
+        assert_eq!(decoded.info_hash, vec![0x11; 20]);
+        assert_eq!(decoded.info_hash2.as_deref(), Some([0x22; 32].as_ref()));
+
+        // Trees preserved
+        assert_eq!(decoded.trees.len(), 1);
+        let layer = decoded.trees.values().next().unwrap();
+        assert_eq!(layer.len(), 96);
+    }
 }
