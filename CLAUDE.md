@@ -81,7 +81,9 @@ cargo clippy --workspace -- -D warnings
 
 ### Storage (`ferrite-storage`)
 - `FileMap::new(file_lengths, lengths)` — O(log n) piece-to-file segment mapping
-- `TorrentStorage` trait: `write_chunk()`, `read_chunk()`, `read_piece()`, `verify_piece()`
+- `TorrentStorage` trait: `write_chunk()`, `read_chunk()`, `read_piece()`, `verify_piece()`, `verify_piece_v2()` (SHA-256), `hash_block()` (per-block SHA-256)
+- `ChunkTracker`: v1 chunk tracking + optional v2 block-level Merkle verification (`enable_v2_tracking()`, `mark_block_verified()`, `all_blocks_verified()`)
+- `DiskHandle`: `verify_piece_v2()`, `hash_block()` async methods for v2 disk I/O
 
 ### Session Configuration (`ferrite-session/src/settings.rs`)
 - `Settings` — unified 56-field session configuration (replaces former `SessionConfig`)

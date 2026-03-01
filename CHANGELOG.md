@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.39.0 — 2026-02-28
+
+BEP 52 storage v2 and disk I/O. Eleven crates, 880 tests.
+
+### M34b: BEP 52 Storage v2 + Disk I/O
+
+### Added
+- `TorrentStorage::verify_piece_v2()` — SHA-256 piece verification for v2 torrents
+- `TorrentStorage::hash_block()` — per-block SHA-256 hashing for Merkle verification
+- `ChunkTracker` v2 per-block verification tracking (`enable_v2_tracking()`, `mark_block_verified()`, `all_blocks_verified()`)
+- `DiskJob::HashV2` and `DiskJob::BlockHash` disk I/O variants
+- `DiskHandle::verify_piece_v2()` and `DiskHandle::hash_block()` async methods
+- 11 new tests (4 storage + 5 chunk_tracker + 2 disk)
+
+### Notes
+- All changes are additive — v1 torrents completely unaffected
+- Default trait implementations work with all existing storage backends (MemoryStorage, FilesystemStorage, MmapStorage)
+- `ChunkTracker` v2 tracking is `Option`-wrapped — zero overhead for v1 torrents
+
 ## 0.38.0 — 2026-02-28
 
 BEP 52 wire protocol and hash picker. Eleven crates, 869 tests.
