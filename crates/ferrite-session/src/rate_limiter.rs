@@ -3,6 +3,8 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// Token bucket rate limiter.
 ///
 /// Tokens represent bytes. `rate` is bytes/second.
@@ -84,6 +86,16 @@ impl TokenBucket {
 pub(crate) enum PeerTransport {
     Tcp,
     Utp,
+}
+
+/// Mixed-mode bandwidth allocation algorithm for TCP/uTP coexistence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MixedModeAlgorithm {
+    /// Throttle uTP upload when any TCP peer is connected.
+    /// uTP gets at most 10% of the global upload rate when TCP peers are present.
+    PreferTcp,
+    /// Allocate bandwidth proportional to the number of TCP vs uTP peers.
+    PeerProportional,
 }
 
 /// Per-class rate limiter set (BEP 40 / libtorrent parity).
@@ -195,6 +207,47 @@ impl RateLimiterSet {
         self.utp_download.set_rate(utp_download);
         self.global_upload.set_rate(global_upload);
         self.global_download.set_rate(global_download);
+    }
+
+    /// Apply mixed-mode bandwidth allocation based on peer transport composition.
+    /// Only adjusts upload — download is not throttled by transport type.
+    pub fn apply_mixed_mode(
+        &mut self,
+        algorithm: MixedModeAlgorithm,
+        tcp_peers: usize,
+        utp_peers: usize,
+        global_upload_rate: u64,
+    ) {
+        if global_upload_rate == 0 {
+            self.tcp_upload.set_rate(0);
+            self.utp_upload.set_rate(0);
+            return;
+        }
+        if tcp_peers == 0 && utp_peers == 0 {
+            self.tcp_upload.set_rate(0);
+            self.utp_upload.set_rate(0);
+            return;
+        }
+        match algorithm {
+            MixedModeAlgorithm::PreferTcp => {
+                if tcp_peers > 0 && utp_peers > 0 {
+                    let tcp_rate = global_upload_rate * 9 / 10;
+                    let utp_rate = global_upload_rate / 10;
+                    self.tcp_upload.set_rate(tcp_rate.max(1));
+                    self.utp_upload.set_rate(utp_rate.max(1));
+                } else {
+                    self.tcp_upload.set_rate(0);
+                    self.utp_upload.set_rate(0);
+                }
+            }
+            MixedModeAlgorithm::PeerProportional => {
+                let total = tcp_peers + utp_peers;
+                let tcp_rate = global_upload_rate * tcp_peers as u64 / total as u64;
+                let utp_rate = global_upload_rate * utp_peers as u64 / total as u64;
+                self.tcp_upload.set_rate(if tcp_peers > 0 { tcp_rate.max(1) } else { 0 });
+                self.utp_upload.set_rate(if utp_peers > 0 { utp_rate.max(1) } else { 0 });
+            }
+        }
     }
 }
 
@@ -372,5 +425,50 @@ mod tests {
         rls.refill(Duration::from_secs(1));
         assert!(rls.try_consume_upload(500, PeerTransport::Tcp));
         assert!(!rls.try_consume_upload(1, PeerTransport::Tcp));
+    }
+
+    #[test]
+    fn mixed_mode_prefer_tcp_both_present() {
+        let mut rls = RateLimiterSet::new(0, 0, 0, 0, 10000, 0);
+        rls.apply_mixed_mode(MixedModeAlgorithm::PreferTcp, 3, 5, 10000);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(9000, PeerTransport::Tcp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Tcp));
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(1000, PeerTransport::Utp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn mixed_mode_prefer_tcp_only_utp() {
+        // When only uTP peers exist, per-class rate is set to unlimited (0),
+        // so uTP can consume up to the full global limit without per-class throttling.
+        let mut rls = RateLimiterSet::new(0, 0, 0, 0, 10000, 0);
+        rls.apply_mixed_mode(MixedModeAlgorithm::PreferTcp, 0, 5, 10000);
+        rls.refill(Duration::from_secs(1));
+        // uTP per-class bucket is unlimited, so full global capacity is available
+        assert!(rls.try_consume_upload(10000, PeerTransport::Utp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn mixed_mode_proportional() {
+        let mut rls = RateLimiterSet::new(0, 0, 0, 0, 10000, 0);
+        rls.apply_mixed_mode(MixedModeAlgorithm::PeerProportional, 3, 7, 10000);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(3000, PeerTransport::Tcp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Tcp));
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(7000, PeerTransport::Utp));
+        assert!(!rls.try_consume_upload(1, PeerTransport::Utp));
+    }
+
+    #[test]
+    fn mixed_mode_unlimited_global_noop() {
+        let mut rls = RateLimiterSet::new(0, 0, 0, 0, 0, 0);
+        rls.apply_mixed_mode(MixedModeAlgorithm::PeerProportional, 3, 7, 0);
+        rls.refill(Duration::from_secs(1));
+        assert!(rls.try_consume_upload(1_000_000, PeerTransport::Tcp));
+        assert!(rls.try_consume_upload(1_000_000, PeerTransport::Utp));
     }
 }

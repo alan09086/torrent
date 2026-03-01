@@ -57,3 +57,4 @@ pub use peer_state::PeerSource;
 pub use extension::ExtensionPlugin;
 pub use i2p::{I2pDestination, I2pDestinationError};
 pub use choker::{SeedChokingAlgorithm, ChokingAlgorithm};
+pub use rate_limiter::MixedModeAlgorithm;

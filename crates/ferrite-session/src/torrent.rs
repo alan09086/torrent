@@ -240,6 +240,11 @@ impl TorrentHandle {
 
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
         let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
+        let rate_limiter_set = crate::rate_limiter::RateLimiterSet::new(
+            0, 0, 0, 0,
+            config.upload_rate_limit,
+            config.download_rate_limit,
+        );
 
         let super_seed = if config.super_seeding {
             Some(crate::super_seed::SuperSeedState::new())
@@ -340,6 +345,8 @@ impl TorrentHandle {
             i2p_accept_rx: None,
             i2p_peer_counter: 0,
             ssl_manager,
+            rate_limiter_set,
+            auto_sequential_active: false,
         };
 
         tokio::spawn(actor.run());
@@ -417,6 +424,11 @@ impl TorrentHandle {
 
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
         let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
+        let rate_limiter_set = crate::rate_limiter::RateLimiterSet::new(
+            0, 0, 0, 0,
+            config.upload_rate_limit,
+            config.download_rate_limit,
+        );
 
         let super_seed = if config.super_seeding {
             Some(crate::super_seed::SuperSeedState::new())
@@ -518,6 +530,8 @@ impl TorrentHandle {
             i2p_accept_rx: None,
             i2p_peer_counter: 0,
             ssl_manager,
+            rate_limiter_set,
+            auto_sequential_active: false,
         };
 
         tokio::spawn(actor.run());
@@ -835,6 +849,11 @@ struct TorrentActor {
 
     /// SSL manager for SSL torrent certificate handling (M42).
     ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+
+    /// Per-class rate limiting with mixed-mode (M45).
+    rate_limiter_set: crate::rate_limiter::RateLimiterSet,
+    /// Whether auto-sequential mode is currently active (hysteresis state).
+    auto_sequential_active: bool,
 }
 
 impl TorrentActor {
@@ -849,6 +868,20 @@ impl TorrentActor {
                 new_state,
             });
         }
+    }
+
+    /// Count connected peers by transport type.
+    fn transport_peer_counts(&self) -> (usize, usize) {
+        let mut tcp = 0;
+        let mut utp = 0;
+        for peer in self.peers.values() {
+            match peer.transport {
+                Some(crate::rate_limiter::PeerTransport::Tcp) => tcp += 1,
+                Some(crate::rate_limiter::PeerTransport::Utp) => utp += 1,
+                None => {}
+            }
+        }
+        (tcp, utp)
     }
 
     /// Main event loop.
@@ -1055,6 +1088,14 @@ impl TorrentActor {
                     self.run_choker().await;
                     // Update streaming cursors and piece priorities
                     self.update_streaming_cursors();
+                    // Update auto-sequential hysteresis (M45)
+                    if self.config.auto_sequential {
+                        self.auto_sequential_active = crate::piece_selector::evaluate_auto_sequential(
+                            self.in_flight_pieces.len(),
+                            self.peers.len(),
+                            self.auto_sequential_active,
+                        );
+                    }
                 }
                 // Optimistic unchoke timer
                 _ = optimistic_interval.tick() => {
@@ -1226,6 +1267,15 @@ impl TorrentActor {
                     let elapsed = Duration::from_millis(100);
                     self.upload_bucket.refill(elapsed);
                     self.download_bucket.refill(elapsed);
+                    // Refill per-class buckets and apply mixed-mode (M45)
+                    self.rate_limiter_set.refill(elapsed);
+                    let (tcp_peers, utp_peers) = self.transport_peer_counts();
+                    self.rate_limiter_set.apply_mixed_mode(
+                        self.config.mixed_mode_algorithm,
+                        tcp_peers,
+                        utp_peers,
+                        self.config.upload_rate_limit,
+                    );
                 }
             }
         }
@@ -1626,6 +1676,14 @@ impl TorrentActor {
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.suggested_pieces.insert(index);
+                }
+            }
+            PeerEvent::TransportIdentified {
+                peer_addr,
+                transport,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.transport = Some(transport);
                 }
             }
             PeerEvent::Disconnected {
@@ -3039,6 +3097,7 @@ impl TorrentActor {
             whole_pieces_threshold: self.config.whole_pieces_threshold,
             piece_size: self.lengths.as_ref().map(|l| l.piece_length() as u32).unwrap_or(262144),
             extent_affinity: self.config.piece_extent_affinity,
+            auto_sequential_active: self.config.auto_sequential && self.auto_sequential_active,
         };
 
         let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
@@ -3523,6 +3582,10 @@ impl TorrentActor {
                     {
                         Ok(Ok(stream)) => {
                             debug!(%addr, "uTP connection established");
+                            let _ = event_tx.send(PeerEvent::TransportIdentified {
+                                peer_addr: addr,
+                                transport: crate::rate_limiter::PeerTransport::Utp,
+                            }).await;
                             let _ = run_peer(
                                 addr,
                                 stream,
@@ -3561,6 +3624,10 @@ impl TorrentActor {
                 };
                 match tcp_result {
                     Ok(stream) => {
+                        let _ = event_tx.send(PeerEvent::TransportIdentified {
+                            peer_addr: addr,
+                            transport: crate::rate_limiter::PeerTransport::Tcp,
+                        }).await;
                         // SSL torrent: wrap TCP stream in TLS (M42)
                         if let Some(ref client_config) = ssl_client_config {
                             match ferrite_wire::ssl::connect_tls(stream, info_hash, Arc::clone(client_config)).await {
@@ -3721,6 +3788,15 @@ impl TorrentActor {
 
         self.peers
             .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, PeerSource::Incoming));
+        // Identify transport for incoming peers (M45)
+        let transport = if mode_override.is_some() {
+            crate::rate_limiter::PeerTransport::Utp
+        } else {
+            crate::rate_limiter::PeerTransport::Tcp
+        };
+        if let Some(peer) = self.peers.get_mut(&addr) {
+            peer.transport = Some(transport);
+        }
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
             info_hash: self.info_hash,
             addr,
@@ -4155,6 +4231,8 @@ mod tests {
             suggest_mode: false,
             max_suggest_pieces: 10,
             predictive_piece_announce_ms: 0,
+            mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
+            auto_sequential: true,
         }
     }
 

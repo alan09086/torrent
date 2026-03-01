@@ -88,10 +88,13 @@ pub(crate) struct PickContext<'a> {
     pub sequential_download: bool,
     pub completed_count: u32,
     pub initial_picker_threshold: u32,
+    #[allow(dead_code)] // Reserved for future per-pick peer-count decisions.
     pub connected_peer_count: usize,
     pub whole_pieces_threshold: u32,
     pub piece_size: u32,
     pub extent_affinity: bool,
+    /// Whether auto-sequential mode is currently active (managed by TorrentActor).
+    pub auto_sequential_active: bool,
 }
 
 /// Result of a pick: which piece and blocks to request.
@@ -372,10 +375,6 @@ impl PieceSelector {
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
-        // Auto-sequential: if too many partial pieces, force sequential
-        let auto_sequential = ctx.in_flight_pieces.len() as f64
-            > 1.5 * ctx.connected_peer_count as f64;
-
         // Snubbed peers: pick highest-availability piece (reverse rarest-first)
         if ctx.peer_is_snubbed {
             return self.pick_reverse_rarest(ctx, missing_chunks);
@@ -389,7 +388,7 @@ impl PieceSelector {
         }
 
         // Sequential mode or auto-sequential
-        if ctx.sequential_download || auto_sequential {
+        if ctx.sequential_download || ctx.auto_sequential_active {
             return self.pick_sequential(ctx, missing_chunks);
         }
 
@@ -649,6 +648,33 @@ pub fn build_wanted_pieces(
         offset += file_len;
     }
     wanted
+}
+
+/// Hysteresis thresholds for auto-sequential mode.
+const AUTO_SEQUENTIAL_ACTIVATE_RATIO: f64 = 1.6;
+const AUTO_SEQUENTIAL_DEACTIVATE_RATIO: f64 = 1.3;
+
+/// Evaluate auto-sequential hysteresis.
+///
+/// Returns the new auto_sequential_active state. Uses dual thresholds to
+/// prevent flapping:
+/// - Activates when in-flight / peers > 1.6 (partial-piece explosion)
+/// - Deactivates when in-flight / peers < 1.3
+/// - Stays in current state between thresholds
+pub(crate) fn evaluate_auto_sequential(
+    in_flight_count: usize,
+    connected_peers: usize,
+    currently_active: bool,
+) -> bool {
+    if connected_peers == 0 {
+        return false;
+    }
+    let ratio = in_flight_count as f64 / connected_peers as f64;
+    if currently_active {
+        ratio >= AUTO_SEQUENTIAL_DEACTIVATE_RATIO
+    } else {
+        ratio > AUTO_SEQUENTIAL_ACTIVATE_RATIO
+    }
 }
 
 #[cfg(test)]
@@ -975,6 +1001,7 @@ mod tests {
             whole_pieces_threshold: 20,
             piece_size: 262_144,
             extent_affinity: false,
+            auto_sequential_active: false,
         }
     }
 
@@ -1372,6 +1399,7 @@ mod tests {
         );
         ctx.connected_peer_count = 4;
         ctx.completed_count = 100; // past initial threshold
+        ctx.auto_sequential_active = true;
 
         let chunks = |piece: u32| {
             if piece < 10 {
@@ -1556,5 +1584,34 @@ mod tests {
         let chunks = |_piece: u32| vec![(0, 16384)];
         let result = sel.pick_blocks(&ctx, chunks).unwrap();
         assert!(result.piece >= 16); // falls back to extent 1
+    }
+
+    #[test]
+    fn auto_sequential_hysteresis_activation() {
+        // 4 peers, need > 1.6 * 4 = 6.4 in-flight to activate
+        assert!(!evaluate_auto_sequential(6, 4, false));  // 6/4 = 1.5 < 1.6
+        assert!(evaluate_auto_sequential(7, 4, false));   // 7/4 = 1.75 > 1.6
+    }
+
+    #[test]
+    fn auto_sequential_hysteresis_deactivation() {
+        // 4 peers, need < 1.3 * 4 = 5.2 in-flight to deactivate
+        assert!(evaluate_auto_sequential(6, 4, true));    // 6/4 = 1.5 >= 1.3, stays active
+        assert!(!evaluate_auto_sequential(5, 4, true));   // 5/4 = 1.25 < 1.3, deactivates
+    }
+
+    #[test]
+    fn auto_sequential_hysteresis_band() {
+        // In the band between 1.3 and 1.6 — state doesn't change
+        // 10 peers: activate > 16, deactivate < 13
+        // At 14 in-flight (ratio 1.4): in the band
+        assert!(!evaluate_auto_sequential(14, 10, false)); // inactive stays inactive
+        assert!(evaluate_auto_sequential(14, 10, true));   // active stays active
+    }
+
+    #[test]
+    fn auto_sequential_zero_peers() {
+        assert!(!evaluate_auto_sequential(10, 0, false));
+        assert!(!evaluate_auto_sequential(10, 0, true));
     }
 }

@@ -85,6 +85,10 @@ pub struct TorrentConfig {
     pub max_suggest_pieces: usize,
     /// Delay (ms) before announcing Have for a piece still being written to disk (0 = disabled).
     pub predictive_piece_announce_ms: u64,
+    /// Mixed-mode TCP/uTP bandwidth allocation algorithm.
+    pub mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm,
+    /// Enable automatic sequential mode switching on partial-piece explosion.
+    pub auto_sequential: bool,
 }
 
 impl Default for TorrentConfig {
@@ -129,6 +133,8 @@ impl Default for TorrentConfig {
             suggest_mode: false,
             max_suggest_pieces: 10,
             predictive_piece_announce_ms: 0,
+            mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
+            auto_sequential: true,
         }
     }
 }
@@ -175,6 +181,8 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             suggest_mode: s.suggest_mode,
             max_suggest_pieces: s.max_suggest_pieces,
             predictive_piece_announce_ms: s.predictive_piece_announce_ms,
+            mixed_mode_algorithm: s.mixed_mode_algorithm,
+            auto_sequential: s.auto_sequential,
         }
     }
 }
@@ -274,6 +282,11 @@ pub(crate) enum PeerEvent {
     SuggestPiece {
         peer_addr: SocketAddr,
         index: u32,
+    },
+    /// Peer successfully connected with a specific transport.
+    TransportIdentified {
+        peer_addr: SocketAddr,
+        transport: crate::rate_limiter::PeerTransport,
     },
     Disconnected {
         peer_addr: SocketAddr,

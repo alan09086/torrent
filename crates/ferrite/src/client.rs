@@ -539,6 +539,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the mixed-mode TCP/uTP bandwidth allocation algorithm.
+    pub fn mixed_mode_algorithm(mut self, algorithm: ferrite_session::MixedModeAlgorithm) -> Self {
+        self.settings.mixed_mode_algorithm = algorithm;
+        self
+    }
+
+    /// Enable or disable automatic sequential mode switching.
+    pub fn auto_sequential(mut self, enable: bool) -> Self {
+        self.settings.auto_sequential = enable;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings
