@@ -4393,6 +4393,7 @@ mod tests {
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
+            url_security: crate::url_guard::UrlSecurityConfig::default(),
         }
     }
 

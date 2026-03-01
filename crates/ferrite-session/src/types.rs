@@ -95,6 +95,8 @@ pub struct TorrentConfig {
     pub peer_turnover_cutoff: f64,
     /// Seconds between turnover checks (0 = disabled).
     pub peer_turnover_interval: u64,
+    /// URL security configuration for SSRF mitigation and IDNA checking.
+    pub url_security: crate::url_guard::UrlSecurityConfig,
 }
 
 impl Default for TorrentConfig {
@@ -144,6 +146,7 @@ impl Default for TorrentConfig {
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
+            url_security: crate::url_guard::UrlSecurityConfig::default(),
         }
     }
 }
@@ -195,6 +198,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             peer_turnover: s.peer_turnover,
             peer_turnover_cutoff: s.peer_turnover_cutoff,
             peer_turnover_interval: s.peer_turnover_interval,
+            url_security: crate::url_guard::UrlSecurityConfig::from(s),
         }
     }
 }
@@ -676,5 +680,25 @@ mod tests {
         assert!((cfg.peer_turnover - 0.1).abs() < f64::EPSILON);
         assert!((cfg.peer_turnover_cutoff - 0.75).abs() < f64::EPSILON);
         assert_eq!(cfg.peer_turnover_interval, 120);
+    }
+
+    #[test]
+    fn torrent_config_url_security_default() {
+        let cfg = TorrentConfig::default();
+        assert!(cfg.url_security.ssrf_mitigation);
+        assert!(!cfg.url_security.allow_idna);
+        assert!(cfg.url_security.validate_https_trackers);
+    }
+
+    #[test]
+    fn torrent_config_url_security_from_settings() {
+        let mut s = crate::settings::Settings::default();
+        s.ssrf_mitigation = false;
+        s.allow_idna = true;
+        s.validate_https_trackers = false;
+        let cfg = TorrentConfig::from(&s);
+        assert!(!cfg.url_security.ssrf_mitigation);
+        assert!(cfg.url_security.allow_idna);
+        assert!(!cfg.url_security.validate_https_trackers);
     }
 }
