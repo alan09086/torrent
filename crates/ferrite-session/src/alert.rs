@@ -134,6 +134,24 @@ pub enum AlertKind {
     /// v1 and v2 hashes disagree on the same piece — the .torrent data is inconsistent.
     InconsistentHashes { info_hash: Id20, piece: u32 },
 
+    // ── BEP 44 DHT storage (M38) ──
+    // TODO: Wire DHT item alerts when session-level dht_put/dht_get is added
+    /// An immutable DHT put completed.
+    DhtPutComplete { target: Id20 },
+    /// A mutable DHT put completed.
+    DhtMutablePutComplete { target: Id20, seq: i64 },
+    /// Result of a DHT get (immutable). `value` is None if not found.
+    DhtGetResult { target: Id20, value: Option<Vec<u8>> },
+    /// Result of a DHT mutable get. `value` is None if not found.
+    DhtMutableGetResult {
+        target: Id20,
+        value: Option<Vec<u8>>,
+        seq: Option<i64>,
+        public_key: [u8; 32],
+    },
+    /// A BEP 44 DHT operation failed.
+    DhtItemError { target: Id20, message: String },
+
     // ── Settings (M31) ──
     SettingsChanged,
 }
@@ -181,6 +199,11 @@ impl AlertKind {
             // DHT
             DhtBootstrapComplete | DhtGetPeers { .. } => AlertCategory::DHT,
             DhtNodeIdViolation { .. } => AlertCategory::DHT | AlertCategory::ERROR,
+            DhtPutComplete { .. }
+            | DhtMutablePutComplete { .. }
+            | DhtGetResult { .. }
+            | DhtMutableGetResult { .. } => AlertCategory::DHT,
+            DhtItemError { .. } => AlertCategory::DHT | AlertCategory::ERROR,
 
             // STORAGE
             FileRenamed { .. }
@@ -455,6 +478,24 @@ mod tests {
         let alert = Alert::new(AlertKind::DhtNodeIdViolation {
             node_id: Id20::from([0u8; 20]),
             addr: "203.0.113.5:6881".parse().unwrap(),
+        });
+        assert!(alert.category().contains(AlertCategory::DHT));
+        assert!(alert.category().contains(AlertCategory::ERROR));
+    }
+
+    #[test]
+    fn dht_put_complete_alert_has_dht_category() {
+        let alert = Alert::new(AlertKind::DhtPutComplete {
+            target: Id20::from([0u8; 20]),
+        });
+        assert!(alert.category().contains(AlertCategory::DHT));
+    }
+
+    #[test]
+    fn dht_item_error_alert_has_dht_and_error_category() {
+        let alert = Alert::new(AlertKind::DhtItemError {
+            target: Id20::from([0u8; 20]),
+            message: "test".into(),
         });
         assert!(alert.category().contains(AlertCategory::DHT));
         assert!(alert.category().contains(AlertCategory::ERROR));

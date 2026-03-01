@@ -15,6 +15,7 @@ ferrite-storage = { path = "../ferrite-storage" }
 ferrite-session = { path = "../ferrite-session" }
 ferrite-utp = { path = "../ferrite-utp" }
 ferrite-nat = { path = "../ferrite-nat" }
+ed25519-dalek = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
