@@ -8,6 +8,31 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.49.0 — 2026-03-01
+
+Pluggable choking algorithms — refactored monolithic choker into Strategy pattern with four implementations. Eleven crates, 1124 tests, 27 BEPs implemented.
+
+### M43: Seed Choking Algorithms + Rate-Based Choker
+
+### Added
+- `ChokerStrategy` trait for pluggable choking algorithm implementations
+- `FixedSlotsStrategy` — extracted existing tit-for-tat choker into trait-based implementation
+- `RateBasedStrategy` — dynamically adjusts unchoke slot count based on upload throughput utilization
+- `SeedChokingAlgorithm` enum: `FastestUpload` (default), `RoundRobin`, `AntiLeech` — controls peer ranking in seed mode
+- `ChokingAlgorithm` enum: `FixedSlots` (default), `RateBased` — selects unchoke slot strategy
+- AntiLeech seed-mode: prioritizes non-seed peers (actual leechers) over seeds (hit-and-run)
+- RoundRobin seed-mode: rotates unchoke slots periodically for fairness
+- `is_seed` field on `PeerInfo` for bitfield-completeness + upload-only detection
+- `seed_choking_algorithm` and `choking_algorithm` settings fields with JSON serialization
+- TorrentActor throughput observation for rate-based dynamic slot adjustment
+- Facade: `SeedChokingAlgorithm`, `ChokingAlgorithm` re-exports, 2 `ClientBuilder` methods
+- 20 new tests (1124 total)
+
+### Changed
+- `Choker` refactored from monolithic struct to thin dispatcher over `Box<dyn ChokerStrategy>`
+- `Choker::new(4)` remains backward-compatible (creates FixedSlots + FastestUpload internally)
+- `Choker::with_algorithms()` constructor for configurable strategy selection
+
 ## 0.48.0 — 2026-03-01
 
 BEP 35 SSL torrents — TLS-encrypted peer connections with per-torrent CA trust, SNI-based routing, and self-signed certificate generation. Eleven crates, 1104 tests, 27 BEPs implemented.
