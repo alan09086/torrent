@@ -95,6 +95,11 @@ pub(crate) enum DiskJob {
         reply: oneshot::Sender<ferrite_storage::Result<()>>,
     },
 
+    CachedPieces {
+        info_hash: Id20,
+        reply: oneshot::Sender<Vec<u32>>,
+    },
+
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -360,6 +365,16 @@ impl DiskHandle {
         )))
     }
 
+    /// Query which pieces are currently in the read cache for this torrent.
+    pub async fn cached_pieces(&self) -> Vec<u32> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(DiskJob::CachedPieces {
+            info_hash: self.info_hash,
+            reply: tx,
+        }).await;
+        rx.await.unwrap_or_default()
+    }
+
     /// Move a torrent's storage to a new directory.
     pub async fn move_storage(&self, new_path: PathBuf) -> ferrite_storage::Result<()> {
         let (tx, rx) = oneshot::channel();
@@ -531,6 +546,16 @@ impl DiskActor {
             DiskJob::MoveStorage { reply, .. } => {
                 // TODO: implement in future milestone
                 let _ = reply.send(Ok(()));
+            }
+            DiskJob::CachedPieces { info_hash, reply } => {
+                let pieces: Vec<u32> = self.cache
+                    .cached_keys()
+                    .filter(|(ih, _, _)| *ih == info_hash)
+                    .map(|(_, piece, _)| *piece)
+                    .collect::<std::collections::HashSet<u32>>()
+                    .into_iter()
+                    .collect();
+                let _ = reply.send(pieces);
             }
             DiskJob::Shutdown { .. } => unreachable!(),
         }

@@ -340,6 +340,8 @@ pub(crate) enum PeerCommand {
     SendExtHandshake(ferrite_wire::ExtHandshake),
     /// Send a full bitfield mid-connection (batched Have fallback).
     SendBitfield(Bytes),
+    /// BEP 6: Suggest a piece to the peer.
+    SuggestPiece(u32),
     /// BEP 52: Send a hash request to the peer.
     SendHashRequest(ferrite_core::HashRequest),
     /// BEP 52: Send hashes in response to a peer's request.
