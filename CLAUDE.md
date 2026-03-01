@@ -65,7 +65,8 @@ cargo clippy --workspace -- -D warnings
 - `TorrentMetaV2` — v2 torrent (BEP 52). Fields: info_hashes, info_bytes, info (InfoDictV2), piece_layers
 - `InfoDictV2` — v2 info dict with nested `FileTreeNode` file tree. `files()`, `num_pieces()`, `file_piece_ranges()`
 - `torrent_v2_from_bytes(data) -> Result<TorrentMetaV2>` — parses v2 .torrent from raw bytes
-- `TorrentMeta` enum (`V1`/`V2`) — `torrent_from_bytes_any(data)` auto-detects format
+- `TorrentMeta` enum (`V1`/`V2`/`Hybrid`) — `torrent_from_bytes_any(data)` auto-detects format. `as_v1()`/`as_v2()` accessors work for both pure and hybrid variants
+- `TorrentVersion` enum (`V1Only`/`V2Only`/`Hybrid`) — version-aware dispatch throughout session and creation
 - `Magnet` — `info_hashes: InfoHashes` (v1 + v2), `info_hash()` method for backward compat. Parses `urn:btih:` and `urn:btmh:`
 - Info-hash = SHA1 (v1) or SHA-256 (v2) of **raw bencode bytes** of info dict (not re-serialized)
 
@@ -85,9 +86,11 @@ cargo clippy --workspace -- -D warnings
 - `ChunkTracker`: v1 chunk tracking + optional v2 block-level Merkle verification (`enable_v2_tracking()`, `mark_block_verified()`, `all_blocks_verified()`)
 - `DiskHandle`: `verify_piece_v2()`, `hash_block()` async methods for v2 disk I/O
 
-### BEP 52 Session Integration (`ferrite-session/src/torrent.rs`, M34c)
-- `TorrentActor` v2 fields: `hash_picker: Option<HashPicker>`, `is_v2: bool`, `meta_v2: Option<TorrentMetaV2>`
-- `verify_and_mark_piece()` dispatches to v1 (SHA-1) or v2 (per-block SHA-256 Merkle) path
+### BEP 52 Session Integration (`ferrite-session/src/torrent.rs`, M34c/M35)
+- `TorrentActor` fields: `hash_picker: Option<HashPicker>`, `version: TorrentVersion`, `meta_v2: Option<TorrentMetaV2>`
+- `verify_and_mark_piece()` dispatches to v1 (SHA-1), v2 (SHA-256 Merkle), or hybrid (both) path
+- `verify_and_mark_piece_hybrid()` — dual verification with `HashResult` tribool decision matrix
+- `on_inconsistent_hashes()` — fatal handler when v1/v2 disagree (destroys hash picker, pauses torrent)
 - `on_piece_verified()` / `on_piece_hash_failed()` — shared post-verification logic (Have broadcast, completion check, smart banning)
 - `handle_hashes_received()` — validates Merkle proof via `HashPicker::add_hashes()`, resolves deferred pieces
 - `PeerEvent`/`PeerCommand` v2 variants for hash message exchange (wire IDs 21-23)
@@ -110,7 +113,8 @@ cargo clippy --workspace -- -D warnings
 
 ### Torrent Creation (`ferrite-core/src/create.rs`)
 - `CreateTorrent` — owned-self builder: `new()` → `add_file/dir()` → `set_*()` → `generate()`
-- `CreateTorrentResult` — `meta: TorrentMetaV1` + `bytes: Vec<u8>` (raw .torrent file)
+- `CreateTorrentResult` — `meta: TorrentMeta` + `bytes: Vec<u8>` (raw .torrent file)
+- `set_version(TorrentVersion)` — create v1, hybrid, or v2 .torrent files (v2-only not yet supported)
 - `auto_piece_size(total) -> u64` — libtorrent-style piece size selection (32 KiB–4 MiB)
 - `TorrentOutput` (private) — serializable wrapper for outer .torrent dict (bencode key renames)
 - Info hash: serialize `InfoDict` → SHA1 (deterministic via SortedMapSerializer)

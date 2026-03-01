@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.41.0 — 2026-03-01
+
+Hybrid v1+v2 torrent support (BEP 52). Eleven crates, 895 tests.
+
+### M35: Hybrid v1+v2 Torrents
+
+### Added
+- `TorrentVersion` enum (`V1Only`, `V2Only`, `Hybrid`) for version-aware dispatch
+- `TorrentMeta::Hybrid(Box<TorrentMetaV1>, Box<TorrentMetaV2>)` variant with `as_v1()` / `as_v2()` accessors
+- `From<TorrentMetaV1>` and `From<TorrentMetaV2>` impls for ergonomic `.into()` conversion
+- Hybrid torrent detection: `meta version = 2` + `pieces` key in info dict
+- `HashResult` tribool (`Passed`/`Failed`/`NotApplicable`) for dual-hash verification
+- `verify_and_mark_piece_hybrid()` — dual SHA-1 + SHA-256 verification with decision matrix
+- `run_v2_block_verification()` — extracted side-effect-free v2 verification for reuse
+- `AlertKind::InconsistentHashes` — fatal error when v1 and v2 hashes disagree on same piece
+- `on_inconsistent_hashes()` — destroys hash picker, pauses torrent, posts error alerts
+- `CreateTorrent::set_version(TorrentVersion)` — create hybrid `.torrent` files
+- Hybrid creation: dual SHA-1 piece + SHA-256 Merkle hashing, merged info dict, piece layers
+- `FileTreeNode::to_bencode()` — serialize v2 file tree back to bencode
+- `TorrentVersion` re-exported from `ferrite::core` and `ferrite::prelude`
+
+### Changed
+- `TorrentActor.is_v2: bool` → `version: TorrentVersion` with match dispatch
+- `SessionHandle::add_torrent()` accepts `TorrentMeta` (was `TorrentMetaV1`)
+- `SessionCommand::AddTorrent.meta` → `Box<TorrentMeta>`
+- `TorrentHandle::from_torrent()` takes `version: TorrentVersion` + `meta_v2: Option<TorrentMetaV2>`
+- `TorrentSource::Meta(Box<TorrentMeta>)` and `AddTorrentParams::from_torrent(TorrentMeta)`
+- `CreateTorrentResult.meta` → `TorrentMeta` (was `TorrentMetaV1`)
+
+### Notes
+- Pure v2-only torrents through session return `Error::Config` (not yet supported)
+- Dual-swarm tracker/DHT announces deferred (hybrid announces on v1 swarm only)
+- v1-only and v2-only torrents completely unaffected
+
 ## 0.40.0 — 2026-02-28
 
 BEP 52 session integration — full v2 verification flow. Eleven crates, 883 tests.
