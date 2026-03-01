@@ -36,6 +36,53 @@ use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, Torren
 /// Shared global rate limiter bucket.
 type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
 
+/// Relocate torrent files from `src_base` to `dst_base`.
+///
+/// For each file, tries `rename` first (fast, same-filesystem), then falls
+/// back to copy + delete (cross-filesystem). Creates parent directories as
+/// needed. Returns error on the first failure.
+fn relocate_files(
+    src_base: &std::path::Path,
+    dst_base: &std::path::Path,
+    file_paths: &[std::path::PathBuf],
+) -> std::io::Result<()> {
+    for rel_path in file_paths {
+        let src = src_base.join(rel_path);
+        let dst = dst_base.join(rel_path);
+
+        if !src.exists() {
+            // File may not exist yet (e.g., not downloaded)
+            continue;
+        }
+
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Try rename first (O(1) on same filesystem)
+        if std::fs::rename(&src, &dst).is_err() {
+            // Cross-filesystem: copy + delete
+            std::fs::copy(&src, &dst)?;
+            std::fs::remove_file(&src)?;
+        }
+    }
+
+    // Try to remove empty parent directories from source
+    // (best-effort, ignore errors)
+    for rel_path in file_paths {
+        let mut dir = src_base.join(rel_path);
+        dir.pop(); // get parent dir
+        while dir != *src_base {
+            if std::fs::remove_dir(&dir).is_err() {
+                break; // not empty or other error
+            }
+            dir.pop();
+        }
+    }
+
+    Ok(())
+}
+
 /// Cloneable handle for interacting with a running torrent.
 #[derive(Clone)]
 pub struct TorrentHandle {
@@ -721,6 +768,10 @@ impl TorrentActor {
                             self.external_ip = Some(ip);
                             self.sort_available_peers();
                         }
+                        Some(TorrentCommand::MoveStorage { new_path, reply }) => {
+                            let result = self.handle_move_storage(new_path).await;
+                            let _ = reply.send(result);
+                        }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
                             self.shutdown_peers().await;
@@ -897,6 +948,66 @@ impl TorrentActor {
                 pb.cmp(&pa)
             });
         }
+    }
+
+    /// Handle MoveStorage: relocate data files, re-register storage.
+    async fn handle_move_storage(&mut self, new_path: std::path::PathBuf) -> crate::Result<()> {
+        let meta = self.meta.as_ref().ok_or_else(|| {
+            crate::Error::Config("cannot move storage: metadata not available".into())
+        })?;
+
+        let file_paths: Vec<std::path::PathBuf> = meta
+            .info
+            .files()
+            .iter()
+            .map(|f| f.path.iter().collect::<std::path::PathBuf>())
+            .collect();
+        let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
+        // files() already includes the torrent name as the first path component,
+        // so src/dst base is just the download directory — no extra join with name.
+        let src_base = self.config.download_dir.clone();
+        let dst_base = new_path.clone();
+
+        // Relocate files on a blocking thread to avoid starving the async runtime
+        let src = src_base.clone();
+        let dst = dst_base.clone();
+        let paths = file_paths.clone();
+        tokio::task::spawn_blocking(move || relocate_files(&src, &dst, &paths))
+            .await
+            .map_err(|e| crate::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .map_err(crate::Error::Io)?;
+
+        // Unregister old storage
+        self.disk_manager.unregister_torrent(self.info_hash).await;
+
+        // Create new storage at destination
+        let lengths = self.lengths.clone().ok_or_else(|| {
+            crate::Error::Config("lengths not available".into())
+        })?;
+        let storage: Arc<dyn TorrentStorage> = Arc::new(
+            ferrite_storage::FilesystemStorage::new(
+                &new_path,
+                file_paths,
+                file_lengths,
+                lengths,
+                Some(&self.file_priorities),
+                false,
+            )?,
+        );
+
+        // Re-register with disk manager
+        self.disk = Some(self.disk_manager.register_torrent(self.info_hash, storage).await);
+
+        // Update download dir
+        self.config.download_dir = new_path.clone();
+
+        // Fire alert
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::StorageMoved {
+            info_hash: self.info_hash,
+            new_path,
+        });
+
+        Ok(())
     }
 
     fn make_stats(&self) -> TorrentStats {
@@ -5262,5 +5373,60 @@ mod tests {
         assert!(ip_filter.read().unwrap().is_blocked("198.51.100.1".parse().unwrap()));
         // Verify a different public IP is still allowed
         assert!(!ip_filter.read().unwrap().is_blocked("203.0.113.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn relocate_files_moves_and_cleans_up() {
+        let tmp = std::env::temp_dir().join(format!("ferrite_relocate_{}", std::process::id()));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+
+        // Create source files mimicking multi-file torrent layout:
+        // TorrentName/subdir/file1.txt
+        // TorrentName/file2.txt
+        let subdir = src.join("TorrentName").join("subdir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("file1.txt"), b"hello").unwrap();
+        std::fs::write(src.join("TorrentName").join("file2.txt"), b"world").unwrap();
+
+        let file_paths = vec![
+            std::path::PathBuf::from("TorrentName/subdir/file1.txt"),
+            std::path::PathBuf::from("TorrentName/file2.txt"),
+        ];
+
+        relocate_files(&src, &dst, &file_paths).unwrap();
+
+        // Destination should have both files
+        assert_eq!(
+            std::fs::read_to_string(dst.join("TorrentName/subdir/file1.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("TorrentName/file2.txt")).unwrap(),
+            "world"
+        );
+
+        // Source directory should be cleaned up (empty dirs removed)
+        assert!(!src.join("TorrentName").join("subdir").exists());
+        assert!(!src.join("TorrentName").exists());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn relocate_files_skips_missing() {
+        let tmp = std::env::temp_dir().join(format!("ferrite_relocate_skip_{}", std::process::id()));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // File doesn't exist — should be skipped without error
+        let file_paths = vec![std::path::PathBuf::from("nonexistent.txt")];
+        relocate_files(&src, &dst, &file_paths).unwrap();
+
+        assert!(!dst.join("nonexistent.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -303,6 +303,11 @@ pub(crate) enum TorrentCommand {
     UpdateExternalIp {
         ip: std::net::IpAddr,
     },
+    /// Move torrent data files to a new directory.
+    MoveStorage {
+        new_path: PathBuf,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
 }
 
 /// Info about a file within a torrent.
