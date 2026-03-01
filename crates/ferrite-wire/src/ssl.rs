@@ -42,7 +42,10 @@ struct SslTorrentServerVerifier {
 
 impl SslTorrentServerVerifier {
     fn new(root_store: Arc<rustls::RootCertStore>) -> Result<Self> {
-        let inner = rustls::client::WebPkiServerVerifier::builder(root_store)
+        let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                root_store,
+                Arc::new(rustls::crypto::ring::default_provider()),
+            )
             .build()
             .map_err(|e| Error::Ssl(format!("server verifier error: {e}")))?;
         Ok(Self { inner })
@@ -131,7 +134,10 @@ pub fn build_client_config(config: &SslConfig) -> Result<Arc<rustls::ClientConfi
 
     let verifier = SslTorrentServerVerifier::new(Arc::new(root_store))?;
 
-    let client_config = rustls::ClientConfig::builder()
+    let provider = rustls::crypto::ring::default_provider();
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Ssl(format!("protocol version error: {e}")))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_client_auth_cert(our_certs, our_key)
@@ -154,11 +160,17 @@ pub fn build_server_config(config: &SslConfig) -> Result<Arc<rustls::ServerConfi
             .map_err(|e| Error::Ssl(format!("failed to add CA cert: {e}")))?;
     }
 
-    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(root_store),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
         .build()
         .map_err(|e| Error::Ssl(format!("client verifier error: {e}")))?;
 
-    let server_config = rustls::ServerConfig::builder()
+    let provider = rustls::crypto::ring::default_provider();
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Ssl(format!("protocol version error: {e}")))?
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(our_certs, our_key)
         .map_err(|e| Error::Ssl(format!("server config error: {e}")))?;
