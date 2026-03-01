@@ -482,6 +482,12 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
+        // BEP 52 hash messages — full handling added in M34c
+        Message::HashRequest { .. }
+        | Message::Hashes { .. }
+        | Message::HashReject { .. } => {
+            tracing::debug!("ignoring BEP 52 hash message from {addr} (not yet implemented)");
+        }
     }
     Ok(None)
 }
