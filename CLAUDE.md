@@ -29,7 +29,7 @@ cargo clippy --workspace -- -D warnings
 ## Milestones
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`
-- M1-M35 complete (v0.41.0, 895 tests). M36-M51 planned for full libtorrent parity.
+- M1-M36 complete (v0.42.0, 912 tests). M37-M51 planned for full libtorrent parity.
 - Implementation plans exist for all remaining milestones (M36-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
@@ -69,7 +69,8 @@ cargo clippy --workspace -- -D warnings
 - `torrent_v2_from_bytes(data) -> Result<TorrentMetaV2>` — parses v2 .torrent from raw bytes
 - `TorrentMeta` enum (`V1`/`V2`/`Hybrid`) — `torrent_from_bytes_any(data)` auto-detects format. `as_v1()`/`as_v2()` accessors work for both pure and hybrid variants
 - `TorrentVersion` enum (`V1Only`/`V2Only`/`Hybrid`) — version-aware dispatch throughout session and creation
-- `Magnet` — `info_hashes: InfoHashes` (v1 + v2), `info_hash()` method for backward compat. Parses `urn:btih:` and `urn:btmh:`
+- `Magnet` — `info_hashes: InfoHashes` (v1 + v2), `selected_files: Option<Vec<FileSelection>>` (BEP 53 `so=`), `info_hash()` method for backward compat. Parses `urn:btih:`, `urn:btmh:`, and `so=`
+- `FileSelection` enum (`Single(usize)` / `Range(usize, usize)`) — BEP 53 file selection. `parse(value) -> Result<Vec<FileSelection>>`, `to_priorities(sels, num_files) -> Vec<FilePriority>`, `to_so_value(sels) -> String`
 - Info-hash = SHA1 (v1) or SHA-256 (v2) of **raw bencode bytes** of info dict (not re-serialized)
 
 ### BEP 52 Hash Coordination (`ferrite-core`, M34a)
