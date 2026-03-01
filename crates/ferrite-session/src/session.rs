@@ -1389,7 +1389,7 @@ impl SessionActor {
                         crate::queue::QueueCategory::Downloading
                     }
                 }
-                TorrentState::Stopped => continue,
+                TorrentState::Stopped | TorrentState::Sharing => continue,
             };
 
             let is_active = stats.state != TorrentState::Paused;

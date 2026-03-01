@@ -2989,6 +2989,7 @@ mod tests {
             max_concurrent_stream_reads: 8,
             proxy: crate::proxy::ProxyConfig::default(),
             anonymous_mode: false,
+            share_mode: false,
         }
     }
 

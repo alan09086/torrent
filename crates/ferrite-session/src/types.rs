@@ -60,6 +60,9 @@ pub struct TorrentConfig {
     pub proxy: crate::proxy::ProxyConfig,
     /// Anonymous mode: suppress client identity in peer handshakes.
     pub anonymous_mode: bool,
+    /// Share mode: relay pieces in memory without writing to disk.
+    /// Requires `enable_fast` for RejectRequest when evicting pieces.
+    pub share_mode: bool,
 }
 
 impl Default for TorrentConfig {
@@ -93,6 +96,7 @@ impl Default for TorrentConfig {
             max_concurrent_stream_reads: 8,
             proxy: crate::proxy::ProxyConfig::default(),
             anonymous_mode: false,
+            share_mode: false,
         }
     }
 }
@@ -128,6 +132,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_concurrent_stream_reads: s.max_concurrent_stream_reads,
             proxy: s.proxy.clone(),
             anonymous_mode: s.anonymous_mode,
+            share_mode: s.default_share_mode,
         }
     }
 }
@@ -142,6 +147,8 @@ pub enum TorrentState {
     Seeding,
     Paused,
     Stopped,
+    /// Share mode: relay pieces in memory without writing to disk.
+    Sharing,
 }
 
 /// Aggregate statistics for a torrent.
@@ -432,5 +439,17 @@ mod tests {
         };
         assert_eq!(stats2.peers_by_source[&PeerSource::Tracker], 5);
         assert_eq!(stats2.peers_by_source[&PeerSource::Dht], 3);
+    }
+
+    #[test]
+    fn torrent_state_sharing_variant() {
+        let state = TorrentState::Sharing;
+        assert_ne!(state, TorrentState::Downloading);
+        assert_ne!(state, TorrentState::Seeding);
+        // Verify JSON round-trip
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(json, "\"Sharing\"");
+        let decoded: TorrentState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, TorrentState::Sharing);
     }
 }

@@ -166,6 +166,10 @@ pub struct Settings {
     pub seed_ratio_limit: Option<f64>,
     #[serde(default)]
     pub default_super_seeding: bool,
+    /// Default share mode for new torrents. When true, torrents relay pieces
+    /// in memory without writing to disk. Requires fast extension (BEP 6).
+    #[serde(default)]
+    pub default_share_mode: bool,
     #[serde(default = "default_true")]
     pub upload_only_announce: bool,
     #[serde(default)]
@@ -302,6 +306,7 @@ impl Default for Settings {
             // Seeding
             seed_ratio_limit: None,
             default_super_seeding: false,
+            default_share_mode: false,
             upload_only_announce: true,
             have_send_delay_ms: 0,
             // Rate limiting
@@ -449,6 +454,12 @@ impl Settings {
             ));
         }
 
+        if self.default_share_mode && !self.enable_fast_extension {
+            return Err(crate::Error::InvalidSettings(
+                "share_mode requires enable_fast_extension for RejectRequest messages".into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -539,6 +550,7 @@ impl PartialEq for Settings {
             && self.external_ip == other.external_ip
             && self.seed_ratio_limit == other.seed_ratio_limit
             && self.default_super_seeding == other.default_super_seeding
+            && self.default_share_mode == other.default_share_mode
             && self.upload_only_announce == other.upload_only_announce
             && self.have_send_delay_ms == other.have_send_delay_ms
             && self.upload_rate_limit == other.upload_rate_limit
@@ -610,6 +622,7 @@ mod tests {
         assert!(!s.anonymous_mode);
         assert!(s.seed_ratio_limit.is_none());
         assert!(!s.default_super_seeding);
+        assert!(!s.default_share_mode);
         assert!(s.upload_only_announce);
         assert_eq!(s.upload_rate_limit, 0);
         assert_eq!(s.download_rate_limit, 0);
@@ -773,5 +786,24 @@ mod tests {
         s.disk_io_threads = 0;
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("disk_io_threads"));
+    }
+
+    #[test]
+    fn share_mode_requires_fast_extension() {
+        let mut s = Settings::default();
+        s.default_share_mode = true;
+        s.enable_fast_extension = false;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("share_mode"));
+
+        // With fast extension enabled, share mode is valid
+        s.enable_fast_extension = true;
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn share_mode_default_false() {
+        let cfg = crate::types::TorrentConfig::default();
+        assert!(!cfg.share_mode);
     }
 }
