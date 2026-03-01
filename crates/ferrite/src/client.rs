@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ferrite_core::{Magnet, TorrentMetaV1};
+use ferrite_core::Magnet;
 use ferrite_session::{ExtensionPlugin, Settings};
 use ferrite_storage::TorrentStorage;
 
@@ -394,8 +394,8 @@ impl Default for ClientBuilder {
 /// Source for adding a torrent to a session.
 #[allow(dead_code)]
 enum TorrentSource {
-    /// Parsed torrent metainfo.
-    Meta(Box<TorrentMetaV1>),
+    /// Parsed torrent metainfo (v1, v2, or hybrid).
+    Meta(Box<ferrite_core::TorrentMeta>),
     /// Magnet link (metadata fetched via BEP 9).
     Magnet(Magnet),
     /// Path to a .torrent file on disk.
@@ -419,8 +419,8 @@ pub struct AddTorrentParams {
 }
 
 impl AddTorrentParams {
-    /// Create params from parsed torrent metainfo.
-    pub fn from_torrent(meta: TorrentMetaV1) -> Self {
+    /// Create params from parsed torrent metainfo (v1, v2, or hybrid).
+    pub fn from_torrent(meta: ferrite_core::TorrentMeta) -> Self {
         Self {
             source: TorrentSource::Meta(Box::new(meta)),
             download_dir: None,

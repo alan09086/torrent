@@ -55,7 +55,7 @@ struct TorrentEntry {
 /// Commands sent from SessionHandle to SessionActor.
 enum SessionCommand {
     AddTorrent {
-        meta: Box<TorrentMetaV1>,
+        meta: Box<ferrite_core::TorrentMeta>,
         storage: Option<Arc<dyn TorrentStorage>>,
         reply: oneshot::Sender<crate::Result<Id20>>,
     },
@@ -337,10 +337,10 @@ impl SessionHandle {
         Ok(SessionHandle { cmd_tx, alert_tx, alert_mask })
     }
 
-    /// Add a torrent from parsed .torrent metadata.
+    /// Add a torrent from parsed .torrent metadata (v1, v2, or hybrid).
     pub async fn add_torrent(
         &self,
-        meta: TorrentMetaV1,
+        meta: ferrite_core::TorrentMeta,
         storage: Option<Arc<dyn TorrentStorage>>,
     ) -> crate::Result<Id20> {
         let (tx, rx) = oneshot::channel();
@@ -954,9 +954,18 @@ impl SessionActor {
 
     async fn handle_add_torrent(
         &mut self,
-        meta: TorrentMetaV1,
+        torrent_meta: ferrite_core::TorrentMeta,
         storage: Option<Arc<dyn TorrentStorage>>,
     ) -> crate::Result<Id20> {
+        // Extract the v1 component — required for session logic.
+        // Pure v2 torrents are not yet supported through the session path.
+        let version = torrent_meta.version();
+        let meta_v2 = torrent_meta.as_v2().cloned();
+        let meta = torrent_meta
+            .as_v1()
+            .cloned()
+            .ok_or_else(|| crate::Error::Config("pure v2 torrents not yet supported in session".into()))?;
+
         let info_hash = meta.info_hash;
 
         if self.torrents.contains_key(&info_hash) {
@@ -988,6 +997,8 @@ impl SessionActor {
 
         let handle = TorrentHandle::from_torrent(
             meta.clone(),
+            version,
+            meta_v2,
             disk_handle,
             self.disk_manager.clone(),
             torrent_config,
@@ -1669,7 +1680,7 @@ mod tests {
         let expected_hash = meta.info_hash;
 
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
         assert_eq!(info_hash, expected_hash);
 
         let list = session.list_torrents().await.unwrap();
@@ -1688,7 +1699,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
         session.remove_torrent(info_hash).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1710,10 +1721,10 @@ mod tests {
         let storage2 = make_storage(&data, 16384);
 
         session
-            .add_torrent(meta.clone(), Some(storage1))
+            .add_torrent(meta.clone().into(), Some(storage1))
             .await
             .unwrap();
-        let result = session.add_torrent(meta, Some(storage2)).await;
+        let result = session.add_torrent(meta.into(), Some(storage2)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate"));
 
@@ -1731,12 +1742,12 @@ mod tests {
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
         let storage1 = make_storage(&data1, 16384);
-        session.add_torrent(meta1, Some(storage1)).await.unwrap();
+        session.add_torrent(meta1.into(), Some(storage1)).await.unwrap();
 
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        let result = session.add_torrent(meta2, Some(storage2)).await;
+        let result = session.add_torrent(meta2.into(), Some(storage2)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("capacity"));
 
@@ -1752,7 +1763,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
         let stats = session.torrent_stats(info_hash).await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
         assert_eq!(stats.pieces_total, 2);
@@ -1769,7 +1780,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
         let info = session.torrent_info(info_hash).await.unwrap();
         assert_eq!(info.info_hash, info_hash);
         assert_eq!(info.name, "test");
@@ -1791,7 +1802,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         session.pause_torrent(info_hash).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1831,12 +1842,12 @@ mod tests {
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
         let storage1 = make_storage(&data1, 16384);
-        session.add_torrent(meta1, Some(storage1)).await.unwrap();
+        session.add_torrent(meta1.into(), Some(storage1)).await.unwrap();
 
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        session.add_torrent(meta2, Some(storage2)).await.unwrap();
+        session.add_torrent(meta2.into(), Some(storage2)).await.unwrap();
 
         let stats = session.session_stats().await.unwrap();
         assert_eq!(stats.active_torrents, 2);
@@ -1915,7 +1926,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta, Some(storage)).await.unwrap();
+        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         // Add a magnet (also triggers LSD announce)
         let magnet = Magnet {
@@ -1943,7 +1954,7 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let info_hash = meta.info_hash;
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta, Some(storage)).await.unwrap();
+        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         let rd = session.save_torrent_resume_data(info_hash).await.unwrap();
         assert_eq!(rd.info_hash, info_hash.as_bytes().as_slice());
@@ -1965,12 +1976,12 @@ mod tests {
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
         let storage1 = make_storage(&data1, 16384);
-        session.add_torrent(meta1, Some(storage1)).await.unwrap();
+        session.add_torrent(meta1.into(), Some(storage1)).await.unwrap();
 
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        session.add_torrent(meta2, Some(storage2)).await.unwrap();
+        session.add_torrent(meta2.into(), Some(storage2)).await.unwrap();
 
         let state = session.save_session_state().await.unwrap();
         assert_eq!(state.torrents.len(), 2);
@@ -2007,7 +2018,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let _info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let _info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
             .await
@@ -2030,7 +2041,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         // Drain TorrentAdded and any checking alerts
         while let Ok(Ok(a)) = tokio::time::timeout(Duration::from_secs(1), alerts.recv()).await {
@@ -2067,7 +2078,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta, Some(storage)).await.unwrap();
+        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         let a1 = tokio::time::timeout(Duration::from_secs(2), sub1.recv())
             .await.unwrap().unwrap();
@@ -2092,7 +2103,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta, Some(storage)).await.unwrap();
+        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
             .await.unwrap().unwrap();
@@ -2107,7 +2118,7 @@ mod tests {
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        session.add_torrent(meta2, Some(storage2)).await.unwrap();
+        session.add_torrent(meta2.into(), Some(storage2)).await.unwrap();
 
         // Give a small window — nothing should arrive
         let result = tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await;
@@ -2119,7 +2130,7 @@ mod tests {
         let data3 = vec![0xCC; 16384];
         let meta3 = make_test_torrent(&data3, 16384);
         let storage3 = make_storage(&data3, 16384);
-        session.add_torrent(meta3, Some(storage3)).await.unwrap();
+        session.add_torrent(meta3.into(), Some(storage3)).await.unwrap();
 
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
             .await.unwrap().unwrap();
@@ -2144,7 +2155,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta, Some(storage)).await.unwrap();
+        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         // STATUS sub gets TorrentAdded
         let alert = tokio::time::timeout(Duration::from_secs(2), status_sub.recv())
@@ -2170,7 +2181,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta, Some(storage)).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
 
         // Drain TorrentAdded
         let _ = tokio::time::timeout(Duration::from_secs(1), alerts.recv())

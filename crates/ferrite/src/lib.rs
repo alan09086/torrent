@@ -436,7 +436,7 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent_facade(&data, 16384);
         let info_hash = session
-            .add_torrent(meta, Some(make_storage_facade(&data, 16384)))
+            .add_torrent(meta.into(), Some(make_storage_facade(&data, 16384)))
             .await
             .unwrap();
 

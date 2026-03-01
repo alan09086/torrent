@@ -81,6 +81,18 @@ impl TorrentMeta {
     }
 }
 
+impl From<TorrentMetaV1> for TorrentMeta {
+    fn from(meta: TorrentMetaV1) -> Self {
+        TorrentMeta::V1(meta)
+    }
+}
+
+impl From<TorrentMetaV2> for TorrentMeta {
+    fn from(meta: TorrentMetaV2) -> Self {
+        TorrentMeta::V2(meta)
+    }
+}
+
 /// Detected version of a .torrent file's info dict.
 enum DetectedVersion {
     V1Only,
