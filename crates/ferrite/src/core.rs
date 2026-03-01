@@ -50,3 +50,10 @@ pub use ferrite_core::{
     TorrentMeta, torrent_from_bytes_any,
     sha256,
 };
+
+// BEP 52 Wire + Hash Picker (M34a)
+pub use ferrite_core::{
+    HashRequest, validate_hash_request,
+    MerkleTreeState, SetBlockResult,
+    HashPicker, FileHashInfo, AddHashesResult,
+};
