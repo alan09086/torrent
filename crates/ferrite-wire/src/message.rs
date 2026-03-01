@@ -39,6 +39,31 @@ pub enum Message {
     RejectRequest { index: u32, begin: u32, length: u32 },
     /// BEP 6: Piece index the peer is allowed to request while choked.
     AllowedFast(u32),
+    /// BEP 52: Request hashes from a file's Merkle tree.
+    HashRequest {
+        pieces_root: ferrite_core::Id32,
+        base: u32,
+        index: u32,
+        count: u32,
+        proof_layers: u32,
+    },
+    /// BEP 52: Response with hashes and uncle proof.
+    Hashes {
+        pieces_root: ferrite_core::Id32,
+        base: u32,
+        index: u32,
+        count: u32,
+        proof_layers: u32,
+        hashes: Vec<ferrite_core::Id32>,
+    },
+    /// BEP 52: Reject a hash request.
+    HashReject {
+        pieces_root: ferrite_core::Id32,
+        base: u32,
+        index: u32,
+        count: u32,
+        proof_layers: u32,
+    },
 }
 
 // Message IDs per BEP 3
@@ -60,6 +85,11 @@ const ID_HAVE_ALL: u8 = 0x0E;
 const ID_HAVE_NONE: u8 = 0x0F;
 const ID_REJECT_REQUEST: u8 = 0x10;
 const ID_ALLOWED_FAST: u8 = 0x11;
+
+// BEP 52 Hash Messages
+const ID_HASH_REQUEST: u8 = 21;
+const ID_HASHES: u8 = 22;
+const ID_HASH_REJECT: u8 = 23;
 
 impl Message {
     /// Serialize a message to bytes (length-prefix + id + payload).
@@ -143,6 +173,38 @@ impl Message {
                 buf.put_u32(*index);
                 buf.freeze()
             }
+            Message::HashRequest { pieces_root, base, index, count, proof_layers }
+            | Message::HashReject { pieces_root, base, index, count, proof_layers } => {
+                let id = match self {
+                    Message::HashRequest { .. } => ID_HASH_REQUEST,
+                    _ => ID_HASH_REJECT,
+                };
+                let mut buf = BytesMut::with_capacity(53);
+                buf.put_u32(49); // 1 + 32 + 4*4
+                buf.put_u8(id);
+                buf.put_slice(&pieces_root.0);
+                buf.put_u32(*base);
+                buf.put_u32(*index);
+                buf.put_u32(*count);
+                buf.put_u32(*proof_layers);
+                buf.freeze()
+            }
+            Message::Hashes { pieces_root, base, index, count, proof_layers, hashes } => {
+                let hash_bytes = hashes.len() * 32;
+                let payload_len = 1 + 32 + 16 + hash_bytes;
+                let mut buf = BytesMut::with_capacity(4 + payload_len);
+                buf.put_u32(payload_len as u32);
+                buf.put_u8(ID_HASHES);
+                buf.put_slice(&pieces_root.0);
+                buf.put_u32(*base);
+                buf.put_u32(*index);
+                buf.put_u32(*count);
+                buf.put_u32(*proof_layers);
+                for h in hashes {
+                    buf.put_slice(&h.0);
+                }
+                buf.freeze()
+            }
         }
     }
 
@@ -220,6 +282,47 @@ impl Message {
             ID_ALLOWED_FAST => {
                 ensure_len(body, 4, "AllowedFast")?;
                 Ok(Message::AllowedFast(read_u32(body)))
+            }
+            ID_HASH_REQUEST | ID_HASH_REJECT => {
+                ensure_len(body, 48, "HashRequest/Reject")?;
+                let mut root = [0u8; 32];
+                root.copy_from_slice(&body[..32]);
+                let pieces_root = ferrite_core::Id32(root);
+                let base = read_u32(&body[32..]);
+                let index = read_u32(&body[36..]);
+                let count = read_u32(&body[40..]);
+                let proof_layers = read_u32(&body[44..]);
+                if id == ID_HASH_REQUEST {
+                    Ok(Message::HashRequest { pieces_root, base, index, count, proof_layers })
+                } else {
+                    Ok(Message::HashReject { pieces_root, base, index, count, proof_layers })
+                }
+            }
+            ID_HASHES => {
+                ensure_len(body, 48, "Hashes")?;
+                let mut root = [0u8; 32];
+                root.copy_from_slice(&body[..32]);
+                let pieces_root = ferrite_core::Id32(root);
+                let base = read_u32(&body[32..]);
+                let index = read_u32(&body[36..]);
+                let count = read_u32(&body[40..]);
+                let proof_layers = read_u32(&body[44..]);
+                let hash_data = &body[48..];
+                if !hash_data.len().is_multiple_of(32) {
+                    return Err(Error::MessageTooShort {
+                        expected: 48 + 32,
+                        got: body.len(),
+                    });
+                }
+                let hashes = hash_data
+                    .chunks_exact(32)
+                    .map(|chunk| {
+                        let mut h = [0u8; 32];
+                        h.copy_from_slice(chunk);
+                        ferrite_core::Id32(h)
+                    })
+                    .collect();
+                Ok(Message::Hashes { pieces_root, base, index, count, proof_layers, hashes })
             }
             _ => Err(Error::InvalidMessageId(id)),
         }
@@ -501,6 +604,84 @@ mod tests {
         let ip3: std::net::IpAddr = "2001:db9::1".parse().unwrap();
         let set3 = allowed_fast_set_for_ip(&ih, ip3, 1000, 10);
         assert_ne!(set, set3);
+    }
+
+    #[test]
+    fn hash_request_round_trip() {
+        let msg = Message::HashRequest {
+            pieces_root: ferrite_core::Id32::ZERO,
+            base: 7,
+            index: 0,
+            count: 512,
+            proof_layers: 3,
+        };
+        round_trip(msg);
+    }
+
+    #[test]
+    fn hash_reject_round_trip() {
+        let msg = Message::HashReject {
+            pieces_root: ferrite_core::Id32::ZERO,
+            base: 7,
+            index: 0,
+            count: 512,
+            proof_layers: 3,
+        };
+        round_trip(msg);
+    }
+
+    #[test]
+    fn hashes_round_trip() {
+        let h1 = ferrite_core::sha256(b"block1");
+        let h2 = ferrite_core::sha256(b"block2");
+        let uncle = ferrite_core::sha256(b"uncle");
+        let msg = Message::Hashes {
+            pieces_root: ferrite_core::Id32::ZERO,
+            base: 0,
+            index: 0,
+            count: 2,
+            proof_layers: 1,
+            hashes: vec![h1, h2, uncle],
+        };
+        round_trip(msg);
+    }
+
+    #[test]
+    fn hash_request_exact_wire_size() {
+        let msg = Message::HashRequest {
+            pieces_root: ferrite_core::Id32::ZERO,
+            base: 0,
+            index: 0,
+            count: 1,
+            proof_layers: 0,
+        };
+        let bytes = msg.to_bytes();
+        // 4 (length prefix) + 1 (msg id) + 32 (root) + 4*4 (fields) = 53
+        assert_eq!(bytes.len(), 53);
+    }
+
+    #[test]
+    fn hashes_variable_length() {
+        let h = ferrite_core::sha256(b"test");
+        let msg = Message::Hashes {
+            pieces_root: ferrite_core::Id32::ZERO,
+            base: 0,
+            index: 0,
+            count: 1,
+            proof_layers: 0,
+            hashes: vec![h],
+        };
+        let bytes = msg.to_bytes();
+        // 4 + 1 + 32 + 4*4 + 1*32 = 85
+        assert_eq!(bytes.len(), 85);
+    }
+
+    #[test]
+    fn hash_request_too_short() {
+        // msg id 21, but only 10 bytes of body (need 48)
+        let mut payload = vec![21u8];
+        payload.extend_from_slice(&[0u8; 10]);
+        assert!(Message::from_payload(&payload).is_err());
     }
 
     #[test]
