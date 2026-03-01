@@ -9,6 +9,7 @@ mod handshake;
 mod holepunch;
 mod message;
 pub mod mse;
+pub mod ssl;
 
 pub use codec::MessageCodec;
 pub use error::{Error, Result};
@@ -16,3 +17,4 @@ pub use extended::{ExtHandshake, ExtMessage, MetadataMessage, MetadataMessageTyp
 pub use handshake::Handshake;
 pub use holepunch::{HolepunchError, HolepunchMessage, HolepunchMsgType};
 pub use message::{allowed_fast_set, allowed_fast_set_for_ip, Message};
+pub use ssl::{SslConfig, accept_tls, build_client_config, build_server_config, connect_tls, generate_self_signed_cert};

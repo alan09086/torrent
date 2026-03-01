@@ -122,6 +122,9 @@ fn default_dht_item_lifetime() -> u64 {
 fn default_dht_sample_interval() -> u64 {
     0
 }
+fn default_ssl_listen_port() -> u16 {
+    0 // 0 = disabled
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -346,6 +349,21 @@ pub struct Settings {
     /// When false (default), I2P-enabled torrents only connect to I2P peers.
     #[serde(default)]
     pub allow_i2p_mixed: bool,
+
+    // ── SSL torrents (M42) ──
+    /// SSL listen port for SSL torrent incoming connections.
+    /// 0 = disabled (no SSL listener). When set, a TLS listener is bound
+    /// on this port for torrents with `ssl-cert` in their info dict.
+    #[serde(default = "default_ssl_listen_port")]
+    pub ssl_listen_port: u16,
+    /// Path to the PEM-encoded certificate file for SSL torrent connections.
+    /// If not set, a self-signed certificate is auto-generated on first use
+    /// and stored in `resume_data_dir` (or a temp directory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_cert_path: Option<PathBuf>,
+    /// Path to the PEM-encoded private key file for SSL torrent connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_key_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -441,6 +459,10 @@ impl Default for Settings {
             i2p_inbound_length: 3,
             i2p_outbound_length: 3,
             allow_i2p_mixed: false,
+            // SSL torrents
+            ssl_listen_port: 0,
+            ssl_cert_path: None,
+            ssl_key_path: None,
         }
     }
 }
@@ -539,6 +561,13 @@ impl Settings {
         if self.default_share_mode && !self.enable_fast_extension {
             return Err(crate::Error::InvalidSettings(
                 "share_mode requires enable_fast_extension for RejectRequest messages".into(),
+            ));
+        }
+
+        // SSL cert/key must both be set or both absent
+        if self.ssl_cert_path.is_some() != self.ssl_key_path.is_some() {
+            return Err(crate::Error::InvalidSettings(
+                "ssl_cert_path and ssl_key_path must both be set or both absent".into(),
             ));
         }
 
@@ -730,6 +759,9 @@ impl PartialEq for Settings {
             && self.i2p_inbound_length == other.i2p_inbound_length
             && self.i2p_outbound_length == other.i2p_outbound_length
             && self.allow_i2p_mixed == other.allow_i2p_mixed
+            && self.ssl_listen_port == other.ssl_listen_port
+            && self.ssl_cert_path == other.ssl_cert_path
+            && self.ssl_key_path == other.ssl_key_path
     }
 }
 
@@ -1081,6 +1113,58 @@ mod tests {
         s.i2p_outbound_quantity = 16;
         s.i2p_inbound_length = 0;
         s.i2p_outbound_length = 7;
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn ssl_settings_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.ssl_listen_port, 0);
+        assert!(s.ssl_cert_path.is_none());
+        assert!(s.ssl_key_path.is_none());
+    }
+
+    #[test]
+    fn ssl_settings_json_round_trip() {
+        let mut s = Settings::default();
+        s.ssl_listen_port = 4433;
+        s.ssl_cert_path = Some(PathBuf::from("/etc/ssl/cert.pem"));
+        s.ssl_key_path = Some(PathBuf::from("/etc/ssl/key.pem"));
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn ssl_validation_cert_without_key() {
+        let mut s = Settings::default();
+        s.ssl_cert_path = Some(PathBuf::from("/tmp/cert.pem"));
+        // ssl_key_path is None
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("ssl_cert_path"));
+    }
+
+    #[test]
+    fn ssl_validation_key_without_cert() {
+        let mut s = Settings::default();
+        s.ssl_key_path = Some(PathBuf::from("/tmp/key.pem"));
+        // ssl_cert_path is None
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("ssl_cert_path"));
+    }
+
+    #[test]
+    fn ssl_validation_both_set_passes() {
+        let mut s = Settings::default();
+        s.ssl_cert_path = Some(PathBuf::from("/tmp/cert.pem"));
+        s.ssl_key_path = Some(PathBuf::from("/tmp/key.pem"));
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn ssl_validation_both_absent_passes() {
+        let s = Settings::default();
+        // Both are None by default
         s.validate().unwrap();
     }
 }

@@ -109,6 +109,7 @@ pub struct CreateTorrent {
     include_symlinks: bool,
     pre_hashes: HashMap<u32, Id20>,
     version: TorrentVersion,
+    ssl_cert: Option<Vec<u8>>,
 }
 
 impl CreateTorrent {
@@ -132,6 +133,7 @@ impl CreateTorrent {
             include_symlinks: false,
             pre_hashes: HashMap::new(),
             version: TorrentVersion::V1Only,
+            ssl_cert: None,
         }
     }
 
@@ -283,6 +285,13 @@ impl CreateTorrent {
         self
     }
 
+    /// Set the SSL CA certificate (PEM-encoded) for SSL torrent creation.
+    /// When set, the `ssl-cert` key is written into the info dict.
+    pub fn set_ssl_cert(mut self, cert_pem: Vec<u8>) -> Self {
+        self.ssl_cert = Some(cert_pem);
+        self
+    }
+
     /// Generate the `.torrent` file.
     pub fn generate(self) -> Result<CreateTorrentResult> {
         self.generate_with_progress(|_, _| {})
@@ -425,6 +434,7 @@ impl CreateTorrent {
                 files: None,
                 private: if self.private { Some(1) } else { None },
                 source: self.source.clone(),
+                ssl_cert: self.ssl_cert.clone(),
             }
         } else {
             let file_entries: Vec<FileEntry> = files_with_pads
@@ -445,6 +455,7 @@ impl CreateTorrent {
                 files: Some(file_entries),
                 private: if self.private { Some(1) } else { None },
                 source: self.source.clone(),
+                ssl_cert: self.ssl_cert.clone(),
             }
         };
 
@@ -485,6 +496,7 @@ impl CreateTorrent {
                 let bytes = ferrite_bencode::to_bytes(&output)
                     .map_err(|e| Error::CreateTorrent(format!("serialize torrent: {e}")))?;
 
+                let ssl_cert = self.ssl_cert.clone();
                 let meta_v1 = TorrentMetaV1 {
                     info_hash,
                     announce: self.trackers.first().map(|(url, _)| url.clone()),
@@ -496,6 +508,7 @@ impl CreateTorrent {
                     url_list: self.web_seeds,
                     httpseeds: self.http_seeds,
                     info_bytes: Some(Bytes::from(info_bytes)),
+                    ssl_cert,
                 };
 
                 Ok(CreateTorrentResult { meta: TorrentMeta::V1(meta_v1), bytes })
@@ -563,6 +576,11 @@ impl CreateTorrent {
                 // optional: source
                 if let Some(ref source) = self.source {
                     merged.insert(b"source".to_vec(), ferrite_bencode::BencodeValue::Bytes(source.as_bytes().to_vec()));
+                }
+
+                // optional: ssl-cert
+                if let Some(ref cert) = self.ssl_cert {
+                    merged.insert(b"ssl-cert".to_vec(), ferrite_bencode::BencodeValue::Bytes(cert.clone()));
                 }
 
                 // Serialize merged info dict → compute both hashes
@@ -645,6 +663,7 @@ impl CreateTorrent {
                     .map_err(|e| Error::CreateTorrent(format!("serialize hybrid torrent: {e}")))?;
 
                 // Build TorrentMetaV1 component
+                let ssl_cert = self.ssl_cert.clone();
                 let meta_v1 = TorrentMetaV1 {
                     info_hash: info_hash_v1,
                     announce: self.trackers.first().map(|(url, _)| url.clone()),
@@ -656,6 +675,7 @@ impl CreateTorrent {
                     url_list: self.web_seeds.clone(),
                     httpseeds: self.http_seeds.clone(),
                     info_bytes: Some(Bytes::from(merged_info_bytes.clone())),
+                    ssl_cert: ssl_cert.clone(),
                 };
 
                 // Build TorrentMetaV2 component
@@ -664,6 +684,7 @@ impl CreateTorrent {
                     piece_length: piece_size,
                     meta_version: 2,
                     file_tree,
+                    ssl_cert: ssl_cert.clone(),
                 };
                 let meta_v2 = TorrentMetaV2 {
                     info_hashes: InfoHashes::hybrid(info_hash_v1, info_hash_v2),
@@ -684,6 +705,7 @@ impl CreateTorrent {
                                 .collect()))
                         })
                         .collect(),
+                    ssl_cert,
                 };
 
                 Ok(CreateTorrentResult {
@@ -1488,5 +1510,24 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("v2-only"), "error: {err}");
+    }
+
+    #[test]
+    fn create_torrent_with_ssl_cert() {
+        let cert_pem = b"-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n";
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.bin");
+        std::fs::write(&file_path, vec![0u8; 65536]).unwrap();
+
+        let result = CreateTorrent::new()
+            .add_file(&file_path)
+            .set_ssl_cert(cert_pem.to_vec())
+            .generate()
+            .unwrap();
+
+        // Parse back and verify ssl-cert round-trips
+        let parsed = torrent_from_bytes(&result.bytes).unwrap();
+        assert_eq!(parsed.ssl_cert.as_deref().unwrap(), cert_pem.as_slice());
+        assert_eq!(parsed.info.ssl_cert.as_deref().unwrap(), cert_pem.as_slice());
     }
 }

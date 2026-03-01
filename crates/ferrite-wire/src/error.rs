@@ -29,6 +29,9 @@ pub enum Error {
     #[error("bencode: {0}")]
     Bencode(#[from] ferrite_bencode::Error),
 
+    #[error("SSL/TLS: {0}")]
+    Ssl(String),
+
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 }

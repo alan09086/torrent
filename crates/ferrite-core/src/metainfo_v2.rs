@@ -28,6 +28,9 @@ pub struct InfoDictV2 {
     pub meta_version: u64,
     /// The nested file tree.
     pub file_tree: FileTreeNode,
+    /// BEP 35 / SSL torrent: PEM-encoded X.509 CA certificate.
+    /// When present, all peer connections must use TLS with certs chaining to this CA.
+    pub ssl_cert: Option<Vec<u8>>,
 }
 
 impl InfoDictV2 {
@@ -128,6 +131,8 @@ pub struct TorrentMetaV2 {
     /// Each entry maps a file's Merkle root to the concatenated piece-level
     /// hashes. Only present for files larger than `piece_length`.
     pub piece_layers: BTreeMap<Id32, Vec<u8>>,
+    /// PEM-encoded SSL CA certificate from the info dict, if present.
+    pub ssl_cert: Option<Vec<u8>>,
 }
 
 impl TorrentMetaV2 {
@@ -262,11 +267,17 @@ pub fn torrent_v2_from_bytes(data: &[u8]) -> Result<TorrentMetaV2, Error> {
         .ok_or_else(|| Error::InvalidTorrent("missing 'file tree' in info".into()))?;
     let file_tree = FileTreeNode::from_bencode(file_tree_value)?;
 
+    let ssl_cert = info_dict
+        .get(b"ssl-cert".as_ref())
+        .and_then(|v| v.as_bytes_raw())
+        .map(|b| b.to_vec());
+
     let info = InfoDictV2 {
         name,
         piece_length,
         meta_version,
         file_tree,
+        ssl_cert: ssl_cert.clone(),
     };
 
     validate_info_v2(&info)?;
@@ -326,6 +337,7 @@ pub fn torrent_v2_from_bytes(data: &[u8]) -> Result<TorrentMetaV2, Error> {
         creation_date,
         info,
         piece_layers,
+        ssl_cert,
     })
 }
 

@@ -69,6 +69,8 @@ pub struct TorrentConfig {
     pub enable_i2p: bool,
     /// Whether to allow mixing I2P and clearnet peers.
     pub allow_i2p_mixed: bool,
+    /// SSL listen port for SSL torrent connections (0 = disabled).
+    pub ssl_listen_port: u16,
 }
 
 impl Default for TorrentConfig {
@@ -106,6 +108,7 @@ impl Default for TorrentConfig {
             share_mode: false,
             enable_i2p: false,
             allow_i2p_mixed: false,
+            ssl_listen_port: 0,
         }
     }
 }
@@ -145,6 +148,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             share_mode: s.default_share_mode,
             enable_i2p: s.enable_i2p,
             allow_i2p_mixed: s.allow_i2p_mixed,
+            ssl_listen_port: s.ssl_listen_port,
         }
     }
 }
@@ -324,6 +328,28 @@ pub(crate) enum PeerCommand {
     Shutdown,
 }
 
+/// Helper trait combining [`AsyncRead`] + [`AsyncWrite`] for trait-object erasure.
+///
+/// Rust doesn't allow `dyn AsyncRead + AsyncWrite` directly, so this trait
+/// combines both into a single trait that can be used as a trait object.
+pub(crate) trait AsyncReadWrite:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
+
+impl<T> AsyncReadWrite for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+/// Boxed async stream (AsyncRead + AsyncWrite + Unpin + Send) with a Debug impl.
+///
+/// Used for incoming SSL peer connections where the concrete TLS type is erased.
+pub(crate) struct BoxedAsyncStream(pub Box<dyn AsyncReadWrite>);
+
+impl std::fmt::Debug for BoxedAsyncStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BoxedAsyncStream(..)")
+    }
+}
+
 /// Commands sent from a `TorrentHandle` to the `TorrentActor`.
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by torrent module (not yet implemented)
@@ -369,6 +395,13 @@ pub(crate) enum TorrentCommand {
     MoveStorage {
         new_path: PathBuf,
         reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Incoming SSL peer routed from the session-level SSL listener (M42).
+    ///
+    /// The TLS handshake has already been completed by the session actor.
+    SpawnSslPeer {
+        addr: SocketAddr,
+        stream: BoxedAsyncStream,
     },
 }
 
@@ -513,6 +546,20 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert!(!cfg.enable_i2p);
         assert!(!cfg.allow_i2p_mixed);
+    }
+
+    #[test]
+    fn torrent_config_ssl_listen_port_default() {
+        let cfg = TorrentConfig::default();
+        assert_eq!(cfg.ssl_listen_port, 0);
+    }
+
+    #[test]
+    fn torrent_config_ssl_listen_port_from_settings() {
+        let mut s = crate::settings::Settings::default();
+        s.ssl_listen_port = 4433;
+        let tc = TorrentConfig::from(&s);
+        assert_eq!(tc.ssl_listen_port, 4433);
     }
 
     #[test]
