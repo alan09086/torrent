@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
 
-use ferrite_core::{Id20, TorrentMetaV1};
+use ferrite_core::{Id20, InfoHashes, TorrentMetaV1};
 use ferrite_tracker::{AnnounceEvent, AnnounceRequest, HttpTracker, UdpTracker};
 
 /// Maximum backoff duration for failed trackers.
@@ -95,6 +95,7 @@ pub(crate) struct AnnounceResult {
 pub(crate) struct TrackerManager {
     trackers: Vec<TrackerEntry>,
     info_hash: Id20,
+    info_hashes: InfoHashes,
     peer_id: Id20,
     port: u16,
     http_client: HttpTracker,
@@ -165,6 +166,7 @@ impl TrackerManager {
         TrackerManager {
             trackers,
             info_hash: meta.info_hash,
+            info_hashes: InfoHashes::v1_only(meta.info_hash),
             peer_id,
             port,
             http_client: HttpTracker::new(),
@@ -177,6 +179,7 @@ impl TrackerManager {
         TrackerManager {
             trackers: Vec::new(),
             info_hash,
+            info_hashes: InfoHashes::v1_only(info_hash),
             peer_id,
             port,
             http_client: HttpTracker::new(),
@@ -188,6 +191,11 @@ impl TrackerManager {
     pub fn set_metadata(&mut self, meta: &TorrentMetaV1) {
         let fresh = Self::from_torrent(meta, self.peer_id, self.port);
         self.trackers = fresh.trackers;
+    }
+
+    /// Set the full info hashes for dual-swarm support (hybrid torrents).
+    pub fn set_info_hashes(&mut self, info_hashes: InfoHashes) {
+        self.info_hashes = info_hashes;
     }
 
     /// Number of configured trackers.
@@ -206,16 +214,61 @@ impl TrackerManager {
             .min()
     }
 
-    /// Build an AnnounceRequest from current stats.
-    fn build_request(
-        &self,
+    /// Announce to all trackers that are due.
+    ///
+    /// For hybrid torrents, announces both v1 and v2 info hashes separately
+    /// to reach peers in both swarms. Returns all discovered peer addresses (deduplicated).
+    pub async fn announce(
+        &mut self,
         event: AnnounceEvent,
         uploaded: u64,
         downloaded: u64,
         left: u64,
-    ) -> AnnounceRequest {
-        AnnounceRequest {
-            info_hash: self.info_hash,
+    ) -> AnnounceResult {
+        let mut all_peers = Vec::new();
+        let mut seen_peers = std::collections::HashSet::new();
+        let mut all_outcomes = Vec::new();
+
+        // Always announce with the primary (v1) info hash
+        let result = self.announce_with_hash(self.info_hash, event, uploaded, downloaded, left).await;
+        for peer in result.peers {
+            if seen_peers.insert(peer) {
+                all_peers.push(peer);
+            }
+        }
+        all_outcomes.extend(result.outcomes);
+
+        // Dual-swarm: also announce with v2 hash (truncated) if hybrid
+        if self.info_hashes.is_hybrid() {
+            if let Some(v2) = self.info_hashes.v2 {
+                let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+                // Only announce the v2 hash if it differs from the v1 hash
+                if v2_as_v1 != self.info_hash {
+                    let result = self.announce_with_hash(v2_as_v1, event, uploaded, downloaded, left).await;
+                    for peer in result.peers {
+                        if seen_peers.insert(peer) {
+                            all_peers.push(peer);
+                        }
+                    }
+                    all_outcomes.extend(result.outcomes);
+                }
+            }
+        }
+
+        AnnounceResult { peers: all_peers, outcomes: all_outcomes }
+    }
+
+    /// Internal: announce with a specific info hash to all due trackers.
+    async fn announce_with_hash(
+        &mut self,
+        hash: Id20,
+        event: AnnounceEvent,
+        uploaded: u64,
+        downloaded: u64,
+        left: u64,
+    ) -> AnnounceResult {
+        let req = AnnounceRequest {
+            info_hash: hash,
             peer_id: self.peer_id,
             port: self.port,
             uploaded,
@@ -224,27 +277,16 @@ impl TrackerManager {
             event,
             num_want: Some(50),
             compact: true,
-        }
-    }
-
-    /// Announce to all trackers that are due.
-    ///
-    /// Returns all discovered peer addresses (deduplicated).
-    pub async fn announce(
-        &mut self,
-        event: AnnounceEvent,
-        uploaded: u64,
-        downloaded: u64,
-        left: u64,
-    ) -> AnnounceResult {
-        let req = self.build_request(event, uploaded, downloaded, left);
+        };
         let now = Instant::now();
         let mut all_peers = Vec::new();
         let mut seen_peers = std::collections::HashSet::new();
         let mut outcomes = Vec::new();
 
         for tracker in &mut self.trackers {
-            if tracker.next_announce > now {
+            // For the secondary (v2) hash, always announce (don't skip based on next_announce,
+            // since the timer tracks the primary hash). For the primary hash, respect the timer.
+            if hash == self.info_hash && tracker.next_announce > now {
                 continue;
             }
 
@@ -264,24 +306,27 @@ impl TrackerManager {
                         url = %tracker.url,
                         peer_count = num_peers,
                         interval,
+                        %hash,
                         "tracker announce success"
                     );
-                    tracker.state = TrackerState::Active;
-                    tracker.interval = Duration::from_secs(interval as u64);
-                    tracker.next_announce = now + tracker.interval;
-                    tracker.backoff = Duration::ZERO;
-                    tracker.consecutive_failures = 0;
-                    if let Some(id) = tracker_id {
-                        tracker.tracker_id = Some(id);
-                    }
-                    // Store seeders/leechers from announce response
-                    if seeders.is_some() || leechers.is_some() {
-                        let prev_downloaded = tracker.scrape_info.map(|s| s.downloaded).unwrap_or(0);
-                        tracker.scrape_info = Some(ferrite_tracker::ScrapeInfo {
-                            complete: seeders.unwrap_or(0),
-                            incomplete: leechers.unwrap_or(0),
-                            downloaded: prev_downloaded,
-                        });
+                    // Only update tracker state for the primary hash
+                    if hash == self.info_hash {
+                        tracker.state = TrackerState::Active;
+                        tracker.interval = Duration::from_secs(interval as u64);
+                        tracker.next_announce = now + tracker.interval;
+                        tracker.backoff = Duration::ZERO;
+                        tracker.consecutive_failures = 0;
+                        if let Some(id) = tracker_id {
+                            tracker.tracker_id = Some(id);
+                        }
+                        if seeders.is_some() || leechers.is_some() {
+                            let prev_downloaded = tracker.scrape_info.map(|s| s.downloaded).unwrap_or(0);
+                            tracker.scrape_info = Some(ferrite_tracker::ScrapeInfo {
+                                complete: seeders.unwrap_or(0),
+                                incomplete: leechers.unwrap_or(0),
+                                downloaded: prev_downloaded,
+                            });
+                        }
                     }
 
                     for peer in peers {
@@ -296,18 +341,20 @@ impl TrackerManager {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    warn!(url = %tracker.url, error = %msg, "tracker announce failed");
-                    tracker.state = TrackerState::Failed {
-                        _error: msg.clone(),
-                    };
-                    tracker.consecutive_failures += 1;
-                    // Exponential backoff
-                    tracker.backoff = if tracker.backoff.is_zero() {
-                        INITIAL_BACKOFF
-                    } else {
-                        (tracker.backoff * 2).min(MAX_BACKOFF)
-                    };
-                    tracker.next_announce = now + tracker.backoff;
+                    warn!(url = %tracker.url, error = %msg, %hash, "tracker announce failed");
+                    // Only update failure state for the primary hash
+                    if hash == self.info_hash {
+                        tracker.state = TrackerState::Failed {
+                            _error: msg.clone(),
+                        };
+                        tracker.consecutive_failures += 1;
+                        tracker.backoff = if tracker.backoff.is_zero() {
+                            INITIAL_BACKOFF
+                        } else {
+                            (tracker.backoff * 2).min(MAX_BACKOFF)
+                        };
+                        tracker.next_announce = now + tracker.backoff;
+                    }
                     outcomes.push(TrackerOutcome {
                         url: tracker.url.clone(),
                         result: Err(msg),
@@ -505,7 +552,7 @@ fn parse_udp_addr(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrite_core::Id20;
+    use ferrite_core::{Id20, InfoHashes};
 
     /// Helper to build a minimal TorrentMetaV1 with given tracker URLs.
     fn torrent_with_trackers(
@@ -748,6 +795,20 @@ mod tests {
         let added = mgr.add_tracker_url("http://tracker.example.com/announce");
         assert!(!added);
         assert_eq!(mgr.tracker_count(), 1);
+    }
+
+    #[test]
+    fn tracker_manager_stores_info_hashes() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let mut mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        assert!(!mgr.info_hashes.is_hybrid());
+
+        let v2 = ferrite_core::Id32::from_hex(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .unwrap();
+        mgr.set_info_hashes(InfoHashes::hybrid(meta.info_hash, v2));
+        assert!(mgr.info_hashes.is_hybrid());
     }
 
     #[test]
