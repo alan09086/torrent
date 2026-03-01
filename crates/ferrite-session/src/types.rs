@@ -89,6 +89,12 @@ pub struct TorrentConfig {
     pub mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm,
     /// Enable automatic sequential mode switching on partial-piece explosion.
     pub auto_sequential: bool,
+    /// Fraction of peers to disconnect per turnover interval (0.0–1.0).
+    pub peer_turnover: f64,
+    /// Only trigger turnover if download rate < this fraction of peak rate (0.0–1.0).
+    pub peer_turnover_cutoff: f64,
+    /// Seconds between turnover checks (0 = disabled).
+    pub peer_turnover_interval: u64,
 }
 
 impl Default for TorrentConfig {
@@ -135,6 +141,9 @@ impl Default for TorrentConfig {
             predictive_piece_announce_ms: 0,
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
+            peer_turnover: 0.04,
+            peer_turnover_cutoff: 0.9,
+            peer_turnover_interval: 300,
         }
     }
 }
@@ -183,6 +192,9 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             predictive_piece_announce_ms: s.predictive_piece_announce_ms,
             mixed_mode_algorithm: s.mixed_mode_algorithm,
             auto_sequential: s.auto_sequential,
+            peer_turnover: s.peer_turnover,
+            peer_turnover_cutoff: s.peer_turnover_cutoff,
+            peer_turnover_interval: s.peer_turnover_interval,
         }
     }
 }
@@ -644,5 +656,25 @@ mod tests {
         s2.enable_holepunch = false;
         let tc2 = TorrentConfig::from(&s2);
         assert!(!tc2.enable_holepunch);
+    }
+
+    #[test]
+    fn torrent_config_peer_turnover_defaults() {
+        let cfg = TorrentConfig::default();
+        assert!((cfg.peer_turnover - 0.04).abs() < f64::EPSILON);
+        assert!((cfg.peer_turnover_cutoff - 0.9).abs() < f64::EPSILON);
+        assert_eq!(cfg.peer_turnover_interval, 300);
+    }
+
+    #[test]
+    fn torrent_config_from_settings_peer_turnover() {
+        let mut s = crate::settings::Settings::default();
+        s.peer_turnover = 0.1;
+        s.peer_turnover_cutoff = 0.75;
+        s.peer_turnover_interval = 120;
+        let cfg = TorrentConfig::from(&s);
+        assert!((cfg.peer_turnover - 0.1).abs() < f64::EPSILON);
+        assert!((cfg.peer_turnover_cutoff - 0.75).abs() < f64::EPSILON);
+        assert_eq!(cfg.peer_turnover_interval, 120);
     }
 }
