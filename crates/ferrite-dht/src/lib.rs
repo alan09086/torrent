@@ -16,6 +16,7 @@ pub mod routing_table;
 pub mod peer_store;
 pub mod node_id;
 pub mod bep44;
+pub mod storage;
 mod actor;
 
 pub use bep44::{
@@ -34,3 +35,4 @@ pub use krpc::{KrpcMessage, KrpcBody, KrpcQuery, KrpcResponse, GetPeersResponse,
 pub use routing_table::RoutingTable;
 pub use actor::{DhtHandle, DhtConfig, DhtStats};
 pub use node_id::{generate_node_id, is_valid_node_id, is_bep42_exempt, ExternalIpVoter, IpVoteSource};
+pub use storage::{DhtStorage, InMemoryDhtStorage};
