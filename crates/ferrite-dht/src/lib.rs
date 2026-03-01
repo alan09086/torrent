@@ -15,8 +15,14 @@ pub mod krpc;
 pub mod routing_table;
 pub mod peer_store;
 pub mod node_id;
+pub mod bep44;
 mod actor;
 
+pub use bep44::{
+    ImmutableItem, MutableItem,
+    compute_mutable_target, build_signing_buffer,
+    MAX_VALUE_SIZE, MAX_SALT_SIZE,
+};
 pub use compact::{
     CompactNodeInfo, CompactNodeInfo6,
     parse_compact_nodes, encode_compact_nodes,

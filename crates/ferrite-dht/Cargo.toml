@@ -11,6 +11,7 @@ ferrite-core = { path = "../ferrite-core" }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+ed25519-dalek = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -28,4 +28,19 @@ pub enum Error {
 
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("BEP 44: value too large ({size} bytes, max {max})")]
+    Bep44ValueTooLarge { size: usize, max: usize },
+
+    #[error("BEP 44: salt too large ({size} bytes, max {max})")]
+    Bep44SaltTooLarge { size: usize, max: usize },
+
+    #[error("BEP 44: invalid signature")]
+    Bep44InvalidSignature,
+
+    #[error("BEP 44: sequence number {got} not newer than {current}")]
+    Bep44SequenceTooOld { got: i64, current: i64 },
+
+    #[error("BEP 44: CAS mismatch (expected seq {expected}, got {actual})")]
+    Bep44CasMismatch { expected: i64, actual: i64 },
 }
