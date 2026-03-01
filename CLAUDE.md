@@ -69,6 +69,16 @@ cargo clippy --workspace -- -D warnings
 - `Magnet` — `info_hashes: InfoHashes` (v1 + v2), `info_hash()` method for backward compat. Parses `urn:btih:` and `urn:btmh:`
 - Info-hash = SHA1 (v1) or SHA-256 (v2) of **raw bencode bytes** of info dict (not re-serialized)
 
+### BEP 52 Hash Coordination (`ferrite-core`, M34a)
+- `HashRequest` — Merkle tree hash range request: `file_root`, `base` (layer), `index`, `count`, `proof_layers`
+- `validate_hash_request(req, file_num_blocks, file_num_pieces) -> bool` — tree geometry bounds check
+- `MerkleTreeState` — per-file verification state: stores piece-layer + block-layer hashes, tracks verified blocks
+- `SetBlockResult` enum: `Ok` (piece sub-tree verified), `Unknown` (awaiting hashes/siblings), `HashFailed` (bad data)
+- `HashPicker` — coordinates hash requests to peers. Priority: block requests > piece-layer requests (512-piece batches)
+- `FileHashInfo` — `{ root: Id32, num_blocks: u32, num_pieces: u32 }` for picker initialization
+- `AddHashesResult` — `{ valid: bool, hash_passed: Vec<u32>, hash_failed: Vec<u32> }`
+- Wire messages: `Message::HashRequest` (ID 21), `Message::Hashes` (ID 22), `Message::HashReject` (ID 23) — 49-byte fixed layout + variable hash array
+
 ### Storage (`ferrite-storage`)
 - `FileMap::new(file_lengths, lengths)` — O(log n) piece-to-file segment mapping
 - `TorrentStorage` trait: `write_chunk()`, `read_chunk()`, `read_piece()`, `verify_piece()`

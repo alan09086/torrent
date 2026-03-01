@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.38.0 — 2026-02-28
+
+BEP 52 wire protocol and hash picker. Eleven crates, 869 tests.
+
+### M34a: BEP 52 Wire Protocol + Hash Picker
+
+### Added
+- BEP 52 wire messages: `HashRequest` (msg 21), `Hashes` (msg 22), `HashReject` (msg 23) in `ferrite-wire`
+- `HashRequest` type with `validate_hash_request()` in `ferrite-core`
+- `MerkleTreeState` for per-file Merkle tree verification with tri-state result (`Ok`/`Unknown`/`HashFailed`)
+- `HashPicker` for coordinating hash requests to peers, including proactive per-block requests
+- Merkle proof validation on received piece-layer hashes (prevents malicious hash injection)
+- Deferred verification: block hashes stored when piece-layer hashes unavailable, retroactively verified on arrival
+- Facade re-exports of all new types in `ferrite::core` and `ferrite::prelude`
+- 26 new tests (6 wire + 5 hash_request + 7 merkle_state + 8 hash_picker)
+
+### Architecture Notes
+- Hash messages are core protocol (msg IDs 21-23), not extension messages
+- Proactive per-block hash requesting implemented — goes beyond libtorrent which left this as `#if 0`
+- `MerkleTreeState` returns `Unknown` (not `Ok`) when piece hash is known but not all sibling blocks are present yet
+- `HashPicker::pick_hashes()` takes `impl Fn(u32) -> bool` callback for bitfield-agnostic piece ownership check
+- Single-file v2 assumption documented; multi-file piece-to-file mapping deferred to future milestone
+
 ## 0.37.0 — 2026-02-28
 
 BEP 52 core v2 metadata types and parsing. Eleven crates, 843 tests.
