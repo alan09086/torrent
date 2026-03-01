@@ -8,6 +8,28 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.52.0 — 2026-03-01
+
+Peer turnover algorithm for periodic replacement of underperforming peers. Eleven crates, 1156 tests, 27 BEPs implemented. Phase 9 (Swarm Intelligence) complete.
+
+### M46: Peer Turnover
+
+### Added
+- `connected_at: Instant` field on PeerState for connection age tracking
+- `run_peer_turnover()` method on TorrentActor: disconnects bottom fraction of peers ranked by download rate
+- Peak download rate tracking in `update_peer_rates()` for cutoff threshold
+- Turnover timer in TorrentActor run() select loop (configurable interval, default 300s)
+- 4 peer exemptions: seeds, outstanding requests, parole peers, recently connected (<30s)
+- Cutoff suppression: skips turnover when aggregate download rate >= cutoff * peak rate
+- `PeerTurnover` alert variant (PEER category) with disconnected/replaced counts
+- 3 new settings: `peer_turnover` (0.04), `peer_turnover_cutoff` (0.9), `peer_turnover_interval` (300)
+- Settings validation for turnover fraction and cutoff (0.0-1.0 range)
+- Facade: 3 `ClientBuilder` methods
+- 11 new tests (1156 total)
+
+### Changed
+- Disconnect cleanup in peer turnover matches full PeerEvent::Disconnected handler (super-seed, suggested_to_peers, in-flight pieces)
+
 ## 0.51.0 — 2026-03-01
 
 Mixed-mode TCP/uTP bandwidth algorithm and auto-sequential hysteresis. Eleven crates, 1145 tests, 27 BEPs implemented.
