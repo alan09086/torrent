@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bitflags::bitflags;
 use bytes::Bytes;
-use ferrite_core::Id20;
+use ferrite_core::{Id20, Id32};
 use ferrite_storage::{ArcCache, TorrentStorage};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
@@ -59,6 +59,23 @@ pub(crate) enum DiskJob {
         #[allow(dead_code)]
         flags: DiskJobFlags,
         reply: oneshot::Sender<ferrite_storage::Result<bool>>,
+    },
+    HashV2 {
+        info_hash: Id20,
+        piece: u32,
+        expected: Id32,
+        #[allow(dead_code)]
+        flags: DiskJobFlags,
+        reply: oneshot::Sender<ferrite_storage::Result<bool>>,
+    },
+    BlockHash {
+        info_hash: Id20,
+        piece: u32,
+        begin: u32,
+        length: u32,
+        #[allow(dead_code)]
+        flags: DiskJobFlags,
+        reply: oneshot::Sender<ferrite_storage::Result<Id32>>,
     },
 
     ClearPiece {
@@ -268,6 +285,54 @@ impl DiskHandle {
         )))
     }
 
+    /// Verify a piece hash against an expected SHA-256 value (v2).
+    pub async fn verify_piece_v2(
+        &self,
+        piece: u32,
+        expected: Id32,
+        flags: DiskJobFlags,
+    ) -> ferrite_storage::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(DiskJob::HashV2 {
+                info_hash: self.info_hash,
+                piece,
+                expected,
+                flags,
+                reply: tx,
+            })
+            .await;
+        rx.await.unwrap_or(Err(ferrite_storage::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
+        )))
+    }
+
+    /// Hash a single block with SHA-256 for Merkle verification (v2).
+    pub async fn hash_block(
+        &self,
+        piece: u32,
+        begin: u32,
+        length: u32,
+        flags: DiskJobFlags,
+    ) -> ferrite_storage::Result<Id32> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(DiskJob::BlockHash {
+                info_hash: self.info_hash,
+                piece,
+                begin,
+                length,
+                flags,
+                reply: tx,
+            })
+            .await;
+        rx.await.unwrap_or(Err(ferrite_storage::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
+        )))
+    }
+
     /// Clear a piece from cache and write buffer (e.g. on hash failure).
     pub async fn clear_piece(&self, piece: u32) {
         let _ = self
@@ -427,6 +492,29 @@ impl DiskActor {
                 let result = self.handle_hash(info_hash, piece, expected).await;
                 let _ = reply.send(result);
             }
+            DiskJob::HashV2 {
+                info_hash,
+                piece,
+                expected,
+                reply,
+                ..
+            } => {
+                let result = self.handle_hash_v2(info_hash, piece, expected).await;
+                let _ = reply.send(result);
+            }
+            DiskJob::BlockHash {
+                info_hash,
+                piece,
+                begin,
+                length,
+                reply,
+                ..
+            } => {
+                let result = self
+                    .handle_block_hash(info_hash, piece, begin, length)
+                    .await;
+                let _ = reply.send(result);
+            }
             DiskJob::ClearPiece { info_hash, piece } => {
                 self.write_buffer.clear_piece(info_hash, piece);
                 self.cache
@@ -543,6 +631,41 @@ impl DiskActor {
         let permit = self.semaphore.clone().acquire_owned().await.unwrap();
         let result =
             tokio::task::spawn_blocking(move || storage.verify_piece(piece, &expected))
+                .await
+                .unwrap();
+        drop(permit);
+        result
+    }
+
+    async fn handle_hash_v2(
+        &mut self,
+        info_hash: Id20,
+        piece: u32,
+        expected: Id32,
+    ) -> ferrite_storage::Result<bool> {
+        self.flush_piece(info_hash, piece).await.ok();
+        let storage = self.get_storage(info_hash)?;
+        let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+        let result =
+            tokio::task::spawn_blocking(move || storage.verify_piece_v2(piece, &expected))
+                .await
+                .unwrap();
+        drop(permit);
+        result
+    }
+
+    async fn handle_block_hash(
+        &mut self,
+        info_hash: Id20,
+        piece: u32,
+        begin: u32,
+        length: u32,
+    ) -> ferrite_storage::Result<Id32> {
+        self.flush_piece(info_hash, piece).await.ok();
+        let storage = self.get_storage(info_hash)?;
+        let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+        let result =
+            tokio::task::spawn_blocking(move || storage.hash_block(piece, begin, length))
                 .await
                 .unwrap();
         drop(permit);
@@ -787,6 +910,41 @@ mod tests {
         assert_eq!(&piece[..25], &[1u8; 25]);
         assert_eq!(&piece[25..], &[2u8; 25]);
 
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn verify_piece_v2_via_disk_handle() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(11);
+        let data = vec![0xABu8; 16384];
+        let expected = ferrite_core::sha256(&data);
+        let lengths = Lengths::new(16384, 16384, 16384);
+        let storage = Arc::new(MemoryStorage::new(lengths));
+        storage.write_chunk(0, 0, &data).unwrap();
+
+        let disk = mgr.register_torrent(ih, storage).await;
+        let result = disk
+            .verify_piece_v2(0, expected, DiskJobFlags::empty())
+            .await;
+        assert!(result.unwrap());
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hash_block_via_disk_handle() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(12);
+        let data = vec![0xCDu8; 16384];
+        let lengths = Lengths::new(16384, 16384, 16384);
+        let storage = Arc::new(MemoryStorage::new(lengths));
+        storage.write_chunk(0, 0, &data).unwrap();
+
+        let disk = mgr.register_torrent(ih, storage).await;
+        let hash = disk
+            .hash_block(0, 0, 16384, DiskJobFlags::empty())
+            .await;
+        assert_eq!(hash.unwrap(), ferrite_core::sha256(&data));
         mgr.shutdown().await;
     }
 
