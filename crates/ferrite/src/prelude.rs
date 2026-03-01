@@ -65,3 +65,6 @@ pub use crate::core::TorrentVersion;
 
 // BEP 52 Hash Picker (M34a)
 pub use crate::core::{HashPicker, SetBlockResult};
+
+// I2P support (M41)
+pub use crate::session::{I2pDestination, I2pDestinationError};

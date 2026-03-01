@@ -55,6 +55,9 @@ pub use ferrite_session::{
     PeerSource,
     // Extension plugin interface (M32d)
     ExtensionPlugin,
+    // I2P support (M41)
+    I2pDestination,
+    I2pDestinationError,
     // Error types
     Error,
     Result,

@@ -401,6 +401,61 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable I2P anonymous network support.
+    ///
+    /// Requires a local I2P router with SAM enabled (default: 127.0.0.1:7656).
+    /// When enabled, the session creates a SAM session on startup and accepts
+    /// anonymous peer connections.
+    pub fn enable_i2p(mut self, v: bool) -> Self {
+        self.settings.enable_i2p = v;
+        self
+    }
+
+    /// Set the SAM bridge hostname. Default: "127.0.0.1".
+    pub fn i2p_hostname(mut self, host: impl Into<String>) -> Self {
+        self.settings.i2p_hostname = host.into();
+        self
+    }
+
+    /// Set the SAM bridge port. Default: 7656.
+    pub fn i2p_port(mut self, port: u16) -> Self {
+        self.settings.i2p_port = port;
+        self
+    }
+
+    /// Set the number of inbound I2P tunnels (1-16). Default: 3.
+    pub fn i2p_inbound_quantity(mut self, n: u8) -> Self {
+        self.settings.i2p_inbound_quantity = n;
+        self
+    }
+
+    /// Set the number of outbound I2P tunnels (1-16). Default: 3.
+    pub fn i2p_outbound_quantity(mut self, n: u8) -> Self {
+        self.settings.i2p_outbound_quantity = n;
+        self
+    }
+
+    /// Set the number of hops in inbound I2P tunnels (0-7). Default: 3.
+    pub fn i2p_inbound_length(mut self, n: u8) -> Self {
+        self.settings.i2p_inbound_length = n;
+        self
+    }
+
+    /// Set the number of hops in outbound I2P tunnels (0-7). Default: 3.
+    pub fn i2p_outbound_length(mut self, n: u8) -> Self {
+        self.settings.i2p_outbound_length = n;
+        self
+    }
+
+    /// Allow mixing I2P and clearnet peers. Default: false.
+    ///
+    /// When false, I2P-enabled torrents only connect to I2P peers.
+    /// When true, both I2P and clearnet peers are used.
+    pub fn allow_i2p_mixed(mut self, v: bool) -> Self {
+        self.settings.allow_i2p_mixed = v;
+        self
+    }
+
     /// Set the disk I/O channel capacity. Default: 1024.
     pub fn disk_channel_capacity(mut self, n: usize) -> Self {
         self.settings.disk_channel_capacity = n;
@@ -602,6 +657,40 @@ mod tests {
         assert!(config.force_proxy);
         assert!(config.anonymous_mode);
         assert!(!config.apply_ip_filter_to_trackers);
+    }
+
+    #[test]
+    fn client_builder_i2p_config() {
+        // Default: I2P disabled
+        let config = ClientBuilder::new().into_settings();
+        assert!(!config.enable_i2p);
+        assert_eq!(config.i2p_hostname, "127.0.0.1");
+        assert_eq!(config.i2p_port, 7656);
+        assert_eq!(config.i2p_inbound_quantity, 3);
+        assert_eq!(config.i2p_outbound_quantity, 3);
+        assert_eq!(config.i2p_inbound_length, 3);
+        assert_eq!(config.i2p_outbound_length, 3);
+        assert!(!config.allow_i2p_mixed);
+
+        // Explicitly configured
+        let config = ClientBuilder::new()
+            .enable_i2p(true)
+            .i2p_hostname("10.0.0.1")
+            .i2p_port(7700)
+            .i2p_inbound_quantity(5)
+            .i2p_outbound_quantity(4)
+            .i2p_inbound_length(2)
+            .i2p_outbound_length(1)
+            .allow_i2p_mixed(true)
+            .into_settings();
+        assert!(config.enable_i2p);
+        assert_eq!(config.i2p_hostname, "10.0.0.1");
+        assert_eq!(config.i2p_port, 7700);
+        assert_eq!(config.i2p_inbound_quantity, 5);
+        assert_eq!(config.i2p_outbound_quantity, 4);
+        assert_eq!(config.i2p_inbound_length, 2);
+        assert_eq!(config.i2p_outbound_length, 1);
+        assert!(config.allow_i2p_mixed);
     }
 
     #[test]

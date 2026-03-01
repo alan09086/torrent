@@ -629,6 +629,27 @@ mod tests {
     }
 
     #[test]
+    fn i2p_types_accessible_through_facade() {
+        // I2pDestination construction and display
+        let dest = session::I2pDestination::from_bytes(vec![42u8; 516]);
+        assert_eq!(dest.len(), 516);
+        assert!(!dest.is_empty());
+
+        // Base64 round-trip
+        let b64 = dest.to_base64();
+        let parsed = session::I2pDestination::from_base64(&b64).unwrap();
+        assert_eq!(parsed, dest);
+
+        // b32 address
+        let b32 = dest.to_b32_address();
+        assert!(b32.ends_with(".b32.i2p"));
+
+        // Error type accessible
+        let err = session::I2pDestinationError::Empty;
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
     fn tracker_scrape_types_accessible_through_facade() {
         // ScrapeInfo construction
         let info = tracker::ScrapeInfo {
