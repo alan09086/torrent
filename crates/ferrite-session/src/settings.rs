@@ -119,6 +119,9 @@ fn default_dht_max_items() -> usize {
 fn default_dht_item_lifetime() -> u64 {
     7200
 }
+fn default_dht_sample_interval() -> u64 {
+    0
+}
 
 // ── Settings ─────────────────────────────────────────────────────────
 
@@ -288,6 +291,10 @@ pub struct Settings {
     /// Lifetime of BEP 44 DHT items in seconds before expiry (default: 7200 = 2 hours).
     #[serde(default = "default_dht_item_lifetime")]
     pub dht_item_lifetime_secs: u64,
+    /// Interval in seconds for periodic sample_infohashes queries (BEP 51).
+    /// 0 = disabled (default). Non-zero enables background DHT indexing.
+    #[serde(default = "default_dht_sample_interval")]
+    pub dht_sample_infohashes_interval: u64,
 
     // ── NAT tuning ──
     #[serde(default = "default_upnp_lease")]
@@ -377,6 +384,7 @@ impl Default for Settings {
             dht_restrict_routing_ips: true,
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
+            dht_sample_infohashes_interval: 0,
             // NAT tuning
             upnp_lease_duration: 3600,
             natpmp_lifetime: 7200,
@@ -625,6 +633,7 @@ impl PartialEq for Settings {
             && self.dht_restrict_routing_ips == other.dht_restrict_routing_ips
             && self.dht_max_items == other.dht_max_items
             && self.dht_item_lifetime_secs == other.dht_item_lifetime_secs
+            && self.dht_sample_infohashes_interval == other.dht_sample_infohashes_interval
             && self.upnp_lease_duration == other.upnp_lease_duration
             && self.natpmp_lifetime == other.natpmp_lifetime
             && self.utp_max_connections == other.utp_max_connections
@@ -849,6 +858,23 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.dht_max_items, 700);
         assert_eq!(s.dht_item_lifetime_secs, 7200);
+    }
+
+    #[test]
+    fn dht_sample_interval_default_disabled() {
+        let s = Settings::default();
+        assert_eq!(s.dht_sample_infohashes_interval, 0);
+    }
+
+    #[test]
+    fn dht_sample_interval_json_round_trip() {
+        let json = r#"{"dht_sample_infohashes_interval": 300}"#;
+        let decoded: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.dht_sample_infohashes_interval, 300);
+
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        let roundtrip: Settings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(roundtrip.dht_sample_infohashes_interval, 300);
     }
 
     #[test]

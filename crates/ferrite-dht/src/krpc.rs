@@ -107,6 +107,11 @@ pub enum KrpcQuery {
         /// For mutable items: optional CAS (compare-and-swap) expected seq.
         cas: Option<i64>,
     },
+    /// BEP 51: sample info hashes from a node's storage.
+    SampleInfohashes {
+        id: Id20,
+        target: Id20,
+    },
 }
 
 /// KRPC response types.
@@ -138,6 +143,8 @@ pub enum KrpcResponse {
         /// For mutable items: sequence number.
         seq: Option<i64>,
     },
+    /// Response to sample_infohashes (BEP 51).
+    SampleInfohashes(SampleInfohashesResponse),
 }
 
 /// get_peers response can return peers, closer nodes, or both.
@@ -153,6 +160,20 @@ pub struct GetPeersResponse {
     pub nodes6: Vec<CompactNodeInfo6>,
 }
 
+/// Response to sample_infohashes (BEP 51).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleInfohashesResponse {
+    pub id: Id20,
+    /// Minimum seconds before querying this node again.
+    pub interval: i64,
+    /// Estimated total number of info hashes in this node's storage.
+    pub num: i64,
+    /// Random sample of info hashes (each 20 bytes).
+    pub samples: Vec<Id20>,
+    /// Closer nodes (compact format), for DHT traversal.
+    pub nodes: Vec<CompactNodeInfo>,
+}
+
 impl KrpcQuery {
     /// The query method name as used in the `q` field.
     pub fn method_name(&self) -> &'static str {
@@ -163,6 +184,7 @@ impl KrpcQuery {
             KrpcQuery::AnnouncePeer { .. } => "announce_peer",
             KrpcQuery::Get { .. } => "get",
             KrpcQuery::Put { .. } => "put",
+            KrpcQuery::SampleInfohashes { .. } => "sample_infohashes",
         }
     }
 
@@ -174,7 +196,8 @@ impl KrpcQuery {
             | KrpcQuery::GetPeers { id, .. }
             | KrpcQuery::AnnouncePeer { id, .. }
             | KrpcQuery::Get { id, .. }
-            | KrpcQuery::Put { id, .. } => id,
+            | KrpcQuery::Put { id, .. }
+            | KrpcQuery::SampleInfohashes { id, .. } => id,
         }
     }
 }
@@ -187,6 +210,7 @@ impl KrpcResponse {
             KrpcResponse::FindNode { id, .. } => id,
             KrpcResponse::GetPeers(gp) => &gp.id,
             KrpcResponse::GetItem { id, .. } => id,
+            KrpcResponse::SampleInfohashes(si) => &si.id,
         }
     }
 }
@@ -423,6 +447,10 @@ fn encode_query_args(query: &KrpcQuery) -> BencodeValue {
             args.insert(b"token".to_vec(), BencodeValue::Bytes(token.clone()));
             args.insert(b"v".to_vec(), BencodeValue::Bytes(value.clone()));
         }
+        KrpcQuery::SampleInfohashes { id, target } => {
+            args.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
+            args.insert(b"target".to_vec(), BencodeValue::Bytes(target.0.to_vec()));
+        }
     }
     BencodeValue::Dict(args)
 }
@@ -523,6 +551,23 @@ fn encode_response_values(resp: &KrpcResponse) -> BencodeValue {
             if let Some(v) = value {
                 values.insert(b"v".to_vec(), BencodeValue::Bytes(v.clone()));
             }
+        }
+        KrpcResponse::SampleInfohashes(si) => {
+            values.insert(b"id".to_vec(), BencodeValue::Bytes(si.id.0.to_vec()));
+            values.insert(b"interval".to_vec(), BencodeValue::Integer(si.interval));
+            if !si.nodes.is_empty() {
+                values.insert(
+                    b"nodes".to_vec(),
+                    BencodeValue::Bytes(encode_compact_nodes(&si.nodes)),
+                );
+            }
+            values.insert(b"num".to_vec(), BencodeValue::Integer(si.num));
+            // BEP 51: "samples" is always present, even if empty
+            let mut samples_buf = Vec::with_capacity(si.samples.len() * 20);
+            for hash in &si.samples {
+                samples_buf.extend_from_slice(hash.as_bytes());
+            }
+            values.insert(b"samples".to_vec(), BencodeValue::Bytes(samples_buf));
         }
     }
     BencodeValue::Dict(values)
@@ -646,6 +691,10 @@ fn decode_query(
                 cas,
             })
         }
+        b"sample_infohashes" => {
+            let target = args_id20(args, b"target")?;
+            Ok(KrpcQuery::SampleInfohashes { id, target })
+        }
         _ => Err(Error::InvalidMessage(format!(
             "unknown query method: {}",
             String::from_utf8_lossy(method)
@@ -670,6 +719,48 @@ fn decode_response(
     // regardless of which fields are present (handles "not found" case).
     if query_method == Some("get") {
         return decode_get_item_response(id, values);
+    }
+
+    // sample_infohashes response (BEP 51): has "samples" + "interval" + "num"
+    let has_samples = values.contains_key(&b"samples"[..]);
+    let has_interval = values.contains_key(&b"interval"[..]);
+
+    if has_samples && has_interval {
+        let interval = values
+            .get(&b"interval"[..])
+            .and_then(|v| v.as_int())
+            .unwrap_or(0);
+        let num = values
+            .get(&b"num"[..])
+            .and_then(|v| v.as_int())
+            .unwrap_or(0);
+
+        let samples_bytes = values
+            .get(&b"samples"[..])
+            .and_then(|v| v.as_bytes_raw())
+            .unwrap_or(&[]);
+        let mut samples = Vec::new();
+        if samples_bytes.len().is_multiple_of(20) {
+            for chunk in samples_bytes.chunks_exact(20) {
+                if let Ok(hash) = Id20::from_bytes(chunk) {
+                    samples.push(hash);
+                }
+            }
+        }
+
+        let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+            parse_compact_nodes(nodes_bytes)?
+        } else {
+            Vec::new()
+        };
+
+        return Ok(KrpcResponse::SampleInfohashes(SampleInfohashesResponse {
+            id,
+            interval,
+            num,
+            samples,
+            nodes,
+        }));
     }
 
     // BEP 44 get response heuristic: has "k" (mutable key), "sig" (signature),
@@ -1371,6 +1462,77 @@ mod tests {
             }
             .method_name(),
             "put"
+        );
+    }
+
+    // --- BEP 51 KRPC tests ---
+
+    #[test]
+    fn sample_infohashes_query_round_trip() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(400),
+            body: KrpcBody::Query(KrpcQuery::SampleInfohashes {
+                id: test_id(),
+                target: target_id(),
+            }),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn sample_infohashes_response_round_trip() {
+        let sample1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let sample2 = Id20::from_hex("0000000000000000000000000000000000000001").unwrap();
+        let nodes = vec![CompactNodeInfo {
+            id: target_id(),
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        }];
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(400),
+            body: KrpcBody::Response(KrpcResponse::SampleInfohashes(SampleInfohashesResponse {
+                id: test_id(),
+                interval: 300,
+                num: 42,
+                samples: vec![sample1, sample2],
+                nodes,
+            })),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn sample_infohashes_response_empty_samples() {
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(401),
+            body: KrpcBody::Response(KrpcResponse::SampleInfohashes(SampleInfohashesResponse {
+                id: test_id(),
+                interval: 60,
+                num: 0,
+                samples: Vec::new(),
+                nodes: Vec::new(),
+            })),
+            sender_ip: None,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn sample_infohashes_query_method_name() {
+        assert_eq!(
+            KrpcQuery::SampleInfohashes {
+                id: Id20::ZERO,
+                target: Id20::ZERO,
+            }
+            .method_name(),
+            "sample_infohashes"
         );
     }
 }

@@ -31,8 +31,8 @@ pub use compact::{
     COMPACT_NODE_SIZE, COMPACT_NODE6_SIZE,
 };
 pub use error::{Error, Result};
-pub use krpc::{KrpcMessage, KrpcBody, KrpcQuery, KrpcResponse, GetPeersResponse, TransactionId};
+pub use krpc::{KrpcMessage, KrpcBody, KrpcQuery, KrpcResponse, GetPeersResponse, SampleInfohashesResponse, TransactionId};
 pub use routing_table::RoutingTable;
-pub use actor::{DhtHandle, DhtConfig, DhtStats};
+pub use actor::{DhtHandle, DhtConfig, DhtStats, SampleInfohashesResult};
 pub use node_id::{generate_node_id, is_valid_node_id, is_bep42_exempt, ExternalIpVoter, IpVoteSource};
 pub use storage::{DhtStorage, InMemoryDhtStorage};
