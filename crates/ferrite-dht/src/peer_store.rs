@@ -108,6 +108,30 @@ impl PeerStore {
         self.peers.values().map(|p| p.len()).sum()
     }
 
+    /// Return up to `max` randomly sampled info hashes from the store.
+    ///
+    /// Uses Fisher-Yates partial shuffle on the key vector.
+    /// If the store has fewer than `max` info hashes, returns all of them.
+    pub fn random_info_hashes(&self, max: usize) -> Vec<Id20> {
+        let keys: Vec<Id20> = self.peers.keys().copied().collect();
+        let count = keys.len().min(max);
+        if count == 0 {
+            return Vec::new();
+        }
+        if count == keys.len() {
+            return keys;
+        }
+
+        // Partial Fisher-Yates shuffle using the thread-local xorshift
+        let mut keys = keys;
+        for i in 0..count {
+            let j = i + (xorshift_next() as usize % (keys.len() - i));
+            keys.swap(i, j);
+        }
+        keys.truncate(count);
+        keys
+    }
+
     fn maybe_rotate(&mut self) {
         if self.secret_created.elapsed() >= TOKEN_ROTATION {
             self.prev_secret = self.secret;
@@ -133,6 +157,31 @@ fn make_token(secret: &[u8; 20], ip: &IpAddr) -> Vec<u8> {
     data.extend_from_slice(&ip_bytes);
     let hash = sha1(&data);
     hash.0[..8].to_vec() // 8-byte token is sufficient
+}
+
+/// Thread-local xorshift64 PRNG. Returns a random u64.
+fn xorshift_next() -> u64 {
+    use std::cell::Cell;
+    use std::time::SystemTime;
+
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+                ^ 0x517cc1b727220a95 // mix constant to avoid collisions with generate_secret
+        );
+    }
+
+    STATE.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        x
+    })
 }
 
 fn generate_secret() -> [u8; 20] {
@@ -221,5 +270,46 @@ mod tests {
         store.add_peer(hash, "10.0.0.1:6881".parse().unwrap());
         store.cleanup();
         assert_eq!(store.peer_count(), 1);
+    }
+
+    #[test]
+    fn random_info_hashes_empty_store() {
+        let store = PeerStore::new();
+        let samples = store.random_info_hashes(20);
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn random_info_hashes_returns_up_to_max() {
+        let mut store = PeerStore::new();
+        for i in 0..5u8 {
+            let mut hash_bytes = [0u8; 20];
+            hash_bytes[0] = i;
+            store.add_peer(Id20(hash_bytes), format!("10.0.0.{}:6881", i).parse().unwrap());
+        }
+        // Ask for fewer than total
+        let samples = store.random_info_hashes(3);
+        assert_eq!(samples.len(), 3);
+        // Ask for more than total
+        let samples = store.random_info_hashes(20);
+        assert_eq!(samples.len(), 5);
+    }
+
+    #[test]
+    fn random_info_hashes_all_valid() {
+        let mut store = PeerStore::new();
+        let mut expected = std::collections::HashSet::new();
+        for i in 0..10u8 {
+            let mut hash_bytes = [0u8; 20];
+            hash_bytes[0] = i;
+            let id = Id20(hash_bytes);
+            expected.insert(id);
+            store.add_peer(id, format!("10.0.0.{}:6881", i).parse().unwrap());
+        }
+        let samples = store.random_info_hashes(10);
+        assert_eq!(samples.len(), 10);
+        for sample in &samples {
+            assert!(expected.contains(sample), "unexpected info hash in sample");
+        }
     }
 }
