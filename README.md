@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-912-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-946-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.42.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.43.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -18,10 +18,10 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - 🔐 **Full BEP 52 support** — BitTorrent v2 metadata, wire protocol, storage, and hybrid v1+v2 torrents
 - ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
 - 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
-- 📡 **22 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
-- 🎛️ **56-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
+- 📡 **23 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
+- 🎛️ **58-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **912 tests, zero clippy warnings**
+- 📊 **946 tests, zero clippy warnings**
 
 ---
 
@@ -57,16 +57,16 @@ ferrite              📦 Public facade: ClientBuilder + prelude + unified error
 | `ferrite-core` | Id20/Id32, TorrentMeta (v1/v2/hybrid), InfoHashes, MerkleTree, Magnet (v1+v2), CreateTorrent, FastResumeData, FilePriority, FileSelection (BEP 53) | 177 |
 | `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH) | 68 |
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers | 35 |
-| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack | 55 |
+| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security | 87 |
 | `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 63 |
-| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 374 |
+| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 376 |
 | `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 35 |
 
 ### 🎯 Session Features
 
-The `ferrite-session` crate (374 tests) includes:
+The `ferrite-session` crate (376 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -107,12 +107,12 @@ The `ferrite-session` crate (374 tests) includes:
 | 48 | Tracker Protocol Extension: Scrape | ✅ |
 | 52 | BitTorrent v2 (SHA-256 Merkle) | ✅ |
 | 53 | Magnet URI Extension (select-only) | ✅ |
-| 42 | DHT Security Extension | 🔜 M37 |
+| 42 | DHT Security Extension | ✅ |
 | 44 | Storing Arbitrary Data in the DHT | 🔜 M38 |
 | 51 | DHT Infohash Indexing | 🔜 M39 |
 | 55 | Holepunch Extension | 🔜 M40 |
 
-**22 BEPs implemented, 4 planned** — targeting 26 total for full libtorrent-rasterbar parity.
+**23 BEPs implemented, 3 planned** — targeting 26 total for full libtorrent-rasterbar parity.
 
 ---
 
@@ -140,7 +140,7 @@ See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 4: Performance | M25–M28 | Smart banning, async disk + ARC cache, parallel hashing, piece picker | ✅ Done |
 | 5: Network & Tools | M29–M32d | IP filter, torrent creation, settings, metadata serving, plugins | ✅ Done |
 | 6: BitTorrent v2 | M33–M35 | BEP 52 metadata, wire + storage, hybrid v1+v2 | ✅ Done |
-| 7: v2 Completion & DHT | M36–M39 | BEP 53, BEP 42/44/51 DHT hardening | 🔨 M36 done |
+| 7: v2 Completion & DHT | M36–M39 | BEP 53, BEP 42/44/51 DHT hardening | 🔨 M37 done |
 | 8: Connectivity & Privacy | M40–M42 | BEP 55 holepunch, I2P (SAM), SSL torrents | 📝 Planned |
 | 9: Swarm Intelligence | M43–M46 | Choking algorithms, piece picker, mixed-mode, peer turnover | 📝 Planned |
 | 10: Security & Hardening | M47–M48 | SSRF mitigation, DSCP, anonymous mode | 📝 Planned |
@@ -170,6 +170,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.43.0 | M37 | BEP 42 DHT security extension, node ID verification, IP voting |
 | 0.42.0 | M36 | BEP 53 `so=`, dual-swarm announces, pure v2 support |
 | 0.41.0 | M35 | Hybrid v1+v2 torrents, `TorrentVersion` enum |
 | 0.40.0 | M34c | BEP 52 session integration, Merkle hash exchange |

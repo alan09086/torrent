@@ -8,6 +8,41 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.43.0 — 2026-03-01
+
+BEP 42 DHT security extension — node ID verification, IP voting, routing table hardening. Eleven crates, 946 tests, 23 BEPs implemented.
+
+### M37: BEP 42 DHT Security Extension
+
+### Added
+- `node_id` module in `ferrite-dht` — CRC32C-based BEP 42 node ID generation and validation
+- `generate_node_id(ip, r)` — creates BEP 42-compliant node IDs with CRC32C(masked_ip | r<<29) prefix
+- `is_valid_node_id(id, ip)` — validates first 21 bits match CRC32C of IP address
+- `is_bep42_exempt(ip)` — exempts local/private/loopback IPs from BEP 42 enforcement
+- `ExternalIpVoter` — consensus-based external IP detection with majority threshold and per-source dedup
+- `IpVoteSource` enum (`Dht(u64)` / `Nat` / `Tracker`) with distinct source IDs for voter dedup
+- KRPC `ip` field — compact IP+port in all DHT responses per BEP 42 (6 bytes IPv4, 18 bytes IPv6)
+- `encode_compact_addr()` / `decode_compact_addr()` helpers for KRPC ip field encoding
+- `DhtActor::checked_insert()` — validates BEP 42 node IDs before routing table insertion
+- `DhtActor::regenerate_node_id()` — recreates compliant node ID and routing table on IP consensus change
+- `DhtCommand::UpdateExternalIp` — feeds external IP from NAT/tracker sources into DHT voter
+- `DhtHandle::update_external_ip()` — public API for external IP propagation to DHT
+- IP consensus channel: `DhtHandle::start()` returns `(Self, mpsc::Receiver<IpAddr>)` tuple
+- `RoutingTable::new_with_config(own_id, restrict_ips)` — configurable IP restriction
+- Routing table IP restriction — one node per IP address via `HashSet<IpAddr>` tracking with eviction cleanup
+- `DhtConfig.enforce_node_id` / `restrict_routing_ips` — BEP 42 enforcement toggles (default true)
+- `Settings.dht_enforce_node_id` / `dht_restrict_routing_ips` — session-level BEP 42 settings
+- `ClientBuilder::dht_enforce_node_id()` / `dht_restrict_routing_ips()` — fluent builder methods
+- `AlertKind::DhtNodeIdViolation` — alert for BEP 42 node ID validation failures
+- Session integration: DHT IP consensus → `SessionActor.external_ip` update + torrent propagation
+- NAT→DHT IP propagation: NAT `ExternalIpDiscovered` events forwarded to DHT voter
+- `node_id` types re-exported from `ferrite::dht`
+
+### Changed
+- `DhtHandle::start()` now returns `Result<(Self, mpsc::Receiver<IpAddr>)>` (was `Result<Self>`)
+- `KrpcMessage` gains `sender_ip: Option<SocketAddr>` field, populated in all responses
+- All DHT routing table insertions go through `checked_insert()` with BEP 42 validation
+
 ## 0.42.0 — 2026-03-01
 
 BEP 53 magnet file selection, dual-swarm announces, pure v2 torrent support. Eleven crates, 912 tests.
