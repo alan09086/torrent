@@ -73,7 +73,7 @@ See [docs/plans/2026-02-26-ferrite-roadmap-v2.md](docs/plans/2026-02-26-ferrite-
 | Phase 3: Protocol Extensions | M21-M24 (IPv6, web seed, super seed + have batching, scrape) | Done |
 | Phase 4: Performance | M25-M28 (smart ban, async disk + ARC cache, parallel hash, piece picker + streaming + dynamic request queue) | Done |
 | Phase 5: Network & Tools | M29-M32d (IP filter, torrent creation, settings, metadata serving, BEP 40, per-class rate limits, move storage, share mode, extension plugins) | Done |
-| Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | M33-M34a done |
+| Phase 6: BitTorrent v2 | M33-M35 (BEP 52, hybrid torrents, BEP 53) | M33-M34 done |
 
 ## License
 
