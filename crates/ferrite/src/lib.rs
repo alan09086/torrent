@@ -375,6 +375,7 @@ mod tests {
             utp::UtpSocket::bind(utp::UtpConfig {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 max_connections: 8,
+                dscp: 0,
             })
             .await
             .unwrap();
@@ -385,6 +386,7 @@ mod tests {
             utp::UtpSocket::bind(utp::UtpConfig {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 max_connections: 8,
+                dscp: 0,
             })
             .await
             .unwrap();

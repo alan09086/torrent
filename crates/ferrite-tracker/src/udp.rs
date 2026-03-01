@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
@@ -7,6 +8,41 @@ use ferrite_core::Id20;
 
 use crate::compact::{parse_compact_peers, parse_compact_peers6};
 use crate::error::{Error, Result};
+
+/// Apply DSCP/ToS marking to a UDP socket. No-op if dscp == 0.
+fn apply_dscp_udp(socket: &UdpSocket, dscp: u8, is_ipv6: bool) {
+    if dscp == 0 {
+        return;
+    }
+    let tos = (dscp as u32) << 2;
+    let fd = socket.as_fd().as_raw_fd();
+    let result = unsafe {
+        if is_ipv6 {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TCLASS,
+                &(tos as libc::c_int) as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        } else {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &(tos as libc::c_int) as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    };
+    if result != 0 {
+        tracing::debug!(
+            dscp,
+            "failed to set DSCP on UDP tracker socket: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
 use crate::{AnnounceRequest, AnnounceResponse, ScrapeInfo};
 
 /// Magic connection ID for UDP tracker connect (BEP 15).
@@ -21,6 +57,7 @@ const UDP_TIMEOUT: Duration = Duration::from_secs(15);
 /// UDP tracker client (BEP 15).
 pub struct UdpTracker {
     timeout: Duration,
+    dscp: u8,
 }
 
 /// UDP announce response.
@@ -41,11 +78,17 @@ impl UdpTracker {
     pub fn new() -> Self {
         UdpTracker {
             timeout: UDP_TIMEOUT,
+            dscp: 0,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_dscp(mut self, dscp: u8) -> Self {
+        self.dscp = dscp;
         self
     }
 
@@ -224,6 +267,7 @@ impl UdpTracker {
 
         let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
         let socket = UdpSocket::bind(bind_addr).await?;
+        apply_dscp_udp(&socket, self.dscp, addr.is_ipv6());
         socket.connect(addr).await?;
 
         // Step 1: Connect
@@ -340,6 +384,7 @@ impl UdpTracker {
 
         let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
         let socket = UdpSocket::bind(bind_addr).await?;
+        apply_dscp_udp(&socket, self.dscp, addr.is_ipv6());
         socket.connect(addr).await?;
 
         // Step 1: Connect
@@ -578,5 +623,17 @@ mod tests {
             parsed.response.peers[0],
             "[2001:db8::1]:6881".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn udp_tracker_dscp_builder() {
+        let tracker = UdpTracker::new().with_dscp(0x2E);
+        assert_eq!(tracker.dscp, 0x2E);
+    }
+
+    #[test]
+    fn udp_tracker_default_no_dscp() {
+        let tracker = UdpTracker::new();
+        assert_eq!(tracker.dscp, 0);
     }
 }

@@ -97,6 +97,8 @@ pub struct TorrentConfig {
     pub peer_turnover_interval: u64,
     /// URL security configuration for SSRF mitigation and IDNA checking.
     pub url_security: crate::url_guard::UrlSecurityConfig,
+    /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
+    pub peer_dscp: u8,
 }
 
 impl Default for TorrentConfig {
@@ -147,6 +149,7 @@ impl Default for TorrentConfig {
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
+            peer_dscp: 0x04,
         }
     }
 }
@@ -199,6 +202,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             peer_turnover_cutoff: s.peer_turnover_cutoff,
             peer_turnover_interval: s.peer_turnover_interval,
             url_security: crate::url_guard::UrlSecurityConfig::from(s),
+            peer_dscp: s.peer_dscp,
         }
     }
 }
@@ -700,5 +704,19 @@ mod tests {
         assert!(!cfg.url_security.ssrf_mitigation);
         assert!(cfg.url_security.allow_idna);
         assert!(!cfg.url_security.validate_https_trackers);
+    }
+
+    #[test]
+    fn torrent_config_peer_dscp_default() {
+        let cfg = TorrentConfig::default();
+        assert_eq!(cfg.peer_dscp, 0x04);
+    }
+
+    #[test]
+    fn torrent_config_peer_dscp_from_settings() {
+        let mut s = crate::settings::Settings::default();
+        s.peer_dscp = 0x2E;
+        let cfg = TorrentConfig::from(&s);
+        assert_eq!(cfg.peer_dscp, 0x2E);
     }
 }

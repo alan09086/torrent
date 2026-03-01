@@ -4409,6 +4409,7 @@ mod tests {
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
+            peer_dscp: 0x04,
         }
     }
 

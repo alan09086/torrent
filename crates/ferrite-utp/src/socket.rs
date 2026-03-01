@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -20,6 +21,9 @@ pub struct UtpConfig {
     pub bind_addr: SocketAddr,
     /// Maximum number of concurrent connections.
     pub max_connections: usize,
+    /// DSCP (Differentiated Services Code Point) value for the UDP socket.
+    /// 0 = no marking (best-effort).
+    pub dscp: u8,
 }
 
 impl Default for UtpConfig {
@@ -27,6 +31,7 @@ impl Default for UtpConfig {
         Self {
             bind_addr: "0.0.0.0:0".parse().unwrap(),
             max_connections: 256,
+            dscp: 0,
         }
     }
 }
@@ -54,6 +59,37 @@ impl UtpSocket {
     /// connections and a listener for accepting inbound connections.
     pub async fn bind(config: UtpConfig) -> Result<(Self, UtpListener)> {
         let udp = UdpSocket::bind(config.bind_addr).await?;
+        if config.dscp > 0 {
+            let tos = (config.dscp as u32) << 2;
+            let is_ipv6 = config.bind_addr.is_ipv6();
+            let fd = udp.as_fd().as_raw_fd();
+            let result = unsafe {
+                if is_ipv6 {
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_IPV6,
+                        libc::IPV6_TCLASS,
+                        &(tos as libc::c_int) as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                } else {
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_IP,
+                        libc::IP_TOS,
+                        &(tos as libc::c_int) as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                }
+            };
+            if result != 0 {
+                tracing::debug!(
+                    dscp = config.dscp,
+                    "failed to set DSCP on uTP socket: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
         let local_addr = udp.local_addr()?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -419,6 +455,7 @@ mod tests {
     fn localhost_config() -> UtpConfig {
         UtpConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
+            dscp: 0,
             ..Default::default()
         }
     }

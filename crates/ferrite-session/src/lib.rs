@@ -29,6 +29,8 @@ pub(crate) mod proxy;
 pub(crate) mod pipeline;
 pub(crate) mod peer_priority;
 pub(crate) mod url_guard;
+#[allow(dead_code)] // Wired in during Task 2 (DSCP wiring to session/torrent actors).
+pub(crate) mod dscp;
 pub mod i2p;
 #[allow(dead_code)] // Wired in during Phase 3c (session SSL integration).
 pub(crate) mod ssl_manager;

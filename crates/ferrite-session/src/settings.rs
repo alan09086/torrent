@@ -151,6 +151,9 @@ fn default_peer_turnover_cutoff() -> f64 {
 fn default_peer_turnover_interval() -> u64 {
     300
 }
+fn default_peer_dscp() -> u8 {
+    0x04
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -438,6 +441,11 @@ pub struct Settings {
     /// Require HTTPS for HTTP tracker announces (UDP trackers are unaffected).
     #[serde(default = "default_true")]
     pub validate_https_trackers: bool,
+    /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
+    /// Applied to TCP listeners, outbound TCP connections, uTP sockets, and UDP tracker sockets.
+    /// Default 0x04 (AF11 — low-priority background). Set to 0 to disable DSCP marking.
+    #[serde(default = "default_peer_dscp")]
+    pub peer_dscp: u8,
 }
 
 impl Default for Settings {
@@ -555,6 +563,7 @@ impl Default for Settings {
             ssrf_mitigation: true,
             allow_idna: false,
             validate_https_trackers: true,
+            peer_dscp: 0x04,
         }
     }
 }
@@ -763,6 +772,7 @@ impl Settings {
         ferrite_utp::UtpConfig {
             bind_addr: std::net::SocketAddr::from(([0, 0, 0, 0], port)),
             max_connections: self.utp_max_connections,
+            dscp: self.peer_dscp,
         }
     }
 
@@ -770,6 +780,7 @@ impl Settings {
         ferrite_utp::UtpConfig {
             bind_addr: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
             max_connections: self.utp_max_connections,
+            dscp: self.peer_dscp,
         }
     }
 
@@ -880,6 +891,7 @@ impl PartialEq for Settings {
             && self.ssrf_mitigation == other.ssrf_mitigation
             && self.allow_idna == other.allow_idna
             && self.validate_https_trackers == other.validate_https_trackers
+            && self.peer_dscp == other.peer_dscp
     }
 }
 
@@ -1414,5 +1426,40 @@ mod tests {
         assert!(!cfg.ssrf_mitigation);
         assert!(cfg.allow_idna);
         assert!(!cfg.validate_https_trackers);
+    }
+
+    #[test]
+    fn default_peer_dscp_value() {
+        let s = Settings::default();
+        assert_eq!(s.peer_dscp, 0x04);
+    }
+
+    #[test]
+    fn peer_dscp_json_round_trip() {
+        let mut s = Settings::default();
+        s.peer_dscp = 0x2E; // EF
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.peer_dscp, 0x2E);
+    }
+
+    #[test]
+    fn peer_dscp_zero_disables() {
+        let mut s = Settings::default();
+        s.peer_dscp = 0;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.peer_dscp, 0);
+    }
+
+    #[test]
+    fn utp_config_includes_dscp() {
+        let mut s = Settings::default();
+        s.peer_dscp = 0x0A;
+        let utp = s.to_utp_config(6881);
+        assert_eq!(utp.dscp, 0x0A);
+
+        let utp_v6 = s.to_utp_config_v6(6881);
+        assert_eq!(utp_v6.dscp, 0x0A);
     }
 }
