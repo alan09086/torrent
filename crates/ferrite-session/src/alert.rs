@@ -86,6 +86,13 @@ pub enum AlertKind {
     DhtGetPeers { info_hash: Id20, num_peers: usize },
     /// BEP 42: A DHT node was rejected because its ID doesn't match its IP.
     DhtNodeIdViolation { node_id: Id20, addr: SocketAddr },
+    /// BEP 51: sample_infohashes response received from a DHT node.
+    DhtSampleInfohashes {
+        /// Number of sampled info hashes received.
+        num_samples: usize,
+        /// The remote node's estimate of its total stored info hashes.
+        total_estimate: i64,
+    },
 
     // ── Session (STATUS) ──
     ListenSucceeded { port: u16 },
@@ -197,7 +204,7 @@ impl AlertKind {
             ScrapeError { .. } => AlertCategory::TRACKER | AlertCategory::ERROR,
 
             // DHT
-            DhtBootstrapComplete | DhtGetPeers { .. } => AlertCategory::DHT,
+            DhtBootstrapComplete | DhtGetPeers { .. } | DhtSampleInfohashes { .. } => AlertCategory::DHT,
             DhtNodeIdViolation { .. } => AlertCategory::DHT | AlertCategory::ERROR,
             DhtPutComplete { .. }
             | DhtMutablePutComplete { .. }
@@ -487,6 +494,15 @@ mod tests {
     fn dht_put_complete_alert_has_dht_category() {
         let alert = Alert::new(AlertKind::DhtPutComplete {
             target: Id20::from([0u8; 20]),
+        });
+        assert!(alert.category().contains(AlertCategory::DHT));
+    }
+
+    #[test]
+    fn dht_sample_infohashes_alert_has_dht_category() {
+        let alert = Alert::new(AlertKind::DhtSampleInfohashes {
+            num_samples: 15,
+            total_estimate: 500,
         });
         assert!(alert.category().contains(AlertCategory::DHT));
     }
