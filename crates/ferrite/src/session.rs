@@ -58,6 +58,9 @@ pub use ferrite_session::{
     // I2P support (M41)
     I2pDestination,
     I2pDestinationError,
+    // Choking algorithms (M43)
+    SeedChokingAlgorithm,
+    ChokingAlgorithm,
     // Error types
     Error,
     Result,

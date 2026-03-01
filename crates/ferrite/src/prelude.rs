@@ -68,3 +68,6 @@ pub use crate::core::{HashPicker, SetBlockResult};
 
 // I2P support (M41)
 pub use crate::session::{I2pDestination, I2pDestinationError};
+
+// Choking algorithms (M43)
+pub use crate::session::{SeedChokingAlgorithm, ChokingAlgorithm};

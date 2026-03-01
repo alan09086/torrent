@@ -13,6 +13,7 @@ use ferrite_core::StorageMode;
 use ferrite_wire::mse::EncryptionMode;
 
 use crate::alert::AlertCategory;
+use crate::choker::{ChokingAlgorithm, SeedChokingAlgorithm};
 use crate::proxy::ProxyConfig;
 
 // ── Serde default helpers ────────────────────────────────────────────
@@ -124,6 +125,12 @@ fn default_dht_sample_interval() -> u64 {
 }
 fn default_ssl_listen_port() -> u16 {
     0 // 0 = disabled
+}
+fn default_seed_choking_algorithm() -> SeedChokingAlgorithm {
+    SeedChokingAlgorithm::FastestUpload
+}
+fn default_choking_algorithm() -> ChokingAlgorithm {
+    ChokingAlgorithm::FixedSlots
 }
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
@@ -364,6 +371,14 @@ pub struct Settings {
     /// Path to the PEM-encoded private key file for SSL torrent connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssl_key_path: Option<PathBuf>,
+
+    // ── Choking algorithms (M43) ──
+    /// Algorithm for ranking peers during seed-mode choking.
+    #[serde(default = "default_seed_choking_algorithm")]
+    pub seed_choking_algorithm: SeedChokingAlgorithm,
+    /// Algorithm for determining the number of unchoke slots.
+    #[serde(default = "default_choking_algorithm")]
+    pub choking_algorithm: ChokingAlgorithm,
 }
 
 impl Default for Settings {
@@ -463,6 +478,9 @@ impl Default for Settings {
             ssl_listen_port: 0,
             ssl_cert_path: None,
             ssl_key_path: None,
+            // Choking algorithms
+            seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
+            choking_algorithm: ChokingAlgorithm::FixedSlots,
         }
     }
 }
@@ -762,6 +780,8 @@ impl PartialEq for Settings {
             && self.ssl_listen_port == other.ssl_listen_port
             && self.ssl_cert_path == other.ssl_cert_path
             && self.ssl_key_path == other.ssl_key_path
+            && self.seed_choking_algorithm == other.seed_choking_algorithm
+            && self.choking_algorithm == other.choking_algorithm
     }
 }
 
@@ -1166,5 +1186,23 @@ mod tests {
         let s = Settings::default();
         // Both are None by default
         s.validate().unwrap();
+    }
+
+    #[test]
+    fn default_choking_algorithms() {
+        let s = Settings::default();
+        assert_eq!(s.seed_choking_algorithm, SeedChokingAlgorithm::FastestUpload);
+        assert_eq!(s.choking_algorithm, ChokingAlgorithm::FixedSlots);
+    }
+
+    #[test]
+    fn choking_algorithm_json_round_trip() {
+        let mut s = Settings::default();
+        s.seed_choking_algorithm = SeedChokingAlgorithm::AntiLeech;
+        s.choking_algorithm = ChokingAlgorithm::RateBased;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.seed_choking_algorithm, SeedChokingAlgorithm::AntiLeech);
+        assert_eq!(decoded.choking_algorithm, ChokingAlgorithm::RateBased);
     }
 }
