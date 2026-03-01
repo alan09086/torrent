@@ -1558,6 +1558,18 @@ impl TorrentActor {
             PeerEvent::IncomingHashRequest { peer_addr, request } => {
                 self.handle_incoming_hash_request(peer_addr, request).await;
             }
+            PeerEvent::HolepunchRendezvous { peer_addr, target } => {
+                // BEP 55: relay logic — will be implemented in Task 6
+                debug!(%peer_addr, %target, "received holepunch rendezvous (not yet handled)");
+            }
+            PeerEvent::HolepunchConnect { peer_addr, target } => {
+                // BEP 55: simultaneous connect — will be implemented in Task 6
+                debug!(%peer_addr, %target, "received holepunch connect (not yet handled)");
+            }
+            PeerEvent::HolepunchError { peer_addr, target, error_code } => {
+                // BEP 55: error from relay — will be implemented in Task 6
+                debug!(%peer_addr, %target, error_code, "received holepunch error (not yet handled)");
+            }
         }
     }
 
@@ -3525,6 +3537,7 @@ mod tests {
             encryption_mode: ferrite_wire::mse::EncryptionMode::Disabled,
             enable_utp: false,
             enable_web_seed: true,
+            enable_holepunch: false,
             max_web_seeds: 4,
             super_seeding: false,
             upload_only_announce: true,

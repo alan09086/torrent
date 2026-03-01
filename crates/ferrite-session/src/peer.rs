@@ -715,6 +715,10 @@ async fn handle_command(
             count: req.count,
             proof_layers: req.proof_layers,
         },
+        PeerCommand::SendHolepunch(_hp_msg) => {
+            // BEP 55: holepunch message sending — will be wired in Task 4
+            return Ok(());
+        }
         PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());
