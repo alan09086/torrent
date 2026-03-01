@@ -161,6 +161,8 @@ pub struct Settings {
     pub enable_ipv6: bool,
     #[serde(default = "default_true")]
     pub enable_web_seed: bool,
+    #[serde(default = "default_true")]
+    pub enable_holepunch: bool,
     #[serde(default = "default_encryption")]
     pub encryption_mode: EncryptionMode,
     #[serde(default)]
@@ -325,6 +327,7 @@ impl Default for Settings {
             enable_natpmp: true,
             enable_ipv6: true,
             enable_web_seed: true,
+            enable_holepunch: true,
             encryption_mode: EncryptionMode::Enabled,
             anonymous_mode: false,
             external_ip: None,
@@ -584,6 +587,7 @@ impl PartialEq for Settings {
             && self.enable_natpmp == other.enable_natpmp
             && self.enable_ipv6 == other.enable_ipv6
             && self.enable_web_seed == other.enable_web_seed
+            && self.enable_holepunch == other.enable_holepunch
             && self.encryption_mode == other.encryption_mode
             && self.anonymous_mode == other.anonymous_mode
             && self.external_ip == other.external_ip
@@ -894,5 +898,22 @@ mod tests {
         let dht_v6 = s.to_dht_config_v6();
         assert!(!dht_v6.enforce_node_id);
         assert!(dht_v6.restrict_routing_ips);
+    }
+
+    #[test]
+    fn enable_holepunch_default_true() {
+        let s = Settings::default();
+        assert!(s.enable_holepunch);
+    }
+
+    #[test]
+    fn enable_holepunch_json_round_trip() {
+        let json = r#"{"enable_holepunch": false}"#;
+        let decoded: Settings = serde_json::from_str(json).unwrap();
+        assert!(!decoded.enable_holepunch);
+
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        let roundtrip: Settings = serde_json::from_str(&encoded).unwrap();
+        assert!(!roundtrip.enable_holepunch);
     }
 }
