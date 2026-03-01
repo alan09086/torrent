@@ -15,6 +15,7 @@ mod peer_id;
 mod resume_data;
 mod file_priority;
 mod hash_request;
+mod merkle_state;
 mod storage_mode;
 
 pub use create::{CreateTorrent, CreateTorrentResult};
@@ -32,6 +33,7 @@ pub use metainfo_v2::{InfoDictV2, TorrentMetaV2, torrent_v2_from_bytes};
 pub use peer_id::PeerId;
 pub use resume_data::{FastResumeData, UnfinishedPiece};
 pub use hash_request::{HashRequest, validate_hash_request};
+pub use merkle_state::{MerkleTreeState, SetBlockResult};
 pub use storage_mode::StorageMode;
 
 /// Network address family for dual-stack support.
