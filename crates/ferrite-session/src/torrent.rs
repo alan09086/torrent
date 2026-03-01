@@ -543,6 +543,19 @@ impl TorrentHandle {
             .await
             .map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Move torrent data files to a new download directory.
+    ///
+    /// Relocates existing files (rename or copy+delete), re-registers storage
+    /// with the disk manager, and fires a `StorageMoved` alert on success.
+    pub async fn move_storage(&self, new_path: std::path::PathBuf) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::MoveStorage { new_path, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------

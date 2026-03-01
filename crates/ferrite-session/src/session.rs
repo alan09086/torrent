@@ -146,6 +146,11 @@ enum SessionCommand {
         settings: Box<Settings>,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    MoveTorrentStorage {
+        info_hash: Id20,
+        new_path: std::path::PathBuf,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     Shutdown,
 }
 
@@ -643,6 +648,24 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Move a torrent's data files to a new download directory.
+    pub async fn move_torrent_storage(
+        &self,
+        info_hash: Id20,
+        new_path: std::path::PathBuf,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::MoveTorrentStorage {
+                info_hash,
+                new_path,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +815,10 @@ impl SessionActor {
                         }
                         Some(SessionCommand::ApplySettings { settings, reply }) => {
                             let result = self.handle_apply_settings(*settings);
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::MoveTorrentStorage { info_hash, new_path, reply }) => {
+                            let result = self.handle_move_torrent_storage(info_hash, new_path).await;
                             let _ = reply.send(result);
                         }
                         Some(SessionCommand::Shutdown) | None => {
@@ -1091,6 +1118,18 @@ impl SessionActor {
             .get(&info_hash)
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
         entry.handle.resume().await
+    }
+
+    async fn handle_move_torrent_storage(
+        &self,
+        info_hash: Id20,
+        new_path: std::path::PathBuf,
+    ) -> crate::Result<()> {
+        let entry = self
+            .torrents
+            .get(&info_hash)
+            .ok_or(crate::Error::TorrentNotFound(info_hash))?;
+        entry.handle.move_storage(new_path).await
     }
 
     async fn handle_torrent_stats(&self, info_hash: Id20) -> crate::Result<TorrentStats> {
