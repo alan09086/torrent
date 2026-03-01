@@ -22,6 +22,9 @@ use crate::peer_store::PeerStore;
 use crate::routing_table::{RoutingTable, K};
 use crate::storage::{DhtStorage, InMemoryDhtStorage};
 
+#[allow(unused_imports)]
+use ed25519_dalek::SigningKey;
+
 /// Configuration for the DHT.
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
@@ -127,6 +130,27 @@ enum DhtCommand {
         ip: std::net::IpAddr,
         source: IpVoteSource,
     },
+    GetImmutable {
+        target: Id20,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>>>,
+    },
+    PutImmutable {
+        value: Vec<u8>,
+        reply: oneshot::Sender<Result<Id20>>,
+    },
+    GetMutable {
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+        #[allow(clippy::type_complexity)]
+        reply: oneshot::Sender<Result<Option<(Vec<u8>, i64)>>>,
+    },
+    PutMutable {
+        keypair_bytes: [u8; 32],
+        value: Vec<u8>,
+        seq: i64,
+        salt: Vec<u8>,
+        reply: oneshot::Sender<Result<Id20>>,
+    },
     Shutdown,
 }
 
@@ -205,6 +229,86 @@ impl DhtHandle {
             .await
             .map_err(|_| Error::Shutdown)
     }
+
+    /// Store an immutable item in the DHT (BEP 44).
+    ///
+    /// Returns the SHA-1 target hash that can be used to retrieve the item.
+    /// The value must be valid bencoded data, max 1000 bytes.
+    pub async fn put_immutable(&self, value: Vec<u8>) -> Result<Id20> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::PutImmutable {
+                value,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        reply_rx.await.map_err(|_| Error::Shutdown)?
+    }
+
+    /// Retrieve an immutable item from the DHT (BEP 44).
+    ///
+    /// Returns the raw bencoded value if found, `None` if not.
+    pub async fn get_immutable(&self, target: Id20) -> Result<Option<Vec<u8>>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetImmutable {
+                target,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        reply_rx.await.map_err(|_| Error::Shutdown)?
+    }
+
+    /// Store a mutable item in the DHT (BEP 44).
+    ///
+    /// - `keypair_bytes`: 32-byte ed25519 seed (secret key)
+    /// - `value`: bencoded data, max 1000 bytes
+    /// - `seq`: sequence number (must be higher than any previously stored)
+    /// - `salt`: optional salt for sub-key isolation (max 64 bytes)
+    ///
+    /// Returns the target hash.
+    pub async fn put_mutable(
+        &self,
+        keypair_bytes: [u8; 32],
+        value: Vec<u8>,
+        seq: i64,
+        salt: Vec<u8>,
+    ) -> Result<Id20> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::PutMutable {
+                keypair_bytes,
+                value,
+                seq,
+                salt,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        reply_rx.await.map_err(|_| Error::Shutdown)?
+    }
+
+    /// Retrieve a mutable item from the DHT (BEP 44).
+    ///
+    /// Returns `(value, seq)` if found, `None` if not.
+    pub async fn get_mutable(
+        &self,
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+    ) -> Result<Option<(Vec<u8>, i64)>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetMutable {
+                public_key,
+                salt,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Shutdown)?;
+        reply_rx.await.map_err(|_| Error::Shutdown)?
+    }
 }
 
 // ---- Actor internals ----
@@ -223,6 +327,10 @@ struct DhtActor {
     stats: ActorStats,
     /// Active get_peers lookups.
     lookups: HashMap<Id20, LookupState>,
+    /// Active BEP 44 get lookups.
+    item_lookups: HashMap<Id20, ItemLookupState>,
+    /// Active BEP 44 put operations (waiting for tokens before sending puts).
+    item_put_ops: HashMap<Id20, ItemPutState>,
     /// BEP 42 external IP voter: aggregates IP reports from KRPC responses.
     ip_voter: ExternalIpVoter,
     /// Callback channel: fires when voter consensus changes.
@@ -249,10 +357,8 @@ enum PendingQueryKind {
     GetPeers { info_hash: Id20 },
     AnnouncePeer,
     /// BEP 44: outgoing get item query.
-    #[allow(dead_code)]
     GetItem { target: Id20 },
     /// BEP 44: outgoing put item query.
-    #[allow(dead_code)]
     PutItem,
 }
 
@@ -264,6 +370,54 @@ struct LookupState {
     tokens: HashMap<Id20, (SocketAddr, Vec<u8>)>,
     /// Best (closest) nodes we know about.
     closest: Vec<CompactNodeInfo>,
+}
+
+/// State for an active BEP 44 get lookup.
+#[allow(dead_code)]
+enum ItemLookupState {
+    Immutable {
+        #[allow(clippy::type_complexity)]
+        reply: Option<oneshot::Sender<Result<Option<Vec<u8>>>>>,
+        queried: std::collections::HashSet<Id20>,
+        closest: Vec<CompactNodeInfo>,
+    },
+    Mutable {
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+        #[allow(clippy::type_complexity)]
+        reply: Option<oneshot::Sender<Result<Option<(Vec<u8>, i64)>>>>,
+        best_seq: i64,
+        best_value: Option<Vec<u8>>,
+        queried: std::collections::HashSet<Id20>,
+        closest: Vec<CompactNodeInfo>,
+    },
+}
+
+/// State for an active BEP 44 put operation (waiting for tokens then sending puts).
+enum ItemPutState {
+    Immutable {
+        item: crate::bep44::ImmutableItem,
+        tokens: HashMap<Id20, (SocketAddr, Vec<u8>)>,
+        sent_puts: usize,
+        reply: Option<oneshot::Sender<Result<Id20>>>,
+    },
+    Mutable {
+        item: crate::bep44::MutableItem,
+        tokens: HashMap<Id20, (SocketAddr, Vec<u8>)>,
+        sent_puts: usize,
+        reply: Option<oneshot::Sender<Result<Id20>>>,
+    },
+}
+
+/// Parameters for a single BEP 44 put-item query.
+struct PutItemParams {
+    addr: SocketAddr,
+    token: Vec<u8>,
+    value: Vec<u8>,
+    key: Option<[u8; 32]>,
+    signature: Option<[u8; 64]>,
+    seq: Option<i64>,
+    salt: Option<Vec<u8>>,
 }
 
 /// Interval for routing table maintenance.
@@ -299,6 +453,8 @@ impl DhtActor {
                 total_responses_received: 0,
             },
             lookups: HashMap::new(),
+            item_lookups: HashMap::new(),
+            item_put_ops: HashMap::new(),
             ip_voter: ExternalIpVoter::new(10),
             ip_consensus_tx,
         }
@@ -345,6 +501,18 @@ impl DhtActor {
                                 let _ = self.ip_consensus_tx.try_send(consensus_ip);
                                 self.regenerate_node_id(consensus_ip);
                             }
+                        }
+                        Some(DhtCommand::GetImmutable { target, reply }) => {
+                            self.handle_get_immutable(target, reply).await;
+                        }
+                        Some(DhtCommand::PutImmutable { value, reply }) => {
+                            self.handle_put_immutable(value, reply).await;
+                        }
+                        Some(DhtCommand::GetMutable { public_key, salt, reply }) => {
+                            self.handle_get_mutable(public_key, salt, reply).await;
+                        }
+                        Some(DhtCommand::PutMutable { keypair_bytes, value, seq, salt, reply }) => {
+                            self.handle_put_mutable(keypair_bytes, value, seq, salt, reply).await;
                         }
                         Some(DhtCommand::Shutdown) | None => {
                             debug!("DHT shutting down");
@@ -899,6 +1067,181 @@ impl DhtActor {
             (PendingQueryKind::AnnouncePeer, KrpcResponse::NodeId { .. }) => {
                 // Announce response — success
             }
+            (
+                PendingQueryKind::GetItem { target },
+                KrpcResponse::GetItem {
+                    token,
+                    nodes,
+                    nodes6,
+                    value,
+                    key,
+                    signature,
+                    seq,
+                    ..
+                },
+            ) => {
+                // Gap 13: Use checked_insert (BEP 42 compliant) instead of routing_table.insert
+                for node in nodes {
+                    if self.matches_family(&node.addr) {
+                        self.checked_insert(node.id, node.addr);
+                    }
+                }
+                for node in nodes6 {
+                    if self.matches_family(&node.addr) {
+                        self.checked_insert(node.id, node.addr);
+                    }
+                }
+
+                let target = *target;
+
+                // If we have a put operation waiting for tokens, collect this token
+                if let (Some(token), Some(put_op)) =
+                    (token, self.item_put_ops.get_mut(&target))
+                {
+                    match put_op {
+                        ItemPutState::Immutable { tokens, .. }
+                        | ItemPutState::Mutable { tokens, .. } => {
+                            tokens.insert(sender_id, (addr, token.clone()));
+                        }
+                    }
+
+                    // If we have enough tokens, send the puts
+                    let should_send = match &self.item_put_ops[&target] {
+                        ItemPutState::Immutable {
+                            tokens, sent_puts, ..
+                        }
+                        | ItemPutState::Mutable {
+                            tokens, sent_puts, ..
+                        } => tokens.len() >= K && *sent_puts == 0,
+                    };
+
+                    if should_send {
+                        self.send_pending_puts(target).await;
+                    }
+                }
+
+                // If we have a get lookup, process the value
+                if self.item_lookups.contains_key(&target) {
+                    // Determine if this is immutable or mutable lookup
+                    let is_immutable = matches!(
+                        self.item_lookups.get(&target),
+                        Some(ItemLookupState::Immutable { .. })
+                    );
+
+                    if is_immutable {
+                        if let Some(v) = value {
+                            // Validate: SHA-1(v) should equal target
+                            if ferrite_core::sha1(v) == target {
+                                // Store locally
+                                if let Ok(item) =
+                                    crate::bep44::ImmutableItem::new(v.clone())
+                                {
+                                    self.item_store.put_immutable(item);
+                                }
+                                if let Some(ItemLookupState::Immutable {
+                                    reply, ..
+                                }) = self.item_lookups.get_mut(&target)
+                                    && let Some(r) = reply.take()
+                                {
+                                    let _ = r.send(Ok(Some(v.clone())));
+                                }
+                            }
+                        } else {
+                            // Gap 7: Collect nodes to query into local Vec first
+                            // to avoid borrow checker violation
+                            let family = self.address_family;
+                            let to_query: Vec<SocketAddr> = {
+                                if let Some(ItemLookupState::Immutable {
+                                    queried, ..
+                                }) = self.item_lookups.get_mut(&target)
+                                {
+                                    nodes
+                                        .iter()
+                                        .filter(|n| match family {
+                                            AddressFamily::V4 => n.addr.is_ipv4(),
+                                            AddressFamily::V6 => n.addr.is_ipv6(),
+                                        })
+                                        .filter(|n| queried.insert(n.id))
+                                        .take(3)
+                                        .map(|n| n.addr)
+                                        .collect()
+                                } else {
+                                    vec![]
+                                }
+                            };
+                            for query_addr in to_query {
+                                self.send_get_item(query_addr, target, None).await;
+                            }
+                        }
+                    } else {
+                        // Mutable lookup
+                        if let (Some(v), Some(k), Some(sig), Some(s)) =
+                            (value, key, signature, seq)
+                        {
+                            // Get the salt from the lookup state
+                            let salt = if let Some(ItemLookupState::Mutable {
+                                salt, ..
+                            }) = self.item_lookups.get(&target)
+                            {
+                                salt.clone()
+                            } else {
+                                Vec::new()
+                            };
+
+                            let item = crate::bep44::MutableItem {
+                                value: v.clone(),
+                                public_key: *k,
+                                signature: *sig,
+                                seq: *s,
+                                salt,
+                                target,
+                            };
+
+                            if item.verify()
+                                && let Some(ItemLookupState::Mutable {
+                                    best_seq,
+                                    best_value,
+                                    ..
+                                }) = self.item_lookups.get_mut(&target)
+                                && *s > *best_seq
+                            {
+                                *best_seq = *s;
+                                *best_value = Some(v.clone());
+                                // Store locally
+                                self.item_store.put_mutable(item);
+                            }
+                        }
+
+                        // Gap 7: Collect nodes to query into local Vec first
+                        let family = self.address_family;
+                        let to_query: Vec<SocketAddr> = {
+                            if let Some(ItemLookupState::Mutable {
+                                queried, ..
+                            }) = self.item_lookups.get_mut(&target)
+                            {
+                                nodes
+                                    .iter()
+                                    .filter(|n| match family {
+                                        AddressFamily::V4 => n.addr.is_ipv4(),
+                                        AddressFamily::V6 => n.addr.is_ipv6(),
+                                    })
+                                    .filter(|n| queried.insert(n.id))
+                                    .take(3)
+                                    .map(|n| n.addr)
+                                    .collect()
+                            } else {
+                                vec![]
+                            }
+                        };
+                        for query_addr in to_query {
+                            self.send_get_item(query_addr, target, None).await;
+                        }
+                    }
+                }
+            }
+            (PendingQueryKind::PutItem, KrpcResponse::NodeId { .. }) => {
+                // Put acknowledged. Nothing to do.
+            }
             _ => {
                 trace!(txn, "mismatched response type");
             }
@@ -1009,6 +1352,45 @@ impl DhtActor {
         // Clean up completed lookups (where the reply channel is closed)
         self.lookups.retain(|_, lookup| !lookup.reply.is_closed());
 
+        // Gap 12: Clean up item lookups — send best result before dropping stale lookups
+        self.item_lookups.retain(|_, lookup| match lookup {
+            ItemLookupState::Immutable { reply, .. } => {
+                if reply.as_ref().is_some_and(|r| r.is_closed()) {
+                    // Receiver dropped — discard
+                    false
+                } else if reply.is_some() {
+                    true
+                } else {
+                    // Reply already sent
+                    false
+                }
+            }
+            ItemLookupState::Mutable {
+                reply,
+                best_value,
+                best_seq,
+                ..
+            } => {
+                if reply.as_ref().is_some_and(|r| r.is_closed()) {
+                    false
+                } else if reply.is_some() {
+                    true
+                } else {
+                    // Check if we should finalize — reply already taken means we're done
+                    let _ = best_value;
+                    let _ = best_seq;
+                    false
+                }
+            }
+        });
+
+        // Clean up completed put operations
+        self.item_put_ops.retain(|_, put_op| match put_op {
+            ItemPutState::Immutable { reply, .. } | ItemPutState::Mutable { reply, .. } => {
+                reply.is_some()
+            }
+        });
+
         // Refresh stale buckets
         let stale = self
             .routing_table
@@ -1069,6 +1451,314 @@ impl DhtActor {
                 },
             );
             self.stats.total_queries_sent += 1;
+        }
+    }
+
+    // ---- BEP 44: item get/put handlers ----
+
+    async fn handle_get_immutable(
+        &mut self,
+        target: Id20,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>>>,
+    ) {
+        // Check local store first
+        if let Some(item) = self.item_store.get_immutable(&target) {
+            let _ = reply.send(Ok(Some(item.value)));
+            return;
+        }
+
+        // Initiate iterative get to the closest nodes
+        let closest = self.routing_table.closest(&target, K);
+        if closest.is_empty() {
+            // No nodes to query — return None immediately
+            let _ = reply.send(Ok(None));
+            return;
+        }
+
+        for node in closest.iter().take(3) {
+            self.send_get_item(node.addr, target, None).await;
+        }
+
+        self.item_lookups.insert(
+            target,
+            ItemLookupState::Immutable {
+                reply: Some(reply),
+                queried: closest.iter().map(|n| n.id).collect(),
+                closest: closest
+                    .into_iter()
+                    .map(|n| CompactNodeInfo {
+                        id: n.id,
+                        addr: n.addr,
+                    })
+                    .collect(),
+            },
+        );
+    }
+
+    async fn handle_put_immutable(
+        &mut self,
+        value: Vec<u8>,
+        reply: oneshot::Sender<Result<Id20>>,
+    ) {
+        let item = match crate::bep44::ImmutableItem::new(value) {
+            Ok(item) => item,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        let target = item.target;
+
+        // Store locally
+        self.item_store.put_immutable(item.clone());
+
+        // Propagate: find closest nodes to the target, then put to them.
+        // First we need tokens from those nodes — initiate a get first.
+        let closest = self.routing_table.closest(&target, K);
+        if closest.is_empty() {
+            // No peers to propagate to, but local store succeeded
+            let _ = reply.send(Ok(target));
+            return;
+        }
+
+        for node in closest.iter().take(K) {
+            self.send_get_item(node.addr, target, None).await;
+        }
+
+        // Track the put operation
+        self.item_put_ops.insert(
+            target,
+            ItemPutState::Immutable {
+                item,
+                tokens: HashMap::new(),
+                sent_puts: 0,
+                reply: Some(reply),
+            },
+        );
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn handle_get_mutable(
+        &mut self,
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+        reply: oneshot::Sender<Result<Option<(Vec<u8>, i64)>>>,
+    ) {
+        let target = crate::bep44::compute_mutable_target(&public_key, &salt);
+
+        // Check local store first
+        if let Some(item) = self.item_store.get_mutable(&public_key, &salt) {
+            let _ = reply.send(Ok(Some((item.value, item.seq))));
+            return;
+        }
+
+        // Initiate iterative get
+        let closest = self.routing_table.closest(&target, K);
+        if closest.is_empty() {
+            let _ = reply.send(Ok(None));
+            return;
+        }
+
+        for node in closest.iter().take(3) {
+            self.send_get_item(node.addr, target, None).await;
+        }
+
+        self.item_lookups.insert(
+            target,
+            ItemLookupState::Mutable {
+                public_key,
+                salt,
+                reply: Some(reply),
+                best_seq: i64::MIN,
+                best_value: None,
+                queried: closest.iter().map(|n| n.id).collect(),
+                closest: closest
+                    .into_iter()
+                    .map(|n| CompactNodeInfo {
+                        id: n.id,
+                        addr: n.addr,
+                    })
+                    .collect(),
+            },
+        );
+    }
+
+    async fn handle_put_mutable(
+        &mut self,
+        keypair_bytes: [u8; 32],
+        value: Vec<u8>,
+        seq: i64,
+        salt: Vec<u8>,
+        reply: oneshot::Sender<Result<Id20>>,
+    ) {
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&keypair_bytes);
+        let item = match crate::bep44::MutableItem::create(&keypair, value, seq, salt) {
+            Ok(item) => item,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        let target = item.target;
+
+        // Store locally
+        self.item_store.put_mutable(item.clone());
+
+        // Propagate: find closest nodes, get tokens, then put
+        let closest = self.routing_table.closest(&target, K);
+        if closest.is_empty() {
+            let _ = reply.send(Ok(target));
+            return;
+        }
+
+        for node in closest.iter().take(K) {
+            self.send_get_item(node.addr, target, None).await;
+        }
+
+        self.item_put_ops.insert(
+            target,
+            ItemPutState::Mutable {
+                item,
+                tokens: HashMap::new(),
+                sent_puts: 0,
+                reply: Some(reply),
+            },
+        );
+    }
+
+    // Gap 5: send_get_item uses sender_ip: None for outgoing queries
+    async fn send_get_item(&mut self, addr: SocketAddr, target: Id20, seq: Option<i64>) {
+        let txn = self.next_transaction_id();
+        let own_id = *self.routing_table.own_id();
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(txn),
+            body: KrpcBody::Query(KrpcQuery::Get {
+                id: own_id,
+                target,
+                seq,
+            }),
+            sender_ip: None, // Gap 5: outgoing queries use None
+        };
+        if let Ok(bytes) = msg.to_bytes() {
+            let _ = self.socket.send_to(&bytes, addr).await;
+            self.pending.insert(
+                txn,
+                PendingQuery {
+                    sent_at: Instant::now(),
+                    addr,
+                    kind: PendingQueryKind::GetItem { target },
+                },
+            );
+            self.stats.total_queries_sent += 1;
+        }
+    }
+
+    // Gap 5: send_put_item uses sender_ip: None for outgoing queries
+    async fn send_put_item(&mut self, params: PutItemParams) {
+        let txn = self.next_transaction_id();
+        let own_id = *self.routing_table.own_id();
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(txn),
+            body: KrpcBody::Query(KrpcQuery::Put {
+                id: own_id,
+                token: params.token,
+                value: params.value,
+                key: params.key,
+                signature: params.signature,
+                seq: params.seq,
+                salt: params.salt,
+                cas: None,
+            }),
+            sender_ip: None, // Gap 5: outgoing queries use None
+        };
+        if let Ok(bytes) = msg.to_bytes() {
+            let _ = self.socket.send_to(&bytes, params.addr).await;
+            self.pending.insert(
+                txn,
+                PendingQuery {
+                    sent_at: Instant::now(),
+                    addr: params.addr,
+                    kind: PendingQueryKind::PutItem,
+                },
+            );
+            self.stats.total_queries_sent += 1;
+        }
+    }
+
+    // Gap 8: Extract data into local variables before calling self.send_put_item
+    async fn send_pending_puts(&mut self, target: Id20) {
+        let puts_to_send: Vec<PutItemParams> =
+            if let Some(put_op) = self.item_put_ops.get(&target) {
+                match put_op {
+                    ItemPutState::Immutable { item, tokens, .. } => tokens
+                        .values()
+                        .take(K)
+                        .map(|(addr, token)| PutItemParams {
+                            addr: *addr,
+                            token: token.clone(),
+                            value: item.value.clone(),
+                            key: None,
+                            signature: None,
+                            seq: None,
+                            salt: None,
+                        })
+                        .collect(),
+                    ItemPutState::Mutable { item, tokens, .. } => {
+                        let salt = if item.salt.is_empty() {
+                            None
+                        } else {
+                            Some(item.salt.clone())
+                        };
+                        tokens
+                            .values()
+                            .take(K)
+                            .map(|(addr, token)| PutItemParams {
+                                addr: *addr,
+                                token: token.clone(),
+                                value: item.value.clone(),
+                                key: Some(item.public_key),
+                                signature: Some(item.signature),
+                                seq: Some(item.seq),
+                                salt: salt.clone(),
+                            })
+                            .collect()
+                    }
+                }
+            } else {
+                return;
+            };
+
+        let num_puts = puts_to_send.len();
+        for params in puts_to_send {
+            self.send_put_item(params).await;
+        }
+
+        // Update sent_puts count and send reply
+        if let Some(put_op) = self.item_put_ops.get_mut(&target) {
+            match put_op {
+                ItemPutState::Immutable {
+                    item,
+                    sent_puts,
+                    reply,
+                    ..
+                } => {
+                    *sent_puts = num_puts;
+                    if let Some(r) = reply.take() {
+                        let _ = r.send(Ok(item.target));
+                    }
+                }
+                ItemPutState::Mutable {
+                    item,
+                    sent_puts,
+                    reply,
+                    ..
+                } => {
+                    *sent_puts = num_puts;
+                    if let Some(r) = reply.take() {
+                        let _ = r.send(Ok(item.target));
+                    }
+                }
+            }
         }
     }
 
@@ -1362,6 +2052,131 @@ mod tests {
             .update_external_ip("203.0.113.5".parse().unwrap(), IpVoteSource::Nat)
             .await
             .unwrap();
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- BEP 44 put/get API tests ----
+
+    // Gap 2: All tests use `let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();`
+
+    #[tokio::test]
+    async fn dht_put_get_immutable_local() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        // Put an immutable item
+        let value = b"12:Hello World!".to_vec();
+        let target = handle.put_immutable(value.clone()).await.unwrap();
+
+        // Get it back (from local store)
+        let result = handle.get_immutable(target).await.unwrap();
+        assert_eq!(result, Some(value));
+
+        // Verify SHA-1 target
+        assert_eq!(target, ferrite_core::sha1(b"12:Hello World!"));
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_put_get_mutable_local() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let seed = [42u8; 32];
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let pubkey = keypair.verifying_key().to_bytes();
+
+        let value = b"4:test".to_vec();
+        let target = handle
+            .put_mutable(seed, value.clone(), 1, Vec::new())
+            .await
+            .unwrap();
+
+        // Get it back (from local store)
+        let result = handle.get_mutable(pubkey, Vec::new()).await.unwrap();
+        assert_eq!(result, Some((value, 1)));
+
+        // Verify target
+        let expected_target = crate::bep44::compute_mutable_target(&pubkey, &[]);
+        assert_eq!(target, expected_target);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_get_immutable_not_found() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let target = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        // With empty routing table, lookup has no peers to query; just returns local result
+        let result = handle.get_immutable(target).await.unwrap();
+        assert_eq!(result, None);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_put_immutable_rejects_oversized() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let value = vec![0u8; 1001];
+        let result = handle.put_immutable(value).await;
+        assert!(result.is_err());
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_stats_includes_item_count() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.dht_item_count, 0);
+
+        handle.put_immutable(b"5:hello".to_vec()).await.unwrap();
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.dht_item_count, 1);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dht_get_mutable_not_found() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        let pubkey = [99u8; 32];
+        let result = handle.get_mutable(pubkey, Vec::new()).await.unwrap();
+        assert_eq!(result, None);
+
         handle.shutdown().await.unwrap();
     }
 }
