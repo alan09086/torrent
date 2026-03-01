@@ -36,6 +36,21 @@ use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, Torren
 /// Shared global rate limiter bucket.
 type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
 
+/// Tribool result for piece hash verification in hybrid torrents.
+///
+/// Mirrors libtorrent-rasterbar's `boost::tribool` approach for dual-hash
+/// verification. `NotApplicable` covers cases where verification cannot run
+/// (e.g. missing hash picker, disk error before any block is checked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashResult {
+    /// All hashes matched.
+    Passed,
+    /// At least one hash did not match.
+    Failed,
+    /// Verification could not be performed (missing state / deferred).
+    NotApplicable,
+}
+
 /// Relocate torrent files from `src_base` to `dst_base`.
 ///
 /// For each file, tries `rename` first (fast, same-filesystem), then falls
@@ -693,7 +708,7 @@ struct TorrentActor {
     // BEP 52 v2/hybrid support (M34-M35)
     hash_picker: Option<ferrite_core::HashPicker>,
     version: ferrite_core::TorrentVersion,
-    #[allow(dead_code)] // read by verify_and_mark_piece_hybrid (M35 Task 4)
+    #[allow(dead_code)] // stored for hybrid torrent re-serialization (M35 Task 5)
     meta_v2: Option<ferrite_core::TorrentMetaV2>,
 }
 
@@ -1775,27 +1790,42 @@ impl TorrentActor {
 
     /// SHA-256 per-block Merkle verification (v2 torrents, BEP 52).
     async fn verify_and_mark_piece_v2(&mut self, index: u32) {
+        let result = self.run_v2_block_verification(index).await;
+        match result {
+            HashResult::Passed => self.on_piece_verified(index).await,
+            HashResult::Failed => self.on_piece_hash_failed(index).await,
+            HashResult::NotApplicable => {
+                // Blocks stored, will resolve when piece-layer hashes arrive
+            }
+        }
+    }
+
+    /// Run SHA-256 per-block Merkle verification and return a `HashResult`
+    /// without triggering side effects (no `on_piece_verified`/`on_piece_hash_failed`).
+    ///
+    /// Extracted from `verify_and_mark_piece_v2` so it can be reused in hybrid
+    /// dual-verification without double-firing callbacks.
+    async fn run_v2_block_verification(&mut self, index: u32) -> HashResult {
         let disk = match &self.disk {
             Some(d) => d.clone(),
-            None => return,
+            None => return HashResult::NotApplicable,
         };
 
         let lengths = match &self.lengths {
             Some(l) => l.clone(),
-            None => return,
+            None => return HashResult::NotApplicable,
         };
 
         // Flush write buffer before reading back for hashing
         if let Err(e) = disk.flush_piece(index).await {
             warn!(index, "failed to flush piece for v2 verification: {e}");
-            return;
+            return HashResult::NotApplicable;
         }
 
         // Compute SHA-256 of each 16 KiB block and feed to Merkle tree
         let num_chunks = lengths.chunks_in_piece(index);
         let blocks_per_piece = (lengths.piece_length() as u32) / DEFAULT_CHUNK_SIZE;
         let mut all_ok = true;
-        let mut any_failed = false;
 
         for chunk_idx in 0..num_chunks {
             let (begin, length) = match lengths.chunk_info(index, chunk_idx) {
@@ -1825,35 +1855,82 @@ impl TorrentActor {
                     }
                     ferrite_core::SetBlockResult::Unknown => {
                         // Piece-layer hash not yet available — stored for deferred verification
-                        // Gap 3: don't mark as verified, just continue
                         debug!(index, chunk_idx, "block hash stored, awaiting piece-layer hashes");
                     }
                     ferrite_core::SetBlockResult::HashFailed => {
                         warn!(index, chunk_idx, "block hash failed Merkle verification");
-                        any_failed = true;
-                        break;
+                        return HashResult::Failed;
                     }
                 }
             }
         }
 
-        if any_failed {
-            self.on_piece_hash_failed(index).await;
-        } else if all_ok
-            && self.chunk_tracker.as_ref().is_some_and(|ct| ct.all_blocks_verified(index))
-        {
-            // All blocks verified — piece is good
-            self.on_piece_verified(index).await;
+        if all_ok && self.chunk_tracker.as_ref().is_some_and(|ct| ct.all_blocks_verified(index)) {
+            HashResult::Passed
+        } else {
+            // Either a disk error (all_ok = false) or blocks stored awaiting piece-layer hashes
+            HashResult::NotApplicable
         }
-        // else: Unknown state — blocks stored, will resolve when piece-layer hashes arrive
     }
 
     /// Dual SHA-1 + SHA-256 verification for hybrid torrents.
-    /// Stub: full implementation in Task 4.
+    ///
+    /// Runs both v1 (whole-piece SHA-1) and v2 (per-block SHA-256 Merkle)
+    /// verification. Decision matrix:
+    /// - Both Passed → piece verified
+    /// - Both Failed → piece hash failed (normal re-request / parole path)
+    /// - One Passed + one Failed → inconsistent hashes (fatal, pauses torrent)
+    /// - Any NotApplicable → deferred (v2 blocks stored, will resolve later)
     async fn verify_and_mark_piece_hybrid(&mut self, index: u32) {
-        // TODO: M35 Task 4 — full hybrid verification with HashResult tribool
-        // For now, fall through to v1 verification
-        self.verify_and_mark_piece_v1(index).await;
+        // ── v1 verification (SHA-1 whole-piece) ──
+        let v1_result = {
+            let expected_hash = self
+                .meta
+                .as_ref()
+                .and_then(|m| m.info.piece_hash(index as usize));
+
+            if let (Some(disk), Some(expected)) = (&self.disk, expected_hash) {
+                match disk.verify_piece(index, expected, DiskJobFlags::empty()).await {
+                    Ok(true) => HashResult::Passed,
+                    Ok(false) => HashResult::Failed,
+                    Err(_) => HashResult::NotApplicable,
+                }
+            } else {
+                HashResult::NotApplicable
+            }
+        };
+
+        // ── v2 verification (SHA-256 per-block Merkle) ──
+        let v2_result = self.run_v2_block_verification(index).await;
+
+        // ── Decision matrix ──
+        match (v1_result, v2_result) {
+            // Both agree: piece is good
+            (HashResult::Passed, HashResult::Passed) => {
+                self.on_piece_verified(index).await;
+            }
+            // Both agree: piece is bad
+            (HashResult::Failed, HashResult::Failed) => {
+                self.on_piece_hash_failed(index).await;
+            }
+            // One passes, one fails: the .torrent metadata is inconsistent
+            (HashResult::Passed, HashResult::Failed) | (HashResult::Failed, HashResult::Passed) => {
+                self.on_inconsistent_hashes(index).await;
+            }
+            // v2 deferred (awaiting piece-layer hashes) but v1 passed: defer the whole thing.
+            // When piece-layer hashes arrive, handle_hashes_received will re-verify.
+            (HashResult::Passed, HashResult::NotApplicable) => {
+                debug!(index, "hybrid: v1 passed, v2 deferred — waiting for piece-layer hashes");
+            }
+            // v2 deferred but v1 failed: fail immediately (no point waiting for v2).
+            (HashResult::Failed, HashResult::NotApplicable) => {
+                self.on_piece_hash_failed(index).await;
+            }
+            // v1 not applicable (missing meta/disk): defer
+            (HashResult::NotApplicable, _) => {
+                debug!(index, "hybrid: v1 not applicable — deferring");
+            }
+        }
     }
 
     /// Common success path after a piece passes verification (v1 SHA-1 or v2 Merkle).
@@ -1978,7 +2055,6 @@ impl TorrentActor {
     /// Handle v1/v2 hash inconsistency — the torrent data itself is corrupt.
     ///
     /// Matching libtorrent: destroy hash picker, pause the torrent, post error alert.
-    #[allow(dead_code)] // called by verify_and_mark_piece_hybrid (M35 Task 4)
     async fn on_inconsistent_hashes(&mut self, piece: u32) {
         let info_hash = self.info_hash;
         error!(
