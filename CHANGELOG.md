@@ -8,6 +8,26 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.54.0 — 2026-03-01
+
+DSCP socket marking and anonymous mode hardening. Eleven crates, 1228 tests, 27 BEPs implemented. Phase 10 (Security & Hardening) complete.
+
+### M48: DSCP Marking + Anonymous Mode Hardening
+
+### Added
+- `dscp` module in ferrite-session: applies DSCP/ToS markings via `setsockopt` to TCP listeners, outbound TCP connections, uTP sockets, and UDP tracker sockets
+- Default DSCP value CS1 (0x08) — scavenger/low-priority traffic class
+- `Settings.peer_dscp` field for configurable DSCP marking
+- `PeerId::generate_anonymous()` with `-XX0000-` prefix (generic/unknown client fingerprint)
+- Ext handshake suppression in anonymous mode: v, p, reqq, upload_only fields all set to None
+- Tracker announce port suppression (sent as 0) in anonymous mode
+- HTTP tracker user-agent suppression (empty string) via `HttpTracker::with_anonymous()`
+- Facade: `ClientBuilder::peer_dscp()` builder method
+- 21 new tests (1228 total)
+
+### Changed
+- Version bump 0.53.0 → 0.54.0
+
 ## 0.53.0 — 2026-03-01
 
 SSRF mitigation, IDNA rejection, and HTTPS tracker validation. Eleven crates, 1207 tests, 27 BEPs implemented. Phase 10 (Security & Hardening) begins.
