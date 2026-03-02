@@ -1,4 +1,5 @@
-//! BitTorrent peer wire protocol (BEP 3, 10, 9, 11).
+#![warn(missing_docs)]
+//! BitTorrent peer wire protocol: handshake, messages, BEP 6/9/10/21/52 extensions, MSE/PE encryption.
 //!
 //! Provides message types, handshake, and a tokio codec for framed I/O.
 

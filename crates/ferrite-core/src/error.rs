@@ -18,7 +18,12 @@ pub enum Error {
 
     /// Invalid hash length.
     #[error("invalid hash length: expected {expected}, got {got}")]
-    InvalidHashLength { expected: usize, got: usize },
+    InvalidHashLength {
+        /// Expected byte length.
+        expected: usize,
+        /// Actual byte length received.
+        got: usize,
+    },
 
     /// Torrent metainfo is malformed.
     #[error("invalid torrent: {0}")]

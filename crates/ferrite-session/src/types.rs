@@ -14,14 +14,23 @@ use crate::choker::{ChokingAlgorithm, SeedChokingAlgorithm};
 /// Configurable parameters for a torrent session.
 #[derive(Debug, Clone)]
 pub struct TorrentConfig {
+    /// TCP listen port for incoming peer connections.
     pub listen_port: u16,
+    /// Maximum number of peer connections per torrent.
     pub max_peers: usize,
+    /// Number of outstanding piece requests to maintain per peer.
     pub target_request_queue: usize,
+    /// Directory where downloaded files are stored.
     pub download_dir: PathBuf,
+    /// Enable DHT for peer discovery.
     pub enable_dht: bool,
+    /// Enable Peer Exchange (BEP 11) for peer discovery.
     pub enable_pex: bool,
+    /// Enable Fast Extension (BEP 6) for reject/suggest/allowed-fast messages.
     pub enable_fast: bool,
+    /// Stop seeding after reaching this upload/download ratio (None = unlimited).
     pub seed_ratio_limit: Option<f64>,
+    /// In end game mode, cancel duplicate requests when a piece completes.
     pub strict_end_game: bool,
     /// Upload rate limit in bytes/sec (0 = unlimited).
     pub upload_rate_limit: u64,
@@ -210,12 +219,19 @@ impl From<&crate::settings::Settings> for TorrentConfig {
 /// Current state of a torrent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TorrentState {
+    /// Waiting for peers to send torrent metadata via BEP 9.
     FetchingMetadata,
+    /// Verifying existing data on disk against piece hashes.
     Checking,
+    /// Actively downloading pieces from peers.
     Downloading,
+    /// All pieces downloaded, awaiting transition to seeding.
     Complete,
+    /// Upload-only: all pieces verified, serving to other peers.
     Seeding,
+    /// Manually paused by the user. No peer connections maintained.
     Paused,
+    /// Removed from the session. Terminal state.
     Stopped,
     /// Share mode: relay pieces in memory without writing to disk.
     Sharing,
@@ -224,12 +240,19 @@ pub enum TorrentState {
 /// Aggregate statistics for a torrent.
 #[derive(Debug, Clone)]
 pub struct TorrentStats {
+    /// Current torrent state.
     pub state: TorrentState,
+    /// Total bytes downloaded (payload only).
     pub downloaded: u64,
+    /// Total bytes uploaded (payload only).
     pub uploaded: u64,
+    /// Number of pieces that have been verified.
     pub pieces_have: u32,
+    /// Total number of pieces in the torrent.
     pub pieces_total: u32,
+    /// Number of currently connected peers.
     pub peers_connected: usize,
+    /// Number of known peers (connected + available).
     pub peers_available: usize,
     /// Progress of piece checking (0.0–1.0), meaningful when state is `Checking`.
     pub checking_progress: f32,
@@ -469,28 +492,41 @@ pub(crate) enum TorrentCommand {
 /// Info about a file within a torrent.
 #[derive(Debug, Clone)]
 pub struct FileInfo {
+    /// Relative path of the file within the torrent.
     pub path: PathBuf,
+    /// File size in bytes.
     pub length: u64,
 }
 
 /// Metadata about a torrent (available after metadata is fetched).
 #[derive(Debug, Clone)]
 pub struct TorrentInfo {
+    /// SHA-1 info hash of the torrent.
     pub info_hash: ferrite_core::Id20,
+    /// Display name from the torrent metadata.
     pub name: String,
+    /// Total size of all files in bytes.
     pub total_length: u64,
+    /// Size of each piece in bytes (last piece may be smaller).
     pub piece_length: u64,
+    /// Total number of pieces in the torrent.
     pub num_pieces: u32,
+    /// List of files contained in the torrent.
     pub files: Vec<FileInfo>,
+    /// Whether this is a private torrent (DHT/PEX disabled).
     pub private: bool,
 }
 
 /// Aggregate statistics for the whole session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStats {
+    /// Number of non-paused torrents in the session.
     pub active_torrents: usize,
+    /// Total bytes downloaded across all torrents since session start.
     pub total_downloaded: u64,
+    /// Total bytes uploaded across all torrents since session start.
     pub total_uploaded: u64,
+    /// Number of nodes in the DHT routing table.
     pub dht_nodes: usize,
 }
 

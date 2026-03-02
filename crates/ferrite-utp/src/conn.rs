@@ -21,18 +21,26 @@ const MAX_TIMEOUTS: u32 = 5;
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnState {
+    /// SYN sent, awaiting SYN-ACK.
     SynSent,
+    /// SYN received, awaiting first data or ACK.
     SynRecv,
+    /// Connection established.
     Connected,
+    /// FIN sent, awaiting peer FIN.
     FinSent,
+    /// Connection fully closed.
     Closed,
+    /// Connection reset by peer.
     Reset,
 }
 
 /// Key for identifying a connection: (remote_addr, local recv_id).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionKey {
+    /// Remote peer address.
     pub addr: SocketAddr,
+    /// Local receive connection ID.
     pub recv_id: u16,
 }
 

@@ -16,6 +16,7 @@ pub struct HttpTracker {
 /// Raw HTTP announce response (bencode).
 #[derive(Debug, Clone)]
 pub struct HttpAnnounceResponse {
+    /// Common announce response data (interval, peers, etc.).
     pub response: AnnounceResponse,
     /// Tracker ID (some trackers return this for subsequent requests).
     pub tracker_id: Option<String>,
@@ -45,10 +46,11 @@ struct RawHttpResponse {
 }
 
 impl HttpTracker {
+    /// Creates a new HTTP tracker client with default settings.
     pub fn new() -> Self {
         HttpTracker {
             client: reqwest::Client::builder()
-                .user_agent("Ferrite/0.57.0")
+                .user_agent("Ferrite/0.58.0")
                 .build()
                 .expect("failed to build HTTP client"),
         }
@@ -72,7 +74,7 @@ impl HttpTracker {
     /// HTTP requests are routed through it.
     pub fn with_proxy(proxy_url: Option<&str>) -> Self {
         let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.57.0");
+            .user_agent("Ferrite/0.58.0");
         if let Some(url) = proxy_url
             && let Ok(proxy) = reqwest::Proxy::all(url)
         {
@@ -94,7 +96,7 @@ impl HttpTracker {
         ssrf_mitigation: bool,
     ) -> Self {
         let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.57.0");
+            .user_agent("Ferrite/0.58.0");
 
         if ssrf_mitigation {
             let policy = reqwest::redirect::Policy::custom(|attempt| {
@@ -228,6 +230,7 @@ impl HttpTracker {
 /// HTTP scrape response containing per-torrent stats.
 #[derive(Debug, Clone)]
 pub struct HttpScrapeResponse {
+    /// Per-torrent scrape statistics keyed by info hash.
     pub files: HashMap<Id20, ScrapeInfo>,
 }
 

@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! BitTorrent session management: peers, torrents, and piece selection.
 
 pub mod alert;
@@ -38,7 +39,9 @@ pub mod extension;
 pub mod streaming;
 pub mod stats;
 pub mod transport;
+/// Disk I/O manager: configuration, handles, and statistics.
 pub mod disk;
+/// Pluggable disk I/O backend trait and implementations.
 pub mod disk_backend;
 pub(crate) mod write_buffer;
 mod torrent;

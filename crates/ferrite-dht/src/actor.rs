@@ -97,12 +97,19 @@ impl DhtConfig {
 /// Runtime statistics for the DHT.
 #[derive(Debug, Clone)]
 pub struct DhtStats {
+    /// Number of nodes in the routing table.
     pub routing_table_size: usize,
+    /// Number of k-buckets in use.
     pub bucket_count: usize,
+    /// Number of distinct info hashes tracked in the peer store.
     pub peer_store_info_hashes: usize,
+    /// Total number of peers across all info hashes.
     pub peer_store_peers: usize,
+    /// Number of in-flight KRPC queries.
     pub pending_queries: usize,
+    /// Total KRPC queries sent since startup.
     pub total_queries_sent: u64,
+    /// Total KRPC responses received since startup.
     pub total_responses_received: u64,
     /// Number of BEP 44 items stored (immutable + mutable).
     pub dht_item_count: usize,

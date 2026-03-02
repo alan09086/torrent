@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1310-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1312-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.57.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.58.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -22,7 +22,48 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **95-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1310 tests, zero clippy warnings**
+- 📊 **1312 tests, zero clippy warnings**
+
+---
+
+## 🚀 Getting Started
+
+Add ferrite to your `Cargo.toml`:
+
+```toml
+[dependencies]
+ferrite = "0.58.0"
+tokio = { version = "1", features = ["full"] }
+```
+
+Download a torrent from a magnet link:
+
+```rust,no_run
+use ferrite::prelude::*;
+
+#[tokio::main]
+async fn main() -> ferrite::Result<()> {
+    let session = ClientBuilder::new()
+        .download_dir("/tmp/downloads")
+        .start()
+        .await?;
+
+    let magnet = Magnet::parse("magnet:?xt=urn:btih:...").unwrap();
+    let info_hash = session.add_magnet(magnet).await?;
+
+    loop {
+        let stats = session.torrent_stats(info_hash).await?;
+        if matches!(stats.state, TorrentState::Seeding) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    session.shutdown().await
+}
+```
+
+See [`examples/`](crates/ferrite/examples/) for more usage patterns including torrent creation, file streaming, and DHT lookups.
 
 ---
 
@@ -62,15 +103,15 @@ ferrite-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 37 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 148 |
 | `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 65 |
-| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 608 |
+| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 610 |
 | `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
-| `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 41 |
+| `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 49 |
 | `ferrite-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
 
 ### 🎯 Session Features
 
-The `ferrite-session` crate (608 tests) includes:
+The `ferrite-session` crate (610 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -176,6 +217,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.58.0 | M52 | API documentation: `#![warn(missing_docs)]` on all 12 crates, example programs, `SessionHandle::open_file()` |
 | 0.57.0 | M51 | Network simulation: ferrite-sim crate, NetworkFactory pluggable transport, SimNetwork/SimSwarm, 5 integration tests |
 | 0.56.0 | M50 | Session statistics: 70 atomic counters, periodic reporting, SessionStatsAlert, rate computation |
 | 0.55.0 | M49 | Pluggable disk I/O: DiskIoBackend trait, PosixDiskIo, MmapDiskIo, DisabledDiskIo, backend factory |

@@ -130,11 +130,17 @@ impl Default for DiskConfig {
 /// Disk I/O performance counters.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiskStats {
+    /// Total bytes read from disk.
     pub read_bytes: u64,
+    /// Total bytes written to disk.
     pub write_bytes: u64,
+    /// Number of read requests served from cache.
     pub cache_hits: u64,
+    /// Number of read requests that required disk I/O.
     pub cache_misses: u64,
+    /// Current size of the write buffer in bytes.
     pub write_buffer_bytes: usize,
+    /// Number of pending disk I/O jobs in the queue.
     pub queued_jobs: usize,
 }
 

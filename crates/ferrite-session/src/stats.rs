@@ -39,89 +39,167 @@ pub struct SessionStatsMetric {
 // ---------------------------------------------------------------------------
 
 // -- Network (0..11) --
+
+/// Metric index: total bytes sent across all connections (counter).
 pub const NET_BYTES_SENT: usize = 0;
+/// Metric index: total bytes received across all connections (counter).
 pub const NET_BYTES_RECV: usize = 1;
+/// Metric index: current number of established connections (gauge).
 pub const NET_NUM_CONNECTIONS: usize = 2;
+/// Metric index: current number of half-open (connecting) sockets (gauge).
 pub const NET_NUM_HALF_OPEN: usize = 3;
+/// Metric index: current number of TCP peers (gauge).
 pub const NET_NUM_TCP_PEERS: usize = 4;
+/// Metric index: current number of uTP peers (gauge).
 pub const NET_NUM_UTP_PEERS: usize = 5;
+/// Metric index: current number of TCP connections (gauge).
 pub const NET_NUM_TCP_CONNECTIONS: usize = 6;
+/// Metric index: current number of uTP connections (gauge).
 pub const NET_NUM_UTP_CONNECTIONS: usize = 7;
+/// Metric index: total bytes sent over TCP (counter).
 pub const NET_TCP_BYTES_SENT: usize = 8;
+/// Metric index: total bytes received over TCP (counter).
 pub const NET_TCP_BYTES_RECV: usize = 9;
+/// Metric index: total bytes sent over uTP (counter).
 pub const NET_UTP_BYTES_SENT: usize = 10;
+/// Metric index: total bytes received over uTP (counter).
 pub const NET_UTP_BYTES_RECV: usize = 11;
 
 // -- Disk (12..21) --
+
+/// Metric index: total disk read operations (counter).
 pub const DISK_READ_COUNT: usize = 12;
+/// Metric index: total disk write operations (counter).
 pub const DISK_WRITE_COUNT: usize = 13;
+/// Metric index: total bytes read from disk (counter).
 pub const DISK_READ_BYTES: usize = 14;
+/// Metric index: total bytes written to disk (counter).
 pub const DISK_WRITE_BYTES: usize = 15;
+/// Metric index: total disk cache hits (counter).
 pub const DISK_CACHE_HITS: usize = 16;
+/// Metric index: total disk cache misses (counter).
 pub const DISK_CACHE_MISSES: usize = 17;
+/// Metric index: current disk job queue depth (gauge).
 pub const DISK_QUEUE_DEPTH: usize = 18;
+/// Metric index: cumulative disk job time in microseconds (counter).
 pub const DISK_JOB_TIME_US: usize = 19;
+/// Metric index: current write buffer size in bytes (gauge).
 pub const DISK_WRITE_BUFFER_BYTES: usize = 20;
+/// Metric index: total piece hash operations (counter).
 pub const DISK_HASH_COUNT: usize = 21;
 
 // -- DHT (22..28) --
+
+/// Metric index: current number of DHT routing table nodes (gauge).
 pub const DHT_NODES: usize = 22;
+/// Metric index: total DHT lookup operations (counter).
 pub const DHT_LOOKUPS: usize = 23;
+/// Metric index: total bytes received via DHT (counter).
 pub const DHT_BYTES_IN: usize = 24;
+/// Metric index: total bytes sent via DHT (counter).
 pub const DHT_BYTES_OUT: usize = 25;
+/// Metric index: current number of IPv4 DHT nodes (gauge).
 pub const DHT_NODES_V4: usize = 26;
+/// Metric index: current number of IPv6 DHT nodes (gauge).
 pub const DHT_NODES_V6: usize = 27;
+/// Metric index: total DHT announce operations (counter).
 pub const DHT_ANNOUNCE_COUNT: usize = 28;
 
 // -- Peers (29..40) --
+
+/// Metric index: current number of unchoked peers (gauge).
 pub const PEER_NUM_UNCHOKED: usize = 29;
+/// Metric index: current number of interested peers (gauge).
 pub const PEER_NUM_INTERESTED: usize = 30;
+/// Metric index: current number of peers we are uploading to (gauge).
 pub const PEER_NUM_UPLOADING: usize = 31;
+/// Metric index: current number of peers we are downloading from (gauge).
 pub const PEER_NUM_DOWNLOADING: usize = 32;
+/// Metric index: current number of torrents in seeding state (gauge).
 pub const PEER_NUM_SEEDING_TORRENTS: usize = 33;
+/// Metric index: current number of torrents in downloading state (gauge).
 pub const PEER_NUM_DOWNLOADING_TORRENTS: usize = 34;
+/// Metric index: current number of torrents being checked (gauge).
 pub const PEER_NUM_CHECKING_TORRENTS: usize = 35;
+/// Metric index: current number of paused torrents (gauge).
 pub const PEER_NUM_PAUSED_TORRENTS: usize = 36;
+/// Metric index: current total number of connected peers (gauge).
 pub const PEER_PEERS_CONNECTED: usize = 37;
+/// Metric index: current total number of known available peers (gauge).
 pub const PEER_PEERS_AVAILABLE: usize = 38;
+/// Metric index: current number of active web seeds (gauge).
 pub const PEER_NUM_WEB_SEEDS: usize = 39;
+/// Metric index: current number of banned peers (gauge).
 pub const PEER_NUM_BANNED: usize = 40;
 
 // -- Protocol (41..54) --
+
+/// Metric index: total pieces downloaded across all torrents (counter).
 pub const PROTO_PIECES_DOWNLOADED: usize = 41;
+/// Metric index: total pieces uploaded across all torrents (counter).
 pub const PROTO_PIECES_UPLOADED: usize = 42;
+/// Metric index: total piece hash verification failures (counter).
 pub const PROTO_HASHFAILS: usize = 43;
+/// Metric index: total wasted bytes (duplicate/rejected data) (counter).
 pub const PROTO_WASTE_BYTES: usize = 44;
+/// Metric index: total piece request messages sent (counter).
 pub const PROTO_PIECE_REQUESTS: usize = 45;
+/// Metric index: total piece reject messages received (counter).
 pub const PROTO_PIECE_REJECTS: usize = 46;
+/// Metric index: total incoming handshakes received (counter).
 pub const PROTO_HANDSHAKES_IN: usize = 47;
+/// Metric index: total outgoing handshakes sent (counter).
 pub const PROTO_HANDSHAKES_OUT: usize = 48;
+/// Metric index: total PEX messages received (counter).
 pub const PROTO_PEX_MESSAGES_IN: usize = 49;
+/// Metric index: total PEX messages sent (counter).
 pub const PROTO_PEX_MESSAGES_OUT: usize = 50;
+/// Metric index: total tracker announce requests (counter).
 pub const PROTO_TRACKER_ANNOUNCES: usize = 51;
+/// Metric index: total tracker announce errors (counter).
 pub const PROTO_TRACKER_ERRORS: usize = 52;
+/// Metric index: total BEP 9 metadata requests sent (counter).
 pub const PROTO_METADATA_REQUESTS: usize = 53;
+/// Metric index: total BEP 9 metadata pieces received (counter).
 pub const PROTO_METADATA_RECEIVES: usize = 54;
 
 // -- Bandwidth (55..64) --
+
+/// Metric index: current aggregate upload rate in bytes/sec (gauge).
 pub const BW_UPLOAD_RATE: usize = 55;
+/// Metric index: current aggregate download rate in bytes/sec (gauge).
 pub const BW_DOWNLOAD_RATE: usize = 56;
+/// Metric index: current TCP upload rate in bytes/sec (gauge).
 pub const BW_UPLOAD_RATE_TCP: usize = 57;
+/// Metric index: current TCP download rate in bytes/sec (gauge).
 pub const BW_DOWNLOAD_RATE_TCP: usize = 58;
+/// Metric index: current uTP upload rate in bytes/sec (gauge).
 pub const BW_UPLOAD_RATE_UTP: usize = 59;
+/// Metric index: current uTP download rate in bytes/sec (gauge).
 pub const BW_DOWNLOAD_RATE_UTP: usize = 60;
+/// Metric index: current payload-only upload rate in bytes/sec (gauge).
 pub const BW_PAYLOAD_UPLOAD_RATE: usize = 61;
+/// Metric index: current payload-only download rate in bytes/sec (gauge).
 pub const BW_PAYLOAD_DOWNLOAD_RATE: usize = 62;
+/// Metric index: total bytes uploaded since session start (counter).
 pub const BW_TOTAL_UPLOADED: usize = 63;
+/// Metric index: total bytes downloaded since session start (counter).
 pub const BW_TOTAL_DOWNLOADED: usize = 64;
 
 // -- Session (65..69) --
+
+/// Metric index: current number of active (non-paused) torrents (gauge).
 pub const SES_ACTIVE_TORRENTS: usize = 65;
+/// Metric index: total number of torrents in the session (gauge).
 pub const SES_NUM_TORRENTS: usize = 66;
+/// Metric index: session uptime in seconds (gauge).
 pub const SES_UPTIME_SECS: usize = 67;
+/// Metric index: total connections blocked by the IP filter (counter).
 pub const SES_IP_FILTER_BLOCKED: usize = 68;
+/// Metric index: total torrents paused by auto-management (counter).
 pub const SES_QUEUE_PAUSED_BY_AUTO: usize = 69;
 
+/// Total number of metrics tracked by the session.
 pub const NUM_METRICS: usize = 70;
 
 // ---------------------------------------------------------------------------

@@ -13,14 +13,20 @@ pub const VERSION: u8 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PacketType {
+    /// Regular data payload.
     Data = 0,
+    /// Graceful connection close.
     Fin = 1,
+    /// ACK-only (no payload).
     State = 2,
+    /// Forceful connection reset.
     Reset = 3,
+    /// Connection initiation.
     Syn = 4,
 }
 
 impl PacketType {
+    /// Converts a raw byte to a `PacketType`, returning an error for unknown values.
     pub fn from_u8(v: u8) -> Result<Self> {
         match v {
             0 => Ok(Self::Data),
@@ -37,11 +43,14 @@ impl PacketType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ExtensionType {
+    /// No extension (end of chain).
     None = 0,
+    /// Selective ACK bitmask.
     Sack = 1,
 }
 
 impl ExtensionType {
+    /// Converts a raw byte to an `ExtensionType`, returning an error for unknown values.
     pub fn from_u8(v: u8) -> Result<Self> {
         match v {
             0 => Ok(Self::None),
@@ -54,17 +63,26 @@ impl ExtensionType {
 /// BEP 29 packet header (20 bytes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
+    /// Packet type (Data, Fin, State, Reset, Syn).
     pub packet_type: PacketType,
+    /// First extension type in the chain, or `None`.
     pub extension: ExtensionType,
+    /// Connection identifier.
     pub connection_id: u16,
+    /// Sender timestamp in microseconds.
     pub timestamp_us: u32,
+    /// Difference between local time and last received timestamp.
     pub timestamp_diff_us: u32,
+    /// Advertised receive window in bytes.
     pub wnd_size: u32,
+    /// Sequence number of this packet.
     pub seq_nr: SeqNr,
+    /// Last sequence number received by sender.
     pub ack_nr: SeqNr,
 }
 
 impl Header {
+    /// Serializes the header into a 20-byte buffer.
     pub fn encode(&self, buf: &mut BytesMut) {
         let type_ver = ((self.packet_type as u8) << 4) | VERSION;
         buf.put_u8(type_ver);
@@ -77,6 +95,7 @@ impl Header {
         buf.put_u16(self.ack_nr.0);
     }
 
+    /// Parses a header from a byte slice, returning an error if too short or invalid.
     pub fn decode(buf: &mut &[u8]) -> Result<Self> {
         if buf.len() < HEADER_SIZE {
             return Err(Error::InvalidPacket(format!(
@@ -115,12 +134,16 @@ impl Header {
 /// Complete uTP packet: header + optional SACK bitmask + payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
+    /// Fixed-size packet header.
     pub header: Header,
+    /// Optional SACK bitmask extension.
     pub sack: Option<Bytes>,
+    /// Data payload (empty for control packets).
     pub payload: Bytes,
 }
 
 impl Packet {
+    /// Serializes the entire packet (header + extensions + payload) into bytes.
     pub fn encode(&self) -> Bytes {
         let sack_ext_len = match &self.sack {
             Some(sack) => 2 + sack.len(), // next_ext(1) + len(1) + bitmask
@@ -142,6 +165,7 @@ impl Packet {
         buf.freeze()
     }
 
+    /// Parses a complete packet from raw bytes.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let mut cursor: &[u8] = data;
         let header = Header::decode(&mut cursor)?;

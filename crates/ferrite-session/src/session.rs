@@ -157,6 +157,11 @@ enum SessionCommand {
         source: crate::peer_state::PeerSource,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    OpenFile {
+        info_hash: Id20,
+        file_index: usize,
+        reply: oneshot::Sender<crate::Result<crate::streaming::FileStream>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -229,7 +234,7 @@ impl SessionHandle {
     ///
     /// This is the most general constructor — all other `start_*` variants
     /// delegate to this method. The `factory` parameter controls how TCP
-    /// listeners and connections are created: use [`NetworkFactory::tokio()`]
+    /// listeners and connections are created: use [`crate::transport::NetworkFactory::tokio()`]
     /// for real networking or a custom factory for simulation.
     pub async fn start_full(
         settings: Settings,
@@ -852,6 +857,28 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Opens a file stream for sequential reading (`AsyncRead` + `AsyncSeek`).
+    ///
+    /// The returned [`FileStream`](crate::streaming::FileStream) reads data from
+    /// a specific file within a torrent, blocking on pieces that haven't been
+    /// downloaded yet.
+    pub async fn open_file(
+        &self,
+        info_hash: Id20,
+        file_index: usize,
+    ) -> crate::Result<crate::streaming::FileStream> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::OpenFile {
+                info_hash,
+                file_index,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,6 +1064,14 @@ impl SessionActor {
                         Some(SessionCommand::AddPeers { info_hash, peers, source, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.add_peers(peers, source).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::OpenFile { info_hash, file_index, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.open_file(file_index).await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -3019,6 +3054,41 @@ mod tests {
             result.is_err(),
             "no SessionStatsAlert should fire when stats_report_interval is 0"
         );
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: open_file returns TorrentNotFound for unknown hash ----
+
+    #[tokio::test]
+    async fn open_file_not_found() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let fake_hash = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let result = session.open_file(fake_hash, 0).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("not found"));
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: open_file on a real torrent routes to TorrentHandle ----
+
+    #[tokio::test]
+    async fn open_file_routes_to_torrent() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // open_file should succeed for file_index 0 (single-file torrent)
+        let stream = session.open_file(info_hash, 0).await;
+        assert!(stream.is_ok(), "open_file should succeed for file_index 0");
+
+        // open_file should fail for out-of-range file_index
+        let result = session.open_file(info_hash, 999).await;
+        assert!(result.is_err(), "open_file should fail for invalid file_index");
+
         session.shutdown().await.unwrap();
     }
 }

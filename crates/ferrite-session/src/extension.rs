@@ -14,12 +14,12 @@ use ferrite_wire::ExtHandshake;
 /// A custom BEP 10 extension message handler.
 ///
 /// Implement this trait to add custom extension protocol support to a ferrite
-/// session. Plugins are registered via [`ClientBuilder::add_extension()`] and
+/// session. Plugins are registered via `ClientBuilder::add_extension()` and
 /// are immutable after session start.
 ///
 /// # Extension ID allocation
 ///
-/// Built-in extensions occupy IDs 1–3:
+/// Built-in extensions occupy IDs 1-3:
 /// - `ut_metadata` = 1
 /// - `ut_pex` = 2
 /// - `lt_trackers` = 3
@@ -29,11 +29,9 @@ use ferrite_wire::ExtHandshake;
 /// # Constraints
 ///
 /// - Plugins cannot access torrent internals (piece state, peer list).
-/// - Plugins cannot initiate unsolicited messages — respond only.
+/// - Plugins cannot initiate unsolicited messages -- respond only.
 /// - Plugins cannot override built-in extensions.
-/// - Callbacks are synchronous — spawn tasks internally for async work.
-///
-/// [`ClientBuilder::add_extension()`]: crate::ClientBuilder::add_extension
+/// - Callbacks are synchronous -- spawn tasks internally for async work.
 pub trait ExtensionPlugin: Send + Sync + 'static {
     /// Extension name for BEP 10 handshake negotiation (e.g. `"ut_comment"`).
     ///

@@ -16,19 +16,48 @@ pub enum Message {
     /// We're not interested.
     NotInterested,
     /// Peer has piece `index`.
-    Have { index: u32 },
+    Have {
+        /// Piece index.
+        index: u32,
+    },
     /// Peer's complete bitfield.
     Bitfield(Bytes),
     /// Request a block: piece index, byte offset within piece, length.
-    Request { index: u32, begin: u32, length: u32 },
+    Request {
+        /// Piece index.
+        index: u32,
+        /// Byte offset within the piece.
+        begin: u32,
+        /// Requested block length in bytes.
+        length: u32,
+    },
     /// A data block: piece index, byte offset, data.
-    Piece { index: u32, begin: u32, data: Bytes },
+    Piece {
+        /// Piece index.
+        index: u32,
+        /// Byte offset within the piece.
+        begin: u32,
+        /// Block payload.
+        data: Bytes,
+    },
     /// Cancel a previously sent request.
-    Cancel { index: u32, begin: u32, length: u32 },
+    Cancel {
+        /// Piece index.
+        index: u32,
+        /// Byte offset within the piece.
+        begin: u32,
+        /// Block length in bytes.
+        length: u32,
+    },
     /// DHT port (BEP 5).
     Port(u16),
     /// Extension message (BEP 10). ext_id=0 is handshake.
-    Extended { ext_id: u8, payload: Bytes },
+    Extended {
+        /// Extension message ID (0 = handshake).
+        ext_id: u8,
+        /// Bencoded extension payload.
+        payload: Bytes,
+    },
     /// BEP 6: Suggest a piece for the peer to download.
     SuggestPiece(u32),
     /// BEP 6: We have all pieces.
@@ -36,32 +65,55 @@ pub enum Message {
     /// BEP 6: We have no pieces.
     HaveNone,
     /// BEP 6: Reject a request from the peer.
-    RejectRequest { index: u32, begin: u32, length: u32 },
+    RejectRequest {
+        /// Piece index.
+        index: u32,
+        /// Byte offset within the piece.
+        begin: u32,
+        /// Block length in bytes.
+        length: u32,
+    },
     /// BEP 6: Piece index the peer is allowed to request while choked.
     AllowedFast(u32),
     /// BEP 52: Request hashes from a file's Merkle tree.
     HashRequest {
+        /// File root hash identifying the Merkle tree.
         pieces_root: ferrite_core::Id32,
+        /// Tree layer (0 = leaf/block layer).
         base: u32,
+        /// Starting node index within the layer.
         index: u32,
+        /// Number of consecutive hashes requested.
         count: u32,
+        /// Number of uncle proof layers to include.
         proof_layers: u32,
     },
     /// BEP 52: Response with hashes and uncle proof.
     Hashes {
+        /// File root hash identifying the Merkle tree.
         pieces_root: ferrite_core::Id32,
+        /// Tree layer (0 = leaf/block layer).
         base: u32,
+        /// Starting node index within the layer.
         index: u32,
+        /// Number of consecutive hashes in the response.
         count: u32,
+        /// Number of uncle proof layers included.
         proof_layers: u32,
+        /// Hash values followed by uncle proof hashes.
         hashes: Vec<ferrite_core::Id32>,
     },
     /// BEP 52: Reject a hash request.
     HashReject {
+        /// File root hash identifying the Merkle tree.
         pieces_root: ferrite_core::Id32,
+        /// Tree layer that was requested.
         base: u32,
+        /// Starting node index that was requested.
         index: u32,
+        /// Number of hashes that was requested.
         count: u32,
+        /// Number of proof layers that was requested.
         proof_layers: u32,
     },
 }

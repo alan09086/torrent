@@ -1,7 +1,9 @@
-//! BitTorrent tracker client (BEP 3, 15, 48).
+#![warn(missing_docs)]
+//! HTTP and UDP BitTorrent tracker clients (BEP 3, BEP 15, BEP 48).
 //!
 //! Supports HTTP and UDP tracker protocols for announce and scrape.
 
+/// Compact peer list encoding/decoding (BEP 23, BEP 7).
 pub mod compact;
 mod error;
 mod http;
@@ -46,23 +48,36 @@ pub fn announce_url_to_scrape(url: &str) -> Option<String> {
 /// Common announce request parameters.
 #[derive(Debug, Clone)]
 pub struct AnnounceRequest {
+    /// SHA-1 info hash of the torrent.
     pub info_hash: Id20,
+    /// Our 20-byte peer ID.
     pub peer_id: Id20,
+    /// Port we are listening on.
     pub port: u16,
+    /// Total bytes uploaded since last announce.
     pub uploaded: u64,
+    /// Total bytes downloaded since last announce.
     pub downloaded: u64,
+    /// Bytes remaining to download.
     pub left: u64,
+    /// Optional announce event (started/stopped/completed).
     pub event: AnnounceEvent,
+    /// Maximum number of peers to return (`None` = tracker default).
     pub num_want: Option<i32>,
+    /// Request compact peer list (6 bytes per IPv4 peer).
     pub compact: bool,
 }
 
-/// Announce event types.
+/// Announce event type sent to trackers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnounceEvent {
+    /// Regular periodic re-announce (no event).
     None = 0,
+    /// Download just finished -- all pieces verified.
     Completed = 1,
+    /// First announce after adding the torrent.
     Started = 2,
+    /// Torrent removed or client shutting down.
     Stopped = 3,
 }
 

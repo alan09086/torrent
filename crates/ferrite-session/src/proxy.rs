@@ -17,12 +17,18 @@ use tokio::net::{TcpStream, UdpSocket};
 /// Supported proxy protocols (matching libtorrent).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ProxyType {
+    /// No proxy (direct connections).
     #[default]
     None,
+    /// SOCKS4 proxy (no authentication, no UDP).
     Socks4,
+    /// SOCKS5 proxy without authentication.
     Socks5,
+    /// SOCKS5 proxy with username/password authentication.
     Socks5Password,
+    /// HTTP CONNECT proxy without authentication.
     Http,
+    /// HTTP CONNECT proxy with username/password authentication.
     HttpPassword,
 }
 
@@ -31,10 +37,15 @@ pub enum ProxyType {
 /// Proxy connection settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
+    /// Proxy protocol to use.
     pub proxy_type: ProxyType,
+    /// Proxy server hostname or IP address.
     pub hostname: String,
+    /// Proxy server port.
     pub port: u16,
+    /// Username for authenticated proxy types.
     pub username: Option<String>,
+    /// Password for authenticated proxy types.
     pub password: Option<String>,
     /// Route peer connections (incl. web seeds) through proxy.
     #[serde(default = "default_true")]

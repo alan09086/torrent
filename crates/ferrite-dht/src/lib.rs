@@ -1,4 +1,5 @@
-//! Kademlia DHT for BitTorrent (BEP 5).
+#![warn(missing_docs)]
+//! Kademlia DHT implementation: BEP 5 routing, BEP 42 security, BEP 44 storage, BEP 51 indexing.
 //!
 //! Implements the Mainline DHT protocol: KRPC message encoding, Kademlia
 //! routing table, peer discovery, and announce operations.
@@ -9,13 +10,21 @@
 //! that owns all state (routing table, UDP socket, pending queries). The
 //! returned `DhtHandle` is a cheap, cloneable sender for submitting commands.
 
+/// DHT error types.
 pub mod error;
+/// Compact node encoding (26-byte IPv4, 38-byte IPv6).
 pub mod compact;
+/// KRPC message encoding and decoding (BEP 5).
 pub mod krpc;
+/// Kademlia routing table with k-buckets.
 pub mod routing_table;
+/// Per-info_hash peer storage and announce token management.
 pub mod peer_store;
+/// BEP 42 node ID generation and validation.
 pub mod node_id;
+/// BEP 44 immutable and mutable item storage.
 pub mod bep44;
+/// DHT item storage backend.
 pub mod storage;
 mod actor;
 

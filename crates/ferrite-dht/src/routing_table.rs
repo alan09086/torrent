@@ -19,8 +19,11 @@ const MAX_BUCKETS: usize = 160;
 /// A node in the routing table.
 #[derive(Debug, Clone)]
 pub struct RoutingNode {
+    /// Node's 20-byte Kademlia ID.
     pub id: Id20,
+    /// Node's socket address.
     pub addr: SocketAddr,
+    /// Timestamp of the last successful interaction.
     pub last_seen: Instant,
     /// Number of consecutive failed queries.
     pub fail_count: u32,

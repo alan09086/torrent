@@ -63,18 +63,23 @@ pub struct UdpTracker {
 /// UDP announce response.
 #[derive(Debug, Clone)]
 pub struct UdpAnnounceResponse {
+    /// Common announce response data (interval, peers, etc.).
     pub response: AnnounceResponse,
+    /// Transaction ID echoed from the request.
     pub transaction_id: u32,
 }
 
 /// UDP scrape response.
 #[derive(Debug, Clone)]
 pub struct UdpScrapeResponse {
+    /// Per-torrent scrape statistics (same order as requested hashes).
     pub results: Vec<ScrapeInfo>,
+    /// Transaction ID echoed from the request.
     pub transaction_id: u32,
 }
 
 impl UdpTracker {
+    /// Creates a new UDP tracker client with default settings.
     pub fn new() -> Self {
         UdpTracker {
             timeout: UDP_TIMEOUT,
@@ -82,11 +87,13 @@ impl UdpTracker {
         }
     }
 
+    /// Sets the timeout duration for UDP tracker requests.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Sets the DSCP/ToS value for outbound UDP packets.
     pub fn with_dscp(mut self, dscp: u8) -> Self {
         self.dscp = dscp;
         self

@@ -56,21 +56,32 @@ struct TrackerEntry {
 /// Public tracker status (simplified view of internal TrackerState).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackerStatus {
+    /// Tracker has not been contacted yet.
     NotContacted,
+    /// Last announce succeeded.
     Working,
+    /// Last announce failed.
     Error,
 }
 
 /// Public info about a single tracker.
 #[derive(Debug, Clone)]
 pub struct TrackerInfo {
+    /// Tracker announce URL.
     pub url: String,
+    /// Tier index (lower = higher priority).
     pub tier: usize,
+    /// Current status of this tracker.
     pub status: TrackerStatus,
+    /// Number of seeders reported by the tracker (from scrape).
     pub seeders: Option<u32>,
+    /// Number of leechers reported by the tracker (from scrape).
     pub leechers: Option<u32>,
+    /// Total completed downloads reported by the tracker (from scrape).
     pub downloaded: Option<u32>,
+    /// Seconds until the next scheduled announce.
     pub next_announce_secs: u64,
+    /// Number of consecutive announce failures.
     pub consecutive_failures: u32,
 }
 

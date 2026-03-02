@@ -18,6 +18,7 @@ pub enum BencodeValue {
 }
 
 impl BencodeValue {
+    /// Returns the integer value if this is a `BencodeValue::Integer`.
     pub fn as_int(&self) -> Option<i64> {
         match self {
             BencodeValue::Integer(n) => Some(*n),
@@ -25,6 +26,7 @@ impl BencodeValue {
         }
     }
 
+    /// Returns the raw byte slice if this is a `BencodeValue::Bytes`.
     pub fn as_bytes_raw(&self) -> Option<&[u8]> {
         match self {
             BencodeValue::Bytes(b) => Some(b),
@@ -32,6 +34,7 @@ impl BencodeValue {
         }
     }
 
+    /// Returns the list if this is a `BencodeValue::List`.
     pub fn as_list(&self) -> Option<&[BencodeValue]> {
         match self {
             BencodeValue::List(items) => Some(items),
@@ -39,6 +42,7 @@ impl BencodeValue {
         }
     }
 
+    /// Returns the dictionary if this is a `BencodeValue::Dict`.
     pub fn as_dict(&self) -> Option<&BTreeMap<Vec<u8>, BencodeValue>> {
         match self {
             BencodeValue::Dict(map) => Some(map),

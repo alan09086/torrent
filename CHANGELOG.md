@@ -8,6 +8,18 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.58.0 — M52: API Documentation & Examples
+
+### Added
+- `#![warn(missing_docs)]` lint enabled on all 12 workspace crates
+- Documentation for ~500+ public items across all crates
+- `SessionHandle::open_file()` method for file streaming at the session level
+- Four example programs: `download.rs`, `create.rs`, `stream.rs`, `dht_lookup.rs`
+- "Getting Started" section in README with usage example
+
+### Changed
+- Version bump 0.57.0 → 0.58.0
+
 ## 0.57.0 — 2026-03-01
 
 Network simulation framework. Twelve crates, 1310 tests, 27 BEPs implemented. Phase 12 (Simulation) complete. **All 51 milestones done — full libtorrent-rasterbar parity achieved.**

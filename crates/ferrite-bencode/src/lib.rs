@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Serde-based bencode codec for BitTorrent.
 //!
 //! Bencode is the serialization format used throughout BitTorrent for .torrent

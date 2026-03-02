@@ -1,12 +1,17 @@
-//! In-process network simulation for ferrite swarm integration testing.
+#![warn(missing_docs)]
+//! In-process network simulation for deterministic BitTorrent swarm testing.
 //!
 //! This crate provides a simulated network layer that replaces real TCP/UDP
 //! sockets with in-memory channels, enabling deterministic, fast integration
 //! tests of multi-peer BitTorrent swarms without real network traffic.
 
+/// Virtual clock for deterministic time control.
 pub mod clock;
+/// Virtual network with configurable link parameters.
 pub mod network;
+/// Transport factory bridging simulated network to session I/O.
 pub mod transport;
+/// Multi-node simulated swarm builder.
 pub mod swarm;
 
 pub use clock::SimClock;
