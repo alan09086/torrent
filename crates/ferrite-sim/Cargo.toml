@@ -8,9 +8,12 @@ description = "In-process network simulation for ferrite swarm integration testi
 [dependencies]
 ferrite-session = { path = "../ferrite-session" }
 ferrite-core = { path = "../ferrite-core" }
+ferrite-bencode = { path = "../ferrite-bencode" }
 ferrite-storage = { path = "../ferrite-storage" }
 tokio = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
