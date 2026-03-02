@@ -48,7 +48,7 @@ impl HttpTracker {
     pub fn new() -> Self {
         HttpTracker {
             client: reqwest::Client::builder()
-                .user_agent("Ferrite/0.53.0")
+                .user_agent("Ferrite/0.54.0")
                 .build()
                 .expect("failed to build HTTP client"),
         }
@@ -72,7 +72,7 @@ impl HttpTracker {
     /// HTTP requests are routed through it.
     pub fn with_proxy(proxy_url: Option<&str>) -> Self {
         let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.53.0");
+            .user_agent("Ferrite/0.54.0");
         if let Some(url) = proxy_url
             && let Ok(proxy) = reqwest::Proxy::all(url)
         {
@@ -94,7 +94,7 @@ impl HttpTracker {
         ssrf_mitigation: bool,
     ) -> Self {
         let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.53.0");
+            .user_agent("Ferrite/0.54.0");
 
         if ssrf_mitigation {
             let policy = reqwest::redirect::Policy::custom(|attempt| {

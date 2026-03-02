@@ -597,6 +597,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the DSCP value for peer traffic (TCP and uTP).
+    ///
+    /// The 6-bit Differentiated Services Code Point is placed in the IP header
+    /// of all peer connections. Common values: `0x00` (best effort),
+    /// `0x08` (CS1 / low-priority, default), `0x20` (CS4). Default: `0x08`.
+    pub fn peer_dscp(mut self, dscp: u8) -> Self {
+        self.settings.peer_dscp = dscp;
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings
@@ -893,5 +903,33 @@ mod tests {
 
         let _proxy = ferrite_session::ProxyConfig::default();
         assert_eq!(_proxy.proxy_type, ferrite_session::ProxyType::None);
+    }
+
+    #[test]
+    fn client_builder_peer_dscp() {
+        // Default: CS1 (0x08)
+        let config = ClientBuilder::new().into_settings();
+        assert_eq!(config.peer_dscp, 0x08);
+
+        // Custom: EF (0x2E)
+        let config = ClientBuilder::new().peer_dscp(0x2E).into_settings();
+        assert_eq!(config.peer_dscp, 0x2E);
+
+        // Disabled: best effort (0x00)
+        let config = ClientBuilder::new().peer_dscp(0x00).into_settings();
+        assert_eq!(config.peer_dscp, 0x00);
+    }
+
+    #[test]
+    fn peer_dscp_flows_through_torrent_config() {
+        // Verify DSCP default flows from Settings → TorrentConfig
+        let settings = ClientBuilder::new().into_settings();
+        let torrent_config = ferrite_session::TorrentConfig::from(&settings);
+        assert_eq!(torrent_config.peer_dscp, 0x08);
+
+        // Custom value propagates through
+        let settings = ClientBuilder::new().peer_dscp(0x20).into_settings();
+        let torrent_config = ferrite_session::TorrentConfig::from(&settings);
+        assert_eq!(torrent_config.peer_dscp, 0x20);
     }
 }
