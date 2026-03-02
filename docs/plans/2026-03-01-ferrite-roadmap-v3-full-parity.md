@@ -420,6 +420,52 @@ Full network simulator for testing multi-peer scenarios without real network tra
 
 ---
 
+## Phase 13: Documentation, CLI & Benchmarking (M52-M53)
+
+*API documentation, a CLI for real-world testing, and benchmarks against libtorrent and rqbit.*
+
+### M52: API Documentation & Examples
+
+Comprehensive documentation pass now that the API is stable.
+
+**Scope:**
+- **`#![warn(missing_docs)]` on all crates:** enable the lint on each inner crate one at a time, fixing gaps as they surface
+- **Document high-traffic types:** `TorrentStats`, `TorrentInfo`, `TorrentState` fields; `AlertKind` variants (especially nuanced ones like `InconsistentHashes`, `PeerTurnover`, `DhtSampleInfohashes`)
+- **`examples/` directory** with 3-4 working programs:
+  - `download.rs` — download a torrent from magnet link, show progress, exit on completion
+  - `create.rs` — create a .torrent file from a directory
+  - `stream.rs` — stream a file via `FileStream` (AsyncRead + AsyncSeek)
+  - `dht_lookup.rs` — standalone DHT peer lookup
+- **README "Getting Started" section:** minimal working code snippet, dependency line, feature flags
+- **`cargo doc` audit:** verify all public items render correctly, fix broken intra-doc links
+
+**Crates:** all
+**Tests:** doc-tests in examples
+
+### M53: CLI Binary & Benchmarking
+
+A thin CLI for downloading torrents and benchmarking against libtorrent/rqbit.
+
+**Scope:**
+- **`ferrite-cli` crate** (new workspace member, `[[bin]]`):
+  - `ferrite-cli download <magnet|.torrent> -o <dir>` — download with progress bar
+  - `ferrite-cli create <path> -o <output.torrent>` — create .torrent
+  - `ferrite-cli info <.torrent>` — print torrent metadata
+  - Progress display: piece count, download/upload rate, peer count, ETA
+  - Graceful shutdown on Ctrl-C (SIGINT)
+  - `--sequential`, `--no-dht`, `--proxy`, `--config <json>` flags
+- **Benchmark harness:**
+  - Download same torrent (e.g., Ubuntu ISO) with ferrite-cli, rqbit, and qBittorrent (libtorrent)
+  - Measure: time to completion, peak/average download rate, memory usage (RSS), CPU usage
+  - Script to run N trials and compute mean/stddev
+  - Results written to `benchmarks/` directory
+
+**Crates:** ferrite-cli (new)
+**Dependencies:** clap, indicatif (progress bar), ctrlc
+**Tests:** ~4 (CLI arg parsing, graceful shutdown, torrent info display)
+
+---
+
 ## Summary
 
 | Phase | Milestones | New Crates | New Dependencies | Est. Tests |
@@ -430,9 +476,10 @@ Full network simulator for testing multi-peer scenarios without real network tra
 | 10: Security & Hardening | M47-M48 | — | — | ~14 |
 | 11: Pluggable Interfaces & Observability | M49-M50 | — | — | ~12 |
 | 12: Simulation | M51 | ferrite-sim | — | ~20 |
-| **Total** | **M36-M51 (16 milestones)** | **1 new** | **3 new** | **~122** |
+| 13: Documentation, CLI & Benchmarking | M52-M53 | ferrite-cli | clap, indicatif, ctrlc | ~4 + doc-tests |
+| **Total** | **M36-M53 (18 milestones)** | **2 new** | **6 new** | **~126+** |
 
-**Projected final state:** 12 crates, ~1017 tests, full libtorrent-rasterbar feature parity.
+**Projected final state:** 13 crates, ~1017+ tests, full libtorrent-rasterbar feature parity + CLI + benchmarks.
 
 ### BEP Coverage After M51
 
