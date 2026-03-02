@@ -8,6 +8,28 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.55.0 — 2026-03-01
+
+Pluggable disk I/O interface. Eleven crates, 1254 tests, 27 BEPs implemented. Phase 11 (Pluggable Interfaces) begins.
+
+### M49: Pluggable Disk I/O Interface
+
+### Added
+- `DiskIoBackend` trait — 14-method pluggable disk I/O interface enabling custom storage backends
+- `PosixDiskIo` — default backend with ARC read cache + WriteBuffer (extracted from DiskActor)
+- `MmapDiskIo` — simplified backend using kernel page cache via mmap
+- `DisabledDiskIo` — null/no-op backend for network throughput benchmarking
+- `create_backend_from_config()` — factory function selecting backend from DiskConfig
+- `DiskIoStats` — aggregate I/O statistics for backends
+- `SessionHandle::start_with_backend()` — session entry point with custom disk I/O backend
+- `SessionHandle::start_with_plugins_and_backend()` — session entry point with both plugins and custom backend
+- Facade: `ClientBuilder::disk_io_backend()` builder method for custom backends
+- 26 new tests (1254 total)
+
+### Changed
+- `DiskActor` refactored to delegate through `Arc<dyn DiskIoBackend>` instead of owning storage/cache/buffer directly
+- Version bump 0.54.0 → 0.55.0
+
 ## 0.54.0 — 2026-03-01
 
 DSCP socket marking and anonymous mode hardening. Eleven crates, 1228 tests, 27 BEPs implemented. Phase 10 (Security & Hardening) complete.

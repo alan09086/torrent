@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1228-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1254-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.54.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.55.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -21,7 +21,7 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - 📡 **27 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
 - 🎛️ **90-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1228 tests, zero clippy warnings**
+- 📊 **1254 tests, zero clippy warnings**
 
 ---
 
@@ -73,7 +73,7 @@ The `ferrite-session` crate (544 tests) includes:
 | **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange (bidirectional), BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange, BEP 53 magnet `so=` file selection |
 | **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, dynamic request queue, file streaming (`AsyncRead` + `AsyncSeek`), sequential download, auto-sequential hysteresis, block-level picking, SuggestPiece, predictive announce |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode TCP/uTP algorithm, automatic upload slot optimization |
-| **Storage** | Async DiskActor with write buffering, ARC read cache, mmap backend, parallel hashing, move storage |
+| **Storage** | Pluggable DiskIoBackend trait (Posix/Mmap/Disabled), async DiskActor, ARC read cache, write buffering, parallel hashing, move storage |
 | **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport |
 | **Security** | SSRF mitigation (URL guard + redirect policy), IDNA/homograph rejection, HTTPS tracker validation, IP filtering (.dat parser), smart banning + parole |
 | **Management** | Unified Settings (93 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
@@ -146,7 +146,7 @@ See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 8: Connectivity & Privacy | M40–M42 | BEP 55 holepunch, I2P (SAM), SSL torrents | ✅ Done |
 | 9: Swarm Intelligence | M43–M46 | Choking algorithms, piece picker, mixed-mode, peer turnover | ✅ Done |
 | 10: Security & Hardening | M47–M48 | SSRF mitigation, DSCP, anonymous mode | ✅ Done |
-| 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | 📝 Planned |
+| 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | 🔨 In Progress |
 | 12: Simulation | M51 | In-process network simulation framework | 📝 Planned |
 
 ---
@@ -172,6 +172,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.55.0 | M49 | Pluggable disk I/O: DiskIoBackend trait, PosixDiskIo, MmapDiskIo, DisabledDiskIo, backend factory |
 | 0.54.0 | M48 | DSCP/ToS socket marking, anonymous mode hardening, ext handshake suppression |
 | 0.53.0 | M47 | SSRF mitigation, IDNA/homograph rejection, HTTPS tracker validation, URL guard module |
 | 0.52.0 | M46 | Peer turnover: periodic replacement of underperforming peers, peak rate cutoff, 4 exemptions |
