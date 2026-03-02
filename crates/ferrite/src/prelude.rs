@@ -74,3 +74,6 @@ pub use crate::session::{SeedChokingAlgorithm, ChokingAlgorithm};
 
 // Mixed-mode bandwidth allocation (M45)
 pub use crate::session::MixedModeAlgorithm;
+
+// Pluggable disk I/O (M49)
+pub use crate::session::{DiskIoBackend, DisabledDiskIo};

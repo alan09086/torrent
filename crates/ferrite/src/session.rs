@@ -51,6 +51,10 @@ pub use ferrite_session::{
     DiskManagerHandle,
     DiskJobFlags,
     DiskStats,
+    // Pluggable disk I/O (M49)
+    DiskIoBackend,
+    DiskIoStats,
+    DisabledDiskIo,
     // Peer source tracking (M32a)
     PeerSource,
     // Extension plugin interface (M32d)

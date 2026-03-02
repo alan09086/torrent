@@ -28,6 +28,7 @@ use ferrite_storage::TorrentStorage;
 pub struct ClientBuilder {
     settings: Settings,
     plugins: Vec<Box<dyn ExtensionPlugin>>,
+    backend: Option<Arc<dyn ferrite_session::DiskIoBackend>>,
 }
 
 impl ClientBuilder {
@@ -36,6 +37,7 @@ impl ClientBuilder {
         Self {
             settings: Settings::default(),
             plugins: Vec::new(),
+            backend: None,
         }
     }
 
@@ -607,6 +609,17 @@ impl ClientBuilder {
         self
     }
 
+    /// Set a custom disk I/O backend.
+    ///
+    /// When set, the session uses this backend instead of the default
+    /// POSIX or mmap backend derived from settings. This enables custom
+    /// storage implementations (e.g., cloud storage, in-memory, or
+    /// the [`DisabledDiskIo`](ferrite_session::DisabledDiskIo) benchmark backend).
+    pub fn disk_io_backend(mut self, backend: Arc<dyn ferrite_session::DiskIoBackend>) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
     /// Consume the builder and return the underlying `Settings`.
     pub fn into_settings(self) -> Settings {
         self.settings
@@ -615,7 +628,16 @@ impl ClientBuilder {
     /// Start the session, spawning the background actor.
     pub async fn start(self) -> ferrite_session::Result<ferrite_session::SessionHandle> {
         let plugins = Arc::new(self.plugins);
-        ferrite_session::SessionHandle::start_with_plugins(self.settings, plugins).await
+        match self.backend {
+            Some(backend) => {
+                ferrite_session::SessionHandle::start_with_plugins_and_backend(
+                    self.settings, plugins, backend,
+                ).await
+            }
+            None => {
+                ferrite_session::SessionHandle::start_with_plugins(self.settings, plugins).await
+            }
+        }
     }
 }
 
@@ -931,5 +953,27 @@ mod tests {
         let settings = ClientBuilder::new().peer_dscp(0x20).into_settings();
         let torrent_config = ferrite_session::TorrentConfig::from(&settings);
         assert_eq!(torrent_config.peer_dscp, 0x20);
+    }
+
+    #[test]
+    fn client_builder_disk_io_backend() {
+        let backend: Arc<dyn ferrite_session::DiskIoBackend> =
+            Arc::new(ferrite_session::DisabledDiskIo);
+        let builder = ClientBuilder::new()
+            .disk_io_backend(backend);
+        assert!(builder.backend.is_some());
+    }
+
+    #[test]
+    fn client_builder_default_no_backend() {
+        let builder = ClientBuilder::new();
+        assert!(builder.backend.is_none());
+    }
+
+    #[test]
+    fn disabled_backend_accessible_via_facade() {
+        use ferrite_session::DiskIoBackend;
+        let backend = ferrite_session::DisabledDiskIo;
+        assert_eq!(backend.name(), "disabled");
     }
 }
