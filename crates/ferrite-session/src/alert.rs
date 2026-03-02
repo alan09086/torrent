@@ -185,6 +185,9 @@ pub enum AlertKind {
     /// SSL/TLS error for an SSL torrent (handshake failure, cert validation, etc.).
     SslTorrentError { info_hash: Id20, message: String },
 
+    // ── Session Stats (M50) ──
+    SessionStatsAlert { values: Vec<i64> },
+
     // ── Settings (M31) ──
     SettingsChanged,
 }
@@ -276,6 +279,9 @@ impl AlertKind {
 
             // SSL
             SslTorrentError { .. } => AlertCategory::ERROR,
+
+            // SESSION STATS (M50)
+            SessionStatsAlert { .. } => AlertCategory::STATS,
 
             // SETTINGS
             SettingsChanged => AlertCategory::STATUS,
@@ -640,5 +646,28 @@ mod tests {
             replaced: 1,
         });
         assert!(alert.category().contains(AlertCategory::PEER));
+    }
+
+    #[test]
+    fn session_stats_alert_has_stats_category() {
+        let alert = Alert::new(AlertKind::SessionStatsAlert {
+            values: vec![100, 200, 300],
+        });
+        assert!(alert.category().contains(AlertCategory::STATS));
+    }
+
+    #[test]
+    fn session_stats_alert_serializes_to_json() {
+        let alert = Alert::new(AlertKind::SessionStatsAlert {
+            values: vec![1, 2, 3, 4, 5],
+        });
+        let json = serde_json::to_string(&alert).unwrap();
+        let decoded: Alert = serde_json::from_str(&json).unwrap();
+        match decoded.kind {
+            AlertKind::SessionStatsAlert { values } => {
+                assert_eq!(values, vec![1, 2, 3, 4, 5]);
+            }
+            _ => panic!("expected SessionStatsAlert"),
+        }
     }
 }

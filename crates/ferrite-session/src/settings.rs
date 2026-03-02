@@ -154,6 +154,9 @@ fn default_peer_turnover_interval() -> u64 {
 fn default_peer_dscp() -> u8 {
     0x08 // CS1 (scavenger/low-priority)
 }
+fn default_stats_report_interval() -> u64 {
+    1000
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -538,6 +541,12 @@ pub struct Settings {
     /// Default 0x08 (CS1/scavenger — low-priority background). Set to 0 to disable DSCP marking.
     #[serde(default = "default_peer_dscp")]
     pub peer_dscp: u8,
+
+    // ── Session Stats (M50) ──
+    /// Interval in milliseconds between `SessionStatsAlert` emissions.
+    /// Default 1000 (1 second). Set to 0 to disable periodic stats alerts.
+    #[serde(default = "default_stats_report_interval")]
+    pub stats_report_interval: u64,
 }
 
 impl Default for Settings {
@@ -656,6 +665,8 @@ impl Default for Settings {
             allow_idna: false,
             validate_https_trackers: true,
             peer_dscp: 0x08,
+            // Session Stats (M50)
+            stats_report_interval: 1000,
         }
     }
 }
@@ -984,6 +995,7 @@ impl PartialEq for Settings {
             && self.allow_idna == other.allow_idna
             && self.validate_https_trackers == other.validate_https_trackers
             && self.peer_dscp == other.peer_dscp
+            && self.stats_report_interval == other.stats_report_interval
     }
 }
 
@@ -1553,5 +1565,29 @@ mod tests {
 
         let utp_v6 = s.to_utp_config_v6(6881);
         assert_eq!(utp_v6.dscp, 0x0A);
+    }
+
+    #[test]
+    fn default_stats_report_interval() {
+        let s = Settings::default();
+        assert_eq!(s.stats_report_interval, 1000);
+    }
+
+    #[test]
+    fn stats_report_interval_json_round_trip() {
+        let mut s = Settings::default();
+        s.stats_report_interval = 5000;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.stats_report_interval, 5000);
+    }
+
+    #[test]
+    fn stats_report_interval_zero_disables() {
+        let mut s = Settings::default();
+        s.stats_report_interval = 0;
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.stats_report_interval, 0);
     }
 }
