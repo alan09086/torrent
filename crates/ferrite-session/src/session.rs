@@ -168,10 +168,35 @@ impl SessionHandle {
         Self::start_with_plugins(settings, Arc::new(Vec::new())).await
     }
 
+    /// Start a new session with a custom disk I/O backend and no plugins.
+    pub async fn start_with_backend(
+        settings: Settings,
+        backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
+    ) -> crate::Result<Self> {
+        Self::start_with_plugins_and_backend(
+            settings,
+            Arc::new(Vec::new()),
+            backend,
+        )
+        .await
+    }
+
     /// Start a new session with the given settings and extension plugins.
     pub async fn start_with_plugins(
         settings: Settings,
         plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    ) -> crate::Result<Self> {
+        let disk_config = crate::disk::DiskConfig::from(&settings);
+        let backend = crate::disk_backend::create_backend_from_config(&disk_config);
+        Self::start_with_plugins_and_backend(settings, plugins, backend).await
+    }
+
+    /// Start a new session with the given settings, extension plugins, and
+    /// a custom disk I/O backend.
+    pub async fn start_with_plugins_and_backend(
+        settings: Settings,
+        plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+        backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> crate::Result<Self> {
         let mut settings = settings;
 
@@ -375,7 +400,7 @@ impl SessionHandle {
 
         let disk_config = crate::disk::DiskConfig::from(&settings);
         let (disk_manager, disk_actor_handle) =
-            crate::disk::DiskManagerHandle::new(disk_config);
+            crate::disk::DiskManagerHandle::new_with_backend(disk_config, backend);
 
         let external_ip = settings.external_ip;
         let actor = SessionActor {

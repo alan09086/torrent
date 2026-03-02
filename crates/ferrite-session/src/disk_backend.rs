@@ -279,10 +279,10 @@ impl DiskIoBackend for PosixDiskIo {
         }
         self.stats.lock().unwrap().write_bytes += len as u64;
 
-        if let Some((ih, p)) = oldest {
-            if let Err(e) = self.flush_piece(ih, p) {
-                tracing::warn!(%e, "background flush failed");
-            }
+        if let Some((ih, p)) = oldest
+            && let Err(e) = self.flush_piece(ih, p)
+        {
+            tracing::warn!(%e, "background flush failed");
         }
 
         Ok(())
