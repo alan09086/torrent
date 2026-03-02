@@ -4,13 +4,14 @@
 //! simulated swarm of BitTorrent sessions that communicate through a shared
 //! [`SimNetwork`] instead of real TCP sockets.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ferrite_core::{TorrentMetaV1, StorageMode};
-use ferrite_session::{SessionHandle, Settings};
+use ferrite_core::{Id20, TorrentMeta, TorrentMetaV1, StorageMode, Lengths, DEFAULT_CHUNK_SIZE};
+use ferrite_session::{SessionHandle, Settings, TorrentStats, PeerSource};
 use ferrite_session::transport::NetworkFactory;
+use ferrite_storage::{MemoryStorage, TorrentStorage};
 
 use crate::network::{LinkConfig, SimNetwork};
 use crate::transport::sim_transport_factory;
@@ -147,6 +148,67 @@ impl SimSwarm {
         self.node_ips[index]
     }
 
+    /// Return the number of nodes in the swarm.
+    pub fn num_nodes(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Add a torrent to the node at `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= num_nodes()` or if adding the torrent fails.
+    pub async fn add_torrent(
+        &self,
+        index: usize,
+        meta: TorrentMeta,
+        storage: Option<Arc<dyn TorrentStorage>>,
+    ) -> Id20 {
+        self.sessions[index]
+            .add_torrent(meta, storage)
+            .await
+            .expect("failed to add torrent to session")
+    }
+
+    /// Get torrent stats for the node at `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= num_nodes()` or if querying stats fails.
+    pub async fn torrent_stats(&self, index: usize, info_hash: Id20) -> TorrentStats {
+        self.sessions[index]
+            .torrent_stats(info_hash)
+            .await
+            .expect("failed to get torrent stats")
+    }
+
+    /// Tell each node about all other nodes' addresses for the given torrent.
+    ///
+    /// For every session that has been started, sends the listen addresses of
+    /// all other nodes as tracker-sourced peers. Errors are silently ignored
+    /// (the node may not have the torrent).
+    pub async fn introduce_peers(&self, info_hash: Id20) {
+        let listen_port = 6881u16;
+        let all_addrs: Vec<SocketAddr> = self
+            .node_ips
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, listen_port))
+            .collect();
+
+        for (i, session) in self.sessions.iter().enumerate() {
+            let peers: Vec<SocketAddr> = all_addrs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, addr)| *addr)
+                .collect();
+
+            let _ = session
+                .add_peers(info_hash, peers, PeerSource::Tracker)
+                .await;
+        }
+    }
+
     /// Shut down all sessions in the swarm.
     pub async fn shutdown(self) {
         for session in &self.sessions {
@@ -202,6 +264,23 @@ pub fn make_test_torrent(data: &[u8], piece_size: u64) -> (TorrentMetaV1, Vec<u8
     let bytes = ferrite_bencode::to_bytes(&t).unwrap();
     let meta = ferrite_core::torrent_from_bytes(&bytes).unwrap();
     (meta, bytes)
+}
+
+/// Create a [`MemoryStorage`] pre-populated with the given data.
+///
+/// Writes data piece-by-piece so the storage is ready to serve as a seed.
+pub fn make_seeded_storage(data: &[u8], piece_size: u64) -> Arc<MemoryStorage> {
+    let lengths = Lengths::new(data.len() as u64, piece_size, DEFAULT_CHUNK_SIZE);
+    let storage = Arc::new(MemoryStorage::new(lengths.clone()));
+    let num_pieces = lengths.num_pieces();
+    for p in 0..num_pieces {
+        let piece_len = lengths.piece_size(p) as usize;
+        let offset = lengths.piece_offset(p) as usize;
+        storage
+            .write_chunk(p, 0, &data[offset..offset + piece_len])
+            .unwrap();
+    }
+    storage
 }
 
 // ---------------------------------------------------------------------------

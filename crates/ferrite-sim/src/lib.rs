@@ -12,4 +12,4 @@ pub mod swarm;
 pub use clock::SimClock;
 pub use network::{SimNetwork, LinkConfig};
 pub use transport::sim_transport_factory;
-pub use swarm::{SimSwarm, SimSwarmBuilder, make_test_torrent};
+pub use swarm::{SimSwarm, SimSwarmBuilder, make_test_torrent, make_seeded_storage};
