@@ -11,14 +11,24 @@ impl PeerId {
     /// Client identifier prefix.
     const PREFIX: &'static [u8] = b"-FE0100-";
 
-    /// Generate a new random peer ID.
+    /// Generate a new random peer ID with the default Ferrite prefix.
     pub fn generate() -> Self {
+        Self::generate_with_prefix(Self::PREFIX)
+    }
+
+    /// Generate an anonymous peer ID with a generic client prefix.
+    ///
+    /// Uses `-XX0000-` prefix (generic/unknown client) instead of `-FE0100-`
+    /// to avoid identifying the client software.
+    pub fn generate_anonymous() -> Self {
+        Self::generate_with_prefix(b"-XX0000-")
+    }
+
+    /// Generate a peer ID with the given 8-byte Azureus-style prefix.
+    fn generate_with_prefix(prefix: &[u8]) -> Self {
         let mut bytes = [0u8; 20];
-        bytes[..8].copy_from_slice(Self::PREFIX);
-        // Fill remaining 12 bytes with random data
+        bytes[..8].copy_from_slice(prefix);
         for byte in &mut bytes[8..] {
-            // Simple LCG random — good enough for peer IDs.
-            // In production this would use rand, but we avoid the dep for now.
             *byte = random_byte();
         }
         PeerId(Id20(bytes))
@@ -83,6 +93,19 @@ mod tests {
     fn peer_ids_are_unique() {
         let a = PeerId::generate();
         let b = PeerId::generate();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn anonymous_peer_id_has_generic_prefix() {
+        let id = PeerId::generate_anonymous();
+        assert_eq!(id.prefix(), b"-XX0000-");
+    }
+
+    #[test]
+    fn anonymous_peer_ids_are_unique() {
+        let a = PeerId::generate_anonymous();
+        let b = PeerId::generate_anonymous();
         assert_ne!(a, b);
     }
 

@@ -54,6 +54,18 @@ impl HttpTracker {
         }
     }
 
+    /// Create an HTTP tracker client for anonymous mode.
+    ///
+    /// Uses an empty user-agent string to avoid identifying the client software.
+    pub fn with_anonymous() -> Self {
+        HttpTracker {
+            client: reqwest::Client::builder()
+                .user_agent("")
+                .build()
+                .expect("failed to build HTTP client"),
+        }
+    }
+
     /// Create an HTTP tracker client with an optional proxy.
     ///
     /// When `proxy_url` is provided (e.g. `"socks5://host:port"`), all
@@ -417,6 +429,12 @@ mod tests {
             result[1],
             "[2001:db8::1]:8080".parse::<std::net::SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn http_tracker_anonymous_builds() {
+        let tracker = HttpTracker::with_anonymous();
+        drop(tracker);
     }
 
     #[test]

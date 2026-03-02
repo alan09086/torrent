@@ -168,7 +168,11 @@ impl TorrentHandle {
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
-        let our_peer_id = PeerId::generate().0;
+        let our_peer_id = if config.anonymous_mode {
+            PeerId::generate_anonymous().0
+        } else {
+            PeerId::generate().0
+        };
 
         // Bind listener for incoming connections
         // Try dual-stack [::]:port first, fall back to IPv4-only
@@ -177,8 +181,16 @@ impl TorrentHandle {
             Err(_) => TcpListener::bind(("0.0.0.0", config.listen_port)).await.ok(),
         };
 
+        // Apply DSCP marking to the listener so accepted connections inherit it
+        if let Some(ref l) = listener {
+            crate::dscp::apply_dscp_listener(l, config.peer_dscp);
+        }
+
         let mut tracker_manager =
-            TrackerManager::from_torrent_filtered(&meta, our_peer_id, config.listen_port, &config.url_security);
+            TrackerManager::from_torrent_filtered(
+                &meta, our_peer_id, config.listen_port, &config.url_security,
+                config.peer_dscp, config.anonymous_mode,
+            );
         tracker_manager.set_info_hashes(info_hashes.clone());
 
         let enable_dht = config.enable_dht;
@@ -377,7 +389,11 @@ impl TorrentHandle {
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
-        let our_peer_id = PeerId::generate().0;
+        let our_peer_id = if config.anonymous_mode {
+            PeerId::generate_anonymous().0
+        } else {
+            PeerId::generate().0
+        };
 
         // Try dual-stack [::]:port first, fall back to IPv4-only
         let listener = match TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)).await {
@@ -385,8 +401,13 @@ impl TorrentHandle {
             Err(_) => TcpListener::bind(("0.0.0.0", config.listen_port)).await.ok(),
         };
 
+        // Apply DSCP marking to the listener so accepted connections inherit it
+        if let Some(ref l) = listener {
+            crate::dscp::apply_dscp_listener(l, config.peer_dscp);
+        }
+
         let tracker_manager =
-            TrackerManager::empty(magnet.info_hash(), our_peer_id, config.listen_port);
+            TrackerManager::empty(magnet.info_hash(), our_peer_id, config.listen_port, config.peer_dscp, config.anonymous_mode);
 
         let enable_dht = config.enable_dht;
 
@@ -3714,6 +3735,7 @@ impl TorrentActor {
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
             let enable_holepunch = self.config.enable_holepunch;
+            let peer_dscp = self.config.peer_dscp;
             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
             // Pick the uTP socket matching the peer's address family
             let utp_socket = if addr.is_ipv6() {
@@ -3796,6 +3818,7 @@ impl TorrentActor {
                 };
                 match tcp_result {
                     Ok(stream) => {
+                        crate::dscp::apply_dscp_tcp(&stream, peer_dscp);
                         let _ = event_tx.send(PeerEvent::TransportIdentified {
                             peer_addr: addr,
                             transport: crate::rate_limiter::PeerTransport::Tcp,
@@ -4129,6 +4152,7 @@ impl TorrentActor {
         let enable_utp = self.config.enable_utp;
         let anonymous_mode = self.config.anonymous_mode;
         let enable_holepunch = self.config.enable_holepunch;
+        let peer_dscp = self.config.peer_dscp;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let utp_socket = if target.is_ipv6() {
             self.utp_socket_v6.clone()
@@ -4188,6 +4212,7 @@ impl TorrentActor {
                 tokio::net::TcpStream::connect(target),
             ).await {
                 Ok(Ok(stream)) => {
+                    crate::dscp::apply_dscp_tcp(&stream, peer_dscp);
                     debug!(%target, "holepunch: TCP connection established");
                     post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
                         info_hash,
@@ -4409,7 +4434,7 @@ mod tests {
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
-            peer_dscp: 0x04,
+            peer_dscp: 0x08,
         }
     }
 

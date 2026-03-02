@@ -100,6 +100,8 @@ pub(crate) struct TrackerManager {
     port: u16,
     http_client: HttpTracker,
     udp_client: UdpTracker,
+    anonymous_mode: bool,
+    dscp: u8,
 }
 
 impl TrackerManager {
@@ -172,6 +174,8 @@ impl TrackerManager {
             port,
             http_client: HttpTracker::new(),
             udp_client: UdpTracker::new(),
+            anonymous_mode: false,
+            dscp: 0,
         }
     }
 
@@ -186,6 +190,8 @@ impl TrackerManager {
         peer_id: Id20,
         port: u16,
         security: &crate::url_guard::UrlSecurityConfig,
+        dscp: u8,
+        anonymous_mode: bool,
     ) -> Self {
         let mut trackers = Vec::new();
         let mut seen_urls = std::collections::HashSet::new();
@@ -253,21 +259,33 @@ impl TrackerManager {
             info_hashes: InfoHashes::v1_only(meta.info_hash),
             peer_id,
             port,
-            http_client: HttpTracker::new(),
-            udp_client: UdpTracker::new(),
+            http_client: if anonymous_mode {
+                HttpTracker::with_anonymous()
+            } else {
+                HttpTracker::new()
+            },
+            udp_client: UdpTracker::new().with_dscp(dscp),
+            anonymous_mode,
+            dscp,
         }
     }
 
     /// Create an empty TrackerManager (for magnet links before metadata arrives).
-    pub fn empty(info_hash: Id20, peer_id: Id20, port: u16) -> Self {
+    pub fn empty(info_hash: Id20, peer_id: Id20, port: u16, dscp: u8, anonymous_mode: bool) -> Self {
         TrackerManager {
             trackers: Vec::new(),
             info_hash,
             info_hashes: InfoHashes::v1_only(info_hash),
             peer_id,
             port,
-            http_client: HttpTracker::new(),
-            udp_client: UdpTracker::new(),
+            http_client: if anonymous_mode {
+                HttpTracker::with_anonymous()
+            } else {
+                HttpTracker::new()
+            },
+            udp_client: UdpTracker::new().with_dscp(dscp),
+            anonymous_mode,
+            dscp,
         }
     }
 
@@ -284,7 +302,9 @@ impl TrackerManager {
         meta: &TorrentMetaV1,
         security: &crate::url_guard::UrlSecurityConfig,
     ) {
-        let fresh = Self::from_torrent_filtered(meta, self.peer_id, self.port, security);
+        let fresh = Self::from_torrent_filtered(
+            meta, self.peer_id, self.port, security, self.dscp, self.anonymous_mode,
+        );
         self.trackers = fresh.trackers;
     }
 
@@ -353,6 +373,11 @@ impl TrackerManager {
         AnnounceResult { peers: all_peers, outcomes: all_outcomes }
     }
 
+    /// Returns the port to announce (0 when anonymous mode is active).
+    fn announce_port(&self) -> u16 {
+        if self.anonymous_mode { 0 } else { self.port }
+    }
+
     /// Internal: announce with a specific info hash to all due trackers.
     async fn announce_with_hash(
         &mut self,
@@ -365,7 +390,7 @@ impl TrackerManager {
         let req = AnnounceRequest {
             info_hash: hash,
             peer_id: self.peer_id,
-            port: self.port,
+            port: self.announce_port(),
             uploaded,
             downloaded,
             left,
@@ -848,14 +873,14 @@ mod tests {
     #[test]
     fn empty_manager_for_magnet() {
         let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
-        let mgr = TrackerManager::empty(info_hash, test_peer_id(), 6881);
+        let mgr = TrackerManager::empty(info_hash, test_peer_id(), 6881, 0, false);
         assert_eq!(mgr.tracker_count(), 0);
     }
 
     #[test]
     fn set_metadata_populates_trackers() {
         let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
-        let mut mgr = TrackerManager::empty(info_hash, test_peer_id(), 6881);
+        let mut mgr = TrackerManager::empty(info_hash, test_peer_id(), 6881, 0, false);
         assert_eq!(mgr.tracker_count(), 0);
 
         let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
@@ -952,7 +977,7 @@ mod tests {
             None,
         );
         let cfg = ssrf_config();
-        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg);
+        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
         assert_eq!(mgr.tracker_count(), 1);
         assert_eq!(mgr.trackers[0].url, "http://127.0.0.1:8080/announce");
     }
@@ -969,7 +994,7 @@ mod tests {
             ]]),
         );
         let cfg = ssrf_config();
-        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg);
+        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
         assert_eq!(mgr.tracker_count(), 1);
         assert_eq!(mgr.trackers[0].url, "http://tracker.example.com/announce");
     }
@@ -978,7 +1003,7 @@ mod tests {
     fn add_tracker_url_validates() {
         let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
         let cfg = ssrf_config();
-        let mut mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg);
+        let mut mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
         assert_eq!(mgr.tracker_count(), 1);
 
         // Valid URL should be added.
@@ -992,5 +1017,31 @@ mod tests {
         // UDP URL should pass (UDP skips SSRF checks).
         assert!(mgr.add_tracker_url_validated("udp://tracker.example.com:6969/announce", &cfg));
         assert_eq!(mgr.tracker_count(), 3);
+    }
+
+    #[test]
+    fn anonymous_mode_zeroes_announce_port() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let cfg = ssrf_config();
+        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, true);
+        assert!(mgr.anonymous_mode);
+        assert_eq!(mgr.announce_port(), 0);
+    }
+
+    #[test]
+    fn normal_mode_includes_port() {
+        let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
+        let mgr = TrackerManager::from_torrent(&meta, test_peer_id(), 6881);
+        assert!(!mgr.anonymous_mode);
+        assert_eq!(mgr.announce_port(), 6881);
+    }
+
+    #[test]
+    fn empty_manager_with_dscp_and_anonymous() {
+        let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let mgr = TrackerManager::empty(info_hash, test_peer_id(), 6881, 0x2E, true);
+        assert!(mgr.anonymous_mode);
+        assert_eq!(mgr.dscp, 0x2E);
+        assert_eq!(mgr.announce_port(), 0);
     }
 }

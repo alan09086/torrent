@@ -149,7 +149,7 @@ impl Default for TorrentConfig {
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
-            peer_dscp: 0x04,
+            peer_dscp: 0x08,
         }
     }
 }
@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn torrent_config_peer_dscp_default() {
         let cfg = TorrentConfig::default();
-        assert_eq!(cfg.peer_dscp, 0x04);
+        assert_eq!(cfg.peer_dscp, 0x08);
     }
 
     #[test]

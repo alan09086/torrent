@@ -109,6 +109,9 @@ pub(crate) async fn run_peer(
         }
         if anonymous_mode {
             ext_hs.v = None;
+            ext_hs.p = None;
+            ext_hs.reqq = None;
+            ext_hs.upload_only = None;
         }
         let payload = ext_hs.to_bytes().map_err(crate::Error::Wire)?;
         framed_write
@@ -2483,5 +2486,35 @@ mod tests {
 
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
         let _ = handle.await;
+    }
+
+    #[test]
+    fn anonymous_mode_suppresses_ext_handshake_fields() {
+        let mut ext_hs = ExtHandshake::new();
+        ext_hs.p = Some(6881);
+        ext_hs.upload_only = Some(1);
+        ext_hs.reqq = Some(250);
+
+        // Simulate anonymous mode suppression (matches run_peer logic)
+        ext_hs.v = None;
+        ext_hs.p = None;
+        ext_hs.reqq = None;
+        ext_hs.upload_only = None;
+
+        assert!(ext_hs.v.is_none());
+        assert!(ext_hs.p.is_none());
+        assert!(ext_hs.reqq.is_none());
+        assert!(ext_hs.upload_only.is_none());
+        // Extension map should still be present
+        assert!(!ext_hs.m.is_empty());
+
+        // Verify suppressed fields don't leak through serialization round-trip
+        let encoded = ext_hs.to_bytes().unwrap();
+        let decoded = ExtHandshake::from_bytes(&encoded).unwrap();
+        assert!(decoded.v.is_none());
+        assert!(decoded.p.is_none());
+        assert!(decoded.reqq.is_none());
+        assert!(decoded.upload_only.is_none());
+        assert!(!decoded.m.is_empty());
     }
 }

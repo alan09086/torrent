@@ -152,7 +152,7 @@ fn default_peer_turnover_interval() -> u64 {
     300
 }
 fn default_peer_dscp() -> u8 {
-    0x04
+    0x08 // CS1 (scavenger/low-priority)
 }
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
@@ -443,7 +443,7 @@ pub struct Settings {
     pub validate_https_trackers: bool,
     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
     /// Applied to TCP listeners, outbound TCP connections, uTP sockets, and UDP tracker sockets.
-    /// Default 0x04 (AF11 — low-priority background). Set to 0 to disable DSCP marking.
+    /// Default 0x08 (CS1/scavenger — low-priority background). Set to 0 to disable DSCP marking.
     #[serde(default = "default_peer_dscp")]
     pub peer_dscp: u8,
 }
@@ -563,7 +563,7 @@ impl Default for Settings {
             ssrf_mitigation: true,
             allow_idna: false,
             validate_https_trackers: true,
-            peer_dscp: 0x04,
+            peer_dscp: 0x08,
         }
     }
 }
@@ -1431,7 +1431,7 @@ mod tests {
     #[test]
     fn default_peer_dscp_value() {
         let s = Settings::default();
-        assert_eq!(s.peer_dscp, 0x04);
+        assert_eq!(s.peer_dscp, 0x08);
     }
 
     #[test]

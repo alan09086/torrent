@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn dscp_ipv4_succeeds() {
         let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        apply_dscp(&sock, 0x04, false); // AF11
+        apply_dscp(&sock, 0x08, false); // CS1
         // Verify with getsockopt
         let fd = sock.as_raw_fd();
         let mut tos: libc::c_int = 0;
@@ -94,13 +94,13 @@ mod tests {
             )
         };
         assert_eq!(r, 0);
-        assert_eq!(tos, 0x10); // AF11: 0x04 << 2 = 0x10
+        assert_eq!(tos, 0x20); // CS1: 0x08 << 2 = 0x20
     }
 
     #[test]
     fn dscp_ipv6_succeeds() {
         let sock = std::net::TcpListener::bind("[::1]:0").unwrap();
-        apply_dscp(&sock, 0x04, true); // AF11
+        apply_dscp(&sock, 0x08, true); // CS1
         let fd = sock.as_raw_fd();
         let mut tclass: libc::c_int = 0;
         let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -114,7 +114,7 @@ mod tests {
             )
         };
         assert_eq!(r, 0);
-        assert_eq!(tclass, 0x10);
+        assert_eq!(tclass, 0x20); // CS1: 0x08 << 2 = 0x20
     }
 
     #[test]
