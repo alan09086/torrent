@@ -16,6 +16,7 @@ pub struct HttpTracker {
 /// Raw HTTP announce response (bencode).
 #[derive(Debug, Clone)]
 pub struct HttpAnnounceResponse {
+    /// Common announce response data (interval, peers, etc.).
     pub response: AnnounceResponse,
     /// Tracker ID (some trackers return this for subsequent requests).
     pub tracker_id: Option<String>,
@@ -45,6 +46,7 @@ struct RawHttpResponse {
 }
 
 impl HttpTracker {
+    /// Creates a new HTTP tracker client with default settings.
     pub fn new() -> Self {
         HttpTracker {
             client: reqwest::Client::builder()
@@ -228,6 +230,7 @@ impl HttpTracker {
 /// HTTP scrape response containing per-torrent stats.
 #[derive(Debug, Clone)]
 pub struct HttpScrapeResponse {
+    /// Per-torrent scrape statistics keyed by info hash.
     pub files: HashMap<Id20, ScrapeInfo>,
 }
 
