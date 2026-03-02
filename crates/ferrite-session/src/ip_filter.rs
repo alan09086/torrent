@@ -270,11 +270,23 @@ impl Default for PortFilter {
 /// Errors from parsing IP filter files.
 #[derive(Debug, thiserror::Error)]
 pub enum IpFilterError {
+    /// An IP address could not be parsed.
     #[error("invalid IP address on line {line}: {message}")]
-    InvalidAddress { line: usize, message: String },
+    InvalidAddress {
+        /// One-based line number in the filter file.
+        line: usize,
+        /// Parse error description.
+        message: String,
+    },
 
+    /// A line could not be parsed (wrong number of fields, etc.).
     #[error("malformed line {line}: {message}")]
-    MalformedLine { line: usize, message: String },
+    MalformedLine {
+        /// One-based line number in the filter file.
+        line: usize,
+        /// Description of the formatting problem.
+        message: String,
+    },
 }
 
 /// Parse an eMule `.dat` format blocklist.

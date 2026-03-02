@@ -91,8 +91,11 @@ impl fmt::Display for I2pDestination {
 /// Error type for I2P destination parsing.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum I2pDestinationError {
+    /// The input string contains an invalid Base64 character.
     #[error("invalid Base64 character at position {0}")]
-    InvalidBase64(usize),
+    InvalidBase64(/// Byte offset of the invalid character.
+        usize),
+    /// The destination was empty after decoding.
     #[error("empty destination")]
     Empty,
 }

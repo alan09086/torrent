@@ -3,14 +3,18 @@ use serde::{Deserialize, Serialize};
 /// A DHT bootstrap node entry for session persistence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DhtNodeEntry {
+    /// Hostname or IP address of the DHT node.
     pub host: String,
+    /// Port number of the DHT node.
     pub port: i64,
 }
 
 /// A peer strike entry for session persistence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStrikeEntry {
+    /// IP address of the peer that received strikes.
     pub ip: String,
+    /// Number of accumulated strikes.
     pub count: i64,
 }
 
@@ -22,12 +26,16 @@ pub struct PeerStrikeEntry {
 /// verification when the bitfield matches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// Cached DHT routing table nodes for faster bootstrap on restart.
     #[serde(rename = "dht-nodes", default)]
     pub dht_nodes: Vec<DhtNodeEntry>,
+    /// Fast resume data for each torrent in the session.
     #[serde(rename = "torrents", default)]
     pub torrents: Vec<ferrite_core::FastResumeData>,
+    /// IP addresses of permanently banned peers.
     #[serde(rename = "banned-peers", default)]
     pub banned_peers: Vec<String>,
+    /// Per-peer strike counts for the smart ban system.
     #[serde(rename = "peer-strikes", default)]
     pub peer_strikes: Vec<PeerStrikeEntry>,
 }

@@ -13,11 +13,17 @@ use crate::types::PeerCommand;
 /// Origin of a peer address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PeerSource {
+    /// Returned by a tracker announce.
     Tracker,
+    /// Discovered via the DHT.
     Dht,
+    /// Received via Peer Exchange (BEP 11).
     Pex,
+    /// Found via Local Service Discovery (BEP 14).
     Lsd,
+    /// Connected to us (incoming connection).
     Incoming,
+    /// Loaded from saved resume data.
     ResumeData,
     /// Discovered via I2P SAM bridge.
     I2p,

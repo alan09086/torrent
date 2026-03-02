@@ -22,30 +22,39 @@ use super::destination::I2pDestination;
 /// SAM protocol errors.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SamError {
+    /// Failed to connect to the SAM bridge.
     #[error("SAM connection failed: {0}")]
     ConnectionFailed(String),
 
+    /// SAM HELLO handshake failed (version mismatch, etc.).
     #[error("SAM handshake failed: {0}")]
     HandshakeFailed(String),
 
+    /// SAM SESSION CREATE command failed.
     #[error("SAM session creation failed: {0}")]
     SessionCreateFailed(String),
 
+    /// SAM STREAM CONNECT command failed.
     #[error("SAM stream connect failed: {0}")]
     StreamConnectFailed(String),
 
+    /// SAM STREAM ACCEPT command failed.
     #[error("SAM stream accept failed: {0}")]
     StreamAcceptFailed(String),
 
+    /// SAM NAMING LOOKUP command failed.
     #[error("SAM naming lookup failed: {0}")]
     NamingLookupFailed(String),
 
+    /// Generic SAM protocol error (malformed reply, unexpected state).
     #[error("SAM protocol error: {0}")]
     ProtocolError(String),
 
+    /// I/O error communicating with the SAM bridge.
     #[error("SAM I/O error: {0}")]
     IoError(String),
 
+    /// Destination string could not be parsed.
     #[error("SAM invalid destination: {0}")]
     InvalidDestination(String),
 }

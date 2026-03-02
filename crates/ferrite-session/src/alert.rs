@@ -54,40 +54,194 @@ bitflags::bitflags! {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertKind {
     // ── Torrent lifecycle (STATUS) ──
-    TorrentAdded { info_hash: Id20, name: String },
-    TorrentRemoved { info_hash: Id20 },
-    TorrentPaused { info_hash: Id20 },
-    TorrentResumed { info_hash: Id20 },
-    TorrentFinished { info_hash: Id20 },
-    StateChanged { info_hash: Id20, prev_state: TorrentState, new_state: TorrentState },
-    MetadataReceived { info_hash: Id20, name: String },
+
+    /// A torrent was added to the session.
+    TorrentAdded {
+        /// Info hash of the added torrent.
+        info_hash: Id20,
+        /// Display name of the torrent.
+        name: String,
+    },
+    /// A torrent was removed from the session.
+    TorrentRemoved {
+        /// Info hash of the removed torrent.
+        info_hash: Id20,
+    },
+    /// A torrent was paused.
+    TorrentPaused {
+        /// Info hash of the paused torrent.
+        info_hash: Id20,
+    },
+    /// A torrent was resumed.
+    TorrentResumed {
+        /// Info hash of the resumed torrent.
+        info_hash: Id20,
+    },
+    /// A torrent finished downloading all pieces.
+    TorrentFinished {
+        /// Info hash of the finished torrent.
+        info_hash: Id20,
+    },
+    /// A torrent changed state.
+    StateChanged {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Previous torrent state.
+        prev_state: TorrentState,
+        /// New torrent state.
+        new_state: TorrentState,
+    },
+    /// Torrent metadata received via BEP 9 extension protocol.
+    MetadataReceived {
+        /// Info hash of the torrent whose metadata was received.
+        info_hash: Id20,
+        /// Display name from the received metadata.
+        name: String,
+    },
 
     // ── Checking (STATUS) ──
-    TorrentChecked { info_hash: Id20, pieces_have: u32, pieces_total: u32 },
-    CheckingProgress { info_hash: Id20, progress: f32 },
+
+    /// A torrent finished checking (verifying existing data on disk).
+    TorrentChecked {
+        /// Info hash of the checked torrent.
+        info_hash: Id20,
+        /// Number of pieces that passed hash verification.
+        pieces_have: u32,
+        /// Total number of pieces in the torrent.
+        pieces_total: u32,
+    },
+    /// Progress update during piece hash checking.
+    CheckingProgress {
+        /// Info hash of the torrent being checked.
+        info_hash: Id20,
+        /// Fraction complete (0.0 to 1.0).
+        progress: f32,
+    },
 
     // ── Transfer (PIECE / BLOCK) ──
-    PieceFinished { info_hash: Id20, piece: u32 },
-    BlockFinished { info_hash: Id20, piece: u32, offset: u32 },
-    HashFailed { info_hash: Id20, piece: u32, contributors: Vec<std::net::IpAddr> },
+
+    /// A piece passed hash verification and is now complete.
+    PieceFinished {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Zero-based piece index.
+        piece: u32,
+    },
+    /// A block (sub-piece chunk) was received and written.
+    BlockFinished {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Zero-based piece index containing the block.
+        piece: u32,
+        /// Byte offset of the block within the piece.
+        offset: u32,
+    },
+    /// A piece failed hash verification.
+    HashFailed {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Zero-based piece index that failed.
+        piece: u32,
+        /// IP addresses of peers that contributed data to this piece.
+        contributors: Vec<std::net::IpAddr>,
+    },
 
     // ── Peers (PEER) ──
-    PeerConnected { info_hash: Id20, addr: SocketAddr },
-    PeerDisconnected { info_hash: Id20, addr: SocketAddr, reason: Option<String> },
-    PeerBanned { info_hash: Id20, addr: SocketAddr },
+
+    /// A new peer connection was established.
+    PeerConnected {
+        /// Info hash of the torrent swarm.
+        info_hash: Id20,
+        /// Socket address of the connected peer.
+        addr: SocketAddr,
+    },
+    /// A peer disconnected.
+    PeerDisconnected {
+        /// Info hash of the torrent swarm.
+        info_hash: Id20,
+        /// Socket address of the disconnected peer.
+        addr: SocketAddr,
+        /// Human-readable reason for disconnection, if available.
+        reason: Option<String>,
+    },
+    /// A peer was banned (e.g. for sending corrupt data).
+    PeerBanned {
+        /// Info hash of the torrent swarm.
+        info_hash: Id20,
+        /// Socket address of the banned peer.
+        addr: SocketAddr,
+    },
 
     // ── Tracker (TRACKER) ──
-    TrackerReply { info_hash: Id20, url: String, num_peers: usize },
-    TrackerWarning { info_hash: Id20, url: String, message: String },
-    TrackerError { info_hash: Id20, url: String, message: String },
-    ScrapeReply { info_hash: Id20, url: String, complete: u32, incomplete: u32, downloaded: u32 },
-    ScrapeError { info_hash: Id20, url: String, message: String },
+
+    /// A tracker announce completed successfully.
+    TrackerReply {
+        /// Info hash announced to the tracker.
+        info_hash: Id20,
+        /// Tracker URL.
+        url: String,
+        /// Number of peers returned by the tracker.
+        num_peers: usize,
+    },
+    /// A tracker returned a warning message.
+    TrackerWarning {
+        /// Info hash announced to the tracker.
+        info_hash: Id20,
+        /// Tracker URL.
+        url: String,
+        /// Warning message from the tracker.
+        message: String,
+    },
+    /// A tracker announce failed.
+    TrackerError {
+        /// Info hash announced to the tracker.
+        info_hash: Id20,
+        /// Tracker URL.
+        url: String,
+        /// Error description.
+        message: String,
+    },
+    /// A tracker scrape completed successfully.
+    ScrapeReply {
+        /// Info hash that was scraped.
+        info_hash: Id20,
+        /// Tracker URL.
+        url: String,
+        /// Number of complete peers (seeders).
+        complete: u32,
+        /// Number of incomplete peers (leechers).
+        incomplete: u32,
+        /// Total number of completed downloads reported by the tracker.
+        downloaded: u32,
+    },
+    /// A tracker scrape failed.
+    ScrapeError {
+        /// Info hash that was scraped.
+        info_hash: Id20,
+        /// Tracker URL.
+        url: String,
+        /// Error description.
+        message: String,
+    },
 
     // ── DHT ──
+
+    /// DHT routing table bootstrapping finished.
     DhtBootstrapComplete,
-    DhtGetPeers { info_hash: Id20, num_peers: usize },
+    /// DHT get_peers query returned peers for a torrent.
+    DhtGetPeers {
+        /// Info hash that was queried.
+        info_hash: Id20,
+        /// Number of peers returned.
+        num_peers: usize,
+    },
     /// BEP 42: A DHT node was rejected because its ID doesn't match its IP.
-    DhtNodeIdViolation { node_id: Id20, addr: SocketAddr },
+    DhtNodeIdViolation {
+        /// Node ID that violated the BEP 42 constraint.
+        node_id: Id20,
+        /// Socket address of the violating node.
+        addr: SocketAddr,
+    },
     /// BEP 51: sample_infohashes response received from a DHT node.
     DhtSampleInfohashes {
         /// Number of sampled info hashes received.
@@ -97,78 +251,211 @@ pub enum AlertKind {
     },
 
     // ── Session (STATUS) ──
-    ListenSucceeded { port: u16 },
-    ListenFailed { port: u16, message: String },
+
+    /// The session successfully started listening on a port.
+    ListenSucceeded {
+        /// The port number now being listened on.
+        port: u16,
+    },
+    /// The session failed to listen on a port.
+    ListenFailed {
+        /// The port number that failed to bind.
+        port: u16,
+        /// Error description.
+        message: String,
+    },
+    /// Periodic session statistics snapshot.
     SessionStatsUpdate(crate::types::SessionStats),
 
     // ── Storage / Disk ──
-    FileRenamed { info_hash: Id20, index: usize, new_path: std::path::PathBuf },
-    StorageMoved { info_hash: Id20, new_path: std::path::PathBuf },
-    FileError { info_hash: Id20, path: std::path::PathBuf, message: String },
+
+    /// A file within a torrent was renamed.
+    FileRenamed {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Zero-based file index within the torrent.
+        index: usize,
+        /// The new filesystem path of the file.
+        new_path: std::path::PathBuf,
+    },
+    /// A torrent's storage was moved to a new directory.
+    StorageMoved {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// The new root directory path.
+        new_path: std::path::PathBuf,
+    },
+    /// A file I/O error occurred.
+    FileError {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Filesystem path where the error occurred.
+        path: std::path::PathBuf,
+        /// Error description.
+        message: String,
+    },
+    /// Periodic disk I/O statistics snapshot.
     DiskStatsUpdate(crate::disk::DiskStats),
 
     // ── Resume (STATUS) ──
-    ResumeDataSaved { info_hash: Id20 },
+
+    /// Fast resume data was saved for a torrent.
+    ResumeDataSaved {
+        /// Info hash of the torrent whose resume data was saved.
+        info_hash: Id20,
+    },
 
     // ── Error ──
-    TorrentError { info_hash: Id20, message: String },
+
+    /// A torrent encountered a fatal error.
+    TorrentError {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Error description.
+        message: String,
+    },
 
     // ── Performance ──
-    PerformanceWarning { info_hash: Id20, message: String },
+
+    /// A performance warning was detected (e.g. too many hash failures).
+    PerformanceWarning {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Warning description.
+        message: String,
+    },
 
     // ── Queue management (STATUS) ──
     /// Queue position changed (manual move or torrent removal shifted positions).
     TorrentQueuePositionChanged {
+        /// Info hash of the affected torrent.
         info_hash: Id20,
+        /// Previous queue position.
         old_pos: i32,
+        /// New queue position.
         new_pos: i32,
     },
     /// Torrent was paused or resumed by the auto-manage system.
     TorrentAutoManaged {
+        /// Info hash of the affected torrent.
         info_hash: Id20,
+        /// Whether the torrent was paused (`true`) or resumed (`false`).
         paused: bool,
     },
 
     // ── IP filtering (PEER) ──
-    PeerBlocked { addr: SocketAddr },
+
+    /// An incoming connection was blocked by the IP filter.
+    PeerBlocked {
+        /// Socket address that was blocked.
+        addr: SocketAddr,
+    },
 
     /// Periodic turnover disconnected underperforming peers and connected replacements.
-    PeerTurnover { info_hash: Id20, disconnected: usize, replaced: usize },
+    PeerTurnover {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Number of peers disconnected during turnover.
+        disconnected: usize,
+        /// Number of replacement peers connected.
+        replaced: usize,
+    },
 
     // ── Web seeding (STATUS) ──
-    WebSeedBanned { info_hash: Id20, url: String },
+
+    /// A web seed was banned (e.g. for serving corrupt data).
+    WebSeedBanned {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// URL of the banned web seed.
+        url: String,
+    },
 
     // ── Port mapping ──
-    PortMappingSucceeded { port: u16, protocol: String },
-    PortMappingFailed { port: u16, message: String },
+
+    /// A UPnP/NAT-PMP port mapping succeeded.
+    PortMappingSucceeded {
+        /// The mapped external port.
+        port: u16,
+        /// Protocol name (e.g. "TCP" or "UDP").
+        protocol: String,
+    },
+    /// A UPnP/NAT-PMP port mapping failed.
+    PortMappingFailed {
+        /// The port that failed to map.
+        port: u16,
+        /// Error description.
+        message: String,
+    },
 
     // ── Hybrid hash conflict (M35) ──
     /// v1 and v2 hashes disagree on the same piece — the .torrent data is inconsistent.
-    InconsistentHashes { info_hash: Id20, piece: u32 },
+    InconsistentHashes {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Zero-based piece index with inconsistent hashes.
+        piece: u32,
+    },
 
     // ── BEP 44 DHT storage (M38) ──
     // TODO: Wire DHT item alerts when session-level dht_put/dht_get is added
     /// An immutable DHT put completed.
-    DhtPutComplete { target: Id20 },
+    DhtPutComplete {
+        /// SHA-1 target hash of the stored item.
+        target: Id20,
+    },
     /// A mutable DHT put completed.
-    DhtMutablePutComplete { target: Id20, seq: i64 },
+    DhtMutablePutComplete {
+        /// SHA-1 target hash derived from the public key and salt.
+        target: Id20,
+        /// Sequence number of the stored value.
+        seq: i64,
+    },
     /// Result of a DHT get (immutable). `value` is None if not found.
-    DhtGetResult { target: Id20, value: Option<Vec<u8>> },
+    DhtGetResult {
+        /// SHA-1 target hash that was queried.
+        target: Id20,
+        /// The retrieved value, or `None` if not found.
+        value: Option<Vec<u8>>,
+    },
     /// Result of a DHT mutable get. `value` is None if not found.
     DhtMutableGetResult {
+        /// SHA-1 target hash derived from the public key and salt.
         target: Id20,
+        /// The retrieved value, or `None` if not found.
         value: Option<Vec<u8>>,
+        /// Sequence number of the value, if found.
         seq: Option<i64>,
+        /// Ed25519 public key of the item author.
         public_key: [u8; 32],
     },
     /// A BEP 44 DHT operation failed.
-    DhtItemError { target: Id20, message: String },
+    DhtItemError {
+        /// SHA-1 target hash of the failed operation.
+        target: Id20,
+        /// Error description.
+        message: String,
+    },
 
     // ── BEP 55 Holepunch (M40) ──
     /// A holepunch connection attempt succeeded.
-    HolepunchSucceeded { info_hash: Id20, addr: SocketAddr },
+    HolepunchSucceeded {
+        /// Info hash of the torrent swarm.
+        info_hash: Id20,
+        /// Socket address of the peer reached via holepunch.
+        addr: SocketAddr,
+    },
     /// A holepunch connection attempt failed.
-    HolepunchFailed { info_hash: Id20, addr: SocketAddr, error_code: Option<u32>, message: String },
+    HolepunchFailed {
+        /// Info hash of the torrent swarm.
+        info_hash: Id20,
+        /// Socket address of the peer we attempted to reach.
+        addr: SocketAddr,
+        /// BEP 55 error code, if provided by the relay.
+        error_code: Option<u32>,
+        /// Human-readable error description.
+        message: String,
+    },
 
     // ── I2P (M41) ──
     /// SAM session successfully created with an ephemeral destination.
@@ -178,17 +465,30 @@ pub enum AlertKind {
     },
     /// I2P error (SAM bridge unreachable, tunnel failure, etc.)
     I2pError {
+        /// Error description.
         message: String,
     },
 
     // ── SSL (M42) ──
     /// SSL/TLS error for an SSL torrent (handshake failure, cert validation, etc.).
-    SslTorrentError { info_hash: Id20, message: String },
+    SslTorrentError {
+        /// Info hash of the affected SSL torrent.
+        info_hash: Id20,
+        /// Error description.
+        message: String,
+    },
 
     // ── Session Stats (M50) ──
-    SessionStatsAlert { values: Vec<i64> },
+
+    /// Session-level statistics counters snapshot (one value per metric).
+    SessionStatsAlert {
+        /// Counter values indexed by [`MetricKind`](crate::MetricKind) ordinal.
+        values: Vec<i64>,
+    },
 
     // ── Settings (M31) ──
+
+    /// Session settings were changed via `apply_settings()`.
     SettingsChanged,
 }
 
@@ -294,7 +594,9 @@ impl AlertKind {
 /// A timestamped event from the session or a torrent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
+    /// Wall-clock time when this alert was created.
     pub timestamp: SystemTime,
+    /// The specific event that occurred.
     pub kind: AlertKind,
 }
 
