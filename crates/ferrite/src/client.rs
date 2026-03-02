@@ -609,6 +609,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the interval in milliseconds between periodic [`SessionStatsAlert`] emissions.
+    ///
+    /// Default: `1000` (1 second). Set to `0` to disable periodic stats alerts.
+    /// Stats can still be triggered on demand via
+    /// [`SessionHandle::post_session_stats()`](ferrite_session::SessionHandle::post_session_stats).
+    pub fn stats_report_interval(mut self, ms: u64) -> Self {
+        self.settings.stats_report_interval = ms;
+        self
+    }
+
     /// Set a custom disk I/O backend.
     ///
     /// When set, the session uses this backend instead of the default
@@ -975,5 +985,32 @@ mod tests {
         use ferrite_session::DiskIoBackend;
         let backend = ferrite_session::DisabledDiskIo;
         assert_eq!(backend.name(), "disabled");
+    }
+
+    #[test]
+    fn client_builder_stats_report_interval() {
+        let config = ClientBuilder::new()
+            .stats_report_interval(5000)
+            .into_settings();
+        assert_eq!(config.stats_report_interval, 5000);
+
+        // Zero disables periodic emission
+        let config = ClientBuilder::new()
+            .stats_report_interval(0)
+            .into_settings();
+        assert_eq!(config.stats_report_interval, 0);
+    }
+
+    #[test]
+    fn client_builder_stats_report_interval_default() {
+        let config = ClientBuilder::new().into_settings();
+        assert_eq!(config.stats_report_interval, 1000);
+    }
+
+    #[test]
+    fn stats_types_available_from_prelude() {
+        // Verify SessionCounters is accessible from the prelude
+        let counters = crate::prelude::SessionCounters::default();
+        assert_eq!(counters.len(), crate::session::NUM_METRICS);
     }
 }
