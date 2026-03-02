@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1279-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1310-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.56.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.57.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -14,14 +14,15 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 
 ## ✨ Highlights
 
-- 🏗️ **11-crate modular workspace** — each layer independently testable and reusable
+- 🏗️ **12-crate modular workspace** — each layer independently testable and reusable
 - 🔐 **Full BEP 52 support** — BitTorrent v2 metadata, wire protocol, storage, and hybrid v1+v2 torrents
 - ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
 - 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
 - 📡 **27 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
 - 🎛️ **95-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
+- 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1279 tests, zero clippy warnings**
+- 📊 **1310 tests, zero clippy warnings**
 
 ---
 
@@ -45,6 +46,8 @@ ferrite-utp          🚀 uTP (BEP 29) micro transport protocol, LEDBAT congesti
 ferrite-nat          🔓 PCP / NAT-PMP / UPnP IGD automatic port mapping
      │
 ferrite              📦 Public facade: ClientBuilder + prelude + unified error
+     │
+ferrite-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, virtual clock
 ```
 
 ---
@@ -59,14 +62,15 @@ ferrite              📦 Public facade: ClientBuilder + prelude + unified error
 | `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 37 |
 | `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 148 |
 | `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 65 |
-| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 544 |
+| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 608 |
 | `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 21 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 41 |
+| `ferrite-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
 
 ### 🎯 Session Features
 
-The `ferrite-session` crate (544 tests) includes:
+The `ferrite-session` crate (608 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -74,9 +78,9 @@ The `ferrite-session` crate (544 tests) includes:
 | **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, dynamic request queue, file streaming (`AsyncRead` + `AsyncSeek`), sequential download, auto-sequential hysteresis, block-level picking, SuggestPiece, predictive announce |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode TCP/uTP algorithm, automatic upload slot optimization |
 | **Storage** | Pluggable DiskIoBackend trait (Posix/Mmap/Disabled), async DiskActor, ARC read cache, write buffering, parallel hashing, move storage |
-| **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport |
+| **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport, pluggable transport (NetworkFactory) |
 | **Security** | SSRF mitigation (URL guard + redirect policy), IDNA/homograph rejection, HTTPS tracker validation, IP filtering (.dat parser), smart banning + parole |
-| **Management** | Unified Settings (93 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
+| **Management** | Unified Settings (95 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
 | **Persistence** | FastResumeData (bencode), session state, DHT node cache |
 | **Extensibility** | Extension plugin trait, share mode, hybrid v1+v2 dual verification, dual-swarm announces, pure v2 torrent support |
 
@@ -147,7 +151,7 @@ See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 9: Swarm Intelligence | M43–M46 | Choking algorithms, piece picker, mixed-mode, peer turnover | ✅ Done |
 | 10: Security & Hardening | M47–M48 | SSRF mitigation, DSCP, anonymous mode | ✅ Done |
 | 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | ✅ Done |
-| 12: Simulation | M51 | In-process network simulation framework | 📝 Planned |
+| 12: Simulation | M51 | In-process network simulation framework | ✅ Done |
 
 ---
 
@@ -172,6 +176,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.57.0 | M51 | Network simulation: ferrite-sim crate, NetworkFactory pluggable transport, SimNetwork/SimSwarm, 5 integration tests |
 | 0.56.0 | M50 | Session statistics: 70 atomic counters, periodic reporting, SessionStatsAlert, rate computation |
 | 0.55.0 | M49 | Pluggable disk I/O: DiskIoBackend trait, PosixDiskIo, MmapDiskIo, DisabledDiskIo, backend factory |
 | 0.54.0 | M48 | DSCP/ToS socket marking, anonymous mode hardening, ext handshake suppression |

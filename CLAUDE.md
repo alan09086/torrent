@@ -11,7 +11,7 @@ cargo clippy --workspace -- -D warnings
 
 ## Architecture
 
-11-crate workspace: `ferrite-bencode` → `ferrite-core` → `ferrite-wire`/`ferrite-tracker`/`ferrite-dht`/`ferrite-storage`/`ferrite-utp`/`ferrite-nat` → `ferrite-session` → `ferrite` (facade)
+12-crate workspace: `ferrite-bencode` → `ferrite-core` → `ferrite-wire`/`ferrite-tracker`/`ferrite-dht`/`ferrite-storage`/`ferrite-utp`/`ferrite-nat` → `ferrite-session` → `ferrite` (facade) + `ferrite-sim` (simulation)
 
 - **ferrite-session**: Actor model — `SessionActor`/`TorrentActor` with `tokio::select!` loops and command channels
 - **ferrite** (facade): `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module
@@ -29,7 +29,7 @@ cargo clippy --workspace -- -D warnings
 ## Milestones
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`
-- M1-M50 complete (v0.56.0, 1279 tests). M51 planned for full libtorrent parity.
+- M1-M51 complete (v0.57.0, 1310 tests). All 51 milestones done — full libtorrent parity achieved.
 - Implementation plans exist for all remaining milestones (M40-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone

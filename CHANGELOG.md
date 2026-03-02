@@ -8,6 +8,37 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.57.0 — 2026-03-01
+
+Network simulation framework. Twelve crates, 1310 tests, 27 BEPs implemented. Phase 12 (Simulation) complete. **All 51 milestones done — full libtorrent-rasterbar parity achieved.**
+
+### M51: Network Simulation Framework
+
+### Added
+- `ferrite-sim` crate — in-process network simulation for swarm integration testing
+- `BoxedStream` — type-erased bidirectional async stream wrapper (ferrite-session)
+- `TransportListener` trait — object-safe TCP listener abstraction (ferrite-session)
+- `NetworkFactory` — pluggable transport factory with `bind_tcp`/`connect_tcp` closures and `is_simulated` flag
+- `NetworkFactory::tokio()` — production factory using real tokio TCP sockets
+- `SessionHandle::start_with_transport()` — session constructor with custom transport factory
+- `SessionHandle::start_full()` — canonical constructor taking all parameters (settings, plugins, backend, factory)
+- `SessionHandle::add_peers()` — peer injection by info hash through session command channel
+- `SimClock` — virtual clock with `advance()` for deterministic timing
+- `SimNetwork` — virtual network with node IP allocation (`10.0.0.x`), TCP routing via `tokio::io::duplex` channels, per-link config, network partitioning
+- `LinkConfig` — per-link latency, bandwidth, and packet loss configuration
+- `sim_transport_factory()` — creates `NetworkFactory` routing through `SimNetwork`
+- `SimSwarmBuilder` / `SimSwarm` — fluent builder for multi-node swarm test scenarios
+- `make_test_torrent()` / `make_seeded_storage()` — test helpers for creating torrents and pre-populated storage
+- 5 swarm integration tests: peer discovery, partition blocking, 3-node swarm, node count, seeded storage roundtrip
+- `PeerSource` re-exported from ferrite-session root
+
+### Changed
+- All `TcpListener::bind()` / `TcpStream::connect()` calls in session and torrent actors replaced with `NetworkFactory` methods
+- SSL listener changed from `Option<TcpListener>` to `Option<Box<dyn TransportListener>>`
+- `from_torrent()` / `from_magnet()` gain `factory: Arc<NetworkFactory>` parameter
+- DSCP marking skipped on transport-abstracted paths (BoxedStream lacks `AsRawFd`)
+- 31 new tests (1310 total)
+
 ## 0.56.0 — 2026-03-01
 
 Session statistics counters. Eleven crates, 1279 tests, 27 BEPs implemented. Phase 11 (Pluggable Interfaces) complete.
