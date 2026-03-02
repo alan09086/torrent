@@ -151,6 +151,12 @@ enum SessionCommand {
         new_path: std::path::PathBuf,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    AddPeers {
+        info_hash: Id20,
+        peers: Vec<SocketAddr>,
+        source: crate::peer_state::PeerSource,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -621,6 +627,26 @@ impl SessionHandle {
         AlertCategory::from_bits_truncate(self.alert_mask.load(Ordering::Relaxed))
     }
 
+    /// Add peers to a specific torrent by info hash.
+    pub async fn add_peers(
+        &self,
+        info_hash: Id20,
+        peers: Vec<SocketAddr>,
+        source: crate::peer_state::PeerSource,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::AddPeers {
+                info_hash,
+                peers,
+                source,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
     /// Gracefully shut down the session and all torrents.
     pub async fn shutdown(&self) -> crate::Result<()> {
         let _ = self.cmd_tx.send(SessionCommand::Shutdown).await;
@@ -1006,6 +1032,14 @@ impl SessionActor {
                         }
                         Some(SessionCommand::MoveTorrentStorage { info_hash, new_path, reply }) => {
                             let result = self.handle_move_torrent_storage(info_hash, new_path).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::AddPeers { info_hash, peers, source, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.add_peers(peers, source).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
                             let _ = reply.send(result);
                         }
                         Some(SessionCommand::PostSessionStats) => {
