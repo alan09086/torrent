@@ -56,7 +56,7 @@ pub(crate) struct StreamingCursor {
 
 /// Async reader/seeker over a single file within a torrent.
 ///
-/// Created via [`TorrentHandle::open_file()`]. Implements [`AsyncRead`] and
+/// Created via [`crate::TorrentHandle::open_file()`]. Implements [`AsyncRead`] and
 /// [`AsyncSeek`], blocking on pieces that haven't been downloaded yet.
 ///
 /// The stream updates a cursor position that the TorrentActor uses to

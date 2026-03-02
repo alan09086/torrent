@@ -35,7 +35,7 @@ pub struct MerkleTreeState {
     /// Block-layer hashes (one per block). Populated during download.
     block_hashes: Vec<Option<Id32>>,
     /// Which blocks have been verified against the Merkle tree.
-    /// Uses Vec<bool> to avoid circular dependency on ferrite-storage::Bitfield.
+    /// Uses `Vec<bool>` to avoid circular dependency on ferrite-storage::Bitfield.
     block_verified: Vec<bool>,
 }
 

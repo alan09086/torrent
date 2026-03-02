@@ -609,7 +609,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the interval in milliseconds between periodic [`SessionStatsAlert`] emissions.
+    /// Set the interval in milliseconds between periodic `SessionStatsAlert` emissions.
     ///
     /// Default: `1000` (1 second). Set to `0` to disable periodic stats alerts.
     /// Stats can still be triggered on demand via

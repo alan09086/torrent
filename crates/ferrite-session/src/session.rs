@@ -234,7 +234,7 @@ impl SessionHandle {
     ///
     /// This is the most general constructor — all other `start_*` variants
     /// delegate to this method. The `factory` parameter controls how TCP
-    /// listeners and connections are created: use [`NetworkFactory::tokio()`]
+    /// listeners and connections are created: use [`crate::transport::NetworkFactory::tokio()`]
     /// for real networking or a custom factory for simulation.
     pub async fn start_full(
         settings: Settings,

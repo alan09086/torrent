@@ -4,9 +4,9 @@
 //! Protocol overview:
 //!   1. Connect to SAM bridge (default 127.0.0.1:7656)
 //!   2. HELLO VERSION MIN=3.1 MAX=3.1
-//!   3. SESSION CREATE STYLE=STREAM ID=<id> DESTINATION=TRANSIENT [tunnel opts]
-//!   4. STREAM CONNECT ID=<id> DESTINATION=<base64> [SILENT=false]
-//!   5. STREAM ACCEPT ID=<id> [SILENT=false]
+//!   3. `SESSION CREATE STYLE=STREAM ID=<id> DESTINATION=TRANSIENT [tunnel opts]`
+//!   4. `STREAM CONNECT ID=<id> DESTINATION=<base64> [SILENT=false]`
+//!   5. `STREAM ACCEPT ID=<id> [SILENT=false]`
 //!
 //! Each command and reply is a single line terminated by `\n`.
 

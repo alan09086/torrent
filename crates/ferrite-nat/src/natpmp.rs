@@ -147,7 +147,7 @@ pub fn decode_mapping_response(buf: &[u8]) -> Result<MappingResponse> {
 /// Send a NAT-PMP request to the gateway and wait for a response.
 ///
 /// Uses exponential backoff retransmission starting at 250ms, doubling
-/// each attempt up to [`MAX_ATTEMPTS`].
+/// each attempt up to `MAX_ATTEMPTS`.
 pub async fn send_request(gateway: Ipv4Addr, request: &[u8]) -> Result<Vec<u8>> {
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
     socket

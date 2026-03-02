@@ -1,6 +1,6 @@
-//! SimTransport — NetworkFactory implementation for simulation.
+//! SimTransport -- `NetworkFactory` implementation for simulation.
 //!
-//! Provides [`sim_transport_factory`], which creates a [`NetworkFactory`] that
+//! Provides [`sim_transport_factory`], which creates a `NetworkFactory` that
 //! routes all TCP traffic through a [`SimNetwork`] instead of real sockets.
 
 use std::io;
@@ -65,11 +65,11 @@ impl TransportListener for SimListener {
 // Factory constructor
 // ---------------------------------------------------------------------------
 
-/// Create a [`NetworkFactory`] that routes all TCP through the given [`SimNetwork`].
+/// Create a `NetworkFactory` that routes all TCP through the given [`SimNetwork`].
 ///
 /// Each node should have a unique virtual IP obtained from [`SimNetwork::add_node()`].
 /// The returned factory:
-/// - `bind_tcp(addr)` — registers a listener in the `SimNetwork`, returns a [`SimListener`]
+/// - `bind_tcp(addr)` -- registers a listener in the `SimNetwork`, returns a `SimListener`
 /// - `connect_tcp(addr)` — routes through the `SimNetwork` to reach the listener at `addr`
 /// - `is_simulated` — `true`
 #[allow(clippy::type_complexity)]
