@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -130,6 +129,7 @@ impl TorrentHandle {
         plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
         sam_session: Option<Arc<crate::i2p::SamSession>>,
         ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+        factory: Arc<crate::transport::NetworkFactory>,
     ) -> crate::Result<Self> {
         let mut config = config;
         // BEP 27: private torrents disable DHT and PEX
@@ -176,15 +176,17 @@ impl TorrentHandle {
 
         // Bind listener for incoming connections
         // Try dual-stack [::]:port first, fall back to IPv4-only
-        let listener = match TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)).await {
+        let listener: Option<Box<dyn crate::transport::TransportListener>> = match factory
+            .bind_tcp(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)))
+            .await
+        {
             Ok(l) => Some(l),
-            Err(_) => TcpListener::bind(("0.0.0.0", config.listen_port)).await.ok(),
+            Err(_) => factory
+                .bind_tcp(SocketAddr::from(([0, 0, 0, 0], config.listen_port)))
+                .await
+                .ok(),
         };
-
-        // Apply DSCP marking to the listener so accepted connections inherit it
-        if let Some(ref l) = listener {
-            crate::dscp::apply_dscp_listener(l, config.peer_dscp);
-        }
+        // Note: DSCP on listener is skipped for transport-abstracted sockets (no raw fd)
 
         let mut tracker_manager =
             TrackerManager::from_torrent_filtered(
@@ -360,6 +362,7 @@ impl TorrentHandle {
             ssl_manager,
             rate_limiter_set,
             auto_sequential_active: false,
+            factory,
         };
 
         tokio::spawn(actor.run());
@@ -386,6 +389,7 @@ impl TorrentHandle {
         plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
         sam_session: Option<Arc<crate::i2p::SamSession>>,
         ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+        factory: Arc<crate::transport::NetworkFactory>,
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -396,15 +400,17 @@ impl TorrentHandle {
         };
 
         // Try dual-stack [::]:port first, fall back to IPv4-only
-        let listener = match TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)).await {
+        let listener: Option<Box<dyn crate::transport::TransportListener>> = match factory
+            .bind_tcp(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)))
+            .await
+        {
             Ok(l) => Some(l),
-            Err(_) => TcpListener::bind(("0.0.0.0", config.listen_port)).await.ok(),
+            Err(_) => factory
+                .bind_tcp(SocketAddr::from(([0, 0, 0, 0], config.listen_port)))
+                .await
+                .ok(),
         };
-
-        // Apply DSCP marking to the listener so accepted connections inherit it
-        if let Some(ref l) = listener {
-            crate::dscp::apply_dscp_listener(l, config.peer_dscp);
-        }
+        // Note: DSCP on listener is skipped for transport-abstracted sockets (no raw fd)
 
         let tracker_manager =
             TrackerManager::empty(magnet.info_hash(), our_peer_id, config.listen_port, config.peer_dscp, config.anonymous_mode);
@@ -555,6 +561,7 @@ impl TorrentHandle {
             ssl_manager,
             rate_limiter_set,
             auto_sequential_active: false,
+            factory,
         };
 
         tokio::spawn(actor.run());
@@ -779,7 +786,7 @@ struct TorrentActor {
     event_rx: mpsc::Receiver<PeerEvent>,
 
     // TCP listener for incoming peer connections
-    listener: Option<TcpListener>,
+    listener: Option<Box<dyn crate::transport::TransportListener>>,
 
     // uTP socket for outbound connections (shared with session, cloned)
     utp_socket: Option<ferrite_utp::UtpSocket>,
@@ -880,6 +887,8 @@ struct TorrentActor {
     rate_limiter_set: crate::rate_limiter::RateLimiterSet,
     /// Whether auto-sequential mode is currently active (hysteresis state).
     auto_sequential_active: bool,
+    /// Network transport factory for TCP operations (M51).
+    factory: Arc<crate::transport::NetworkFactory>,
 }
 
 impl TorrentActor {
@@ -1100,7 +1109,7 @@ impl TorrentActor {
                     }
                 }
                 // Accept incoming peers
-                result = accept_incoming(&self.listener) => {
+                result = accept_incoming(&mut self.listener) => {
                     if let Ok((stream, addr)) = result {
                         self.spawn_peer_from_stream(addr, stream);
                     }
@@ -3735,8 +3744,8 @@ impl TorrentActor {
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
             let enable_holepunch = self.config.enable_holepunch;
-            let peer_dscp = self.config.peer_dscp;
             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
+            let factory = Arc::clone(&self.factory);
             // Pick the uTP socket matching the peer's address family
             let utp_socket = if addr.is_ipv6() {
                 self.utp_socket_v6.clone()
@@ -3810,15 +3819,15 @@ impl TorrentActor {
                     }
                 }
 
-                // TCP connection — through proxy if configured
+                // TCP connection — through proxy if configured, or via transport factory
                 let tcp_result = if use_proxy {
                     crate::proxy::connect_through_proxy(&proxy_config, addr).await
+                        .map(crate::transport::BoxedStream::new)
                 } else {
-                    tokio::net::TcpStream::connect(addr).await
+                    factory.connect_tcp(addr).await
                 };
                 match tcp_result {
                     Ok(stream) => {
-                        crate::dscp::apply_dscp_tcp(&stream, peer_dscp);
                         let _ = event_tx.send(PeerEvent::TransportIdentified {
                             peer_addr: addr,
                             transport: crate::rate_limiter::PeerTransport::Tcp,
@@ -4152,7 +4161,6 @@ impl TorrentActor {
         let enable_utp = self.config.enable_utp;
         let anonymous_mode = self.config.anonymous_mode;
         let enable_holepunch = self.config.enable_holepunch;
-        let peer_dscp = self.config.peer_dscp;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let utp_socket = if target.is_ipv6() {
             self.utp_socket_v6.clone()
@@ -4160,6 +4168,7 @@ impl TorrentActor {
             self.utp_socket.clone()
         };
         let plugins = Arc::clone(&self.plugins);
+        let factory = Arc::clone(&self.factory);
 
         tokio::spawn(async move {
             // Try uTP first (5s timeout) — preferred for holepunch as NAT traversal
@@ -4209,10 +4218,9 @@ impl TorrentActor {
             // TCP fallback — only reached if uTP didn't succeed
             match tokio::time::timeout(
                 Duration::from_secs(10),
-                tokio::net::TcpStream::connect(target),
+                factory.connect_tcp(target),
             ).await {
                 Ok(Ok(stream)) => {
-                    crate::dscp::apply_dscp_tcp(&stream, peer_dscp);
                     debug!(%target, "holepunch: TCP connection established");
                     post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
                         info_hash,
@@ -4308,11 +4316,11 @@ impl TorrentActor {
     }
 }
 
-/// Helper to accept a connection from an optional listener.
+/// Helper to accept a connection from an optional transport listener.
 /// Returns `pending` if no listener is bound, so the `select!` branch is skipped.
 async fn accept_incoming(
-    listener: &Option<TcpListener>,
-) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+    listener: &mut Option<Box<dyn crate::transport::TransportListener>>,
+) -> std::io::Result<(crate::transport::BoxedStream, SocketAddr)> {
     match listener {
         Some(l) => l.accept().await,
         None => std::future::pending().await,
@@ -4340,6 +4348,7 @@ mod tests {
     use std::time::Duration;
     use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use ferrite_wire::{ExtHandshake, Handshake, Message, MessageCodec};
     use futures::{SinkExt, StreamExt};
     use tokio_util::codec::{FramedRead, FramedWrite};
@@ -4506,7 +4515,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4536,7 +4545,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dm, _dj) = test_disk_manager();
-        let handle = TorrentHandle::from_magnet(magnet, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_magnet(magnet, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4558,7 +4567,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4590,7 +4599,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4656,7 +4665,7 @@ mod tests {
         // The from_torrent constructor should disable DHT and PEX
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4680,7 +4689,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4703,7 +4712,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4729,7 +4738,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
         let handle2 = handle.clone();
@@ -4772,7 +4781,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4835,7 +4844,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -4961,7 +4970,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5089,7 +5098,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5208,7 +5217,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5394,7 +5403,7 @@ mod tests {
         let leecher_config = test_config();
         let (latx, lamask) = test_alert_channel();
         let (ldh, ldm, _ldj) = test_register_disk(leecher_meta.info_hash, leecher_storage).await;
-        let leecher = TorrentHandle::from_torrent(leecher_meta, ferrite_core::TorrentVersion::V1Only, None, ldh, ldm, leecher_config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), latx, lamask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let leecher = TorrentHandle::from_torrent(leecher_meta, ferrite_core::TorrentVersion::V1Only, None, ldh, ldm, leecher_config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), latx, lamask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5454,7 +5463,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dm, _dj) = test_disk_manager();
-        let handle = TorrentHandle::from_magnet(magnet, dm, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_magnet(magnet, dm, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5518,7 +5527,7 @@ mod tests {
         // the tracker doesn't exist, but that's fine — failures are non-fatal).
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5576,7 +5585,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5602,7 +5611,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dm, _dj) = test_disk_manager();
-        let handle = TorrentHandle::from_magnet(magnet, dm, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_magnet(magnet, dm, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5626,7 +5635,7 @@ mod tests {
         let config = test_config();
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5656,7 +5665,7 @@ mod tests {
         let config = test_config();
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5693,7 +5702,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -5871,7 +5880,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6019,7 +6028,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6046,7 +6055,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6082,7 +6091,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6114,7 +6123,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6148,7 +6157,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6192,7 +6201,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6238,7 +6247,7 @@ mod tests {
         drop(listener);
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6334,7 +6343,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6366,7 +6375,7 @@ mod tests {
         drop(listener);
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6548,7 +6557,7 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, Arc::clone(&ban_mgr), test_ip_filter(), Arc::new(Vec::new()), None, None)
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, Arc::clone(&ban_mgr), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
             .await
             .unwrap();
 
@@ -6614,7 +6623,7 @@ mod tests {
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
             meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -6678,7 +6687,7 @@ mod tests {
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
             meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -6717,7 +6726,7 @@ mod tests {
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
             meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -6776,7 +6785,7 @@ mod tests {
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
             meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), Arc::clone(&ip_filter), Arc::new(Vec::new()), None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), Arc::clone(&ip_filter), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -6813,7 +6822,7 @@ mod tests {
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
             meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), Arc::clone(&ip_filter), Arc::new(Vec::new()), None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), Arc::clone(&ip_filter), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
