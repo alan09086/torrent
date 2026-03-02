@@ -103,7 +103,7 @@ impl Unpin for BoxedStream {}
 /// provide their own implementation backed by in-memory channels.
 ///
 /// The `accept` method returns a boxed future for dyn compatibility.
-pub trait TransportListener: Send {
+pub trait TransportListener: Send + Sync {
     /// Accept the next inbound connection.
     fn accept(&mut self) -> AcceptFuture<'_>;
 

@@ -163,6 +163,9 @@ pub struct SessionHandle {
     alert_tx: broadcast::Sender<Alert>,
     alert_mask: Arc<AtomicU32>,
     counters: Arc<crate::stats::SessionCounters>,
+    /// Network transport factory (M51). Used by future simulation tasks.
+    #[allow(dead_code)]
+    factory: Arc<crate::transport::NetworkFactory>,
 }
 
 impl SessionHandle {
@@ -200,6 +203,33 @@ impl SessionHandle {
         settings: Settings,
         plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
+    ) -> crate::Result<Self> {
+        Self::start_full(settings, plugins, backend, Arc::new(crate::transport::NetworkFactory::tokio())).await
+    }
+
+    /// Start a new session with the given settings and a custom transport factory.
+    ///
+    /// Uses default plugins (none) and default disk backend.
+    pub async fn start_with_transport(
+        settings: Settings,
+        factory: Arc<crate::transport::NetworkFactory>,
+    ) -> crate::Result<Self> {
+        let disk_config = crate::disk::DiskConfig::from(&settings);
+        let backend = crate::disk_backend::create_backend_from_config(&disk_config);
+        Self::start_full(settings, Arc::new(Vec::new()), backend, factory).await
+    }
+
+    /// Start a new session with all customizable parameters.
+    ///
+    /// This is the most general constructor — all other `start_*` variants
+    /// delegate to this method. The `factory` parameter controls how TCP
+    /// listeners and connections are created: use [`NetworkFactory::tokio()`]
+    /// for real networking or a custom factory for simulation.
+    pub async fn start_full(
+        settings: Settings,
+        plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+        backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
+        factory: Arc<crate::transport::NetworkFactory>,
     ) -> crate::Result<Self> {
         let mut settings = settings;
 
@@ -346,8 +376,8 @@ impl SessionHandle {
         };
 
         // SSL listener (M42): bind if ssl_listen_port != 0
-        let ssl_listener = if settings.ssl_listen_port != 0 {
-            match tokio::net::TcpListener::bind(("0.0.0.0", settings.ssl_listen_port)).await {
+        let ssl_listener: Option<Box<dyn crate::transport::TransportListener>> = if settings.ssl_listen_port != 0 {
+            match factory.bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.ssl_listen_port))).await {
                 Ok(l) => {
                     info!(port = settings.ssl_listen_port, "SSL listener started");
                     Some(l)
@@ -438,10 +468,11 @@ impl SessionHandle {
             ssl_manager,
             ssl_listener,
             counters: Arc::clone(&counters),
+            factory: Arc::clone(&factory),
         };
 
         tokio::spawn(actor.run());
-        Ok(SessionHandle { cmd_tx, alert_tx, alert_mask, counters })
+        Ok(SessionHandle { cmd_tx, alert_tx, alert_mask, counters, factory })
     }
 
     /// Add a torrent from parsed .torrent metadata (v1, v2, or hybrid).
@@ -837,9 +868,11 @@ struct SessionActor {
     /// SSL manager for SSL torrent certificate handling (M42).
     ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
     /// SSL/TLS TCP listener (separate port from the main listener) (M42).
-    ssl_listener: Option<tokio::net::TcpListener>,
+    ssl_listener: Option<Box<dyn crate::transport::TransportListener>>,
     /// Shared atomic session counters (M50).
     counters: Arc<crate::stats::SessionCounters>,
+    /// Network transport factory for TCP operations (M51).
+    factory: Arc<crate::transport::NetworkFactory>,
 }
 
 impl SessionActor {
@@ -1010,7 +1043,7 @@ impl SessionActor {
                 }
                 // SSL inbound connections (M42)
                 result = async {
-                    if let Some(ref listener) = self.ssl_listener {
+                    if let Some(ref mut listener) = self.ssl_listener {
                         listener.accept().await
                     } else {
                         std::future::pending().await
@@ -1211,6 +1244,7 @@ impl SessionActor {
             Arc::clone(&self.plugins),
             self.sam_session.clone(),
             self.ssl_manager.clone(),
+            Arc::clone(&self.factory),
         )
         .await?;
 
@@ -1274,6 +1308,7 @@ impl SessionActor {
             Arc::clone(&self.plugins),
             self.sam_session.clone(),
             self.ssl_manager.clone(),
+            Arc::clone(&self.factory),
         )
         .await?;
         self.torrents.insert(
@@ -1765,7 +1800,7 @@ impl SessionActor {
     /// the server config.
     async fn handle_ssl_incoming(
         &mut self,
-        stream: tokio::net::TcpStream,
+        stream: crate::transport::BoxedStream,
         addr: std::net::SocketAddr,
     ) {
         use tokio_rustls::LazyConfigAcceptor;
