@@ -67,6 +67,12 @@ pub use ferrite_session::{
     ChokingAlgorithm,
     // Mixed-mode bandwidth allocation (M45)
     MixedModeAlgorithm,
+    // Session stats (M50)
+    MetricKind,
+    SessionStatsMetric,
+    SessionCounters,
+    session_stats_metrics,
+    NUM_METRICS,
     // Error types
     Error,
     Result,

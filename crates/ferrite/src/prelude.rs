@@ -77,3 +77,6 @@ pub use crate::session::MixedModeAlgorithm;
 
 // Pluggable disk I/O (M49)
 pub use crate::session::{DiskIoBackend, DisabledDiskIo};
+
+// Session stats (M50)
+pub use crate::session::SessionCounters;

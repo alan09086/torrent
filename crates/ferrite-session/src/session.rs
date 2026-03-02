@@ -151,6 +151,8 @@ enum SessionCommand {
         new_path: std::path::PathBuf,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Trigger an immediate session stats snapshot and alert (M50).
+    PostSessionStats,
     Shutdown,
 }
 
@@ -160,6 +162,7 @@ pub struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCommand>,
     alert_tx: broadcast::Sender<Alert>,
     alert_mask: Arc<AtomicU32>,
+    counters: Arc<crate::stats::SessionCounters>,
 }
 
 impl SessionHandle {
@@ -402,6 +405,8 @@ impl SessionHandle {
         let (disk_manager, disk_actor_handle) =
             crate::disk::DiskManagerHandle::new_with_backend(disk_config, backend);
 
+        let counters = Arc::new(crate::stats::SessionCounters::new());
+
         let external_ip = settings.external_ip;
         let actor = SessionActor {
             settings,
@@ -432,10 +437,11 @@ impl SessionHandle {
             sam_session,
             ssl_manager,
             ssl_listener,
+            counters: Arc::clone(&counters),
         };
 
         tokio::spawn(actor.run());
-        Ok(SessionHandle { cmd_tx, alert_tx, alert_mask })
+        Ok(SessionHandle { cmd_tx, alert_tx, alert_mask, counters })
     }
 
     /// Add a torrent from parsed .torrent metadata (v1, v2, or hybrid).
@@ -559,6 +565,19 @@ impl SessionHandle {
     /// Subscribe with per-subscriber category filtering.
     pub fn subscribe_filtered(&self, filter: AlertCategory) -> AlertStream {
         AlertStream::new(self.alert_tx.subscribe(), filter)
+    }
+
+    /// Trigger an immediate session stats snapshot and alert.
+    pub async fn post_session_stats(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(SessionCommand::PostSessionStats)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Access the shared atomic counters (read-only handle).
+    pub fn counters(&self) -> &Arc<crate::stats::SessionCounters> {
+        &self.counters
     }
 
     /// Atomically update the session-level alert mask.
@@ -819,6 +838,8 @@ struct SessionActor {
     ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
     /// SSL/TLS TCP listener (separate port from the main listener) (M42).
     ssl_listener: Option<tokio::net::TcpListener>,
+    /// Shared atomic session counters (M50).
+    counters: Arc<crate::stats::SessionCounters>,
 }
 
 impl SessionActor {
@@ -831,6 +852,17 @@ impl SessionActor {
             std::time::Duration::from_secs(auto_manage_secs),
         );
         auto_manage_interval.tick().await; // skip first immediate tick
+
+        // Periodic session stats timer (M50)
+        let stats_interval_ms = self.settings.stats_report_interval;
+        let mut stats_timer = if stats_interval_ms > 0 {
+            Some(tokio::time::interval(std::time::Duration::from_millis(stats_interval_ms)))
+        } else {
+            None
+        };
+        if let Some(ref mut t) = stats_timer {
+            t.tick().await; // skip first immediate tick
+        }
 
         loop {
             tokio::select! {
@@ -943,6 +975,9 @@ impl SessionActor {
                             let result = self.handle_move_torrent_storage(info_hash, new_path).await;
                             let _ = reply.send(result);
                         }
+                        Some(SessionCommand::PostSessionStats) => {
+                            self.fire_stats_alert();
+                        }
                         Some(SessionCommand::Shutdown) | None => {
                             self.shutdown_all().await;
                             return;
@@ -1046,6 +1081,15 @@ impl SessionActor {
                     for entry in self.torrents.values() {
                         let _ = entry.handle.update_external_ip(ip).await;
                     }
+                }
+                // Periodic session stats (M50)
+                _ = async {
+                    match &mut stats_timer {
+                        Some(t) => t.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.fire_stats_alert();
                 }
             }
         }
@@ -1355,7 +1399,38 @@ impl SessionActor {
         })
     }
 
+    /// Update gauge metrics that come from session-level state.
+    fn update_session_gauges(&self) {
+        use crate::stats::*;
+        let c = &self.counters;
+        c.set(SES_NUM_TORRENTS, self.torrents.len() as i64);
+        c.set(SES_ACTIVE_TORRENTS, self.torrents.len() as i64);
+
+        // DHT presence (instance count, not routing table size)
+        let dht_nodes = self.dht_v4.is_some() as i64 + self.dht_v6.is_some() as i64;
+        c.set(DHT_NODES, dht_nodes);
+        c.set(DHT_NODES_V4, self.dht_v4.is_some() as i64);
+        c.set(DHT_NODES_V6, self.dht_v6.is_some() as i64);
+
+        // Ban count
+        let ban_count = self.ban_manager.read().unwrap().banned_list().len() as i64;
+        c.set(PEER_NUM_BANNED, ban_count);
+    }
+
+    /// Snapshot counters and fire a SessionStatsAlert.
+    fn fire_stats_alert(&self) {
+        self.update_session_gauges();
+        let values = self.counters.snapshot();
+        crate::alert::post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            crate::alert::AlertKind::SessionStatsAlert { values },
+        );
+    }
+
     async fn make_session_stats(&self) -> SessionStats {
+        self.update_session_gauges();
+
         let mut total_downloaded = 0u64;
         let mut total_uploaded = 0u64;
 
@@ -2791,6 +2866,90 @@ mod tests {
         let current = session.settings().await.unwrap();
         assert!(!current.force_proxy);
 
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- M50: Session stats counters tests ----
+
+    #[tokio::test]
+    async fn session_stats_counters_accessible() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let counters = session.counters();
+        // Uptime should be >= 0 from the moment of creation
+        assert!(counters.uptime_secs() >= 0);
+        assert_eq!(counters.len(), crate::stats::NUM_METRICS);
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_session_stats_fires_alert() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let mut stats_sub = session.subscribe_filtered(AlertCategory::STATS);
+
+        session.post_session_stats().await.unwrap();
+
+        let alert = tokio::time::timeout(Duration::from_secs(2), stats_sub.recv())
+            .await
+            .expect("timed out waiting for SessionStatsAlert")
+            .expect("recv error");
+        assert!(
+            matches!(alert.kind, AlertKind::SessionStatsAlert { ref values } if values.len() == crate::stats::NUM_METRICS),
+            "expected SessionStatsAlert with {} values, got {:?}",
+            crate::stats::NUM_METRICS,
+            alert.kind,
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_stats_include_torrent_count() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let mut stats_sub = session.subscribe_filtered(AlertCategory::STATS);
+
+        // Add a torrent
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        session.post_session_stats().await.unwrap();
+
+        let alert = tokio::time::timeout(Duration::from_secs(2), stats_sub.recv())
+            .await
+            .expect("timed out waiting for SessionStatsAlert")
+            .expect("recv error");
+        match alert.kind {
+            AlertKind::SessionStatsAlert { values } => {
+                assert!(
+                    values[crate::stats::SES_NUM_TORRENTS] > 0,
+                    "SES_NUM_TORRENTS should be > 0 after adding a torrent, got {}",
+                    values[crate::stats::SES_NUM_TORRENTS],
+                );
+            }
+            other => panic!("expected SessionStatsAlert, got {other:?}"),
+        }
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stats_timer_disabled_when_zero() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let mut config = test_settings();
+        config.stats_report_interval = 0;
+        let session = SessionHandle::start(config).await.unwrap();
+        let mut stats_sub = session.subscribe_filtered(AlertCategory::STATS);
+
+        // Wait 200ms — no periodic stats alert should arrive
+        let result = tokio::time::timeout(Duration::from_millis(200), stats_sub.recv()).await;
+        assert!(
+            result.is_err(),
+            "no SessionStatsAlert should fire when stats_report_interval is 0"
+        );
         session.shutdown().await.unwrap();
     }
 }
