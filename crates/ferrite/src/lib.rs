@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! A Rust BitTorrent library.
 //!
 //! `ferrite` is the public facade for the ferrite crate family. It re-exports

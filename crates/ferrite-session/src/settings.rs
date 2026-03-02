@@ -177,38 +177,66 @@ fn default_i2p_tunnel_length() -> u8 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     // ── General ──
+    /// TCP listen port for incoming peer connections (default: 6881).
     #[serde(default = "default_listen_port")]
     pub listen_port: u16,
+    /// Default download directory for new torrents (default: ".").
     #[serde(default = "default_download_dir")]
     pub download_dir: PathBuf,
+    /// Maximum number of concurrent torrents (default: 100).
     #[serde(default = "default_max_torrents")]
     pub max_torrents: usize,
+    /// Directory for fast-resume data files. If `None`, resume data is not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_data_dir: Option<PathBuf>,
 
     // ── Protocol features ──
+    /// Enable Kademlia DHT peer discovery (BEP 5). Default: true.
     #[serde(default = "default_true")]
     pub enable_dht: bool,
+    /// Enable Peer Exchange (BEP 11). Default: true.
     #[serde(default = "default_true")]
     pub enable_pex: bool,
+    /// Enable Local Service Discovery via multicast (BEP 14). Default: true.
     #[serde(default = "default_true")]
     pub enable_lsd: bool,
+    /// Enable BEP 6 Fast Extension (AllowedFast, HaveAll, HaveNone, Reject,
+    /// SuggestPiece). Default: true.
     #[serde(default = "default_true")]
     pub enable_fast_extension: bool,
+    /// Enable uTP (BEP 29) micro transport protocol. When enabled, outbound
+    /// connections try uTP first with a 5-second timeout before falling back
+    /// to TCP. Default: true.
     #[serde(default = "default_true")]
     pub enable_utp: bool,
+    /// Enable UPnP IGD port mapping (last resort after PCP and NAT-PMP).
+    /// Default: true.
     #[serde(default = "default_true")]
     pub enable_upnp: bool,
+    /// Enable NAT-PMP (RFC 6886) and PCP (RFC 6887) port mapping.
+    /// PCP is tried first, then NAT-PMP as fallback. Default: true.
     #[serde(default = "default_true")]
     pub enable_natpmp: bool,
+    /// Enable IPv6 dual-stack support (BEP 7, 24). Binds listeners on both
+    /// IPv4 and IPv6, starts a second DHT instance, and processes IPv6 peers
+    /// in PEX and tracker responses. Default: true.
     #[serde(default = "default_true")]
     pub enable_ipv6: bool,
+    /// Enable HTTP/web seeding (BEP 19 GetRight, BEP 17 Hoffman). Torrents
+    /// with `url-list` or `httpseeds` download pieces from HTTP servers
+    /// alongside peer-to-peer transfers. Default: true.
     #[serde(default = "default_true")]
     pub enable_web_seed: bool,
+    /// Enable BEP 55 holepunch extension for NAT traversal. Advertises
+    /// `ut_holepunch` in the extension handshake and can act as initiator,
+    /// relay, or target for holepunch connections. Default: true.
     #[serde(default = "default_true")]
     pub enable_holepunch: bool,
+    /// Connection encryption mode (MSE/PE). Default: Enabled.
     #[serde(default = "default_encryption")]
     pub encryption_mode: EncryptionMode,
+    /// Suppress identifying information (client version in BEP 10 handshake)
+    /// and disable DHT, LSD, UPnP, and NAT-PMP. Default: false.
     #[serde(default)]
     pub anonymous_mode: bool,
     /// Manually configured external IP for BEP 40 peer priority.
@@ -217,22 +245,32 @@ pub struct Settings {
     pub external_ip: Option<IpAddr>,
 
     // ── Seeding ──
+    /// Stop seeding when this upload/download ratio is reached. `None` = unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_ratio_limit: Option<f64>,
+    /// Enable BEP 16 super seeding for new torrents. Reveals pieces one-per-peer
+    /// to maximize piece diversity across the swarm. Default: false.
     #[serde(default)]
     pub default_super_seeding: bool,
     /// Default share mode for new torrents. When true, torrents relay pieces
     /// in memory without writing to disk. Requires fast extension (BEP 6).
     #[serde(default)]
     pub default_share_mode: bool,
+    /// Advertise upload-only status via extension handshake when a torrent
+    /// transitions to seeding (BEP 21). Default: true.
     #[serde(default = "default_true")]
     pub upload_only_announce: bool,
+    /// Have message batching delay in milliseconds. When > 0, Have messages are
+    /// buffered and sent in batches; if the batch exceeds 50% of total pieces,
+    /// a full Bitfield is sent instead. Default: 0 (immediate).
     #[serde(default)]
     pub have_send_delay_ms: u64,
 
     // ── Rate limiting ──
+    /// Global upload rate limit in bytes/sec (0 = unlimited).
     #[serde(default)]
     pub upload_rate_limit: u64,
+    /// Global download rate limit in bytes/sec (0 = unlimited).
     #[serde(default)]
     pub download_rate_limit: u64,
     /// TCP upload rate limit in bytes/sec (0 = unlimited).
@@ -247,10 +285,13 @@ pub struct Settings {
     /// uTP download rate limit in bytes/sec (0 = unlimited).
     #[serde(default)]
     pub utp_download_rate_limit: u64,
+    /// Automatically adjust the number of upload slots based on bandwidth. Default: true.
     #[serde(default = "default_true")]
     pub auto_upload_slots: bool,
+    /// Minimum number of automatic upload slots (default: 2).
     #[serde(default = "default_auto_upload_slots_min")]
     pub auto_upload_slots_min: usize,
+    /// Maximum number of automatic upload slots (default: 20).
     #[serde(default = "default_auto_upload_slots_max")]
     pub auto_upload_slots_max: usize,
     /// Mixed-mode TCP/uTP bandwidth allocation algorithm.
@@ -258,60 +299,93 @@ pub struct Settings {
     pub mixed_mode_algorithm: MixedModeAlgorithm,
 
     // ── Queue management ──
+    /// Maximum concurrent auto-managed downloading torrents (-1 = unlimited, default: 3).
     #[serde(default = "default_active_downloads")]
     pub active_downloads: i32,
+    /// Maximum concurrent auto-managed seeding torrents (-1 = unlimited, default: 5).
     #[serde(default = "default_active_seeds")]
     pub active_seeds: i32,
+    /// Hard cap on all active auto-managed torrents (-1 = unlimited, default: 500).
     #[serde(default = "default_active_limit")]
     pub active_limit: i32,
+    /// Maximum concurrent hash-check operations (default: 1).
     #[serde(default = "default_active_checking")]
     pub active_checking: i32,
+    /// Exempt inactive torrents from download/seed limits. A torrent is inactive
+    /// if its rate is below `inactive_down_rate` / `inactive_up_rate`. Default: true.
     #[serde(default = "default_true")]
     pub dont_count_slow_torrents: bool,
+    /// Download rate threshold (bytes/sec) below which a torrent is considered
+    /// inactive for queue management purposes (default: 2048).
     #[serde(default = "default_inactive_rate")]
     pub inactive_down_rate: u64,
+    /// Upload rate threshold (bytes/sec) below which a torrent is considered
+    /// inactive for queue management purposes (default: 2048).
     #[serde(default = "default_inactive_rate")]
     pub inactive_up_rate: u64,
+    /// Interval in seconds between queue evaluations (default: 30).
     #[serde(default = "default_auto_manage_interval")]
     pub auto_manage_interval: u64,
+    /// Grace period in seconds where a torrent is considered active regardless
+    /// of speed after being started (default: 60).
     #[serde(default = "default_auto_manage_startup")]
     pub auto_manage_startup: u64,
+    /// Allocate seeding slots before download slots. Default: false.
     #[serde(default)]
     pub auto_manage_prefer_seeds: bool,
 
     // ── Alerts ──
+    /// Bitmask of alert categories to receive (default: ALL).
     #[serde(default = "default_alert_mask")]
     pub alert_mask: AlertCategory,
+    /// Capacity of the alert broadcast channel (default: 1024).
     #[serde(default = "default_alert_channel_size")]
     pub alert_channel_size: usize,
 
     // ── Smart banning ──
+    /// Number of hash-failure involvements before a peer is auto-banned.
+    /// Lower values ban faster but risk false positives (default: 3).
     #[serde(default = "default_smart_ban_max_failures")]
     pub smart_ban_max_failures: u32,
+    /// Enable parole mode: re-download a failed piece from a single uninvolved
+    /// peer to definitively attribute fault before striking. Default: true.
     #[serde(default = "default_true")]
     pub smart_ban_parole: bool,
 
     // ── Disk I/O ──
+    /// Number of concurrent disk I/O threads (default: 4).
     #[serde(default = "default_disk_io_threads")]
     pub disk_io_threads: usize,
+    /// Storage allocation mode: Auto, FullPreallocate, or SparseFile (default: Auto).
     #[serde(default = "default_storage_mode")]
     pub storage_mode: StorageMode,
+    /// Total ARC disk cache size in bytes (default: 64 MiB, minimum: 1 MiB).
     #[serde(default = "default_disk_cache_size")]
     pub disk_cache_size: usize,
+    /// Fraction of disk cache reserved for write buffering (0.0–1.0, default: 0.25).
     #[serde(default = "default_disk_write_cache_ratio")]
     pub disk_write_cache_ratio: f32,
+    /// Capacity of the async disk I/O command channel (default: 512).
     #[serde(default = "default_disk_channel_capacity")]
     pub disk_channel_capacity: usize,
 
     // ── Hashing & piece picking ──
+    /// Number of concurrent piece hash verification threads (default: 2).
     #[serde(default = "default_hashing_threads")]
     pub hashing_threads: usize,
+    /// Maximum per-peer request queue depth (default: 250).
     #[serde(default = "default_max_request_queue_depth")]
     pub max_request_queue_depth: usize,
+    /// Request queue time multiplier in seconds. Controls how many seconds
+    /// worth of requests to keep in flight per peer (default: 3.0).
     #[serde(default = "default_request_queue_time")]
     pub request_queue_time: f64,
+    /// Block request timeout in seconds before the request is considered
+    /// lost and re-issued (default: 60).
     #[serde(default = "default_block_request_timeout")]
     pub block_request_timeout_secs: u32,
+    /// Maximum concurrent `FileStream` readers. Controls how many simultaneous
+    /// file-streaming reads can proceed (default: 8).
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_stream_reads: usize,
     /// Automatically switch to sequential piece picking when too many partial
@@ -320,26 +394,41 @@ pub struct Settings {
     pub auto_sequential: bool,
 
     // ── Piece picker enhancements (M44) ──
+    /// Prefer pieces adjacent to those already downloaded for improved sequential
+    /// disk access patterns (4 MiB extent groups). Default: true.
     #[serde(default = "default_true")]
     pub piece_extent_affinity: bool,
+    /// Enable BEP 6 SuggestPiece: suggest newly verified pieces to peers that
+    /// don't have them, improving piece diversity in the swarm. Default: false.
     #[serde(default)]
     pub suggest_mode: bool,
+    /// Maximum SuggestPiece messages per peer to avoid flooding (default: 10).
     #[serde(default = "default_max_suggest_pieces")]
     pub max_suggest_pieces: usize,
+    /// Predictive piece announce delay in milliseconds. When > 0, a Have message
+    /// is sent before hash verification completes, reducing piece availability
+    /// latency at the cost of a possible false announce. Default: 0 (disabled).
     #[serde(default = "default_predictive_piece_announce_ms")]
     pub predictive_piece_announce_ms: u64,
 
     // ── Proxy ──
+    /// Proxy configuration for peer and tracker connections. Default: no proxy.
     #[serde(default)]
     pub proxy: ProxyConfig,
+    /// Force all connections through the configured proxy. Disables listen
+    /// sockets, UPnP, NAT-PMP, DHT, and LSD. Default: false.
     #[serde(default)]
     pub force_proxy: bool,
+    /// Check tracker IP addresses against the IP filter. When false, trackers
+    /// are exempt from IP filtering. Default: true.
     #[serde(default = "default_true")]
     pub apply_ip_filter_to_trackers: bool,
 
     // ── DHT tuning ──
+    /// Maximum DHT queries per second to control network traffic (default: 50).
     #[serde(default = "default_dht_qps")]
     pub dht_queries_per_second: usize,
+    /// Timeout in seconds for a single DHT query before it is abandoned (default: 10).
     #[serde(default = "default_dht_timeout")]
     pub dht_query_timeout_secs: u64,
     /// BEP 42: Enforce node ID verification in DHT routing table.
@@ -360,12 +449,15 @@ pub struct Settings {
     pub dht_sample_infohashes_interval: u64,
 
     // ── NAT tuning ──
+    /// UPnP lease duration in seconds (default: 3600).
     #[serde(default = "default_upnp_lease")]
     pub upnp_lease_duration: u32,
+    /// NAT-PMP mapping lifetime in seconds (default: 7200).
     #[serde(default = "default_natpmp_lifetime")]
     pub natpmp_lifetime: u32,
 
     // ── uTP tuning ──
+    /// Maximum concurrent uTP connections (default: 256).
     #[serde(default = "default_utp_max_conns")]
     pub utp_max_connections: usize,
 
