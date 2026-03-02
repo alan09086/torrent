@@ -8,10 +8,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[repr(u8)]
 pub enum FilePriority {
+    /// Do not download this file.
     Skip = 0,
+    /// Low download priority.
     Low = 1,
+    /// Default download priority.
     #[default]
     Normal = 4,
+    /// High download priority.
     High = 7,
 }
 

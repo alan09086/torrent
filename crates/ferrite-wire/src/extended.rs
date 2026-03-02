@@ -102,15 +102,20 @@ pub enum ExtMessage {
 /// ut_metadata message types (BEP 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataMessageType {
+    /// Request a metadata piece from the peer.
     Request = 0,
+    /// Metadata piece payload.
     Data = 1,
+    /// Peer does not have the requested metadata piece.
     Reject = 2,
 }
 
 /// ut_metadata message (BEP 9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataMessage {
+    /// Message type (request, data, or reject).
     pub msg_type: MetadataMessageType,
+    /// Zero-based metadata piece index.
     pub piece: u32,
     /// Total metadata size (included in Data messages).
     pub total_size: Option<u64>,

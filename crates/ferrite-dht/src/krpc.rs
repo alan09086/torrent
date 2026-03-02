@@ -24,14 +24,17 @@ use crate::error::{Error, Result};
 pub struct TransactionId(pub [u8; 2]);
 
 impl TransactionId {
+    /// Create a transaction ID from a 16-bit integer.
     pub fn from_u16(val: u16) -> Self {
         TransactionId(val.to_be_bytes())
     }
 
+    /// Return the transaction ID as a 16-bit integer.
     pub fn as_u16(&self) -> u16 {
         u16::from_be_bytes(self.0)
     }
 
+    /// Parse a transaction ID from raw bytes (pads 1-byte IDs with zero).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 2 {
             // Some implementations use 1-byte transaction IDs; pad with zero
@@ -46,7 +49,9 @@ impl TransactionId {
 /// A parsed KRPC message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KrpcMessage {
+    /// Opaque 2-byte identifier matching requests to responses.
     pub transaction_id: TransactionId,
+    /// Message payload (query, response, or error).
     pub body: KrpcBody,
     /// BEP 42: Compact IP+port of the message recipient, included in responses.
     pub sender_ip: Option<std::net::SocketAddr>,
@@ -55,34 +60,57 @@ pub struct KrpcMessage {
 /// The body of a KRPC message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KrpcBody {
+    /// A query from a remote node.
     Query(KrpcQuery),
+    /// A response to one of our queries.
     Response(KrpcResponse),
-    Error { code: i64, message: String },
+    /// An error response.
+    Error {
+        /// KRPC error code.
+        code: i64,
+        /// Human-readable error description.
+        message: String,
+    },
 }
 
 /// KRPC query types (BEP 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KrpcQuery {
+    /// Liveness check.
     Ping {
+        /// Querying node's ID.
         id: Id20,
     },
+    /// Find the closest nodes to a target ID.
     FindNode {
+        /// Querying node's ID.
         id: Id20,
+        /// Target node ID to search for.
         target: Id20,
     },
+    /// Find peers downloading a torrent.
     GetPeers {
+        /// Querying node's ID.
         id: Id20,
+        /// Torrent info hash to search for.
         info_hash: Id20,
     },
+    /// Announce that we are downloading a torrent.
     AnnouncePeer {
+        /// Querying node's ID.
         id: Id20,
+        /// Torrent info hash being announced.
         info_hash: Id20,
+        /// Port we are listening on.
         port: u16,
+        /// If true, use the UDP source port instead of the `port` field.
         implied_port: bool,
+        /// Write token obtained from a prior get_peers response.
         token: Vec<u8>,
     },
     /// BEP 44: get an item from DHT storage.
     Get {
+        /// Querying node's ID.
         id: Id20,
         /// Target hash: SHA-1(value) for immutable, SHA-1(pubkey+salt) for mutable.
         target: Id20,
@@ -91,6 +119,7 @@ pub enum KrpcQuery {
     },
     /// BEP 44: put an item into DHT storage.
     Put {
+        /// Querying node's ID.
         id: Id20,
         /// Write token (obtained from a prior get response).
         token: Vec<u8>,
@@ -109,7 +138,9 @@ pub enum KrpcQuery {
     },
     /// BEP 51: sample info hashes from a node's storage.
     SampleInfohashes {
+        /// Querying node's ID.
         id: Id20,
+        /// Target ID for DHT traversal.
         target: Id20,
     },
 }
@@ -118,21 +149,30 @@ pub enum KrpcQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KrpcResponse {
     /// Response to ping or announce_peer — just the node ID.
-    NodeId { id: Id20 },
+    NodeId {
+        /// Responding node's ID.
+        id: Id20,
+    },
     /// Response to find_node.
     FindNode {
+        /// Responding node's ID.
         id: Id20,
+        /// Closest known IPv4 nodes.
         nodes: Vec<CompactNodeInfo>,
-        /// IPv6 nodes (BEP 24): 38-byte compact format.
+        /// Closest known IPv6 nodes (BEP 24).
         nodes6: Vec<CompactNodeInfo6>,
     },
     /// Response to get_peers — either peers or closer nodes.
     GetPeers(GetPeersResponse),
     /// BEP 44: response to a get query.
     GetItem {
+        /// Responding node's ID.
         id: Id20,
+        /// Write token for subsequent put operations.
         token: Option<Vec<u8>>,
+        /// Closest known IPv4 nodes.
         nodes: Vec<CompactNodeInfo>,
+        /// Closest known IPv6 nodes.
         nodes6: Vec<CompactNodeInfo6>,
         /// The stored value (if found).
         value: Option<Vec<u8>>,
@@ -150,7 +190,9 @@ pub enum KrpcResponse {
 /// get_peers response can return peers, closer nodes, or both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetPeersResponse {
+    /// Responding node's ID.
     pub id: Id20,
+    /// Write token for announce_peer.
     pub token: Option<Vec<u8>>,
     /// Direct peer addresses (compact: 6 bytes each for IPv4, 18 bytes for IPv6).
     pub peers: Vec<std::net::SocketAddr>,
@@ -163,6 +205,7 @@ pub struct GetPeersResponse {
 /// Response to sample_infohashes (BEP 51).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleInfohashesResponse {
+    /// Responding node's ID.
     pub id: Id20,
     /// Minimum seconds before querying this node again.
     pub interval: i64,

@@ -9,7 +9,9 @@ use crate::error::{Error, Result};
 /// Encoded as 26 bytes: 20-byte node ID, 4-byte IPv4, 2-byte port (big-endian).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactNodeInfo {
+    /// 20-byte node ID.
     pub id: Id20,
+    /// IPv4 socket address (IP + port).
     pub addr: SocketAddr,
 }
 
@@ -81,7 +83,9 @@ pub fn encode_compact_nodes(nodes: &[CompactNodeInfo]) -> Vec<u8> {
 /// Encoded as 38 bytes: 20-byte node ID, 16-byte IPv6, 2-byte port (big-endian).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactNodeInfo6 {
+    /// 20-byte node ID.
     pub id: Id20,
+    /// IPv6 socket address (IP + port).
     pub addr: SocketAddr,
 }
 

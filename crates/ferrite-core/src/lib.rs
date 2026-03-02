@@ -1,4 +1,5 @@
-//! Core types for BitTorrent: hashes, metainfo, magnets, and piece arithmetic.
+#![warn(missing_docs)]
+//! Core BitTorrent types: info hashes, metadata, magnets, piece arithmetic, and torrent creation.
 
 mod create;
 mod detect;
@@ -45,7 +46,9 @@ pub use storage_mode::StorageMode;
 /// Network address family for dual-stack support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AddressFamily {
+    /// IPv4.
     V4,
+    /// IPv6.
     V6,
 }
 

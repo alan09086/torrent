@@ -9,8 +9,9 @@ pub(crate) const VC: [u8; 8] = [0u8; 8];
 #[allow(dead_code)]
 pub(crate) const MAX_PADDING: usize = 512;
 
-/// Crypto method bitmask values.
+/// Crypto method bitmask: plaintext (no encryption).
 pub const CRYPTO_PLAINTEXT: u32 = 0x01;
+/// Crypto method bitmask: RC4 stream cipher.
 pub const CRYPTO_RC4: u32 = 0x02;
 
 /// Compute HASH(data) = SHA1(data). Returns 20 bytes.

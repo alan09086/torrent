@@ -12,7 +12,9 @@ use super::stream::MseStream;
 
 /// Result of a successful MSE/PE negotiation.
 pub struct NegotiationResult<S> {
+    /// The encrypted (or plaintext) stream wrapper.
     pub stream: MseStream<S>,
+    /// Negotiated crypto method bitmask (`CRYPTO_PLAINTEXT` or `CRYPTO_RC4`).
     pub crypto_method: u32,
 }
 

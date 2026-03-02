@@ -16,6 +16,7 @@ pub struct MessageCodec {
 }
 
 impl MessageCodec {
+    /// Create a codec with the default maximum message size (16 MiB).
     pub fn new() -> Self {
         MessageCodec {
             max_size: MAX_MESSAGE_SIZE,

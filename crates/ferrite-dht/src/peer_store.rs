@@ -35,6 +35,7 @@ struct StoredPeer {
 }
 
 impl PeerStore {
+    /// Create an empty peer store with a fresh token secret.
     pub fn new() -> Self {
         let secret = generate_secret();
         PeerStore {

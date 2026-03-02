@@ -18,8 +18,11 @@ use crate::{Id32, MerkleTree};
 /// File info needed to initialize the hash picker.
 #[derive(Debug, Clone)]
 pub struct FileHashInfo {
+    /// Merkle root hash for this file.
     pub root: Id32,
+    /// Total number of 16 KiB blocks in the file.
     pub num_blocks: u32,
+    /// Total number of pieces in the file.
     pub num_pieces: u32,
 }
 
