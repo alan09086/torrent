@@ -8,6 +8,29 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.56.0 — 2026-03-01
+
+Session statistics counters. Eleven crates, 1279 tests, 27 BEPs implemented. Phase 11 (Pluggable Interfaces) complete.
+
+### M50: Session Statistics Counters
+
+### Added
+- `SessionCounters` — 70 atomic counters (`[AtomicI64; 70]`) covering network, disk, DHT, peers, protocol, bandwidth, and session metrics
+- `MetricKind` enum (Counter/Gauge) and `SessionStatsMetric` metadata struct for metric introspection
+- `session_stats_metrics()` — static metadata for all 70 counters (name, kind, description)
+- `SessionStatsAlert` — new alert variant carrying full 70-metric snapshot via `AlertCategory::STATS`
+- `Settings.stats_report_interval` — configurable periodic stats reporting (default 1000ms, 0=disabled)
+- Periodic stats timer in `SessionActor::run()` loop with `update_session_gauges()` and `fire_stats_alert()`
+- `SessionHandle::post_session_stats()` — on-demand stats snapshot request
+- `SessionHandle::counters()` — direct access to `Arc<SessionCounters>` for zero-copy reads
+- `ClientBuilder::stats_report_interval()` — facade builder method
+- Facade re-exports: `MetricKind`, `SessionStatsMetric`, `SessionCounters`, `session_stats_metrics`, `NUM_METRICS`
+- Prelude re-export: `SessionCounters`
+- 25 new tests (1279 total)
+
+### Changed
+- Version bump 0.55.0 → 0.56.0
+
 ## 0.55.0 — 2026-03-01
 
 Pluggable disk I/O interface. Eleven crates, 1254 tests, 27 BEPs implemented. Phase 11 (Pluggable Interfaces) begins.
