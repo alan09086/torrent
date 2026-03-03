@@ -151,6 +151,9 @@ fn default_peer_turnover() -> f64 {
 fn default_peer_turnover_cutoff() -> f64 {
     0.9
 }
+fn default_steal_threshold_ratio() -> f64 {
+    10.0
+}
 fn default_peer_turnover_interval() -> u64 {
     300
 }
@@ -405,6 +408,10 @@ pub struct Settings {
     /// pieces accumulate. Uses hysteresis (1.6x activate / 1.3x deactivate).
     #[serde(default = "default_true")]
     pub auto_sequential: bool,
+    /// Steal blocks from peers this many times slower than the requesting peer (default: 10.0).
+    /// Set to 0.0 to disable stealing.
+    #[serde(default = "default_steal_threshold_ratio")]
+    pub steal_threshold_ratio: f64,
 
     // ── Piece picker enhancements (M44) ──
     /// Prefer pieces adjacent to those already downloaded for improved sequential
@@ -642,6 +649,7 @@ impl Default for Settings {
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
             auto_sequential: true,
+            steal_threshold_ratio: 10.0,
             // Piece picker enhancements (M44)
             piece_extent_affinity: true,
             suggest_mode: false,
@@ -739,6 +747,7 @@ impl Settings {
             disk_io_threads: 8,
             auto_upload_slots_max: 100,
             suggest_mode: true,
+            steal_threshold_ratio: 5.0,
             ..Self::default()
         }
     }
@@ -1000,6 +1009,7 @@ impl PartialEq for Settings {
             && self.block_request_timeout_secs == other.block_request_timeout_secs
             && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
             && self.auto_sequential == other.auto_sequential
+            && self.steal_threshold_ratio.to_bits() == other.steal_threshold_ratio.to_bits()
             && self.piece_extent_affinity == other.piece_extent_affinity
             && self.suggest_mode == other.suggest_mode
             && self.max_suggest_pieces == other.max_suggest_pieces

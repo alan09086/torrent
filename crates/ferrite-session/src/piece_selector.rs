@@ -95,6 +95,10 @@ pub(crate) struct PickContext<'a> {
     pub extent_affinity: bool,
     /// Whether auto-sequential mode is currently active (managed by TorrentActor).
     pub auto_sequential_active: bool,
+    /// Map of peer address to their download rate (bytes/sec) for steal decisions.
+    pub peer_rates: &'a HashMap<SocketAddr, f64>,
+    /// Ratio threshold for stealing: steal if target peer rate < requesting peer rate / ratio.
+    pub steal_threshold_ratio: f64,
 }
 
 /// Result of a pick: which piece and blocks to request.
@@ -363,7 +367,60 @@ impl PieceSelector {
             }
         }
 
-        best_piece.map(|piece| PickResult { piece, blocks: best_blocks, exclusive: false })
+        if best_piece.is_some() {
+            return best_piece
+                .map(|piece| PickResult { piece, blocks: best_blocks, exclusive: false });
+        }
+
+        // Steal phase: if no unassigned blocks found, steal from slow peers
+        if ctx.steal_threshold_ratio > 0.0 && !ctx.peer_is_snubbed {
+            let my_rate = ctx.peer_rate;
+            if my_rate > 0.0 {
+                let steal_threshold = my_rate / ctx.steal_threshold_ratio;
+
+                for (&piece, ifp) in ctx.in_flight_pieces {
+                    if !ctx.peer_has.get(piece)
+                        || ctx.we_have.get(piece)
+                        || !ctx.wanted.get(piece)
+                    {
+                        continue;
+                    }
+
+                    // Get all missing blocks (includes assigned ones)
+                    let all_missing = missing_chunks(piece);
+
+                    // Filter to blocks assigned to slow peers
+                    let stealable: Vec<(u32, u32)> = all_missing
+                        .into_iter()
+                        .filter(|&(begin, _len)| {
+                            if let Some(&assigned_peer) =
+                                ifp.assigned_blocks.get(&(piece, begin))
+                            {
+                                if assigned_peer == ctx.peer_addr {
+                                    return false;
+                                }
+                                ctx.peer_rates
+                                    .get(&assigned_peer)
+                                    .map(|&rate| rate < steal_threshold)
+                                    .unwrap_or(false)
+                            } else {
+                                false // unassigned blocks should have been picked already
+                            }
+                        })
+                        .collect();
+
+                    if !stealable.is_empty() {
+                        return Some(PickResult {
+                            piece,
+                            blocks: stealable,
+                            exclusive: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Pick a new piece (not yet in-flight).
@@ -982,6 +1039,8 @@ mod tests {
         time_critical_pieces: &'a BTreeSet<u32>,
         suggested_pieces: &'a HashSet<u32>,
     ) -> PickContext<'a> {
+        static EMPTY_RATES: std::sync::LazyLock<HashMap<SocketAddr, f64>> =
+            std::sync::LazyLock::new(HashMap::new);
         PickContext {
             peer_addr,
             peer_has,
@@ -1002,6 +1061,8 @@ mod tests {
             piece_size: 262_144,
             extent_affinity: false,
             auto_sequential_active: false,
+            peer_rates: &EMPTY_RATES,
+            steal_threshold_ratio: 10.0,
         }
     }
 

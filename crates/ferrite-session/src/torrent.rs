@@ -4544,6 +4544,10 @@ impl TorrentActor {
             .map(|p| p.suggested_pieces.clone())
             .unwrap_or_default();
 
+        let peer_rates: HashMap<SocketAddr, f64> = self.peers.iter()
+            .map(|(&addr, p)| (addr, p.pipeline.ewma_rate()))
+            .collect();
+
         let ctx = PickContext {
             peer_addr,
             peer_has: &peer_bitfield,
@@ -4564,6 +4568,8 @@ impl TorrentActor {
             piece_size: self.lengths.as_ref().map(|l| l.piece_length() as u32).unwrap_or(262144),
             extent_affinity: self.config.piece_extent_affinity,
             auto_sequential_active: self.config.auto_sequential && self.auto_sequential_active,
+            peer_rates: &peer_rates,
+            steal_threshold_ratio: self.config.steal_threshold_ratio,
         };
 
         let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
@@ -5863,6 +5869,7 @@ mod tests {
             predictive_piece_announce_ms: 0,
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
+            steal_threshold_ratio: 10.0,
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,

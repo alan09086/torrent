@@ -99,6 +99,8 @@ pub struct TorrentConfig {
     pub mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm,
     /// Enable automatic sequential mode switching on partial-piece explosion.
     pub auto_sequential: bool,
+    /// Steal blocks from peers this many times slower than the requesting peer (0.0 = disabled).
+    pub steal_threshold_ratio: f64,
     /// Fraction of peers to disconnect per turnover interval (0.0–1.0).
     pub peer_turnover: f64,
     /// Only trigger turnover if download rate < this fraction of peak rate (0.0–1.0).
@@ -161,6 +163,7 @@ impl Default for TorrentConfig {
             predictive_piece_announce_ms: 0,
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
+            steal_threshold_ratio: 10.0,
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
@@ -217,6 +220,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             predictive_piece_announce_ms: s.predictive_piece_announce_ms,
             mixed_mode_algorithm: s.mixed_mode_algorithm,
             auto_sequential: s.auto_sequential,
+            steal_threshold_ratio: s.steal_threshold_ratio,
             peer_turnover: s.peer_turnover,
             peer_turnover_cutoff: s.peer_turnover_cutoff,
             peer_turnover_interval: s.peer_turnover_interval,
