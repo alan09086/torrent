@@ -658,7 +658,6 @@ impl Default for ClientBuilder {
 }
 
 /// Source for adding a torrent to a session.
-#[allow(dead_code)]
 enum TorrentSource {
     /// Parsed torrent metainfo (v1, v2, or hybrid).
     Meta(Box<ferrite_core::TorrentMeta>),
@@ -676,11 +675,8 @@ enum TorrentSource {
 /// [`from_magnet()`](Self::from_magnet), [`from_file()`](Self::from_file),
 /// or [`from_bytes()`](Self::from_bytes).
 pub struct AddTorrentParams {
-    #[allow(dead_code)]
     source: TorrentSource,
-    #[allow(dead_code)]
     download_dir: Option<PathBuf>,
-    #[allow(dead_code)]
     storage: Option<Arc<dyn TorrentStorage>>,
 }
 
@@ -731,6 +727,37 @@ impl AddTorrentParams {
     pub fn storage(mut self, s: Arc<dyn TorrentStorage>) -> Self {
         self.storage = Some(s);
         self
+    }
+
+    /// Add this torrent to the session.
+    ///
+    /// Dispatches based on the source type: magnets go through
+    /// [`SessionHandle::add_magnet()`], while `.torrent` files and raw bytes
+    /// are parsed and sent through [`SessionHandle::add_torrent()`].
+    ///
+    /// Note: the per-torrent `download_dir` override is not yet supported
+    /// by the session layer. If set, it is currently ignored.
+    pub async fn add_to(
+        self,
+        session: &ferrite_session::SessionHandle,
+    ) -> crate::Result<ferrite_core::Id20> {
+        match self.source {
+            TorrentSource::Meta(meta) => {
+                Ok(session.add_torrent(*meta, self.storage).await?)
+            }
+            TorrentSource::Magnet(magnet) => {
+                Ok(session.add_magnet(magnet).await?)
+            }
+            TorrentSource::File(path) => {
+                let data = std::fs::read(&path)?;
+                let meta = ferrite_core::torrent_from_bytes_any(&data)?;
+                Ok(session.add_torrent(meta, self.storage).await?)
+            }
+            TorrentSource::Bytes(data) => {
+                let meta = ferrite_core::torrent_from_bytes_any(&data)?;
+                Ok(session.add_torrent(meta, self.storage).await?)
+            }
+        }
     }
 }
 
@@ -1012,5 +1039,79 @@ mod tests {
         // Verify SessionCounters is accessible from the prelude
         let counters = crate::prelude::SessionCounters::default();
         assert_eq!(counters.len(), crate::session::NUM_METRICS);
+    }
+
+    #[test]
+    fn add_torrent_params_from_magnet() {
+        let magnet = Magnet::parse("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test").unwrap();
+        let params = AddTorrentParams::from_magnet(magnet);
+        assert!(matches!(params.source, TorrentSource::Magnet(_)));
+        assert!(params.download_dir.is_none());
+        assert!(params.storage.is_none());
+    }
+
+    #[test]
+    fn add_torrent_params_from_file() {
+        let params = AddTorrentParams::from_file("/tmp/test.torrent")
+            .download_dir("/tmp/downloads");
+        assert!(matches!(params.source, TorrentSource::File(_)));
+        assert_eq!(params.download_dir.as_deref(), Some(std::path::Path::new("/tmp/downloads")));
+    }
+
+    #[test]
+    fn add_torrent_params_from_bytes() {
+        let params = AddTorrentParams::from_bytes(vec![1, 2, 3]);
+        assert!(matches!(params.source, TorrentSource::Bytes(_)));
+    }
+
+    #[tokio::test]
+    async fn add_to_magnet_routes_to_session() {
+        let session = ClientBuilder::new()
+            .listen_port(0)
+            .enable_dht(false)
+            .download_dir("/tmp")
+            .start()
+            .await
+            .unwrap();
+
+        let magnet = Magnet::parse("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test").unwrap();
+        let info_hash = AddTorrentParams::from_magnet(magnet)
+            .add_to(&session)
+            .await
+            .unwrap();
+
+        assert_eq!(info_hash.to_hex(), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_to_bytes_parses_and_routes() {
+        // Create a temp file for torrent generation
+        let tmp = std::env::temp_dir().join("ferrite_test_add_to.bin");
+        std::fs::write(&tmp, b"hello ferrite").unwrap();
+        let result = ferrite_core::CreateTorrent::new()
+            .add_file(&tmp)
+            .set_piece_size(16384)
+            .generate()
+            .unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        let session = ClientBuilder::new()
+            .listen_port(0)
+            .enable_dht(false)
+            .download_dir("/tmp")
+            .start()
+            .await
+            .unwrap();
+
+        let info_hash = AddTorrentParams::from_bytes(result.bytes)
+            .add_to(&session)
+            .await
+            .unwrap();
+
+        // Should have parsed and added successfully
+        let torrents = session.list_torrents().await.unwrap();
+        assert!(torrents.contains(&info_hash));
+        session.shutdown().await.unwrap();
     }
 }
