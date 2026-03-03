@@ -154,6 +154,9 @@ fn default_peer_turnover_interval() -> u64 {
 fn default_peer_dscp() -> u8 {
     0x08 // CS1 (scavenger/low-priority)
 }
+fn default_max_peers_per_torrent() -> usize {
+    200
+}
 fn default_stats_report_interval() -> u64 {
     1000
 }
@@ -514,6 +517,11 @@ pub struct Settings {
     #[serde(default = "default_choking_algorithm")]
     pub choking_algorithm: ChokingAlgorithm,
 
+    // ── Peer connections ──
+    /// Maximum peer connections per torrent (default: 200).
+    #[serde(default = "default_max_peers_per_torrent")]
+    pub max_peers_per_torrent: usize,
+
     // ── Peer turnover ──
     /// Fraction of peers to disconnect per turnover interval (0.0–1.0, default: 0.04).
     #[serde(default = "default_peer_turnover")]
@@ -656,6 +664,8 @@ impl Default for Settings {
             // Choking algorithms
             seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: ChokingAlgorithm::FixedSlots,
+            // Peer connections
+            max_peers_per_torrent: 200,
             // Peer turnover
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
@@ -677,6 +687,7 @@ impl Settings {
         Self {
             disk_cache_size: 8 * 1024 * 1024,
             max_torrents: 20,
+            max_peers_per_torrent: 30,
             active_downloads: 1,
             active_seeds: 2,
             active_limit: 10,
@@ -696,6 +707,7 @@ impl Settings {
         Self {
             disk_cache_size: 256 * 1024 * 1024,
             max_torrents: 2000,
+            max_peers_per_torrent: 500,
             active_downloads: 30,
             active_seeds: 100,
             active_limit: 2000,
@@ -988,6 +1000,7 @@ impl PartialEq for Settings {
             && self.ssl_key_path == other.ssl_key_path
             && self.seed_choking_algorithm == other.seed_choking_algorithm
             && self.choking_algorithm == other.choking_algorithm
+            && self.max_peers_per_torrent == other.max_peers_per_torrent
             && self.peer_turnover.to_bits() == other.peer_turnover.to_bits()
             && self.peer_turnover_cutoff.to_bits() == other.peer_turnover_cutoff.to_bits()
             && self.peer_turnover_interval == other.peer_turnover_interval
@@ -1060,6 +1073,7 @@ mod tests {
         assert_eq!(s.utp_max_connections, 256);
         assert_eq!(s.mixed_mode_algorithm, MixedModeAlgorithm::PeerProportional);
         assert!(s.auto_sequential);
+        assert_eq!(s.max_peers_per_torrent, 200);
     }
 
     #[test]
@@ -1067,6 +1081,7 @@ mod tests {
         let s = Settings::min_memory();
         assert_eq!(s.disk_cache_size, 8 * 1024 * 1024);
         assert_eq!(s.max_torrents, 20);
+        assert_eq!(s.max_peers_per_torrent, 30);
         assert_eq!(s.active_downloads, 1);
         assert_eq!(s.active_seeds, 2);
         assert_eq!(s.active_limit, 10);
@@ -1083,6 +1098,7 @@ mod tests {
         let s = Settings::high_performance();
         assert_eq!(s.disk_cache_size, 256 * 1024 * 1024);
         assert_eq!(s.max_torrents, 2000);
+        assert_eq!(s.max_peers_per_torrent, 500);
         assert_eq!(s.active_downloads, 30);
         assert_eq!(s.active_seeds, 100);
         assert_eq!(s.active_limit, 2000);
@@ -1152,6 +1168,7 @@ mod tests {
         let s = Settings::default();
         let tc = crate::types::TorrentConfig::from(&s);
         assert_eq!(tc.listen_port, 0); // random per-torrent
+        assert_eq!(tc.max_peers, s.max_peers_per_torrent);
         assert_eq!(tc.download_dir, s.download_dir);
         assert_eq!(tc.enable_dht, s.enable_dht);
         assert_eq!(tc.enable_pex, s.enable_pex);
