@@ -2766,23 +2766,43 @@ impl SessionActor {
             }
         }
 
-        // Serialize smart ban state
-        let ban_mgr = self.ban_manager.read().unwrap();
-        let banned_peers: Vec<String> = ban_mgr.banned_list()
-            .iter()
-            .map(|ip| ip.to_string())
-            .collect();
-        let peer_strikes: Vec<crate::persistence::PeerStrikeEntry> = ban_mgr.strikes_map()
-            .iter()
-            .map(|(ip, &count)| crate::persistence::PeerStrikeEntry {
-                ip: ip.to_string(),
-                count: count as i64,
-            })
-            .collect();
-        drop(ban_mgr);
+        // Serialize smart ban state (scoped to drop RwLockReadGuard before awaits)
+        let (banned_peers, peer_strikes) = {
+            let ban_mgr = self.ban_manager.read().unwrap();
+            let banned_peers: Vec<String> = ban_mgr.banned_list()
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect();
+            let peer_strikes: Vec<crate::persistence::PeerStrikeEntry> = ban_mgr.strikes_map()
+                .iter()
+                .map(|(ip, &count)| crate::persistence::PeerStrikeEntry {
+                    ip: ip.to_string(),
+                    count: count as i64,
+                })
+                .collect();
+            (banned_peers, peer_strikes)
+        };
+
+        let mut dht_entries = Vec::new();
+        if let Some(ref dht) = self.dht_v4 {
+            for (_id, addr) in dht.get_routing_nodes().await {
+                dht_entries.push(crate::persistence::DhtNodeEntry {
+                    host: addr.ip().to_string(),
+                    port: addr.port() as i64,
+                });
+            }
+        }
+        if let Some(ref dht) = self.dht_v6 {
+            for (_id, addr) in dht.get_routing_nodes().await {
+                dht_entries.push(crate::persistence::DhtNodeEntry {
+                    host: addr.ip().to_string(),
+                    port: addr.port() as i64,
+                });
+            }
+        }
 
         Ok(SessionState {
-            dht_nodes: Vec::new(), // DHT node cache — populated when DHT is wired
+            dht_nodes: dht_entries,
             torrents,
             banned_peers,
             peer_strikes,
