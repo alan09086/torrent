@@ -242,6 +242,28 @@ enum SessionCommand {
         new_name: String,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Set per-torrent maximum connections (0 = use global default).
+    SetMaxConnections {
+        info_hash: Id20,
+        limit: usize,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Get per-torrent maximum connection limit.
+    MaxConnections {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<usize>>,
+    },
+    /// Set per-torrent maximum upload slots (unchoke slots).
+    SetMaxUploads {
+        info_hash: Id20,
+        limit: usize,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Get per-torrent maximum upload slots (unchoke slots).
+    MaxUploads {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<usize>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1239,6 +1261,68 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Set the per-torrent maximum number of connections (0 = use global default).
+    pub async fn set_max_connections(
+        &self,
+        info_hash: Id20,
+        limit: usize,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetMaxConnections {
+                info_hash,
+                limit,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent maximum connection limit (0 = use global default).
+    pub async fn max_connections(&self, info_hash: Id20) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::MaxConnections {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the per-torrent maximum number of upload slots (unchoke slots).
+    pub async fn set_max_uploads(
+        &self,
+        info_hash: Id20,
+        limit: usize,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetMaxUploads {
+                info_hash,
+                limit,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent maximum upload slots (unchoke slots).
+    pub async fn max_uploads(&self, info_hash: Id20) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::MaxUploads {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1569,6 +1653,38 @@ impl SessionActor {
                         Some(SessionCommand::RenameFile { info_hash, file_index, new_name, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.rename_file(file_index, new_name).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetMaxConnections { info_hash, limit, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_max_connections(limit).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::MaxConnections { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.max_connections().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetMaxUploads { info_hash, limit, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_max_uploads(limit).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::MaxUploads { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.max_uploads().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };

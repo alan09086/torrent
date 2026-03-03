@@ -317,6 +317,7 @@ impl TorrentHandle {
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker,
+            max_connections: 0,
             metadata_downloader: None,
             downloaded: 0,
             uploaded: 0,
@@ -538,6 +539,7 @@ impl TorrentHandle {
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker,
+            max_connections: 0,
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
             downloaded: 0,
             uploaded: 0,
@@ -910,6 +912,46 @@ impl TorrentHandle {
             .await
             .map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Set the per-torrent maximum number of connections (0 = use global default).
+    pub async fn set_max_connections(&self, limit: usize) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetMaxConnections { limit, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent maximum connection limit (0 = use global default).
+    pub async fn max_connections(&self) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::MaxConnections { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set the per-torrent maximum number of upload slots (unchoke slots).
+    pub async fn set_max_uploads(&self, limit: usize) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetMaxUploads { limit, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent maximum upload slots (unchoke slots).
+    pub async fn max_uploads(&self) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::MaxUploads { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +991,8 @@ struct TorrentActor {
     peers: HashMap<SocketAddr, PeerState>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
     choker: Choker,
+    /// Per-torrent connection limit override (0 = use config.max_peers).
+    max_connections: usize,
 
     // Metadata (for magnet links)
     metadata_downloader: Option<MetadataDownloader>,
@@ -1092,6 +1136,17 @@ struct TorrentActor {
 }
 
 impl TorrentActor {
+    /// Returns the effective maximum connection count for this torrent.
+    ///
+    /// If `max_connections > 0`, use that override; otherwise fall back to `config.max_peers`.
+    fn effective_max_connections(&self) -> usize {
+        if self.max_connections > 0 {
+            self.max_connections
+        } else {
+            self.config.max_peers
+        }
+    }
+
     /// Transition to a new state, firing a StateChanged alert if different.
     fn transition_state(&mut self, new_state: TorrentState) {
         let prev = self.state;
@@ -1325,6 +1380,11 @@ impl TorrentActor {
                         Some(TorrentCommand::UpdateExternalIp { ip }) => {
                             self.external_ip = Some(ip);
                             self.sort_available_peers();
+                            post_alert(
+                                &self.alert_tx,
+                                &self.alert_mask,
+                                AlertKind::ExternalIpDetected { ip },
+                            );
                         }
                         Some(TorrentCommand::MoveStorage { new_path, reply }) => {
                             let result = self.handle_move_storage(new_path).await;
@@ -1385,6 +1445,20 @@ impl TorrentActor {
                             let result = self.handle_rename_file(file_index, new_name).await;
                             let _ = reply.send(result);
                         }
+                        Some(TorrentCommand::SetMaxConnections { limit, reply }) => {
+                            self.max_connections = limit;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::MaxConnections { reply }) => {
+                            let _ = reply.send(self.max_connections);
+                        }
+                        Some(TorrentCommand::SetMaxUploads { limit, reply }) => {
+                            self.choker.set_unchoke_slots(limit);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::MaxUploads { reply }) => {
+                            let _ = reply.send(self.choker.unchoke_slots());
+                        }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
                             self.shutdown_peers().await;
@@ -1441,7 +1515,7 @@ impl TorrentActor {
                     // Re-trigger DHT search if exhausted and we still need peers
                     if self.config.enable_dht
                         && self.available_peers.is_empty()
-                        && self.peers.len() < self.config.max_peers
+                        && self.peers.len() < self.effective_max_connections()
                     {
                         if self.dht_peers_rx.is_none()
                             && let Some(ref dht) = self.dht
@@ -2111,7 +2185,7 @@ impl TorrentActor {
             num_uploads,
 
             // ── Limits ──
-            connections_limit: self.config.max_peers,
+            connections_limit: self.effective_max_connections(),
             uploads_limit: self.choker.unchoke_slots(),
 
             // ── Distributed copies ──
@@ -4496,7 +4570,7 @@ impl TorrentActor {
     // ----- Peer connectivity -----
 
     fn try_connect_peers(&mut self) {
-        while self.peers.len() < self.config.max_peers {
+        while self.peers.len() < self.effective_max_connections() {
             let (addr, source) = match self.available_peers.pop() {
                 Some(pair) => pair,
                 None => break,
@@ -4713,7 +4787,7 @@ impl TorrentActor {
     /// I2P peers don't have real IP addresses, then hands the underlying TCP stream
     /// to `spawn_peer_from_stream`.
     fn handle_i2p_incoming(&mut self, stream: crate::i2p::SamStream) {
-        if self.peers.len() >= self.config.max_peers {
+        if self.peers.len() >= self.effective_max_connections() {
             return;
         }
 
@@ -4767,7 +4841,7 @@ impl TorrentActor {
         stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
         mode_override: Option<ferrite_wire::mse::EncryptionMode>,
     ) {
-        if self.peers.contains_key(&addr) || self.peers.len() >= self.config.max_peers {
+        if self.peers.contains_key(&addr) || self.peers.len() >= self.effective_max_connections() {
             return;
         }
 
@@ -4920,7 +4994,7 @@ impl TorrentActor {
         }
 
         // Check peer limit
-        if self.peers.len() >= self.config.max_peers {
+        if self.peers.len() >= self.effective_max_connections() {
             debug!(%target, "holepunch: at max peers, ignoring connect");
             return;
         }
@@ -7998,5 +8072,158 @@ mod tests {
         post_alert(&tx, &mask, AlertKind::MetadataFailed { info_hash });
         let received = rx.try_recv().expect("should receive MetadataFailed alert");
         assert!(matches!(received.kind, AlertKind::MetadataFailed { .. }));
+    }
+
+    // ---- Test: set_max_connections persists ----
+
+    #[tokio::test]
+    async fn set_max_connections_persists() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Set max_connections to 10
+        handle.set_max_connections(10).await.unwrap();
+        let val = handle.max_connections().await.unwrap();
+        assert_eq!(val, 10);
+
+        // Update to a different value
+        handle.set_max_connections(25).await.unwrap();
+        let val = handle.max_connections().await.unwrap();
+        assert_eq!(val, 25);
+
+        // Verify stats reflect the override
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.connections_limit, 25);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: max_connections default is 0 (use config.max_peers) ----
+
+    #[tokio::test]
+    async fn max_connections_default() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+        let expected_default = config.max_peers;
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Default max_connections should be 0
+        let val = handle.max_connections().await.unwrap();
+        assert_eq!(val, 0);
+
+        // Stats should show config.max_peers as the effective limit
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.connections_limit, expected_default);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_max_uploads round trip ----
+
+    #[tokio::test]
+    async fn set_max_uploads_round_trip() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Set max_uploads to 8
+        handle.set_max_uploads(8).await.unwrap();
+        let val = handle.max_uploads().await.unwrap();
+        assert_eq!(val, 8);
+
+        // Verify stats uploads_limit reflects the new value
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.uploads_limit, 8);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: ExternalIpDetected alert fires ----
+
+    #[tokio::test]
+    async fn external_ip_detected_alert() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Drain any initial alerts
+        while arx.try_recv().is_ok() {}
+
+        // Send UpdateExternalIp command
+        let test_ip: std::net::IpAddr = "203.0.113.42".parse().unwrap();
+        handle.cmd_tx
+            .send(TorrentCommand::UpdateExternalIp { ip: test_ip })
+            .await
+            .unwrap();
+
+        // Wait for the actor to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Check for ExternalIpDetected alert
+        let mut saw_alert = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let AlertKind::ExternalIpDetected { ip } = alert.kind {
+                assert_eq!(ip, test_ip);
+                saw_alert = true;
+            }
+        }
+        assert!(saw_alert, "should have received ExternalIpDetected alert");
+
+        handle.shutdown().await.unwrap();
     }
 }

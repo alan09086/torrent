@@ -498,6 +498,14 @@ pub enum AlertKind {
         values: Vec<i64>,
     },
 
+    // ── Network (STATUS) ──
+
+    /// An external IP address was detected or updated (e.g. from tracker/NAT/DHT).
+    ExternalIpDetected {
+        /// The detected external IP address.
+        ip: std::net::IpAddr,
+    },
+
     // ── Settings (M31) ──
 
     /// Session settings were changed via `apply_settings()`.
@@ -597,6 +605,9 @@ impl AlertKind {
 
             // SESSION STATS (M50)
             SessionStatsAlert { .. } => AlertCategory::STATS,
+
+            // NETWORK
+            ExternalIpDetected { .. } => AlertCategory::STATUS,
 
             // SETTINGS
             SettingsChanged => AlertCategory::STATUS,

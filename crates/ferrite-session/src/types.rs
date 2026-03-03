@@ -819,6 +819,24 @@ pub(crate) enum TorrentCommand {
         new_name: String,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Set the per-torrent maximum number of connections (0 = use global default).
+    SetMaxConnections {
+        limit: usize,
+        reply: oneshot::Sender<()>,
+    },
+    /// Get the current per-torrent maximum connection limit.
+    MaxConnections {
+        reply: oneshot::Sender<usize>,
+    },
+    /// Set the per-torrent maximum number of unchoke slots (upload slots).
+    SetMaxUploads {
+        limit: usize,
+        reply: oneshot::Sender<()>,
+    },
+    /// Get the current per-torrent maximum unchoke slots (upload slots).
+    MaxUploads {
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 /// Info about a file within a torrent.
