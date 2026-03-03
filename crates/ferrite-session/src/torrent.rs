@@ -1455,6 +1455,7 @@ impl TorrentActor {
             peers_available: self.available_peers.len(),
             checking_progress: self.checking_progress,
             peers_by_source,
+            ..Default::default()
         }
     }
 

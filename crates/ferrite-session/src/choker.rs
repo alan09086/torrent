@@ -421,6 +421,12 @@ impl Choker {
         self.unchoke_slots = n;
     }
 
+    /// Return the current number of regular unchoke slots.
+    #[allow(dead_code)] // Used by make_stats() in a later task.
+    pub fn unchoke_slots(&self) -> usize {
+        self.unchoke_slots
+    }
+
     /// Observe current aggregate throughput for rate-based slot adjustment.
     pub fn observe_throughput(&mut self, throughput: u64) {
         self.strategy.observe_throughput(throughput);
@@ -1066,6 +1072,18 @@ mod tests {
         // Now dynamic_slots should be 3 (increased).
         let decision = choker.decide(&peers);
         assert_eq!(decision.to_unchoke.len(), 4); // 3 regular + 1 optimistic
+    }
+
+    #[test]
+    fn choker_unchoke_slots_getter() {
+        let mut choker = Choker::new(4);
+        assert_eq!(choker.unchoke_slots(), 4);
+
+        choker.set_unchoke_slots(7);
+        assert_eq!(choker.unchoke_slots(), 7);
+
+        choker.set_unchoke_slots(0);
+        assert_eq!(choker.unchoke_slots(), 0);
     }
 
     #[test]

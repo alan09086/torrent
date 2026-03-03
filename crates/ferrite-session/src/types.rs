@@ -240,6 +240,8 @@ pub enum TorrentState {
 /// Aggregate statistics for a torrent.
 #[derive(Debug, Clone)]
 pub struct TorrentStats {
+    // ── Original fields (unchanged) ──
+
     /// Current torrent state.
     pub state: TorrentState,
     /// Total bytes downloaded (payload only).
@@ -258,6 +260,281 @@ pub struct TorrentStats {
     pub checking_progress: f32,
     /// Number of connected peers broken down by discovery source.
     pub peers_by_source: HashMap<crate::peer_state::PeerSource, usize>,
+
+    // ── Identity ──
+
+    /// Info hashes (v1 SHA-1 and/or v2 SHA-256) for this torrent.
+    pub info_hashes: ferrite_core::InfoHashes,
+    /// Display name from the torrent metadata.
+    pub name: String,
+
+    // ── State flags ──
+
+    /// Whether metadata has been received (always true for .torrent adds).
+    pub has_metadata: bool,
+    /// Whether we have all pieces and are seeding.
+    pub is_seeding: bool,
+    /// Whether all wanted pieces are downloaded (may differ from is_seeding with file priorities).
+    pub is_finished: bool,
+    /// Whether the torrent is paused.
+    pub is_paused: bool,
+    /// Whether the torrent is auto-managed by the session queuing system.
+    pub auto_managed: bool,
+    /// Whether sequential piece downloading is enabled.
+    pub sequential_download: bool,
+    /// Whether BEP 16 super seeding mode is active.
+    pub super_seeding: bool,
+    /// Whether we have accepted any incoming peer connections.
+    pub has_incoming: bool,
+    /// Whether resume data needs to be saved.
+    pub need_save_resume: bool,
+    /// Whether a storage move operation is in progress.
+    pub moving_storage: bool,
+
+    // ── Progress ──
+
+    /// Download progress as a fraction (0.0–1.0).
+    pub progress: f32,
+    /// Download progress in parts per million (0–1_000_000).
+    pub progress_ppm: u32,
+    /// Total bytes of verified (downloaded and hash-checked) data.
+    pub total_done: u64,
+    /// Total size of the torrent in bytes.
+    pub total: u64,
+    /// Total bytes of wanted data that have been verified.
+    pub total_wanted_done: u64,
+    /// Total bytes of wanted data (respecting file priorities).
+    pub total_wanted: u64,
+    /// Block (sub-piece request) size in bytes.
+    pub block_size: u32,
+
+    // ── Transfer (session counters) ──
+
+    /// Total bytes downloaded this session (including protocol overhead).
+    pub total_download: u64,
+    /// Total bytes uploaded this session (including protocol overhead).
+    pub total_upload: u64,
+    /// Total payload bytes downloaded this session.
+    pub total_payload_download: u64,
+    /// Total payload bytes uploaded this session.
+    pub total_payload_upload: u64,
+    /// Total bytes of data that failed hash check.
+    pub total_failed_bytes: u64,
+    /// Total bytes of redundant (duplicate) data received.
+    pub total_redundant_bytes: u64,
+
+    // ── Transfer (all-time, persisted) ──
+
+    /// All-time total bytes downloaded (persisted across sessions via resume data).
+    pub all_time_download: u64,
+    /// All-time total bytes uploaded (persisted across sessions via resume data).
+    pub all_time_upload: u64,
+
+    // ── Rates ──
+
+    /// Current download rate in bytes/sec (including protocol overhead).
+    pub download_rate: u64,
+    /// Current upload rate in bytes/sec (including protocol overhead).
+    pub upload_rate: u64,
+    /// Current payload download rate in bytes/sec.
+    pub download_payload_rate: u64,
+    /// Current payload upload rate in bytes/sec.
+    pub upload_payload_rate: u64,
+
+    // ── Connection details ──
+
+    /// Number of peers connected (including half-open).
+    pub num_peers: usize,
+    /// Number of connected peers that are seeds.
+    pub num_seeds: usize,
+    /// Number of complete copies known from tracker scrape (-1 = unknown).
+    pub num_complete: i32,
+    /// Number of incomplete copies known from tracker scrape (-1 = unknown).
+    pub num_incomplete: i32,
+    /// Total number of seeds across all trackers.
+    pub list_seeds: usize,
+    /// Total number of peers across all trackers.
+    pub list_peers: usize,
+    /// Number of peers available to connect to (not yet connected).
+    pub connect_candidates: usize,
+    /// Number of active peer connections (TCP + uTP).
+    pub num_connections: usize,
+    /// Number of unchoked peers we are uploading to.
+    pub num_uploads: usize,
+
+    // ── Limits ──
+
+    /// Maximum number of connections for this torrent.
+    pub connections_limit: usize,
+    /// Maximum number of unchoke slots for this torrent.
+    pub uploads_limit: usize,
+
+    // ── Distributed copies ──
+
+    /// Number of full distributed copies available in the swarm.
+    pub distributed_full_copies: u32,
+    /// Fractional part of distributed copies (0–999).
+    pub distributed_fraction: u32,
+    /// Distributed copies as a float (full + fraction/1000).
+    pub distributed_copies: f32,
+
+    // ── Tracker ──
+
+    /// URL of the tracker we most recently announced to.
+    pub current_tracker: String,
+    /// Whether we are currently announcing to any tracker.
+    pub announcing_to_trackers: bool,
+    /// Whether we are currently announcing to LSD (Local Service Discovery).
+    pub announcing_to_lsd: bool,
+    /// Whether we are currently announcing to DHT.
+    pub announcing_to_dht: bool,
+
+    // ── Timestamps (POSIX seconds) ──
+
+    /// Time when the torrent was added to the session.
+    pub added_time: i64,
+    /// Time when the torrent completed downloading (0 = not completed).
+    pub completed_time: i64,
+    /// Last time a complete copy was seen in the swarm (0 = never).
+    pub last_seen_complete: i64,
+    /// Time of last upload activity (0 = never).
+    pub last_upload: i64,
+    /// Time of last download activity (0 = never).
+    pub last_download: i64,
+
+    // ── Durations (cumulative seconds) ──
+
+    /// Total seconds the torrent has been active (downloading or seeding).
+    pub active_duration: i64,
+    /// Total seconds the torrent has been in finished state.
+    pub finished_duration: i64,
+    /// Total seconds the torrent has been seeding.
+    pub seeding_duration: i64,
+
+    // ── Storage ──
+
+    /// Current save path for the torrent data.
+    pub save_path: String,
+
+    // ── Queue ──
+
+    /// Position in the session queue (-1 = not queued).
+    pub queue_position: i32,
+
+    // ── Error ──
+
+    /// Human-readable error message (empty = no error).
+    pub error: String,
+    /// Index of the file that caused the error (-1 = not file-specific).
+    pub error_file: i32,
+}
+
+impl Default for TorrentStats {
+    fn default() -> Self {
+        Self {
+            // Original fields
+            state: TorrentState::Paused,
+            downloaded: 0,
+            uploaded: 0,
+            pieces_have: 0,
+            pieces_total: 0,
+            peers_connected: 0,
+            peers_available: 0,
+            checking_progress: 0.0,
+            peers_by_source: HashMap::new(),
+
+            // Identity
+            info_hashes: ferrite_core::InfoHashes::v1_only(ferrite_core::Id20::from([0u8; 20])),
+            name: String::new(),
+
+            // State flags
+            has_metadata: false,
+            is_seeding: false,
+            is_finished: false,
+            is_paused: false,
+            auto_managed: false,
+            sequential_download: false,
+            super_seeding: false,
+            has_incoming: false,
+            need_save_resume: false,
+            moving_storage: false,
+
+            // Progress
+            progress: 0.0,
+            progress_ppm: 0,
+            total_done: 0,
+            total: 0,
+            total_wanted_done: 0,
+            total_wanted: 0,
+            block_size: 16384,
+
+            // Transfer (session counters)
+            total_download: 0,
+            total_upload: 0,
+            total_payload_download: 0,
+            total_payload_upload: 0,
+            total_failed_bytes: 0,
+            total_redundant_bytes: 0,
+
+            // Transfer (all-time)
+            all_time_download: 0,
+            all_time_upload: 0,
+
+            // Rates
+            download_rate: 0,
+            upload_rate: 0,
+            download_payload_rate: 0,
+            upload_payload_rate: 0,
+
+            // Connection details
+            num_peers: 0,
+            num_seeds: 0,
+            num_complete: -1,
+            num_incomplete: -1,
+            list_seeds: 0,
+            list_peers: 0,
+            connect_candidates: 0,
+            num_connections: 0,
+            num_uploads: 0,
+
+            // Limits
+            connections_limit: 0,
+            uploads_limit: 0,
+
+            // Distributed copies
+            distributed_full_copies: 0,
+            distributed_fraction: 0,
+            distributed_copies: 0.0,
+
+            // Tracker
+            current_tracker: String::new(),
+            announcing_to_trackers: false,
+            announcing_to_lsd: false,
+            announcing_to_dht: false,
+
+            // Timestamps
+            added_time: 0,
+            completed_time: 0,
+            last_seen_complete: 0,
+            last_upload: 0,
+            last_download: 0,
+
+            // Durations
+            active_duration: 0,
+            finished_duration: 0,
+            seeding_duration: 0,
+
+            // Storage
+            save_path: String::new(),
+
+            // Queue
+            queue_position: -1,
+
+            // Error
+            error: String::new(),
+            error_file: -1,
+        }
+    }
 }
 
 /// Events sent from a `PeerTask` back to the `TorrentActor`.
@@ -604,14 +881,8 @@ mod tests {
 
         let stats = TorrentStats {
             state: TorrentState::Downloading,
-            downloaded: 0,
-            uploaded: 0,
-            pieces_have: 0,
             pieces_total: 10,
-            peers_connected: 0,
-            peers_available: 0,
-            checking_progress: 0.0,
-            peers_by_source: HashMap::new(),
+            ..Default::default()
         };
         assert!(stats.peers_by_source.is_empty());
 
@@ -624,6 +895,96 @@ mod tests {
         };
         assert_eq!(stats2.peers_by_source[&PeerSource::Tracker], 5);
         assert_eq!(stats2.peers_by_source[&PeerSource::Dht], 3);
+    }
+
+    #[test]
+    fn torrent_stats_default_values() {
+        let stats = TorrentStats::default();
+
+        // State
+        assert_eq!(stats.state, TorrentState::Paused);
+
+        // Original fields are zeroed
+        assert_eq!(stats.downloaded, 0);
+        assert_eq!(stats.uploaded, 0);
+        assert_eq!(stats.pieces_have, 0);
+        assert_eq!(stats.pieces_total, 0);
+        assert_eq!(stats.peers_connected, 0);
+        assert_eq!(stats.peers_available, 0);
+        assert!((stats.checking_progress - 0.0).abs() < f32::EPSILON);
+        assert!(stats.peers_by_source.is_empty());
+
+        // Identity: zeroed info hash
+        assert_eq!(
+            stats.info_hashes,
+            ferrite_core::InfoHashes::v1_only(ferrite_core::Id20::from([0u8; 20]))
+        );
+        assert!(stats.name.is_empty());
+
+        // State flags are all false
+        assert!(!stats.has_metadata);
+        assert!(!stats.is_seeding);
+        assert!(!stats.is_finished);
+        assert!(!stats.is_paused);
+        assert!(!stats.auto_managed);
+        assert!(!stats.sequential_download);
+        assert!(!stats.super_seeding);
+        assert!(!stats.has_incoming);
+        assert!(!stats.need_save_resume);
+        assert!(!stats.moving_storage);
+
+        // Progress
+        assert!((stats.progress - 0.0).abs() < f32::EPSILON);
+        assert_eq!(stats.progress_ppm, 0);
+        assert_eq!(stats.total_done, 0);
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.total_wanted_done, 0);
+        assert_eq!(stats.total_wanted, 0);
+        assert_eq!(stats.block_size, 16384);
+
+        // Sentinel values
+        assert_eq!(stats.num_complete, -1);
+        assert_eq!(stats.num_incomplete, -1);
+        assert_eq!(stats.queue_position, -1);
+        assert_eq!(stats.error_file, -1);
+
+        // Strings are empty
+        assert!(stats.current_tracker.is_empty());
+        assert!(stats.save_path.is_empty());
+        assert!(stats.error.is_empty());
+
+        // Rates are zero
+        assert_eq!(stats.download_rate, 0);
+        assert_eq!(stats.upload_rate, 0);
+        assert_eq!(stats.download_payload_rate, 0);
+        assert_eq!(stats.upload_payload_rate, 0);
+
+        // Distributed copies
+        assert_eq!(stats.distributed_full_copies, 0);
+        assert_eq!(stats.distributed_fraction, 0);
+        assert!((stats.distributed_copies - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn torrent_stats_seeding_flags() {
+        let stats = TorrentStats {
+            state: TorrentState::Seeding,
+            is_seeding: true,
+            is_finished: true,
+            has_metadata: true,
+            progress: 1.0,
+            progress_ppm: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(stats.state, TorrentState::Seeding);
+        assert!(stats.is_seeding);
+        assert!(stats.is_finished);
+        assert!(stats.has_metadata);
+        assert!((stats.progress - 1.0).abs() < f32::EPSILON);
+        assert_eq!(stats.progress_ppm, 1_000_000);
+        // Other fields remain default
+        assert!(!stats.is_paused);
+        assert_eq!(stats.downloaded, 0);
     }
 
     #[test]
