@@ -807,6 +807,46 @@ impl TorrentHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Enable or disable sequential (in-order) piece downloading.
+    pub async fn set_sequential_download(&self, enabled: bool) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetSequentialDownload { enabled, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Query whether sequential downloading is enabled.
+    pub async fn is_sequential_download(&self) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::IsSequentialDownload { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Enable or disable BEP 16 super seeding mode.
+    pub async fn set_super_seeding(&self, enabled: bool) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetSuperSeeding { enabled, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Query whether BEP 16 super seeding mode is enabled.
+    pub async fn is_super_seeding(&self) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::IsSuperSeeding { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
     /// Route an incoming SSL peer (TLS already completed) to this torrent (M42).
     pub(crate) async fn spawn_ssl_peer(
         &self,
@@ -1262,6 +1302,25 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::UploadLimit { reply }) => {
                             let _ = reply.send(self.upload_bucket.rate());
+                        }
+                        Some(TorrentCommand::SetSequentialDownload { enabled, reply }) => {
+                            self.config.sequential_download = enabled;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::IsSequentialDownload { reply }) => {
+                            let _ = reply.send(self.config.sequential_download);
+                        }
+                        Some(TorrentCommand::SetSuperSeeding { enabled, reply }) => {
+                            self.config.super_seeding = enabled;
+                            self.super_seed = if enabled {
+                                Some(crate::super_seed::SuperSeedState::new())
+                            } else {
+                                None
+                            };
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::IsSuperSeeding { reply }) => {
+                            let _ = reply.send(self.config.super_seeding);
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;

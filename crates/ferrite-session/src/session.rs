@@ -202,6 +202,24 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<u64>>,
     },
+    SetSequentialDownload {
+        info_hash: Id20,
+        enabled: bool,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    IsSequentialDownload {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<bool>>,
+    },
+    SetSuperSeeding {
+        info_hash: Id20,
+        enabled: bool,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    IsSuperSeeding {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<bool>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1062,6 +1080,68 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Enable or disable sequential (in-order) piece downloading for a torrent.
+    pub async fn set_sequential_download(
+        &self,
+        info_hash: Id20,
+        enabled: bool,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetSequentialDownload {
+                info_hash,
+                enabled,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Query whether sequential downloading is enabled for a torrent.
+    pub async fn is_sequential_download(&self, info_hash: Id20) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::IsSequentialDownload {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Enable or disable BEP 16 super seeding mode for a torrent.
+    pub async fn set_super_seeding(
+        &self,
+        info_hash: Id20,
+        enabled: bool,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetSuperSeeding {
+                info_hash,
+                enabled,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Query whether BEP 16 super seeding mode is enabled for a torrent.
+    pub async fn is_super_seeding(&self, info_hash: Id20) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::IsSuperSeeding {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,6 +1408,38 @@ impl SessionActor {
                         Some(SessionCommand::UploadLimit { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.upload_limit().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetSequentialDownload { info_hash, enabled, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_sequential_download(enabled).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::IsSequentialDownload { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.is_sequential_download().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetSuperSeeding { info_hash, enabled, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_super_seeding(enabled).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::IsSuperSeeding { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.is_super_seeding().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -3547,6 +3659,80 @@ mod tests {
         assert!(session.upload_limit(fake).await.is_err());
         assert!(session.set_download_limit(fake, 100).await.is_err());
         assert!(session.set_upload_limit(fake, 100).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: sequential_download_toggle ----
+
+    #[tokio::test]
+    async fn sequential_download_toggle() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Enable sequential download.
+        session.set_sequential_download(info_hash, true).await.unwrap();
+        assert!(session.is_sequential_download(info_hash).await.unwrap());
+
+        // Disable it again.
+        session.set_sequential_download(info_hash, false).await.unwrap();
+        assert!(!session.is_sequential_download(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: super_seeding_toggle ----
+
+    #[tokio::test]
+    async fn super_seeding_toggle() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Enable super seeding.
+        session.set_super_seeding(info_hash, true).await.unwrap();
+        assert!(session.is_super_seeding(info_hash).await.unwrap());
+
+        // Disable it again.
+        session.set_super_seeding(info_hash, false).await.unwrap();
+        assert!(!session.is_super_seeding(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: sequential_download_default_false ----
+
+    #[tokio::test]
+    async fn sequential_download_default_false() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Default config has sequential_download = false.
+        assert!(!session.is_sequential_download(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: super_seeding_default_false ----
+
+    #[tokio::test]
+    async fn super_seeding_default_false() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Default config has super_seeding = false.
+        assert!(!session.is_super_seeding(info_hash).await.unwrap());
 
         session.shutdown().await.unwrap();
     }

@@ -782,6 +782,24 @@ pub(crate) enum TorrentCommand {
     UploadLimit {
         reply: oneshot::Sender<u64>,
     },
+    /// Enable or disable sequential (in-order) piece downloading.
+    SetSequentialDownload {
+        enabled: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Query whether sequential downloading is enabled.
+    IsSequentialDownload {
+        reply: oneshot::Sender<bool>,
+    },
+    /// Enable or disable BEP 16 super seeding mode.
+    SetSuperSeeding {
+        enabled: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Query whether super seeding mode is enabled.
+    IsSuperSeeding {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Info about a file within a torrent.
