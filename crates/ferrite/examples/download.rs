@@ -22,11 +22,15 @@ async fn main() -> ferrite::Result<()> {
     loop {
         let stats = session.torrent_stats(info_hash).await?;
         println!(
-            "[{:?}] {}/{} pieces, {} peers",
-            stats.state, stats.pieces_have, stats.pieces_total, stats.peers_connected,
+            "[{:?}] {:.1}% | {:.1} KB/s down | {} seeds, {} peers",
+            stats.state,
+            stats.progress * 100.0,
+            stats.download_rate as f64 / 1024.0,
+            stats.num_seeds,
+            stats.num_peers,
         );
 
-        if matches!(stats.state, TorrentState::Seeding | TorrentState::Complete) {
+        if stats.is_seeding || stats.is_finished {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

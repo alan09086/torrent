@@ -8,6 +8,25 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.59.0 — TorrentStats Full Parity
+
+### Added
+- Full libtorrent `torrent_status` parity: ~55-field `TorrentStats` with identity, state flags, progress, transfer counters, rates, connection details, limits, distributed copies, tracker info, timestamps, durations, error reporting
+- `Default` implementation for `TorrentStats` with correct sentinel values
+- `compute_progress()` helper for byte-level progress calculation
+- `distributed_copies()` helper for piece availability analysis
+- Event-driven tracking in 7 handler sites: download, upload, hash failure, state transitions, incoming peers, peer bitfields, storage moves
+- Duration accumulation for `active_duration`, `finished_duration`, `seeding_duration` with live computation
+- Session-level enrichment of `queue_position` and `auto_managed`
+- `unchoke_slots()` getter on `Choker`
+
+### Changed
+- `make_stats()` rewritten to populate all fields in single peer pass
+- `transition_state()` rewritten with full duration accumulation state machine
+- `handle_move_storage()` refactored for `moving_storage` flag safety on all error paths
+- Updated download example to show progress percentage and rates
+- Version bump 0.58.0 → 0.59.0
+
 ## 0.58.0 — M52: API Documentation & Examples
 
 ### Added

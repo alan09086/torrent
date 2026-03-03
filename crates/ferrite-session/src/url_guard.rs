@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn build_client_default_config() {
         let cfg = ssrf_config();
-        let client = build_http_client(&cfg, None, "Ferrite/0.58.0");
+        let client = build_http_client(&cfg, None, "Ferrite/0.59.0");
         // Just verify it builds without panicking.
         drop(client);
     }
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn build_client_with_proxy() {
         let cfg = ssrf_config();
-        let client = build_http_client(&cfg, Some("http://proxy.example.com:8080"), "Ferrite/0.58.0");
+        let client = build_http_client(&cfg, Some("http://proxy.example.com:8080"), "Ferrite/0.59.0");
         drop(client);
     }
 
@@ -570,14 +570,14 @@ mod tests {
     fn build_client_invalid_proxy_fallback() {
         let cfg = ssrf_config();
         // Invalid proxy URL — should still build a client (proxy is silently skipped).
-        let client = build_http_client(&cfg, Some("not a url"), "Ferrite/0.58.0");
+        let client = build_http_client(&cfg, Some("not a url"), "Ferrite/0.59.0");
         drop(client);
     }
 
     #[test]
     fn build_client_permissive_config() {
         let cfg = permissive_config();
-        let client = build_http_client(&cfg, None, "Ferrite/0.58.0");
+        let client = build_http_client(&cfg, None, "Ferrite/0.59.0");
         drop(client);
     }
 
