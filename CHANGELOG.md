@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.62.0 — M55: Download Speed Optimization
+
+### Changed
+- **Immediate peer connection** — DHT, PEX, tracker, and manually-added peers now trigger `try_connect_peers()` immediately instead of waiting up to 30s for the periodic connect timer
+- **Raised default max_peers** from 50 to 200 per torrent
+- **Reduced connect_interval** from 30s to 5s for faster catch-up on edge cases
+- **`max_peers_per_torrent`** now configurable in Settings (default: 200, embedded: 30, high_performance: 500)
+
+### Fixed
+- **CLI: FilesystemStorage** — `ferrite download` was passing `None` for storage, causing the session to use MemoryStorage (in-RAM only). Now creates proper FilesystemStorage from torrent metadata.
+
+### Benchmark (Arch ISO 1.42 GiB, 3 trials)
+| Client | Time (s) | Speed (MB/s) | RSS (MiB) |
+|--------|----------|-------------|-----------|
+| ferrite | 87.7 ±3.6 | 16.6 ±0.7 | 27.6 ±0.8 |
+| rqbit | 17.8 ±0.9 | 81.5 ±3.9 | 40.6 ±0.9 |
+| libtorrent | 37.1 ±29.9 | 58.2 ±37.9 | 1487.1 ±0.3 |
+
+**Note:** Remaining speed gap is due to DHT cold-start (no routing table persistence). See M56 roadmap.
+
 ## 0.61.0 — M54: CLI Binary & Benchmarking
 
 ### Added
