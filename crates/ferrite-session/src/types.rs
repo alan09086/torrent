@@ -870,6 +870,17 @@ pub(crate) enum TorrentCommand {
     TorrentFileV2 {
         reply: oneshot::Sender<Option<ferrite_core::TorrentMetaV2>>,
     },
+    /// Force an immediate DHT announce (fire-and-forget at torrent level).
+    ForceDhtAnnounce,
+    /// Read all data for a specific piece from disk.
+    ReadPiece {
+        index: u32,
+        reply: oneshot::Sender<crate::Result<bytes::Bytes>>,
+    },
+    /// Flush the disk write cache for this torrent.
+    FlushCache {
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
 }
 
 /// Per-peer details exported for client UI introspection.

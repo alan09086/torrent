@@ -81,6 +81,15 @@ pub enum Error {
         index: usize,
     },
 
+    /// Piece index is out of range for the torrent.
+    #[error("piece index {index} out of range (torrent has {num_pieces} pieces)")]
+    InvalidPieceIndex {
+        /// The requested piece index.
+        index: u32,
+        /// Total number of pieces in the torrent.
+        num_pieces: u32,
+    },
+
     /// Configuration error (e.g. invalid proxy settings).
     #[error("configuration error: {0}")]
     Config(/// Error description.

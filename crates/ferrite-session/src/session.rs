@@ -305,6 +305,27 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<Option<ferrite_core::TorrentMetaV2>>>,
     },
+    /// Force an immediate DHT announce for a torrent.
+    ForceDhtAnnounce {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Force an immediate LSD announce for a torrent (session-level only).
+    ForceLsdAnnounce {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Read all data for a specific piece from disk.
+    ReadPiece {
+        info_hash: Id20,
+        index: u32,
+        reply: oneshot::Sender<crate::Result<bytes::Bytes>>,
+    },
+    /// Flush the disk write cache for a torrent.
+    FlushCache {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1499,6 +1520,65 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Force an immediate DHT announce for a torrent.
+    pub async fn force_dht_announce(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceDhtAnnounce {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Force an immediate LSD (Local Service Discovery) announce for a torrent.
+    ///
+    /// LSD is a session-level component — this does not go through the torrent actor.
+    pub async fn force_lsd_announce(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceLsdAnnounce {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Read all data for a specific piece from disk.
+    pub async fn read_piece(
+        &self,
+        info_hash: Id20,
+        index: u32,
+    ) -> crate::Result<bytes::Bytes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ReadPiece {
+                info_hash,
+                index,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Flush the disk write cache for a torrent.
+    pub async fn flush_cache(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FlushCache {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1925,6 +2005,43 @@ impl SessionActor {
                         Some(SessionCommand::TorrentFileV2 { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.torrent_file_v2().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceDhtAnnounce { info_hash, reply }) => {
+                            let result = match self.torrents.get(&info_hash) {
+                                Some(entry) => {
+                                    entry.handle.force_dht_announce().await
+                                }
+                                None => Err(crate::Error::TorrentNotFound(info_hash)),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceLsdAnnounce { info_hash, reply }) => {
+                            // LSD is session-level: verify the torrent exists, then announce directly.
+                            let result = if self.torrents.contains_key(&info_hash) {
+                                if let Some(ref lsd) = self.lsd {
+                                    lsd.announce(vec![info_hash]).await;
+                                }
+                                Ok(())
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReadPiece { info_hash, index, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.read_piece(index).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FlushCache { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.flush_cache().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -4346,6 +4463,105 @@ mod tests {
         let torrent = session.torrent_file(info_hash).await.unwrap();
         // Before metadata is received, torrent_file should return None.
         assert!(torrent.is_none());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_dht_announce_no_error ----
+
+    #[tokio::test]
+    async fn force_dht_announce_no_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed even without DHT enabled (no-op, no error).
+        let result = session.force_dht_announce(info_hash).await;
+        assert!(result.is_ok(), "force_dht_announce should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.force_dht_announce(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_lsd_announce_no_error ----
+
+    #[tokio::test]
+    async fn force_lsd_announce_no_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed even without LSD enabled (no-op announce, no error).
+        let result = session.force_lsd_announce(info_hash).await;
+        assert!(result.is_ok(), "force_lsd_announce should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.force_lsd_announce(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: read_piece_after_download ----
+
+    #[tokio::test]
+    async fn read_piece_after_download() {
+        let data = vec![0xCD; 32768]; // 2 pieces of 16384
+        let meta = make_test_torrent(&data, 16384);
+        let lengths = Lengths::new(data.len() as u64, 16384, DEFAULT_CHUNK_SIZE);
+        let storage = Arc::new(MemoryStorage::new(lengths));
+        // Pre-fill storage with the data
+        storage.write_chunk(0, 0, &data[..16384]).unwrap();
+        storage.write_chunk(1, 0, &data[16384..]).unwrap();
+
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Read piece 0
+        let piece_data = session.read_piece(info_hash, 0).await.unwrap();
+        assert_eq!(piece_data.len(), 16384);
+        assert!(piece_data.iter().all(|&b| b == 0xCD));
+
+        // Read piece 1
+        let piece_data = session.read_piece(info_hash, 1).await.unwrap();
+        assert_eq!(piece_data.len(), 16384);
+        assert!(piece_data.iter().all(|&b| b == 0xCD));
+
+        // Out-of-range piece should fail
+        let result = session.read_piece(info_hash, 999).await;
+        assert!(result.is_err(), "read_piece out of range should fail");
+
+        // Unknown torrent should fail
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.read_piece(fake, 0).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: flush_cache_completes ----
+
+    #[tokio::test]
+    async fn flush_cache_completes() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // flush_cache should succeed.
+        let result = session.flush_cache(info_hash).await;
+        assert!(result.is_ok(), "flush_cache should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.flush_cache(fake).await.is_err());
 
         session.shutdown().await.unwrap();
     }

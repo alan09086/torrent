@@ -1040,6 +1040,39 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Force an immediate DHT announce for this torrent.
+    ///
+    /// Fire-and-forget at the torrent level — the DHT announce is best-effort.
+    pub async fn force_dht_announce(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ForceDhtAnnounce)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Read all data for a specific piece from disk.
+    ///
+    /// Returns the complete piece data as `Bytes`. The piece must have been
+    /// downloaded already; use [`have_piece`](Self::have_piece) to check first.
+    pub async fn read_piece(&self, index: u32) -> crate::Result<Bytes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::ReadPiece { index, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Flush the disk write cache, ensuring all buffered writes are persisted.
+    pub async fn flush_cache(&self) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FlushCache { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1574,6 +1607,17 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::TorrentFileV2 { reply }) => {
                             let _ = reply.send(self.meta_v2.clone());
+                        }
+                        Some(TorrentCommand::ForceDhtAnnounce) => {
+                            self.handle_force_dht_announce().await;
+                        }
+                        Some(TorrentCommand::ReadPiece { index, reply }) => {
+                            let result = self.handle_read_piece(index).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::FlushCache { reply }) => {
+                            let result = self.handle_flush_cache().await;
+                            let _ = reply.send(result);
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
@@ -2237,6 +2281,78 @@ impl TorrentActor {
         }
 
         result
+    }
+
+    /// Force an immediate DHT announce on all available DHT handles (v4 + v6).
+    async fn handle_force_dht_announce(&self) {
+        if let Some(ref dht) = self.dht
+            && let Err(e) = dht.announce(self.info_hash, self.config.listen_port).await
+        {
+            warn!("Force DHT v4 announce failed: {e}");
+        }
+        if let Some(ref dht6) = self.dht_v6
+            && let Err(e) = dht6.announce(self.info_hash, self.config.listen_port).await
+        {
+            debug!("Force DHT v6 announce failed: {e}");
+        }
+        // Dual-swarm: also announce v2 hash for hybrid torrents
+        if self.info_hashes.is_hybrid()
+            && let Some(v2) = self.info_hashes.v2
+        {
+            let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+            if v2_as_v1 != self.info_hash {
+                if let Some(ref dht) = self.dht
+                    && let Err(e) = dht.announce(v2_as_v1, self.config.listen_port).await
+                {
+                    debug!("Force DHT v4 dual-swarm announce failed: {e}");
+                }
+                if let Some(ref dht6) = self.dht_v6
+                    && let Err(e) = dht6.announce(v2_as_v1, self.config.listen_port).await
+                {
+                    debug!("Force DHT v6 dual-swarm announce failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Read a complete piece from disk by reading all chunks and concatenating.
+    async fn handle_read_piece(&self, index: u32) -> crate::Result<Bytes> {
+        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let lengths = self.lengths.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+
+        let piece_size = lengths.piece_size(index);
+        if piece_size == 0 {
+            return Err(crate::Error::InvalidPieceIndex {
+                index,
+                num_pieces: lengths.num_pieces(),
+            });
+        }
+
+        let chunk_size = lengths.chunk_size();
+        let num_chunks = lengths.chunks_in_piece(index);
+        let mut buf = bytes::BytesMut::with_capacity(piece_size as usize);
+
+        for chunk_idx in 0..num_chunks {
+            let begin = chunk_idx * chunk_size;
+            let len = if chunk_idx == num_chunks - 1 {
+                piece_size - begin
+            } else {
+                chunk_size
+            };
+            let data = disk
+                .read_chunk(index, begin, len, DiskJobFlags::empty())
+                .await
+                .map_err(crate::Error::Storage)?;
+            buf.extend_from_slice(&data);
+        }
+
+        Ok(buf.freeze())
+    }
+
+    /// Flush the disk write cache.
+    async fn handle_flush_cache(&self) -> crate::Result<()> {
+        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        disk.flush_cache().await.map_err(crate::Error::Storage)
     }
 
     fn make_stats(&self) -> TorrentStats {

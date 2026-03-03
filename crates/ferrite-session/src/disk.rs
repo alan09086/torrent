@@ -95,6 +95,11 @@ pub(crate) enum DiskJob {
         reply: oneshot::Sender<Vec<u32>>,
     },
 
+    /// Flush all buffered writes across all torrents.
+    FlushAll {
+        reply: oneshot::Sender<ferrite_storage::Result<()>>,
+    },
+
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -399,6 +404,20 @@ impl DiskHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Flush all buffered writes to persistent storage.
+    pub async fn flush_cache(&self) -> ferrite_storage::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(DiskJob::FlushAll {
+                reply: tx,
+            })
+            .await;
+        rx.await.unwrap_or(Err(ferrite_storage::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
+        )))
+    }
+
     /// Move a torrent's storage to a new directory.
     pub async fn move_storage(&self, new_path: PathBuf) -> ferrite_storage::Result<()> {
         let (tx, rx) = oneshot::channel();
@@ -613,6 +632,17 @@ impl DiskActor {
             DiskJob::CachedPieces { info_hash, reply } => {
                 let pieces = self.backend.cached_pieces(info_hash);
                 let _ = reply.send(pieces);
+            }
+            DiskJob::FlushAll { reply } => {
+                let backend = Arc::clone(&self.backend);
+                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                let result = tokio::task::spawn_blocking(move || {
+                    backend.flush_all()
+                })
+                .await
+                .unwrap();
+                drop(permit);
+                let _ = reply.send(to_storage_result(result));
             }
             DiskJob::Shutdown { .. } => unreachable!(),
         }
