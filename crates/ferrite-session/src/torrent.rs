@@ -5125,8 +5125,15 @@ impl TorrentActor {
                     .unwrap_or_else(|| Bitfield::new(self.num_pieces))
             };
 
-            self.peers
-                .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, source));
+            self.peers.insert(addr, PeerState::new(
+                addr,
+                self.num_pieces,
+                cmd_tx,
+                source,
+                self.config.max_request_queue_depth,
+                self.config.request_queue_time,
+                self.config.initial_queue_depth,
+            ));
             post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
                 info_hash: self.info_hash,
                 addr,
@@ -5392,8 +5399,15 @@ impl TorrentActor {
                 .unwrap_or_else(|| Bitfield::new(self.num_pieces))
         };
 
-        self.peers
-            .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, PeerSource::Incoming));
+        self.peers.insert(addr, PeerState::new(
+            addr,
+            self.num_pieces,
+            cmd_tx,
+            PeerSource::Incoming,
+            self.config.max_request_queue_depth,
+            self.config.request_queue_time,
+            self.config.initial_queue_depth,
+        ));
         // Identify transport for incoming peers (M45)
         let transport = if mode_override.is_some() {
             crate::rate_limiter::PeerTransport::Utp
@@ -5544,7 +5558,15 @@ impl TorrentActor {
                 .unwrap_or_else(|| Bitfield::new(self.num_pieces))
         };
 
-        self.peers.insert(target, PeerState::new(target, self.num_pieces, cmd_tx, PeerSource::Pex));
+        self.peers.insert(target, PeerState::new(
+            target,
+            self.num_pieces,
+            cmd_tx,
+            PeerSource::Pex,
+            self.config.max_request_queue_depth,
+            self.config.request_queue_time,
+            self.config.initial_queue_depth,
+        ));
         post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
             info_hash: self.info_hash,
             addr: target,
@@ -5846,6 +5868,9 @@ mod tests {
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_dscp: 0x08,
+            initial_queue_depth: 128,
+            max_request_queue_depth: 250,
+            request_queue_time: 3.0,
         }
     }
 

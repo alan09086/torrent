@@ -91,6 +91,9 @@ fn default_hashing_threads() -> usize {
 fn default_max_request_queue_depth() -> usize {
     250
 }
+fn default_initial_queue_depth() -> usize {
+    128
+}
 fn default_request_queue_time() -> f64 {
     3.0
 }
@@ -382,6 +385,10 @@ pub struct Settings {
     /// Maximum per-peer request queue depth (default: 250).
     #[serde(default = "default_max_request_queue_depth")]
     pub max_request_queue_depth: usize,
+    /// Initial per-peer request queue depth (default: 128). Higher values let
+    /// peers reach full throughput faster by skipping slow-start ramp-up.
+    #[serde(default = "default_initial_queue_depth")]
+    pub initial_queue_depth: usize,
     /// Request queue time multiplier in seconds. Controls how many seconds
     /// worth of requests to keep in flight per peer (default: 3.0).
     #[serde(default = "default_request_queue_time")]
@@ -630,6 +637,7 @@ impl Default for Settings {
             // Hashing & piece picking
             hashing_threads: 2,
             max_request_queue_depth: 250,
+            initial_queue_depth: 128,
             request_queue_time: 3.0,
             block_request_timeout_secs: 60,
             max_concurrent_stream_reads: 8,
@@ -704,6 +712,7 @@ impl Settings {
             alert_channel_size: 256,
             utp_max_connections: 64,
             max_request_queue_depth: 50,
+            initial_queue_depth: 16,
             max_concurrent_stream_reads: 2,
             hashing_threads: 1,
             disk_io_threads: 1,
@@ -724,6 +733,7 @@ impl Settings {
             alert_channel_size: 4096,
             utp_max_connections: 1024,
             max_request_queue_depth: 1000,
+            initial_queue_depth: 256,
             max_concurrent_stream_reads: 32,
             hashing_threads: 4,
             disk_io_threads: 8,
@@ -985,6 +995,7 @@ impl PartialEq for Settings {
             && self.disk_channel_capacity == other.disk_channel_capacity
             && self.hashing_threads == other.hashing_threads
             && self.max_request_queue_depth == other.max_request_queue_depth
+            && self.initial_queue_depth == other.initial_queue_depth
             && self.request_queue_time.to_bits() == other.request_queue_time.to_bits()
             && self.block_request_timeout_secs == other.block_request_timeout_secs
             && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
@@ -1078,6 +1089,7 @@ mod tests {
         assert_eq!(s.disk_channel_capacity, 512);
         assert_eq!(s.hashing_threads, 2);
         assert_eq!(s.max_request_queue_depth, 250);
+        assert_eq!(s.initial_queue_depth, 128);
         assert!((s.request_queue_time - 3.0).abs() < f64::EPSILON);
         assert_eq!(s.block_request_timeout_secs, 60);
         assert_eq!(s.max_concurrent_stream_reads, 8);
@@ -1107,6 +1119,7 @@ mod tests {
         assert_eq!(s.alert_channel_size, 256);
         assert_eq!(s.utp_max_connections, 64);
         assert_eq!(s.max_request_queue_depth, 50);
+        assert_eq!(s.initial_queue_depth, 16);
         assert_eq!(s.max_concurrent_stream_reads, 2);
         assert_eq!(s.hashing_threads, 1);
         assert_eq!(s.disk_io_threads, 1);
@@ -1124,6 +1137,7 @@ mod tests {
         assert_eq!(s.alert_channel_size, 4096);
         assert_eq!(s.utp_max_connections, 1024);
         assert_eq!(s.max_request_queue_depth, 1000);
+        assert_eq!(s.initial_queue_depth, 256);
         assert_eq!(s.max_concurrent_stream_reads, 32);
         assert_eq!(s.hashing_threads, 4);
         assert_eq!(s.disk_io_threads, 8);

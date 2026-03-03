@@ -109,6 +109,12 @@ pub struct TorrentConfig {
     pub url_security: crate::url_guard::UrlSecurityConfig,
     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
     pub peer_dscp: u8,
+    /// Initial per-peer request queue depth for the pipeline slow-start.
+    pub initial_queue_depth: usize,
+    /// Maximum per-peer request queue depth.
+    pub max_request_queue_depth: usize,
+    /// Request queue time multiplier in seconds for steady-state depth.
+    pub request_queue_time: f64,
 }
 
 impl Default for TorrentConfig {
@@ -160,6 +166,9 @@ impl Default for TorrentConfig {
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_dscp: 0x08,
+            initial_queue_depth: 128,
+            max_request_queue_depth: 250,
+            request_queue_time: 3.0,
         }
     }
 }
@@ -213,6 +222,9 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             peer_turnover_interval: s.peer_turnover_interval,
             url_security: crate::url_guard::UrlSecurityConfig::from(s),
             peer_dscp: s.peer_dscp,
+            initial_queue_depth: s.initial_queue_depth,
+            max_request_queue_depth: s.max_request_queue_depth,
+            request_queue_time: s.request_queue_time,
         }
     }
 }

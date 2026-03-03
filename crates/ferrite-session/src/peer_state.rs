@@ -94,6 +94,9 @@ impl PeerState {
         bitfield_len: u32,
         cmd_tx: mpsc::Sender<PeerCommand>,
         source: PeerSource,
+        max_queue_depth: usize,
+        request_queue_time: f64,
+        initial_queue_depth: usize,
     ) -> Self {
         Self {
             addr,
@@ -114,7 +117,7 @@ impl PeerState {
             upload_only: false,
             super_seed_assigned: None,
             cmd_tx,
-            pipeline: PeerPipelineState::new(250, 3.0),
+            pipeline: PeerPipelineState::new(max_queue_depth, request_queue_time, initial_queue_depth),
             snubbed: false,
             last_data_received: None,
             connected_at: std::time::Instant::now(),
@@ -166,6 +169,9 @@ mod tests {
             100,
             tx,
             PeerSource::Tracker,
+            250,
+            3.0,
+            128,
         );
         assert!(peer.connected_at.elapsed().as_secs() < 1);
     }

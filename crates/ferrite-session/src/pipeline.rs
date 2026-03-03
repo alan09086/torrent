@@ -10,6 +10,13 @@ use std::time::{Duration, Instant};
 
 use ferrite_core::DEFAULT_CHUNK_SIZE;
 
+/// Default initial per-peer request queue depth.
+///
+/// Starting at 128 lets peers reach full throughput immediately instead of
+/// slowly growing from 2 during slow-start (which requires ~126 blocks / ~2 MB
+/// before saturating the link). rqbit uses 128 semaphore permits as well.
+const INITIAL_QUEUE_DEPTH: usize = 128;
+
 /// Per-peer dynamic request queue sizing with slow-start.
 ///
 /// Tracks in-flight requests, measures throughput via EWMA, and adjusts the
@@ -40,11 +47,15 @@ pub(crate) struct PeerPipelineState {
 
 #[allow(dead_code)] // consumed by TorrentActor integration (Task 4)
 impl PeerPipelineState {
-    /// Create a new pipeline state starting in slow-start with queue depth 2.
-    pub fn new(max_queue_depth: usize, request_queue_time: f64) -> Self {
+    /// Create a new pipeline state starting in slow-start.
+    ///
+    /// `initial_queue_depth` sets the starting queue depth (default: [`INITIAL_QUEUE_DEPTH`]).
+    /// The value is clamped to `[1, max_queue_depth]`.
+    pub fn new(max_queue_depth: usize, request_queue_time: f64, initial_queue_depth: usize) -> Self {
+        let depth = initial_queue_depth.clamp(1, max_queue_depth);
         Self {
             ewma_rate_bytes_sec: 0.0,
-            queue_depth: 2,
+            queue_depth: depth,
             in_slow_start: true,
             last_second_bytes: 0,
             prev_second_bytes: 0,
@@ -146,7 +157,7 @@ impl PeerPipelineState {
 
     /// Reset to slow-start state (e.g. after unchoke or reconnect).
     pub fn reset_to_slow_start(&mut self) {
-        self.queue_depth = 2;
+        self.queue_depth = INITIAL_QUEUE_DEPTH.min(self.max_queue_depth);
         self.in_slow_start = true;
         self.slow_start_exited = false;
         self.ewma_rate_bytes_sec = 0.0;
@@ -186,9 +197,9 @@ mod tests {
 
     #[test]
     fn slow_start_grows_and_exits_on_plateau() {
-        let mut state = PeerPipelineState::new(250, 3.0);
+        let mut state = PeerPipelineState::new(250, 3.0, 128);
         assert!(state.in_slow_start());
-        assert_eq!(state.queue_depth(), 2);
+        assert_eq!(state.queue_depth(), 128);
 
         let now = Instant::now();
 
@@ -197,8 +208,8 @@ mod tests {
             state.request_sent(0, i * DEFAULT_CHUNK_SIZE, now);
             state.block_received(0, i * DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_SIZE, now);
         }
-        // Started at 2, received 10 blocks -> 2 + 10 = 12
-        assert_eq!(state.queue_depth(), 12);
+        // Started at 128, received 10 blocks -> 128 + 10 = 138
+        assert_eq!(state.queue_depth(), 138);
         assert!(state.in_slow_start());
 
         // Simulate two ticks with plateaued throughput (same bytes, delta < 10KB)
@@ -218,7 +229,7 @@ mod tests {
 
     #[test]
     fn steady_state_formula() {
-        let mut state = PeerPipelineState::new(250, 3.0);
+        let mut state = PeerPipelineState::new(250, 3.0, 128);
 
         // Force out of slow-start
         state.in_slow_start = false;
@@ -238,7 +249,7 @@ mod tests {
     #[test]
     fn queue_depth_clamped() {
         // Very low EWMA -> floor of 2
-        let mut state = PeerPipelineState::new(250, 3.0);
+        let mut state = PeerPipelineState::new(250, 3.0, 128);
         state.in_slow_start = false;
         state.slow_start_exited = true;
         state.ewma_rate_bytes_sec = 100.0; // ~100 B/s -> depth ≈ 0 -> clamped to 2
@@ -251,7 +262,7 @@ mod tests {
         assert_eq!(state.queue_depth(), 250);
 
         // Small max_queue_depth is respected
-        let mut state2 = PeerPipelineState::new(5, 3.0);
+        let mut state2 = PeerPipelineState::new(5, 3.0, 5);
         state2.in_slow_start = false;
         state2.slow_start_exited = true;
         state2.ewma_rate_bytes_sec = 10.0 * 1024.0 * 1024.0; // 10 MB/s
@@ -261,7 +272,7 @@ mod tests {
 
     #[test]
     fn block_timeout_and_most_recent_request() {
-        let mut state = PeerPipelineState::new(250, 3.0);
+        let mut state = PeerPipelineState::new(250, 3.0, 128);
 
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_millis(100);
