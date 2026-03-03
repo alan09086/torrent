@@ -8,6 +8,30 @@ All notable changes to this project will be documented in this file.
 - Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
 - Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
 
+## 0.60.0 — M53: Full Torrent Operations API Parity
+
+### Added
+- **Session wrappers**: `force_reannounce`, `tracker_list`, `scrape`, `set_file_priority`, `file_priorities` — SessionHandle wrappers for existing TorrentHandle methods
+- **Per-torrent rate limits**: `set_download_limit`, `set_upload_limit`, `download_limit`, `upload_limit` with 0=unlimited convention
+- **Runtime toggles**: `set_sequential_download`, `is_sequential_download`, `set_super_seeding`, `is_super_seeding`
+- **Tracker management**: `add_tracker`, `replace_trackers` with `TrackerManager::replace_all()`
+- **Force recheck**: `force_recheck()` with `ChunkTracker::clear()`, state transitions through Checking, peer disconnection
+- **File operations**: `rename_file()` with disk rename + FileRenamed alert
+- **Connection limits**: `set_max_connections`, `max_connections`, `set_max_uploads`, `max_uploads` with enforcement across 5 peer acceptance paths
+- **Peer introspection**: `get_peer_info()` → `Vec<PeerInfo>` (16 fields), `get_download_queue()` → `Vec<PartialPieceInfo>`
+- **Piece queries**: `have_piece`, `piece_availability`, `file_progress` with byte-accurate file-piece overlap
+- **Identity queries**: `info_hashes`, `torrent_file`, `torrent_file_v2` (None for magnets before metadata)
+- **Force announce**: `force_dht_announce` (dual-swarm v4/v6), `force_lsd_announce` (session-level)
+- **Disk operations**: `read_piece` → `Bytes`, `flush_cache` with `DiskJob::FlushAll`
+- **Niche operations**: `is_valid` (synchronous), `clear_error` (auto-resume), `file_status`, `connect_peer`
+- **TorrentFlags**: bitflags convenience API (PAUSED, AUTO_MANAGED, SEQUENTIAL_DOWNLOAD, SUPER_SEEDING, UPLOAD_ONLY)
+- **Alerts**: `FileCompleted`, `MetadataFailed`, `ExternalIpDetected`
+- **Types**: `PeerInfo`, `PartialPieceInfo`, `FileMode`, `FileStatus`, `TorrentFlags`
+- `TokenBucket::rate()` getter
+
+### Fixed
+- `verify_existing_pieces` now calls `choker.set_seed_mode(false)` on the Downloading path (latent bug activated by force_recheck)
+
 ## 0.59.0 — TorrentStats Full Parity
 
 ### Added

@@ -189,7 +189,7 @@ impl WebSeedTask {
         event_tx: mpsc::Sender<PeerEvent>,
         security: &crate::url_guard::UrlSecurityConfig,
     ) -> Self {
-        let http_client = crate::url_guard::build_http_client(security, None, "Ferrite/0.59.0");
+        let http_client = crate::url_guard::build_http_client(security, None, "Ferrite/0.60.0");
 
         Self {
             url,
