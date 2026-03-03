@@ -845,6 +845,19 @@ pub(crate) enum TorrentCommand {
     GetDownloadQueue {
         reply: oneshot::Sender<Vec<PartialPieceInfo>>,
     },
+    /// Check whether a specific piece has been downloaded.
+    HavePiece {
+        index: u32,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Get per-piece availability counts from connected peers.
+    PieceAvailability {
+        reply: oneshot::Sender<Vec<u32>>,
+    },
+    /// Get per-file bytes-downloaded progress.
+    FileProgress {
+        reply: oneshot::Sender<Vec<u64>>,
+    },
 }
 
 /// Per-peer details exported for client UI introspection.

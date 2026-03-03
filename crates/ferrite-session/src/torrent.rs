@@ -975,6 +975,36 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Check whether a specific piece has been downloaded.
+    pub async fn have_piece(&self, index: u32) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::HavePiece { index, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-piece availability counts from connected peers.
+    pub async fn piece_availability(&self) -> crate::Result<Vec<u32>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::PieceAvailability { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-file bytes-downloaded progress.
+    pub async fn file_progress(&self) -> crate::Result<Vec<u64>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FileProgress { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,6 +1517,19 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::GetDownloadQueue { reply }) => {
                             let _ = reply.send(self.build_download_queue());
+                        }
+                        Some(TorrentCommand::HavePiece { index, reply }) => {
+                            let has = self.chunk_tracker.as_ref()
+                                .map(|ct| ct.has_piece(index))
+                                .unwrap_or(false);
+                            let _ = reply.send(has);
+                        }
+                        Some(TorrentCommand::PieceAvailability { reply }) => {
+                            let avail = self.piece_selector.availability().to_vec();
+                            let _ = reply.send(avail);
+                        }
+                        Some(TorrentCommand::FileProgress { reply }) => {
+                            let _ = reply.send(self.compute_file_progress());
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
@@ -2088,6 +2131,68 @@ impl TorrentActor {
                 blocks_assigned: ifp.assigned_blocks.len() as u32,
             }
         }).collect()
+    }
+
+    /// Compute per-file downloaded bytes.
+    fn compute_file_progress(&self) -> Vec<u64> {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let lengths = match self.lengths.as_ref() {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        let chunk_tracker = match self.chunk_tracker.as_ref() {
+            Some(ct) => ct,
+            None => return Vec::new(),
+        };
+
+        let files = meta.info.files();
+        if files.is_empty() {
+            return Vec::new();
+        }
+
+        let piece_length = lengths.piece_length();
+        let mut result = Vec::with_capacity(files.len());
+        let mut file_offset = 0u64;
+
+        for file_entry in &files {
+            let file_len = file_entry.length;
+            if file_len == 0 {
+                result.push(0);
+                file_offset += file_len;
+                continue;
+            }
+
+            let file_end = file_offset + file_len;
+            let first_piece = (file_offset / piece_length) as u32;
+            let last_piece = ((file_end - 1) / piece_length) as u32;
+
+            let mut downloaded = 0u64;
+
+            for p in first_piece..=last_piece {
+                if !chunk_tracker.has_piece(p) {
+                    continue;
+                }
+
+                let piece_start = lengths.piece_offset(p);
+                let piece_end = piece_start + lengths.piece_size(p) as u64;
+
+                // Clamp to file boundaries
+                let overlap_start = piece_start.max(file_offset);
+                let overlap_end = piece_end.min(file_end);
+
+                if overlap_start < overlap_end {
+                    downloaded += overlap_end - overlap_start;
+                }
+            }
+
+            result.push(downloaded);
+            file_offset = file_end;
+        }
+
+        result
     }
 
     fn make_stats(&self) -> TorrentStats {
@@ -8409,6 +8514,173 @@ mod tests {
 
         let queue = handle.get_download_queue().await.unwrap();
         assert!(queue.is_empty(), "download queue should be empty with no active downloads");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: have_piece false initially ----
+
+    #[tokio::test]
+    async fn have_piece_false_initially() {
+        let data = vec![0xAB; 32768]; // 32 KiB = 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        assert!(!handle.have_piece(0).await.unwrap(), "piece 0 should not be downloaded initially");
+        assert!(!handle.have_piece(1).await.unwrap(), "piece 1 should not be downloaded initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: piece_availability empty with no peers ----
+
+    #[tokio::test]
+    async fn piece_availability_empty_no_peers() {
+        let data = vec![0xAB; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let avail = handle.piece_availability().await.unwrap();
+        assert_eq!(avail.len(), 2, "should have availability for 2 pieces");
+        assert!(avail.iter().all(|&c| c == 0), "all availability counts should be 0 with no peers");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: file_progress zeros initially ----
+
+    #[tokio::test]
+    async fn file_progress_zeros_initially() {
+        let data = vec![0xAB; 32768]; // single-file, 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let progress = handle.file_progress().await.unwrap();
+        assert_eq!(progress.len(), 1, "single-file torrent should have 1 entry");
+        assert_eq!(progress[0], 0, "no bytes should be downloaded initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: file_progress length matches file count (multi-file) ----
+
+    /// Build a multi-file TorrentMetaV1 from a total data blob and file lengths.
+    fn make_test_torrent_multi(data: &[u8], piece_length: u64, file_lengths: &[u64]) -> TorrentMetaV1 {
+        use serde::Serialize;
+
+        let mut pieces = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + piece_length as usize).min(data.len());
+            let hash = ferrite_core::sha1(&data[offset..end]);
+            pieces.extend_from_slice(hash.as_bytes());
+            offset = end;
+        }
+
+        #[derive(Serialize)]
+        struct FileE {
+            length: u64,
+            path: Vec<String>,
+        }
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+            files: Vec<FileE>,
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            info: Info<'a>,
+        }
+
+        let files: Vec<FileE> = file_lengths.iter().enumerate().map(|(i, &len)| {
+            FileE {
+                length: len,
+                path: vec![format!("file{i}.bin")],
+            }
+        }).collect();
+
+        let t = Torrent {
+            info: Info {
+                name: "test_multi",
+                piece_length,
+                pieces: &pieces,
+                files,
+            },
+        };
+
+        let bytes = ferrite_bencode::to_bytes(&t).unwrap();
+        torrent_from_bytes(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_progress_length_matches_file_count() {
+        // 3 files: 10000 + 20000 + 2768 = 32768 bytes total, 2 pieces of 16384
+        let data = vec![0xCD; 32768];
+        let file_lengths = [10000u64, 20000, 2768];
+        let meta = make_test_torrent_multi(&data, 16384, &file_lengths);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let progress = handle.file_progress().await.unwrap();
+        assert_eq!(progress.len(), 3, "multi-file torrent should have 3 entries");
+        assert!(progress.iter().all(|&b| b == 0), "all progress should be 0 initially");
 
         handle.shutdown().await.unwrap();
     }

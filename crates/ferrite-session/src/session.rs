@@ -274,6 +274,22 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<Vec<crate::types::PartialPieceInfo>>>,
     },
+    /// Check whether a specific piece has been downloaded.
+    HavePiece {
+        info_hash: Id20,
+        index: u32,
+        reply: oneshot::Sender<crate::Result<bool>>,
+    },
+    /// Get per-piece availability counts from connected peers.
+    PieceAvailability {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<u32>>>,
+    },
+    /// Get per-file bytes-downloaded progress.
+    FileProgress {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<u64>>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1365,6 +1381,56 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Check whether a specific piece has been downloaded for a torrent.
+    pub async fn have_piece(
+        &self,
+        info_hash: Id20,
+        index: u32,
+    ) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::HavePiece {
+                info_hash,
+                index,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-piece availability counts from connected peers for a torrent.
+    pub async fn piece_availability(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<u32>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::PieceAvailability {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-file bytes-downloaded progress for a torrent.
+    pub async fn file_progress(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<u64>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FileProgress {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1743,6 +1809,30 @@ impl SessionActor {
                         Some(SessionCommand::GetDownloadQueue { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.get_download_queue().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::HavePiece { info_hash, index, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.have_piece(index).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::PieceAvailability { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.piece_availability().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FileProgress { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.file_progress().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
