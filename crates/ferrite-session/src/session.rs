@@ -162,6 +162,28 @@ enum SessionCommand {
         file_index: usize,
         reply: oneshot::Sender<crate::Result<crate::streaming::FileStream>>,
     },
+    ForceReannounce {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    TrackerList {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::tracker_manager::TrackerInfo>>>,
+    },
+    Scrape {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Option<(String, ferrite_tracker::ScrapeInfo)>>>,
+    },
+    SetFilePriority {
+        info_hash: Id20,
+        index: usize,
+        priority: ferrite_core::FilePriority,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    FilePriorities {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<ferrite_core::FilePriority>>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -879,6 +901,87 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Force all trackers for a torrent to re-announce immediately.
+    pub async fn force_reannounce(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceReannounce {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the list of all configured trackers with their status for a torrent.
+    pub async fn tracker_list(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::tracker_manager::TrackerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::TrackerList {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Scrape trackers for seeder/leecher counts for a torrent.
+    pub async fn scrape(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Option<(String, ferrite_tracker::ScrapeInfo)>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::Scrape {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the download priority of a specific file within a torrent.
+    pub async fn set_file_priority(
+        &self,
+        info_hash: Id20,
+        index: usize,
+        priority: ferrite_core::FilePriority,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetFilePriority {
+                info_hash,
+                index,
+                priority,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-file priorities for a torrent.
+    pub async fn file_priorities(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<ferrite_core::FilePriority>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FilePriorities {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1175,47 @@ impl SessionActor {
                         Some(SessionCommand::OpenFile { info_hash, file_index, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.open_file(file_index).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceReannounce { info_hash, reply }) => {
+                            let result = match self.torrents.get(&info_hash) {
+                                Some(entry) => {
+                                    entry.handle.force_reannounce().await
+                                }
+                                None => Err(crate::Error::TorrentNotFound(info_hash)),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TrackerList { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.tracker_list().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::Scrape { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.scrape().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetFilePriority { info_hash, index, priority, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_file_priority(index, priority).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FilePriorities { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.file_priorities().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -3092,6 +3236,117 @@ mod tests {
         // open_file should fail for out-of-range file_index
         let result = session.open_file(info_hash, 999).await;
         assert!(result.is_err(), "open_file should fail for invalid file_index");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_reannounce via session ----
+
+    #[tokio::test]
+    async fn session_force_reannounce() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed for a known torrent.
+        let result = session.force_reannounce(info_hash).await;
+        assert!(result.is_ok(), "force_reannounce should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.force_reannounce(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: tracker_list via session ----
+
+    #[tokio::test]
+    async fn session_tracker_list() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed (empty list since test torrent has no announce URL).
+        let trackers = session.tracker_list(info_hash).await.unwrap();
+        assert!(trackers.is_empty(), "test torrent has no trackers");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.tracker_list(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: scrape via session ----
+
+    #[tokio::test]
+    async fn session_scrape() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed (None since test torrent has no trackers to scrape).
+        let scrape = session.scrape(info_hash).await.unwrap();
+        assert!(scrape.is_none(), "test torrent has no trackers to scrape");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.scrape(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_file_priority via session ----
+
+    #[tokio::test]
+    async fn session_set_file_priority() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed for file index 0 (single-file torrent).
+        let result = session
+            .set_file_priority(info_hash, 0, ferrite_core::FilePriority::Normal)
+            .await;
+        assert!(result.is_ok(), "set_file_priority should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session
+            .set_file_priority(fake, 0, ferrite_core::FilePriority::Normal)
+            .await
+            .is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: file_priorities via session ----
+
+    #[tokio::test]
+    async fn session_file_priorities() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should return priorities for the single file.
+        let priorities = session.file_priorities(info_hash).await.unwrap();
+        assert_eq!(priorities.len(), 1, "single-file torrent should have 1 file priority");
+        assert_eq!(priorities[0], ferrite_core::FilePriority::Normal);
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.file_priorities(fake).await.is_err());
 
         session.shutdown().await.unwrap();
     }
