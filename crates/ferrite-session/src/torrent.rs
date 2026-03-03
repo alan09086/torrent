@@ -313,6 +313,28 @@ impl TorrentHandle {
             downloaded: 0,
             uploaded: 0,
             checking_progress: 0.0,
+            total_download: 0,
+            total_upload: 0,
+            total_failed_bytes: 0,
+            total_redundant_bytes: 0,
+            added_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            completed_time: 0,
+            last_download: 0,
+            last_upload: 0,
+            last_seen_complete: 0,
+            active_duration: 0,
+            finished_duration: 0,
+            seeding_duration: 0,
+            active_since: Some(std::time::Instant::now()),
+            state_duration_since: None,
+            moving_storage: false,
+            has_incoming: false,
+            need_save_resume: false,
+            error: String::new(),
+            error_file: -1,
             cmd_rx,
             event_tx,
             event_rx,
@@ -512,6 +534,28 @@ impl TorrentHandle {
             downloaded: 0,
             uploaded: 0,
             checking_progress: 0.0,
+            total_download: 0,
+            total_upload: 0,
+            total_failed_bytes: 0,
+            total_redundant_bytes: 0,
+            added_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            completed_time: 0,
+            last_download: 0,
+            last_upload: 0,
+            last_seen_complete: 0,
+            active_duration: 0,
+            finished_duration: 0,
+            seeding_duration: 0,
+            active_since: Some(std::time::Instant::now()),
+            state_duration_since: None,
+            moving_storage: false,
+            has_incoming: false,
+            need_save_resume: false,
+            error: String::new(),
+            error_file: -1,
             cmd_rx,
             event_tx,
             event_rx,
@@ -779,6 +823,44 @@ struct TorrentActor {
     downloaded: u64,
     uploaded: u64,
     checking_progress: f32,
+    #[allow(dead_code)] // wired in Task 3 (make_stats) and Task 4 (event tracking)
+    total_download: u64,
+    #[allow(dead_code)]
+    total_upload: u64,
+    #[allow(dead_code)]
+    total_failed_bytes: u64,
+    #[allow(dead_code)]
+    total_redundant_bytes: u64,
+    #[allow(dead_code)]
+    added_time: i64,
+    #[allow(dead_code)]
+    completed_time: i64,
+    #[allow(dead_code)]
+    last_download: i64,
+    #[allow(dead_code)]
+    last_upload: i64,
+    #[allow(dead_code)]
+    last_seen_complete: i64,
+    #[allow(dead_code)]
+    active_duration: i64,
+    #[allow(dead_code)]
+    finished_duration: i64,
+    #[allow(dead_code)]
+    seeding_duration: i64,
+    #[allow(dead_code)]
+    active_since: Option<std::time::Instant>,
+    #[allow(dead_code)]
+    state_duration_since: Option<std::time::Instant>,
+    #[allow(dead_code)]
+    moving_storage: bool,
+    #[allow(dead_code)]
+    has_incoming: bool,
+    #[allow(dead_code)]
+    need_save_resume: bool,
+    #[allow(dead_code)]
+    error: String,
+    #[allow(dead_code)]
+    error_file: i32,
 
     // Channels
     cmd_rx: mpsc::Receiver<TorrentCommand>,
