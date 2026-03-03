@@ -555,6 +555,14 @@ pub struct Settings {
     /// Default 1000 (1 second). Set to 0 to disable periodic stats alerts.
     #[serde(default = "default_stats_report_interval")]
     pub stats_report_interval: u64,
+
+    // ── DHT bootstrap (M56) ──
+    /// Previously saved DHT routing table nodes for fast bootstrap.
+    /// These are prepended to the bootstrap node list on startup so that
+    /// peer discovery starts instantly instead of bootstrapping from scratch.
+    /// Runtime-injected, not serialized.
+    #[serde(skip)]
+    pub dht_saved_nodes: Vec<String>,
 }
 
 impl Default for Settings {
@@ -677,6 +685,8 @@ impl Default for Settings {
             peer_dscp: 0x08,
             // Session Stats (M50)
             stats_report_interval: 1000,
+            // DHT bootstrap (M56)
+            dht_saved_nodes: Vec::new(),
         }
     }
 }
@@ -851,26 +861,34 @@ impl From<&Settings> for crate::ban::BanConfig {
 
 impl Settings {
     pub(crate) fn to_dht_config(&self) -> ferrite_dht::DhtConfig {
+        let default = ferrite_dht::DhtConfig::default();
+        let mut bootstrap = self.dht_saved_nodes.clone();
+        bootstrap.extend(default.bootstrap_nodes.iter().cloned());
         ferrite_dht::DhtConfig {
+            bootstrap_nodes: bootstrap,
             queries_per_second: self.dht_queries_per_second,
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
             enforce_node_id: self.dht_enforce_node_id,
             restrict_routing_ips: self.dht_restrict_routing_ips,
             dht_max_items: self.dht_max_items,
             dht_item_lifetime_secs: self.dht_item_lifetime_secs,
-            ..ferrite_dht::DhtConfig::default()
+            ..default
         }
     }
 
     pub(crate) fn to_dht_config_v6(&self) -> ferrite_dht::DhtConfig {
+        let default = ferrite_dht::DhtConfig::default_v6();
+        let mut bootstrap = self.dht_saved_nodes.clone();
+        bootstrap.extend(default.bootstrap_nodes.iter().cloned());
         ferrite_dht::DhtConfig {
+            bootstrap_nodes: bootstrap,
             queries_per_second: self.dht_queries_per_second,
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
             enforce_node_id: self.dht_enforce_node_id,
             restrict_routing_ips: self.dht_restrict_routing_ips,
             dht_max_items: self.dht_max_items,
             dht_item_lifetime_secs: self.dht_item_lifetime_secs,
-            ..ferrite_dht::DhtConfig::default_v6()
+            ..default
         }
     }
 
@@ -1009,6 +1027,7 @@ impl PartialEq for Settings {
             && self.validate_https_trackers == other.validate_https_trackers
             && self.peer_dscp == other.peer_dscp
             && self.stats_report_interval == other.stats_report_interval
+            && self.dht_saved_nodes == other.dht_saved_nodes
     }
 }
 

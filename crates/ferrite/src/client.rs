@@ -619,6 +619,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Provide previously saved DHT routing table nodes for fast bootstrap.
+    ///
+    /// These nodes are prepended to the default bootstrap node list so that
+    /// peer discovery starts instantly instead of bootstrapping from scratch.
+    /// Typically loaded from a persisted session state file on startup.
+    pub fn dht_saved_nodes(mut self, nodes: Vec<String>) -> Self {
+        self.settings.dht_saved_nodes = nodes;
+        self
+    }
+
     /// Set a custom disk I/O backend.
     ///
     /// When set, the session uses this backend instead of the default

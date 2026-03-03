@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ferrite::core::{Lengths, DEFAULT_CHUNK_SIZE, TorrentMeta};
+use ferrite::session::SessionState;
 use ferrite::storage::{FilesystemStorage, TorrentStorage};
 
 pub struct DownloadOpts<'a> {
@@ -20,6 +21,10 @@ pub struct DownloadOpts<'a> {
 
 pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     let DownloadOpts { source, output, no_dht, config, seed, port, quiet } = opts;
+
+    // Global state file for DHT node persistence across sessions
+    let state_path = state_file_path();
+
     // Load settings
     let mut builder = if let Some(config_path) = config {
         let data = std::fs::read_to_string(config_path)
@@ -37,6 +42,14 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
 
     if no_dht {
         builder = builder.enable_dht(false);
+    }
+
+    // Load saved DHT nodes from previous session for instant peer discovery
+    if let Some(saved_nodes) = load_dht_nodes(&state_path) {
+        if !quiet {
+            eprintln!("Loaded {} saved DHT nodes from previous session", saved_nodes.len());
+        }
+        builder = builder.dht_saved_nodes(saved_nodes);
     }
 
     let session = builder.start().await?;
@@ -94,6 +107,7 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
                 pb.finish_with_message("shutting down...");
             }
             eprintln!("\nShutting down...");
+            save_session_state(&session, &state_path, quiet).await;
             session.shutdown().await?;
             tokio::time::sleep(Duration::from_secs(1)).await;
             break;
@@ -118,6 +132,7 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
                 tokio::signal::ctrl_c().await?;
                 eprintln!("\nShutting down...");
             }
+            save_session_state(&session, &state_path, quiet).await;
             session.shutdown().await?;
             tokio::time::sleep(Duration::from_secs(1)).await;
             break;
@@ -198,5 +213,64 @@ fn format_rate(bytes_per_sec: u64) -> String {
         format!("{:.1} KB/s", bytes_per_sec as f64 / KIB as f64)
     } else {
         format!("{bytes_per_sec} B/s")
+    }
+}
+
+/// Return the global state file path (`$XDG_DATA_HOME/ferrite/session.dat`).
+///
+/// Respects `XDG_DATA_HOME`, falls back to `~/.local/share/ferrite`.
+/// Creates the parent directory if it doesn't exist.
+fn state_file_path() -> PathBuf {
+    let dir = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("ferrite");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("session.dat")
+}
+
+/// Load DHT node addresses from a previously saved state file.
+///
+/// Returns `None` if the file doesn't exist or can't be parsed.
+fn load_dht_nodes(state_path: &Path) -> Option<Vec<String>> {
+    let data = std::fs::read(state_path).ok()?;
+    let state: SessionState = ferrite::bencode::from_bytes(&data).ok()?;
+    if state.dht_nodes.is_empty() {
+        return None;
+    }
+    let nodes: Vec<String> = state
+        .dht_nodes
+        .iter()
+        .map(|entry| format!("{}:{}", entry.host, entry.port))
+        .collect();
+    Some(nodes)
+}
+
+/// Save session state (DHT nodes, etc.) to the state file.
+async fn save_session_state(
+    session: &ferrite::session::SessionHandle,
+    state_path: &Path,
+    quiet: bool,
+) {
+    match session.save_session_state().await {
+        Ok(state) => {
+            if !quiet && !state.dht_nodes.is_empty() {
+                eprintln!("Saving {} DHT nodes for next session", state.dht_nodes.len());
+            }
+            match ferrite::bencode::to_bytes(&state) {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(state_path, &bytes) {
+                        eprintln!("Warning: failed to write state file: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to encode session state: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to save session state: {e}");
+        }
     }
 }
