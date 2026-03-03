@@ -847,6 +847,26 @@ impl TorrentHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Add a new tracker URL to this torrent (fire-and-forget).
+    ///
+    /// The URL is validated and deduplicated by the tracker manager.
+    pub async fn add_tracker(&self, url: String) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::AddTracker { url })
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Replace all tracker URLs for this torrent.
+    pub async fn replace_trackers(&self, urls: Vec<String>) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::ReplaceTrackers { urls, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
     /// Route an incoming SSL peer (TLS already completed) to this torrent (M42).
     pub(crate) async fn spawn_ssl_peer(
         &self,
@@ -1321,6 +1341,13 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::IsSuperSeeding { reply }) => {
                             let _ = reply.send(self.config.super_seeding);
+                        }
+                        Some(TorrentCommand::AddTracker { url }) => {
+                            self.tracker_manager.add_tracker_url(&url);
+                        }
+                        Some(TorrentCommand::ReplaceTrackers { urls, reply }) => {
+                            self.tracker_manager.replace_all(urls);
+                            let _ = reply.send(());
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;

@@ -800,6 +800,15 @@ pub(crate) enum TorrentCommand {
     IsSuperSeeding {
         reply: oneshot::Sender<bool>,
     },
+    /// Add a new tracker URL (fire-and-forget at torrent level).
+    AddTracker {
+        url: String,
+    },
+    /// Replace all tracker URLs with a new set.
+    ReplaceTrackers {
+        urls: Vec<String>,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Info about a file within a torrent.

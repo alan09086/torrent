@@ -220,6 +220,16 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<bool>>,
     },
+    AddTracker {
+        info_hash: Id20,
+        url: String,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    ReplaceTrackers {
+        info_hash: Id20,
+        urls: Vec<String>,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1142,6 +1152,40 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Add a new tracker URL to a torrent.
+    ///
+    /// The URL is validated and deduplicated by the tracker manager.
+    pub async fn add_tracker(&self, info_hash: Id20, url: String) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::AddTracker {
+                info_hash,
+                url,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Replace all tracker URLs for a torrent.
+    pub async fn replace_trackers(
+        &self,
+        info_hash: Id20,
+        urls: Vec<String>,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ReplaceTrackers {
+                info_hash,
+                urls,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1440,6 +1484,22 @@ impl SessionActor {
                         Some(SessionCommand::IsSuperSeeding { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.is_super_seeding().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::AddTracker { info_hash, url, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.add_tracker(url).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReplaceTrackers { info_hash, urls, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.replace_trackers(urls).await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -3733,6 +3793,78 @@ mod tests {
 
         // Default config has super_seeding = false.
         assert!(!session.is_super_seeding(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: add_tracker_increases_count ----
+
+    #[tokio::test]
+    async fn add_tracker_increases_count() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Test torrent has no trackers initially.
+        let before = session.tracker_list(info_hash).await.unwrap();
+        assert!(before.is_empty());
+
+        // Add a tracker.
+        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+
+        let after = session.tracker_list(info_hash).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].url, "udp://tracker.example.com:6969/announce");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: replace_trackers_replaces_all ----
+
+    #[tokio::test]
+    async fn replace_trackers_replaces_all() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Add 2 trackers.
+        session.add_tracker(info_hash, "udp://tracker1.example.com:6969/announce".into()).await.unwrap();
+        session.add_tracker(info_hash, "http://tracker2.example.com/announce".into()).await.unwrap();
+        assert_eq!(session.tracker_list(info_hash).await.unwrap().len(), 2);
+
+        // Replace with 1 different tracker.
+        session.replace_trackers(info_hash, vec![
+            "http://replacement.example.com/announce".into(),
+        ]).await.unwrap();
+
+        let after = session.tracker_list(info_hash).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].url, "http://replacement.example.com/announce");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: add_tracker_deduplicates ----
+
+    #[tokio::test]
+    async fn add_tracker_deduplicates() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Add the same tracker URL twice.
+        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+
+        // Should only have 1 tracker (deduplicated).
+        let trackers = session.tracker_list(info_hash).await.unwrap();
+        assert_eq!(trackers.len(), 1);
 
         session.shutdown().await.unwrap();
     }
