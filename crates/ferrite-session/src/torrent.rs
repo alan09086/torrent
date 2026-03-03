@@ -1424,7 +1424,7 @@ impl TorrentActor {
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
-        let mut connect_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut connect_interval = tokio::time::interval(Duration::from_secs(5));
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(self.config.have_send_delay_ms)))
@@ -6827,22 +6827,10 @@ mod tests {
         // Add seeder as a peer
         leecher.add_peers(vec![seeder_addr], PeerSource::Tracker).await.unwrap();
 
-        // Give the connect interval time to fire (it ticks every 30s).
-        // Instead, wait a bit for the initial connect tick. Since our interval
-        // skips the first tick, the first real connect happens at 30s.
-        // That's too long for a test. Let's trigger it by polling stats.
-        //
-        // Actually, the connect timer fires immediately on the SECOND tick after
-        // the first (which we consumed). So we need a different approach.
-        // We added the available peer — but the connect interval won't fire for 30s.
-        //
-        // Let's just wait and check — the actor's try_connect_peers runs on the timer.
-        // For this test to be practical, we need a shorter interval or a direct connect trigger.
-        //
-        // Actually the timer will fire every 30 seconds after the first tick we consumed.
-        // For testing, we can just wait longer or use a smaller torrent.
-        // Let's wait up to 35 seconds with a short poll.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
+        // Give the connect interval time to fire (it ticks every 5s).
+        // The actor's try_connect_peers runs on the timer, and also immediately
+        // when peers are added via AddPeers command. Wait up to 10 seconds.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let stats = leecher.stats().await.unwrap();
