@@ -97,6 +97,15 @@ fn relocate_files(
     Ok(())
 }
 
+/// Current time as POSIX seconds (0 on clock error).
+#[allow(dead_code)] // used in Task 4 (event-driven timestamp tracking)
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Cloneable handle for interacting with a running torrent.
 #[derive(Clone)]
 pub struct TorrentHandle {
@@ -823,43 +832,25 @@ struct TorrentActor {
     downloaded: u64,
     uploaded: u64,
     checking_progress: f32,
-    #[allow(dead_code)] // wired in Task 3 (make_stats) and Task 4 (event tracking)
     total_download: u64,
-    #[allow(dead_code)]
     total_upload: u64,
-    #[allow(dead_code)]
     total_failed_bytes: u64,
-    #[allow(dead_code)]
     total_redundant_bytes: u64,
-    #[allow(dead_code)]
     added_time: i64,
-    #[allow(dead_code)]
     completed_time: i64,
-    #[allow(dead_code)]
     last_download: i64,
-    #[allow(dead_code)]
     last_upload: i64,
-    #[allow(dead_code)]
     last_seen_complete: i64,
-    #[allow(dead_code)]
     active_duration: i64,
-    #[allow(dead_code)]
     finished_duration: i64,
-    #[allow(dead_code)]
     seeding_duration: i64,
-    #[allow(dead_code)]
     active_since: Option<std::time::Instant>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // wired in Task 4 (event tracking)
     state_duration_since: Option<std::time::Instant>,
-    #[allow(dead_code)]
     moving_storage: bool,
-    #[allow(dead_code)]
     has_incoming: bool,
-    #[allow(dead_code)]
     need_save_resume: bool,
-    #[allow(dead_code)]
     error: String,
-    #[allow(dead_code)]
     error_file: i32,
 
     // Channels
@@ -1515,19 +1506,162 @@ impl TorrentActor {
         Ok(())
     }
 
+    /// Compute download progress metrics.
+    ///
+    /// Returns `(total, total_done, total_wanted, total_wanted_done, progress, progress_ppm)`.
+    fn compute_progress(&self) -> (u64, u64, u64, u64, f32, u32) {
+        let lengths = match &self.lengths {
+            Some(l) => l,
+            None => return (0, 0, 0, 0, 0.0, 0),
+        };
+
+        let total = lengths.total_length();
+
+        let bitfield = self
+            .chunk_tracker
+            .as_ref()
+            .map(|ct| ct.bitfield());
+
+        let mut total_done: u64 = 0;
+        let mut total_wanted: u64 = 0;
+        let mut total_wanted_done: u64 = 0;
+
+        for idx in 0..self.num_pieces {
+            let piece_bytes = lengths.piece_size(idx) as u64;
+            let have = bitfield
+                .as_ref()
+                .map(|bf| bf.get(idx))
+                .unwrap_or(false);
+
+            if have {
+                total_done += piece_bytes;
+            }
+
+            if self.wanted_pieces.get(idx) {
+                total_wanted += piece_bytes;
+                if have {
+                    total_wanted_done += piece_bytes;
+                }
+            }
+        }
+
+        let progress = if total_wanted == 0 {
+            1.0
+        } else {
+            total_wanted_done as f32 / total_wanted as f32
+        };
+        let progress_ppm = (progress * 1_000_000.0) as u32;
+
+        (total, total_done, total_wanted, total_wanted_done, progress, progress_ppm)
+    }
+
+    /// Compute distributed copy availability across the swarm.
+    ///
+    /// Returns `(full_copies, fraction, copies_float)` where `fraction` is in thousandths.
+    fn distributed_copies(&self) -> (u32, u32, f32) {
+        if self.num_pieces == 0 || self.peers.is_empty() {
+            return (0, 0, 0.0);
+        }
+
+        let num = self.num_pieces as usize;
+        let mut availability = vec![0u32; num];
+
+        for peer in self.peers.values() {
+            for idx in 0..self.num_pieces {
+                if peer.bitfield.get(idx) {
+                    availability[idx as usize] += 1;
+                }
+            }
+        }
+
+        let min_avail = availability.iter().copied().min().unwrap_or(0);
+        let rarest_count = availability.iter().filter(|&&c| c == min_avail).count() as u32;
+        let fraction = ((self.num_pieces - rarest_count) * 1000) / self.num_pieces;
+        let copies_float = min_avail as f32 + fraction as f32 / 1000.0;
+
+        (min_avail, fraction, copies_float)
+    }
+
     fn make_stats(&self) -> TorrentStats {
+        // ── Single pass over peers ──
+        let mut num_seeds = 0usize;
+        let mut num_uploads = 0usize;
+        let mut download_rate_sum: u64 = 0;
+        let mut upload_rate_sum: u64 = 0;
+        let mut peers_by_source = std::collections::HashMap::new();
+
+        for peer in self.peers.values() {
+            *peers_by_source.entry(peer.source).or_insert(0) += 1;
+            download_rate_sum += peer.download_rate;
+            upload_rate_sum += peer.upload_rate;
+            if self.num_pieces > 0 && peer.bitfield.count_ones() == self.num_pieces {
+                num_seeds += 1;
+            }
+            if !peer.am_choking {
+                num_uploads += 1;
+            }
+        }
+
+        // ── Tracker info (scrape data + current tracker) ──
+        let tracker_list = self.tracker_manager.tracker_list();
+        let mut num_complete: i32 = -1;
+        let mut num_incomplete: i32 = -1;
+        let mut current_tracker = String::new();
+
+        for ti in &tracker_list {
+            if num_complete == -1
+                && let Some(s) = ti.seeders
+            {
+                num_complete = s as i32;
+            }
+            if num_incomplete == -1
+                && let Some(l) = ti.leechers
+            {
+                num_incomplete = l as i32;
+            }
+            if current_tracker.is_empty()
+                && matches!(ti.status, crate::tracker_manager::TrackerStatus::Working)
+            {
+                current_tracker = ti.url.clone();
+            }
+        }
+
+        // ── Progress ──
         let pieces_have = self
             .chunk_tracker
             .as_ref()
             .map(|ct| ct.bitfield().count_ones())
             .unwrap_or(0);
+        let (total, total_done, total_wanted, total_wanted_done, progress, progress_ppm) =
+            self.compute_progress();
 
-        let mut peers_by_source = std::collections::HashMap::new();
-        for peer in self.peers.values() {
-            *peers_by_source.entry(peer.source).or_insert(0) += 1;
-        }
+        // ── Distributed copies ──
+        let (distributed_full_copies, distributed_fraction, distributed_copies) =
+            self.distributed_copies();
+
+        // ── Active duration (include current active stint) ──
+        let active_duration = self.active_duration
+            + self
+                .active_since
+                .map(|since| since.elapsed().as_secs() as i64)
+                .unwrap_or(0);
+
+        // ── Name ──
+        let name = self
+            .meta
+            .as_ref()
+            .map(|m| m.info.name.clone())
+            .unwrap_or_default();
+
+        // ── Block size ──
+        let block_size = self
+            .lengths
+            .as_ref()
+            .map(|l| l.chunk_size())
+            .unwrap_or(16384);
 
         TorrentStats {
+            // ── Original 9 fields (unchanged) ──
             state: self.state,
             downloaded: self.downloaded,
             uploaded: self.uploaded,
@@ -1537,7 +1671,97 @@ impl TorrentActor {
             peers_available: self.available_peers.len(),
             checking_progress: self.checking_progress,
             peers_by_source,
-            ..Default::default()
+
+            // ── Identity ──
+            info_hashes: self.info_hashes.clone(),
+            name,
+
+            // ── State flags ──
+            has_metadata: self.meta.is_some(),
+            is_seeding: self.state == TorrentState::Seeding,
+            is_finished: matches!(self.state, TorrentState::Complete | TorrentState::Seeding),
+            is_paused: self.state == TorrentState::Paused,
+            auto_managed: false, // session fills this
+            sequential_download: self.config.sequential_download,
+            super_seeding: self.config.super_seeding,
+            has_incoming: self.has_incoming,
+            need_save_resume: self.need_save_resume,
+            moving_storage: self.moving_storage,
+
+            // ── Progress ──
+            progress,
+            progress_ppm,
+            total_done,
+            total,
+            total_wanted_done,
+            total_wanted,
+            block_size,
+
+            // ── Transfer (session counters) ──
+            total_download: self.total_download,
+            total_upload: self.total_upload,
+            total_payload_download: self.downloaded,
+            total_payload_upload: self.uploaded,
+            total_failed_bytes: self.total_failed_bytes,
+            total_redundant_bytes: self.total_redundant_bytes,
+
+            // ── Transfer (all-time = session for now, no persistence yet) ──
+            all_time_download: self.total_download,
+            all_time_upload: self.total_upload,
+
+            // ── Rates ──
+            download_rate: download_rate_sum,
+            upload_rate: upload_rate_sum,
+            download_payload_rate: download_rate_sum,
+            upload_payload_rate: upload_rate_sum,
+
+            // ── Connection details ──
+            num_peers: self.peers.len(),
+            num_seeds,
+            num_complete,
+            num_incomplete,
+            list_seeds: num_seeds,
+            list_peers: self.peers.len() + self.available_peers.len(),
+            connect_candidates: self.available_peers.len(),
+            num_connections: self.peers.len(),
+            num_uploads,
+
+            // ── Limits ──
+            connections_limit: self.config.max_peers,
+            uploads_limit: self.choker.unchoke_slots(),
+
+            // ── Distributed copies ──
+            distributed_full_copies,
+            distributed_fraction,
+            distributed_copies,
+
+            // ── Tracker ──
+            current_tracker,
+            announcing_to_trackers: !tracker_list.is_empty(),
+            announcing_to_lsd: false, // LSD not yet implemented
+            announcing_to_dht: self.dht_peers_rx.is_some(),
+
+            // ── Timestamps ──
+            added_time: self.added_time,
+            completed_time: self.completed_time,
+            last_seen_complete: self.last_seen_complete,
+            last_upload: self.last_upload,
+            last_download: self.last_download,
+
+            // ── Durations ──
+            active_duration,
+            finished_duration: self.finished_duration,
+            seeding_duration: self.seeding_duration,
+
+            // ── Storage ──
+            save_path: self.config.download_dir.to_string_lossy().into_owned(),
+
+            // ── Queue (session fills this) ──
+            queue_position: -1,
+
+            // ── Error ──
+            error: self.error.clone(),
+            error_file: self.error_file,
         }
     }
 

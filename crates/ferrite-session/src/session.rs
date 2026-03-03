@@ -1464,7 +1464,11 @@ impl SessionActor {
             .torrents
             .get(&info_hash)
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
-        entry.handle.stats().await
+        let mut stats = entry.handle.stats().await?;
+        // Enrich with session-level data that the torrent actor doesn't own.
+        stats.queue_position = entry.queue_position;
+        stats.auto_managed = entry.auto_managed;
+        Ok(stats)
     }
 
     fn handle_torrent_info(&self, info_hash: Id20) -> crate::Result<TorrentInfo> {
