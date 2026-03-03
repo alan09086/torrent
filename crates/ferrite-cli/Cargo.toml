@@ -1,0 +1,20 @@
+[package]
+name = "ferrite-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line BitTorrent client powered by ferrite"
+
+[[bin]]
+name = "ferrite"
+path = "src/main.rs"
+
+[dependencies]
+ferrite = { path = "../ferrite" }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+serde_json = "1"

@@ -4,9 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.61.0 — M54: CLI Binary & Benchmarking
+
 ### Added
-- Roadmap v3 (`docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`) — 16 new milestones (M36-M51) across 6 phases targeting full libtorrent-rasterbar feature parity
-- Implementation plans for all 16 remaining milestones covering: BEP 42/44/51/53/55, I2P, SSL torrents, choking algorithms, piece picker enhancements, mixed-mode TCP/uTP, peer turnover, SSRF mitigation, DSCP marking, anonymous mode, pluggable disk I/O, session statistics, and network simulation framework
+- **`ferrite-cli` crate** — new workspace member providing the `ferrite` binary
+- **`ferrite download`** — download torrents from magnet links or .torrent files with indicatif progress bar, Ctrl-C graceful shutdown, `--config` JSON settings, `--seed`, `--quiet`, `--no-dht`, `--port` options
+- **`ferrite create`** — create .torrent files from files or directories with tracker, private, and piece size options, progress display during hashing
+- **`ferrite info`** — display torrent metadata with v1/v2/hybrid support, dual info hash display, file listing, tracker listing
+- **Benchmark harness** — `benchmarks/run_benchmark.sh` for comparing ferrite vs rqbit vs libtorrent (wall time, speed, RSS), with `lt_download.py` libtorrent runner and `summarize.py` results aggregation
+- 7 CLI integration tests (arg parsing, error handling, create+info roundtrip)
+
+### Dependencies
+- `clap` 4.x (derive), `indicatif` 0.17, `tracing-subscriber` 0.3, `anyhow` 1, `serde_json` 1
 
 ## 0.60.0 — M53: Full Torrent Operations API Parity
 
