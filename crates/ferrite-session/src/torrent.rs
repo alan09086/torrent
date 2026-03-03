@@ -1830,6 +1830,7 @@ impl TorrentActor {
                         if !result.peers.is_empty() {
                             debug!(count = result.peers.len(), "tracker returned peers");
                             self.handle_add_peers(result.peers, PeerSource::Tracker);
+                            self.try_connect_peers();
                         }
                     }
                 }
