@@ -767,6 +767,46 @@ impl TorrentHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
 
+    /// Set the per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_download_limit(&self, bytes_per_sec: u64) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetDownloadLimit { bytes_per_sec, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set the per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_upload_limit(&self, bytes_per_sec: u64) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetUploadLimit { bytes_per_sec, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn download_limit(&self) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::DownloadLimit { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn upload_limit(&self) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::UploadLimit { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
     /// Route an incoming SSL peer (TLS already completed) to this torrent (M42).
     pub(crate) async fn spawn_ssl_peer(
         &self,
@@ -1208,6 +1248,20 @@ impl TorrentActor {
                                 stream.0,
                                 Some(ferrite_wire::mse::EncryptionMode::Disabled),
                             );
+                        }
+                        Some(TorrentCommand::SetDownloadLimit { bytes_per_sec, reply }) => {
+                            self.download_bucket.set_rate(bytes_per_sec);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::SetUploadLimit { bytes_per_sec, reply }) => {
+                            self.upload_bucket.set_rate(bytes_per_sec);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::DownloadLimit { reply }) => {
+                            let _ = reply.send(self.download_bucket.rate());
+                        }
+                        Some(TorrentCommand::UploadLimit { reply }) => {
+                            let _ = reply.send(self.upload_bucket.rate());
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;

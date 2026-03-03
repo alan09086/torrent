@@ -39,6 +39,11 @@ impl TokenBucket {
         self.rate == 0
     }
 
+    /// Current rate limit in bytes/sec (0 = unlimited).
+    pub fn rate(&self) -> u64 {
+        self.rate
+    }
+
     /// Add tokens proportional to elapsed time.
     pub fn refill(&mut self, elapsed: Duration) {
         if self.rate == 0 {

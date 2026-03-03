@@ -764,6 +764,24 @@ pub(crate) enum TorrentCommand {
         addr: SocketAddr,
         stream: BoxedAsyncStream,
     },
+    /// Set the per-torrent download rate limit (bytes/sec, 0 = unlimited).
+    SetDownloadLimit {
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<()>,
+    },
+    /// Set the per-torrent upload rate limit (bytes/sec, 0 = unlimited).
+    SetUploadLimit {
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<()>,
+    },
+    /// Get the current per-torrent download rate limit (bytes/sec, 0 = unlimited).
+    DownloadLimit {
+        reply: oneshot::Sender<u64>,
+    },
+    /// Get the current per-torrent upload rate limit (bytes/sec, 0 = unlimited).
+    UploadLimit {
+        reply: oneshot::Sender<u64>,
+    },
 }
 
 /// Info about a file within a torrent.

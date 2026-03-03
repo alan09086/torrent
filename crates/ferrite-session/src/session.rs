@@ -184,6 +184,24 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<Vec<ferrite_core::FilePriority>>>,
     },
+    SetDownloadLimit {
+        info_hash: Id20,
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    SetUploadLimit {
+        info_hash: Id20,
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    DownloadLimit {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<u64>>,
+    },
+    UploadLimit {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<u64>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -982,6 +1000,68 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Set the per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_download_limit(
+        &self,
+        info_hash: Id20,
+        bytes_per_sec: u64,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetDownloadLimit {
+                info_hash,
+                bytes_per_sec,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_upload_limit(
+        &self,
+        info_hash: Id20,
+        bytes_per_sec: u64,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetUploadLimit {
+                info_hash,
+                bytes_per_sec,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn download_limit(&self, info_hash: Id20) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::DownloadLimit {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn upload_limit(&self, info_hash: Id20) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::UploadLimit {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1296,38 @@ impl SessionActor {
                         Some(SessionCommand::FilePriorities { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.file_priorities().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetDownloadLimit { info_hash, bytes_per_sec, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_download_limit(bytes_per_sec).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetUploadLimit { info_hash, bytes_per_sec, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_upload_limit(bytes_per_sec).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::DownloadLimit { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.download_limit().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::UploadLimit { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.upload_limit().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -3347,6 +3459,94 @@ mod tests {
         // Should fail for unknown torrent.
         let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         assert!(session.file_priorities(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_download_limit zero means unlimited ----
+
+    #[tokio::test]
+    async fn set_download_limit_zero_means_unlimited() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Set limit to non-zero, then back to zero (unlimited).
+        session.set_download_limit(info_hash, 50_000).await.unwrap();
+        session.set_download_limit(info_hash, 0).await.unwrap();
+        let limit = session.download_limit(info_hash).await.unwrap();
+        assert_eq!(limit, 0, "0 means unlimited");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_upload_limit persists ----
+
+    #[tokio::test]
+    async fn set_upload_limit_persists() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        session.set_upload_limit(info_hash, 100_000).await.unwrap();
+        let limit = session.upload_limit(info_hash).await.unwrap();
+        assert_eq!(limit, 100_000);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: download_limit default is zero ----
+
+    #[tokio::test]
+    async fn download_limit_default_is_zero() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Default config has download_rate_limit = 0.
+        let limit = session.download_limit(info_hash).await.unwrap();
+        assert_eq!(limit, 0, "default download limit should be 0 (unlimited)");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: rate_limit_round_trip ----
+
+    #[tokio::test]
+    async fn rate_limit_round_trip() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Set both limits.
+        session.set_download_limit(info_hash, 1_000_000).await.unwrap();
+        session.set_upload_limit(info_hash, 500_000).await.unwrap();
+
+        // Read them back.
+        let dl = session.download_limit(info_hash).await.unwrap();
+        let ul = session.upload_limit(info_hash).await.unwrap();
+        assert_eq!(dl, 1_000_000);
+        assert_eq!(ul, 500_000);
+
+        // Update and verify again.
+        session.set_download_limit(info_hash, 2_000_000).await.unwrap();
+        let dl = session.download_limit(info_hash).await.unwrap();
+        assert_eq!(dl, 2_000_000);
+
+        // Unknown torrent should fail.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.download_limit(fake).await.is_err());
+        assert!(session.upload_limit(fake).await.is_err());
+        assert!(session.set_download_limit(fake, 100).await.is_err());
+        assert!(session.set_upload_limit(fake, 100).await.is_err());
 
         session.shutdown().await.unwrap();
     }
