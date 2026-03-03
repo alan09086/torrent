@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use bitflags::bitflags;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -881,6 +882,30 @@ pub(crate) enum TorrentCommand {
     FlushCache {
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Clear the error state and resume if the torrent was paused due to error.
+    ClearError,
+    /// Get per-file open/mode status based on torrent state.
+    FileStatus {
+        reply: oneshot::Sender<Vec<crate::types::FileStatus>>,
+    },
+    /// Read the current torrent flags as a bitflag set.
+    Flags {
+        reply: oneshot::Sender<TorrentFlags>,
+    },
+    /// Set (enable) the specified torrent flags.
+    SetFlags {
+        flags: TorrentFlags,
+        reply: oneshot::Sender<()>,
+    },
+    /// Unset (disable) the specified torrent flags.
+    UnsetFlags {
+        flags: TorrentFlags,
+        reply: oneshot::Sender<()>,
+    },
+    /// Immediately initiate a peer connection to the given address.
+    ConnectPeer {
+        addr: SocketAddr,
+    },
 }
 
 /// Per-peer details exported for client UI introspection.
@@ -970,6 +995,46 @@ pub struct SessionStats {
     pub total_uploaded: u64,
     /// Number of nodes in the DHT routing table.
     pub dht_nodes: usize,
+}
+
+/// Whether a file in a torrent is open and its I/O access mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// File is open for reading only (e.g. seeding).
+    ReadOnly,
+    /// File is open for reading and writing (e.g. downloading).
+    ReadWrite,
+    /// File is not currently open.
+    Closed,
+}
+
+/// Status of a single file within a torrent.
+#[derive(Debug, Clone)]
+pub struct FileStatus {
+    /// Whether the file is currently open.
+    pub open: bool,
+    /// The current access mode.
+    pub mode: FileMode,
+}
+
+bitflags! {
+    /// Bitflag convenience wrapper for common torrent state flags.
+    ///
+    /// These map to existing torrent actor fields; `set_flags` / `unset_flags`
+    /// delegate to the underlying operations (pause/resume, set_sequential, etc.).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TorrentFlags: u32 {
+        /// Torrent is paused.
+        const PAUSED = 0x1;
+        /// Torrent is auto-managed by the session queuing system.
+        const AUTO_MANAGED = 0x2;
+        /// Sequential (in-order) piece downloading is enabled.
+        const SEQUENTIAL_DOWNLOAD = 0x4;
+        /// BEP 16 super seeding mode is active.
+        const SUPER_SEEDING = 0x8;
+        /// Upload-only status (seeding complete, no wanted pieces).
+        const UPLOAD_ONLY = 0x10;
+    }
 }
 
 /// Type alias for a factory that creates per-torrent storage.

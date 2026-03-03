@@ -326,6 +326,44 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Check if a torrent handle is still valid (torrent exists and channel open).
+    IsValid {
+        info_hash: Id20,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Clear error state on a torrent.
+    ClearError {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Get per-file open/mode status for a torrent.
+    FileStatus {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::types::FileStatus>>>,
+    },
+    /// Read the current torrent flags.
+    Flags {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<crate::types::TorrentFlags>>,
+    },
+    /// Set (enable) the specified torrent flags.
+    SetFlags {
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Unset (disable) the specified torrent flags.
+    UnsetFlags {
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Immediately initiate a peer connection for a torrent.
+    ConnectPeer {
+        info_hash: Id20,
+        addr: SocketAddr,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1579,6 +1617,122 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Check if a torrent exists in the session and its handle is still valid.
+    pub async fn is_valid(&self, info_hash: Id20) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::IsValid {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Clear the error state on a torrent, resuming it if it was paused due to error.
+    pub async fn clear_error(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ClearError {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-file open/mode status for a torrent.
+    pub async fn file_status(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::types::FileStatus>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FileStatus {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Read the current torrent flags as a [`crate::types::TorrentFlags`] bitflag set.
+    pub async fn flags(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<crate::types::TorrentFlags> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::Flags {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set (enable) the specified torrent flags.
+    pub async fn set_flags(
+        &self,
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetFlags {
+                info_hash,
+                flags,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Unset (disable) the specified torrent flags.
+    pub async fn unset_flags(
+        &self,
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::UnsetFlags {
+                info_hash,
+                flags,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Immediately initiate a peer connection for a torrent.
+    pub async fn connect_peer(
+        &self,
+        info_hash: Id20,
+        addr: SocketAddr,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ConnectPeer {
+                info_hash,
+                addr,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2042,6 +2196,60 @@ impl SessionActor {
                         Some(SessionCommand::FlushCache { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.flush_cache().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::IsValid { info_hash, reply }) => {
+                            let valid = self.torrents.get(&info_hash)
+                                .map(|e| e.handle.is_valid())
+                                .unwrap_or(false);
+                            let _ = reply.send(valid);
+                        }
+                        Some(SessionCommand::ClearError { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.clear_error().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FileStatus { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.file_status().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::Flags { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.flags().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetFlags { info_hash, flags, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_flags(flags).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::UnsetFlags { info_hash, flags, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.unset_flags(flags).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ConnectPeer { info_hash, addr, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.connect_peer(addr).await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };

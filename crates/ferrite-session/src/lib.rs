@@ -53,7 +53,7 @@ pub use error::{Error, Result};
 pub use settings::Settings;
 pub use disk::{DiskConfig, DiskHandle, DiskJobFlags, DiskManagerHandle, DiskStats};
 pub use disk_backend::{DiskIoBackend, DiskIoStats, DisabledDiskIo};
-pub use types::{FileInfo, PartialPieceInfo, PeerInfo, SessionStats, StorageFactory, TorrentConfig, TorrentInfo, TorrentState, TorrentStats};
+pub use types::{FileInfo, FileMode, FileStatus, PartialPieceInfo, PeerInfo, SessionStats, StorageFactory, TorrentConfig, TorrentFlags, TorrentInfo, TorrentState, TorrentStats};
 pub use torrent::TorrentHandle;
 pub use session::SessionHandle;
 pub use ban::BanConfig;

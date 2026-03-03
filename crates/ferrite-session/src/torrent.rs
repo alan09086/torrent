@@ -1073,6 +1073,79 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Check whether this handle refers to a live torrent.
+    ///
+    /// Returns `false` after the torrent has been removed or shut down.
+    /// This is a synchronous check on the channel state — no command dispatch.
+    pub fn is_valid(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
+    /// Clear any error state on the torrent and resume if it was paused due to error.
+    pub async fn clear_error(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ClearError)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-file open/mode status based on the current torrent state.
+    ///
+    /// Returns one [`crate::types::FileStatus`] entry per file in the torrent.
+    pub async fn file_status(&self) -> crate::Result<Vec<crate::types::FileStatus>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FileStatus { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Read the current torrent state as a [`TorrentFlags`] bitflag set.
+    pub async fn flags(&self) -> crate::Result<crate::types::TorrentFlags> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::Flags { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set (enable) the specified torrent flags.
+    ///
+    /// Delegates to the underlying operations (pause/resume, sequential download, etc.).
+    pub async fn set_flags(&self, flags: crate::types::TorrentFlags) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetFlags { flags, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Unset (disable) the specified torrent flags.
+    ///
+    /// Delegates to the underlying operations (pause/resume, sequential download, etc.).
+    pub async fn unset_flags(&self, flags: crate::types::TorrentFlags) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::UnsetFlags { flags, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Immediately initiate a peer connection to the given address.
+    ///
+    /// Bypasses the normal peer selection queue — the connection attempt starts
+    /// right away. Fire-and-forget: no reply is sent.
+    pub async fn connect_peer(&self, addr: SocketAddr) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ConnectPeer { addr })
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1618,6 +1691,26 @@ impl TorrentActor {
                         Some(TorrentCommand::FlushCache { reply }) => {
                             let result = self.handle_flush_cache().await;
                             let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::ClearError) => {
+                            self.handle_clear_error().await;
+                        }
+                        Some(TorrentCommand::FileStatus { reply }) => {
+                            let _ = reply.send(self.build_file_status());
+                        }
+                        Some(TorrentCommand::Flags { reply }) => {
+                            let _ = reply.send(self.build_flags());
+                        }
+                        Some(TorrentCommand::SetFlags { flags, reply }) => {
+                            self.apply_set_flags(flags).await;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::UnsetFlags { flags, reply }) => {
+                            self.apply_unset_flags(flags).await;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::ConnectPeer { addr }) => {
+                            self.handle_connect_peer(addr);
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
@@ -2353,6 +2446,98 @@ impl TorrentActor {
     async fn handle_flush_cache(&self) -> crate::Result<()> {
         let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
         disk.flush_cache().await.map_err(crate::Error::Storage)
+    }
+
+    /// Clear the error state. If the torrent was paused and had an error, resume it.
+    async fn handle_clear_error(&mut self) {
+        let had_error = !self.error.is_empty();
+        self.error = String::new();
+        self.error_file = -1;
+        // If we were paused and had an error, resume
+        if had_error && self.state == TorrentState::Paused {
+            self.handle_resume().await;
+        }
+    }
+
+    /// Build per-file status based on the current torrent state.
+    fn build_file_status(&self) -> Vec<crate::types::FileStatus> {
+        let num_files = self.file_priorities.len();
+        let (open, mode) = match self.state {
+            TorrentState::Seeding => (true, crate::types::FileMode::ReadOnly),
+            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata | TorrentState::Complete | TorrentState::Sharing => {
+                (true, crate::types::FileMode::ReadWrite)
+            }
+            TorrentState::Paused | TorrentState::Stopped => {
+                (false, crate::types::FileMode::Closed)
+            }
+        };
+        vec![crate::types::FileStatus { open, mode }; num_files]
+    }
+
+    /// Build the current TorrentFlags from actor state.
+    fn build_flags(&self) -> crate::types::TorrentFlags {
+        let mut flags = crate::types::TorrentFlags::empty();
+        if self.state == TorrentState::Paused {
+            flags |= crate::types::TorrentFlags::PAUSED;
+        }
+        // auto_managed is session-level; torrent actor doesn't track it.
+        // We leave AUTO_MANAGED unset at the torrent level.
+        if self.config.sequential_download {
+            flags |= crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD;
+        }
+        if self.config.super_seeding {
+            flags |= crate::types::TorrentFlags::SUPER_SEEDING;
+        }
+        if self.state == TorrentState::Seeding
+            || matches!(self.state, TorrentState::Complete)
+        {
+            flags |= crate::types::TorrentFlags::UPLOAD_ONLY;
+        }
+        flags
+    }
+
+    /// Apply set_flags: enable the specified flags.
+    async fn apply_set_flags(&mut self, flags: crate::types::TorrentFlags) {
+        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state != TorrentState::Paused {
+            self.handle_pause().await;
+        }
+        if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
+            self.config.sequential_download = true;
+        }
+        if flags.contains(crate::types::TorrentFlags::SUPER_SEEDING) {
+            self.config.super_seeding = true;
+            if self.super_seed.is_none() {
+                self.super_seed = Some(crate::super_seed::SuperSeedState::new());
+            }
+        }
+        // AUTO_MANAGED and UPLOAD_ONLY are session-level; no-op at torrent level.
+    }
+
+    /// Apply unset_flags: disable the specified flags.
+    async fn apply_unset_flags(&mut self, flags: crate::types::TorrentFlags) {
+        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state == TorrentState::Paused {
+            self.handle_resume().await;
+        }
+        if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
+            self.config.sequential_download = false;
+        }
+        if flags.contains(crate::types::TorrentFlags::SUPER_SEEDING) {
+            self.config.super_seeding = false;
+            self.super_seed = None;
+        }
+        // AUTO_MANAGED and UPLOAD_ONLY are session-level; no-op at torrent level.
+    }
+
+    /// Immediately initiate a connection to the given peer address.
+    fn handle_connect_peer(&mut self, addr: SocketAddr) {
+        // Skip if already connected
+        if self.peers.contains_key(&addr) {
+            return;
+        }
+        // Add to the end of available peers (pop() takes from the end, so it
+        // will be the next peer attempted) and trigger connection immediately.
+        self.available_peers.push((addr, PeerSource::Incoming));
+        self.try_connect_peers();
     }
 
     fn make_stats(&self) -> TorrentStats {
@@ -8841,6 +9026,175 @@ mod tests {
         let progress = handle.file_progress().await.unwrap();
         assert_eq!(progress.len(), 3, "multi-file torrent should have 3 entries");
         assert!(progress.iter().all(|&b| b == 0), "all progress should be 0 initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: is_valid returns true for active torrent ----
+
+    #[tokio::test]
+    async fn is_valid_true_for_active() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.is_valid(), "handle should be valid while torrent actor is alive");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: is_valid returns false after shutdown ----
+
+    #[tokio::test]
+    async fn is_valid_false_after_remove() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.is_valid());
+
+        // Shutdown the torrent (simulating removal)
+        handle.shutdown().await.unwrap();
+
+        // Give the actor time to stop and close the channel
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!handle.is_valid(), "handle should be invalid after shutdown");
+    }
+
+    // ---- Test: clear_error resets error state ----
+
+    #[tokio::test]
+    async fn clear_error_resets() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Initially no error
+        let stats = handle.stats().await.unwrap();
+        assert!(stats.error.is_empty());
+        assert_eq!(stats.error_file, -1);
+
+        // Clear error (no-op when no error) should succeed without issue
+        handle.clear_error().await.unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert!(stats.error.is_empty());
+        assert_eq!(stats.error_file, -1);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: flags round trip ----
+
+    #[tokio::test]
+    async fn flags_round_trip() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Initial flags: torrent starts downloading (not paused), no sequential, no super seeding
+        let initial = handle.flags().await.unwrap();
+        assert!(!initial.contains(crate::types::TorrentFlags::PAUSED));
+        assert!(!initial.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
+        assert!(!initial.contains(crate::types::TorrentFlags::SUPER_SEEDING));
+
+        // Enable sequential download via set_flags
+        handle.set_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD).await.unwrap();
+        let after_set = handle.flags().await.unwrap();
+        assert!(after_set.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
+
+        // Disable it via unset_flags
+        handle.unset_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD).await.unwrap();
+        let after_unset = handle.flags().await.unwrap();
+        assert!(!after_unset.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
+
+        // Verify sequential_download state via the dedicated query
+        assert!(!handle.is_sequential_download().await.unwrap());
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: connect_peer does not error ----
+
+    #[tokio::test]
+    async fn connect_peer_no_error() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // connect_peer should not error even though the peer doesn't exist
+        // (the connection attempt will fail asynchronously, but the command itself succeeds)
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        handle.connect_peer(addr).await.unwrap();
+
+        // Give the actor a moment to process
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         handle.shutdown().await.unwrap();
     }
