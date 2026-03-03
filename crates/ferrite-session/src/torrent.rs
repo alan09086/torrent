@@ -867,6 +867,21 @@ impl TorrentHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
 
+    /// Trigger a full piece verification (force recheck).
+    ///
+    /// Transitions the torrent through `Checking` state, clears all piece
+    /// completion data, re-verifies every piece against its hash, then
+    /// transitions to `Seeding` (all valid) or `Downloading` (some missing).
+    /// Returns after the check is complete.
+    pub async fn force_recheck(&self) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::ForceRecheck { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
     /// Route an incoming SSL peer (TLS already completed) to this torrent (M42).
     pub(crate) async fn spawn_ssl_peer(
         &self,
@@ -1348,6 +1363,9 @@ impl TorrentActor {
                         Some(TorrentCommand::ReplaceTrackers { urls, reply }) => {
                             self.tracker_manager.replace_all(urls);
                             let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::ForceRecheck { reply }) => {
+                            self.handle_force_recheck(reply).await;
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
@@ -2547,7 +2565,31 @@ impl TorrentActor {
             info!("all pieces verified, starting as seeder");
         } else {
             self.transition_state(TorrentState::Downloading);
+            self.choker.set_seed_mode(false);
         }
+    }
+
+    /// Handle a force recheck request: clear all piece state, re-verify,
+    /// transition to the appropriate post-check state, then send reply.
+    async fn handle_force_recheck(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<crate::Result<()>>,
+    ) {
+        // Disconnect all peers — they hold stale bitfield state
+        for peer in self.peers.values() {
+            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+        }
+        self.peers.clear();
+
+        // Clear all piece completion state
+        if let Some(ref mut ct) = self.chunk_tracker {
+            ct.clear();
+        }
+
+        // Run the full verification pipeline (transitions through Checking)
+        self.verify_existing_pieces().await;
+
+        let _ = reply.send(Ok(()));
     }
 
     fn build_resume_data(&self) -> crate::Result<ferrite_core::FastResumeData> {
@@ -7507,5 +7549,78 @@ mod tests {
     fn peer_turnover_no_action_when_seeding() {
         let state = TorrentState::Seeding;
         assert_ne!(state, TorrentState::Downloading);
+    }
+
+    // ---- Test: force_recheck transitions through Checking state ----
+
+    #[tokio::test]
+    async fn force_recheck_transitions_to_checking() {
+        let data = vec![0xDDu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
+            .await
+            .unwrap();
+
+        // Wait for initial verification to complete (should become Seeding)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding, "should start as seeder");
+
+        // Drain any existing alerts
+        while arx.try_recv().is_ok() {}
+
+        // Force recheck
+        handle.force_recheck().await.unwrap();
+
+        // After force_recheck returns, look for a StateChanged alert that
+        // went through Checking (the transition_state fires it)
+        let mut saw_checking = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let crate::alert::AlertKind::StateChanged { new_state, .. } = alert.kind {
+                if new_state == TorrentState::Checking {
+                    saw_checking = true;
+                }
+            }
+        }
+        assert!(saw_checking, "should have transitioned through Checking state");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_recheck completes with correct state ----
+
+    #[tokio::test]
+    async fn force_recheck_completes() {
+        let data = vec![0xEEu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
+            .await
+            .unwrap();
+
+        // Wait for initial verification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding);
+        assert_eq!(stats.pieces_have, 2);
+
+        // Force recheck — should re-verify all pieces and return to Seeding
+        handle.force_recheck().await.unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding, "should return to Seeding after recheck");
+        assert_eq!(stats.pieces_have, 2, "all pieces should still be verified");
+
+        handle.shutdown().await.unwrap();
     }
 }

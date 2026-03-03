@@ -230,6 +230,11 @@ enum SessionCommand {
         urls: Vec<String>,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Trigger a full piece verification (force recheck) for a torrent.
+    ForceRecheck {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1186,6 +1191,23 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Trigger a full piece verification (force recheck) for a torrent.
+    ///
+    /// Clears all piece completion data, re-verifies every piece, and
+    /// transitions to `Seeding` or `Downloading` depending on the result.
+    /// Returns after the recheck is complete.
+    pub async fn force_recheck(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceRecheck {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1500,6 +1522,14 @@ impl SessionActor {
                         Some(SessionCommand::ReplaceTrackers { info_hash, urls, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.replace_trackers(urls).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceRecheck { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.force_recheck().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };

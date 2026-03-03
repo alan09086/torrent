@@ -809,6 +809,10 @@ pub(crate) enum TorrentCommand {
         urls: Vec<String>,
         reply: oneshot::Sender<()>,
     },
+    /// Trigger a full piece verification (force recheck).
+    ForceRecheck {
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
 }
 
 /// Info about a file within a torrent.
