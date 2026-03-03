@@ -80,3 +80,6 @@ pub use crate::session::{DiskIoBackend, DisabledDiskIo};
 
 // Session stats (M50)
 pub use crate::session::SessionCounters;
+
+// Torrent flags + file status (M53)
+pub use crate::session::{FileMode, FileStatus, TorrentFlags};

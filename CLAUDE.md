@@ -29,7 +29,7 @@ cargo clippy --workspace -- -D warnings
 ## Milestones
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md`
-- M1-M52 complete (v0.59.0, 1320 tests). All 51 parity milestones done + M52 API documentation + TorrentStats full parity.
+- M1-M53 complete (v0.60.0, 1366 tests). All 51 parity milestones done + M52 API documentation + TorrentStats full parity + M53 full torrent operations API parity.
 - Implementation plans exist for all remaining milestones (M40-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone

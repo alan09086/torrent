@@ -626,6 +626,17 @@ impl TrackerManager {
         true
     }
 
+    /// Replace all trackers with a new set of URLs.
+    ///
+    /// Clears the existing tracker list and adds each URL via `add_tracker_url`,
+    /// which handles validation and deduplication.
+    pub fn replace_all(&mut self, urls: Vec<String>) {
+        self.trackers.clear();
+        for url in &urls {
+            self.add_tracker_url(url);
+        }
+    }
+
     /// Add a new tracker URL with URL security validation.
     ///
     /// Returns `true` if the URL was added, `false` if it failed validation,

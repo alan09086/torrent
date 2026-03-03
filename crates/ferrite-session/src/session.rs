@@ -162,6 +162,208 @@ enum SessionCommand {
         file_index: usize,
         reply: oneshot::Sender<crate::Result<crate::streaming::FileStream>>,
     },
+    ForceReannounce {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    TrackerList {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::tracker_manager::TrackerInfo>>>,
+    },
+    Scrape {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Option<(String, ferrite_tracker::ScrapeInfo)>>>,
+    },
+    SetFilePriority {
+        info_hash: Id20,
+        index: usize,
+        priority: ferrite_core::FilePriority,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    FilePriorities {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<ferrite_core::FilePriority>>>,
+    },
+    SetDownloadLimit {
+        info_hash: Id20,
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    SetUploadLimit {
+        info_hash: Id20,
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    DownloadLimit {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<u64>>,
+    },
+    UploadLimit {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<u64>>,
+    },
+    SetSequentialDownload {
+        info_hash: Id20,
+        enabled: bool,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    IsSequentialDownload {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<bool>>,
+    },
+    SetSuperSeeding {
+        info_hash: Id20,
+        enabled: bool,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    IsSuperSeeding {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<bool>>,
+    },
+    AddTracker {
+        info_hash: Id20,
+        url: String,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    ReplaceTrackers {
+        info_hash: Id20,
+        urls: Vec<String>,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Trigger a full piece verification (force recheck) for a torrent.
+    ForceRecheck {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Rename a file within a torrent on disk.
+    RenameFile {
+        info_hash: Id20,
+        file_index: usize,
+        new_name: String,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Set per-torrent maximum connections (0 = use global default).
+    SetMaxConnections {
+        info_hash: Id20,
+        limit: usize,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Get per-torrent maximum connection limit.
+    MaxConnections {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<usize>>,
+    },
+    /// Set per-torrent maximum upload slots (unchoke slots).
+    SetMaxUploads {
+        info_hash: Id20,
+        limit: usize,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Get per-torrent maximum upload slots (unchoke slots).
+    MaxUploads {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<usize>>,
+    },
+    /// Get per-peer details for all connected peers of a torrent.
+    GetPeerInfo {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::types::PeerInfo>>>,
+    },
+    /// Get in-flight piece download status for a torrent.
+    GetDownloadQueue {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::types::PartialPieceInfo>>>,
+    },
+    /// Check whether a specific piece has been downloaded.
+    HavePiece {
+        info_hash: Id20,
+        index: u32,
+        reply: oneshot::Sender<crate::Result<bool>>,
+    },
+    /// Get per-piece availability counts from connected peers.
+    PieceAvailability {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<u32>>>,
+    },
+    /// Get per-file bytes-downloaded progress.
+    FileProgress {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<u64>>>,
+    },
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    InfoHashesQuery {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<ferrite_core::InfoHashes>>,
+    },
+    /// Get the full v1 metainfo for a torrent.
+    TorrentFile {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Option<ferrite_core::TorrentMetaV1>>>,
+    },
+    /// Get the full v2 metainfo for a torrent.
+    TorrentFileV2 {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Option<ferrite_core::TorrentMetaV2>>>,
+    },
+    /// Force an immediate DHT announce for a torrent.
+    ForceDhtAnnounce {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Force an immediate LSD announce for a torrent (session-level only).
+    ForceLsdAnnounce {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Read all data for a specific piece from disk.
+    ReadPiece {
+        info_hash: Id20,
+        index: u32,
+        reply: oneshot::Sender<crate::Result<bytes::Bytes>>,
+    },
+    /// Flush the disk write cache for a torrent.
+    FlushCache {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Check if a torrent handle is still valid (torrent exists and channel open).
+    IsValid {
+        info_hash: Id20,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Clear error state on a torrent.
+    ClearError {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Get per-file open/mode status for a torrent.
+    FileStatus {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::types::FileStatus>>>,
+    },
+    /// Read the current torrent flags.
+    Flags {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<crate::types::TorrentFlags>>,
+    },
+    /// Set (enable) the specified torrent flags.
+    SetFlags {
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Unset (disable) the specified torrent flags.
+    UnsetFlags {
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Immediately initiate a peer connection for a torrent.
+    ConnectPeer {
+        info_hash: Id20,
+        addr: SocketAddr,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -879,6 +1081,658 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Force all trackers for a torrent to re-announce immediately.
+    pub async fn force_reannounce(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceReannounce {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the list of all configured trackers with their status for a torrent.
+    pub async fn tracker_list(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::tracker_manager::TrackerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::TrackerList {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Scrape trackers for seeder/leecher counts for a torrent.
+    pub async fn scrape(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Option<(String, ferrite_tracker::ScrapeInfo)>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::Scrape {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the download priority of a specific file within a torrent.
+    pub async fn set_file_priority(
+        &self,
+        info_hash: Id20,
+        index: usize,
+        priority: ferrite_core::FilePriority,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetFilePriority {
+                info_hash,
+                index,
+                priority,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-file priorities for a torrent.
+    pub async fn file_priorities(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<ferrite_core::FilePriority>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FilePriorities {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_download_limit(
+        &self,
+        info_hash: Id20,
+        bytes_per_sec: u64,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetDownloadLimit {
+                info_hash,
+                bytes_per_sec,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_upload_limit(
+        &self,
+        info_hash: Id20,
+        bytes_per_sec: u64,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetUploadLimit {
+                info_hash,
+                bytes_per_sec,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn download_limit(&self, info_hash: Id20) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::DownloadLimit {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn upload_limit(&self, info_hash: Id20) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::UploadLimit {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Enable or disable sequential (in-order) piece downloading for a torrent.
+    pub async fn set_sequential_download(
+        &self,
+        info_hash: Id20,
+        enabled: bool,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetSequentialDownload {
+                info_hash,
+                enabled,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Query whether sequential downloading is enabled for a torrent.
+    pub async fn is_sequential_download(&self, info_hash: Id20) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::IsSequentialDownload {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Enable or disable BEP 16 super seeding mode for a torrent.
+    pub async fn set_super_seeding(
+        &self,
+        info_hash: Id20,
+        enabled: bool,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetSuperSeeding {
+                info_hash,
+                enabled,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Query whether BEP 16 super seeding mode is enabled for a torrent.
+    pub async fn is_super_seeding(&self, info_hash: Id20) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::IsSuperSeeding {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Add a new tracker URL to a torrent.
+    ///
+    /// The URL is validated and deduplicated by the tracker manager.
+    pub async fn add_tracker(&self, info_hash: Id20, url: String) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::AddTracker {
+                info_hash,
+                url,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Replace all tracker URLs for a torrent.
+    pub async fn replace_trackers(
+        &self,
+        info_hash: Id20,
+        urls: Vec<String>,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ReplaceTrackers {
+                info_hash,
+                urls,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Trigger a full piece verification (force recheck) for a torrent.
+    ///
+    /// Clears all piece completion data, re-verifies every piece, and
+    /// transitions to `Seeding` or `Downloading` depending on the result.
+    /// Returns after the recheck is complete.
+    pub async fn force_recheck(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceRecheck {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Rename a file within a torrent on disk.
+    ///
+    /// Changes the filename of the specified file (by index) to `new_name`.
+    /// The file stays in the same directory; only the filename component changes.
+    /// Fires a `FileRenamed` alert on success.
+    pub async fn rename_file(
+        &self,
+        info_hash: Id20,
+        file_index: usize,
+        new_name: String,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::RenameFile {
+                info_hash,
+                file_index,
+                new_name,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the per-torrent maximum number of connections (0 = use global default).
+    pub async fn set_max_connections(
+        &self,
+        info_hash: Id20,
+        limit: usize,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetMaxConnections {
+                info_hash,
+                limit,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent maximum connection limit (0 = use global default).
+    pub async fn max_connections(&self, info_hash: Id20) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::MaxConnections {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set the per-torrent maximum number of upload slots (unchoke slots).
+    pub async fn set_max_uploads(
+        &self,
+        info_hash: Id20,
+        limit: usize,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetMaxUploads {
+                info_hash,
+                limit,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the current per-torrent maximum upload slots (unchoke slots).
+    pub async fn max_uploads(&self, info_hash: Id20) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::MaxUploads {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-peer details for all connected peers of a torrent.
+    pub async fn get_peer_info(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::types::PeerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::GetPeerInfo {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get in-flight piece download status for a torrent (the download queue).
+    pub async fn get_download_queue(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::types::PartialPieceInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::GetDownloadQueue {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Check whether a specific piece has been downloaded for a torrent.
+    pub async fn have_piece(
+        &self,
+        info_hash: Id20,
+        index: u32,
+    ) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::HavePiece {
+                info_hash,
+                index,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-piece availability counts from connected peers for a torrent.
+    pub async fn piece_availability(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<u32>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::PieceAvailability {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-file bytes-downloaded progress for a torrent.
+    pub async fn file_progress(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<u64>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FileProgress {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    pub async fn info_hashes(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<ferrite_core::InfoHashes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::InfoHashesQuery {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the full v1 metainfo for a torrent.
+    ///
+    /// Returns `None` for magnet links before metadata has been received.
+    pub async fn torrent_file(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Option<ferrite_core::TorrentMetaV1>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::TorrentFile {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the full v2 metainfo for a torrent.
+    ///
+    /// Returns `None` if the torrent is not a v2/hybrid torrent, or for magnet
+    /// links before metadata has been received.
+    pub async fn torrent_file_v2(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Option<ferrite_core::TorrentMetaV2>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::TorrentFileV2 {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Force an immediate DHT announce for a torrent.
+    pub async fn force_dht_announce(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceDhtAnnounce {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Force an immediate LSD (Local Service Discovery) announce for a torrent.
+    ///
+    /// LSD is a session-level component — this does not go through the torrent actor.
+    pub async fn force_lsd_announce(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ForceLsdAnnounce {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Read all data for a specific piece from disk.
+    pub async fn read_piece(
+        &self,
+        info_hash: Id20,
+        index: u32,
+    ) -> crate::Result<bytes::Bytes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ReadPiece {
+                info_hash,
+                index,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Flush the disk write cache for a torrent.
+    pub async fn flush_cache(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FlushCache {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Check if a torrent exists in the session and its handle is still valid.
+    pub async fn is_valid(&self, info_hash: Id20) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::IsValid {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Clear the error state on a torrent, resuming it if it was paused due to error.
+    pub async fn clear_error(&self, info_hash: Id20) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ClearError {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get per-file open/mode status for a torrent.
+    pub async fn file_status(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::types::FileStatus>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::FileStatus {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Read the current torrent flags as a [`crate::types::TorrentFlags`] bitflag set.
+    pub async fn flags(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<crate::types::TorrentFlags> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::Flags {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Set (enable) the specified torrent flags.
+    pub async fn set_flags(
+        &self,
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::SetFlags {
+                info_hash,
+                flags,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Unset (disable) the specified torrent flags.
+    pub async fn unset_flags(
+        &self,
+        info_hash: Id20,
+        flags: crate::types::TorrentFlags,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::UnsetFlags {
+                info_hash,
+                flags,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Immediately initiate a peer connection for a torrent.
+    pub async fn connect_peer(
+        &self,
+        info_hash: Id20,
+        addr: SocketAddr,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::ConnectPeer {
+                info_hash,
+                addr,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1926,330 @@ impl SessionActor {
                         Some(SessionCommand::OpenFile { info_hash, file_index, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.open_file(file_index).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceReannounce { info_hash, reply }) => {
+                            let result = match self.torrents.get(&info_hash) {
+                                Some(entry) => {
+                                    entry.handle.force_reannounce().await
+                                }
+                                None => Err(crate::Error::TorrentNotFound(info_hash)),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TrackerList { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.tracker_list().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::Scrape { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.scrape().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetFilePriority { info_hash, index, priority, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_file_priority(index, priority).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FilePriorities { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.file_priorities().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetDownloadLimit { info_hash, bytes_per_sec, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_download_limit(bytes_per_sec).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetUploadLimit { info_hash, bytes_per_sec, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_upload_limit(bytes_per_sec).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::DownloadLimit { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.download_limit().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::UploadLimit { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.upload_limit().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetSequentialDownload { info_hash, enabled, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_sequential_download(enabled).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::IsSequentialDownload { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.is_sequential_download().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetSuperSeeding { info_hash, enabled, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_super_seeding(enabled).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::IsSuperSeeding { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.is_super_seeding().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::AddTracker { info_hash, url, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.add_tracker(url).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReplaceTrackers { info_hash, urls, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.replace_trackers(urls).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceRecheck { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.force_recheck().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::RenameFile { info_hash, file_index, new_name, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.rename_file(file_index, new_name).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetMaxConnections { info_hash, limit, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_max_connections(limit).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::MaxConnections { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.max_connections().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetMaxUploads { info_hash, limit, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_max_uploads(limit).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::MaxUploads { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.max_uploads().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::GetPeerInfo { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.get_peer_info().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::GetDownloadQueue { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.get_download_queue().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::HavePiece { info_hash, index, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.have_piece(index).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::PieceAvailability { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.piece_availability().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FileProgress { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.file_progress().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::InfoHashesQuery { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.info_hashes().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TorrentFile { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.torrent_file().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TorrentFileV2 { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.torrent_file_v2().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceDhtAnnounce { info_hash, reply }) => {
+                            let result = match self.torrents.get(&info_hash) {
+                                Some(entry) => {
+                                    entry.handle.force_dht_announce().await
+                                }
+                                None => Err(crate::Error::TorrentNotFound(info_hash)),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ForceLsdAnnounce { info_hash, reply }) => {
+                            // LSD is session-level: verify the torrent exists, then announce directly.
+                            let result = if self.torrents.contains_key(&info_hash) {
+                                if let Some(ref lsd) = self.lsd {
+                                    lsd.announce(vec![info_hash]).await;
+                                }
+                                Ok(())
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReadPiece { info_hash, index, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.read_piece(index).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FlushCache { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.flush_cache().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::IsValid { info_hash, reply }) => {
+                            let valid = self.torrents.get(&info_hash)
+                                .map(|e| e.handle.is_valid())
+                                .unwrap_or(false);
+                            let _ = reply.send(valid);
+                        }
+                        Some(SessionCommand::ClearError { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.clear_error().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::FileStatus { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.file_status().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::Flags { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.flags().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::SetFlags { info_hash, flags, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.set_flags(flags).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::UnsetFlags { info_hash, flags, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.unset_flags(flags).await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ConnectPeer { info_hash, addr, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.connect_peer(addr).await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -3092,6 +4270,506 @@ mod tests {
         // open_file should fail for out-of-range file_index
         let result = session.open_file(info_hash, 999).await;
         assert!(result.is_err(), "open_file should fail for invalid file_index");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_reannounce via session ----
+
+    #[tokio::test]
+    async fn session_force_reannounce() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed for a known torrent.
+        let result = session.force_reannounce(info_hash).await;
+        assert!(result.is_ok(), "force_reannounce should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.force_reannounce(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: tracker_list via session ----
+
+    #[tokio::test]
+    async fn session_tracker_list() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed (empty list since test torrent has no announce URL).
+        let trackers = session.tracker_list(info_hash).await.unwrap();
+        assert!(trackers.is_empty(), "test torrent has no trackers");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.tracker_list(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: scrape via session ----
+
+    #[tokio::test]
+    async fn session_scrape() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed (None since test torrent has no trackers to scrape).
+        let scrape = session.scrape(info_hash).await.unwrap();
+        assert!(scrape.is_none(), "test torrent has no trackers to scrape");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.scrape(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_file_priority via session ----
+
+    #[tokio::test]
+    async fn session_set_file_priority() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed for file index 0 (single-file torrent).
+        let result = session
+            .set_file_priority(info_hash, 0, ferrite_core::FilePriority::Normal)
+            .await;
+        assert!(result.is_ok(), "set_file_priority should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session
+            .set_file_priority(fake, 0, ferrite_core::FilePriority::Normal)
+            .await
+            .is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: file_priorities via session ----
+
+    #[tokio::test]
+    async fn session_file_priorities() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should return priorities for the single file.
+        let priorities = session.file_priorities(info_hash).await.unwrap();
+        assert_eq!(priorities.len(), 1, "single-file torrent should have 1 file priority");
+        assert_eq!(priorities[0], ferrite_core::FilePriority::Normal);
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.file_priorities(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_download_limit zero means unlimited ----
+
+    #[tokio::test]
+    async fn set_download_limit_zero_means_unlimited() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Set limit to non-zero, then back to zero (unlimited).
+        session.set_download_limit(info_hash, 50_000).await.unwrap();
+        session.set_download_limit(info_hash, 0).await.unwrap();
+        let limit = session.download_limit(info_hash).await.unwrap();
+        assert_eq!(limit, 0, "0 means unlimited");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_upload_limit persists ----
+
+    #[tokio::test]
+    async fn set_upload_limit_persists() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        session.set_upload_limit(info_hash, 100_000).await.unwrap();
+        let limit = session.upload_limit(info_hash).await.unwrap();
+        assert_eq!(limit, 100_000);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: download_limit default is zero ----
+
+    #[tokio::test]
+    async fn download_limit_default_is_zero() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Default config has download_rate_limit = 0.
+        let limit = session.download_limit(info_hash).await.unwrap();
+        assert_eq!(limit, 0, "default download limit should be 0 (unlimited)");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: rate_limit_round_trip ----
+
+    #[tokio::test]
+    async fn rate_limit_round_trip() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Set both limits.
+        session.set_download_limit(info_hash, 1_000_000).await.unwrap();
+        session.set_upload_limit(info_hash, 500_000).await.unwrap();
+
+        // Read them back.
+        let dl = session.download_limit(info_hash).await.unwrap();
+        let ul = session.upload_limit(info_hash).await.unwrap();
+        assert_eq!(dl, 1_000_000);
+        assert_eq!(ul, 500_000);
+
+        // Update and verify again.
+        session.set_download_limit(info_hash, 2_000_000).await.unwrap();
+        let dl = session.download_limit(info_hash).await.unwrap();
+        assert_eq!(dl, 2_000_000);
+
+        // Unknown torrent should fail.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.download_limit(fake).await.is_err());
+        assert!(session.upload_limit(fake).await.is_err());
+        assert!(session.set_download_limit(fake, 100).await.is_err());
+        assert!(session.set_upload_limit(fake, 100).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: sequential_download_toggle ----
+
+    #[tokio::test]
+    async fn sequential_download_toggle() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Enable sequential download.
+        session.set_sequential_download(info_hash, true).await.unwrap();
+        assert!(session.is_sequential_download(info_hash).await.unwrap());
+
+        // Disable it again.
+        session.set_sequential_download(info_hash, false).await.unwrap();
+        assert!(!session.is_sequential_download(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: super_seeding_toggle ----
+
+    #[tokio::test]
+    async fn super_seeding_toggle() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Enable super seeding.
+        session.set_super_seeding(info_hash, true).await.unwrap();
+        assert!(session.is_super_seeding(info_hash).await.unwrap());
+
+        // Disable it again.
+        session.set_super_seeding(info_hash, false).await.unwrap();
+        assert!(!session.is_super_seeding(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: sequential_download_default_false ----
+
+    #[tokio::test]
+    async fn sequential_download_default_false() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Default config has sequential_download = false.
+        assert!(!session.is_sequential_download(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: super_seeding_default_false ----
+
+    #[tokio::test]
+    async fn super_seeding_default_false() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Default config has super_seeding = false.
+        assert!(!session.is_super_seeding(info_hash).await.unwrap());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: add_tracker_increases_count ----
+
+    #[tokio::test]
+    async fn add_tracker_increases_count() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Test torrent has no trackers initially.
+        let before = session.tracker_list(info_hash).await.unwrap();
+        assert!(before.is_empty());
+
+        // Add a tracker.
+        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+
+        let after = session.tracker_list(info_hash).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].url, "udp://tracker.example.com:6969/announce");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: replace_trackers_replaces_all ----
+
+    #[tokio::test]
+    async fn replace_trackers_replaces_all() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Add 2 trackers.
+        session.add_tracker(info_hash, "udp://tracker1.example.com:6969/announce".into()).await.unwrap();
+        session.add_tracker(info_hash, "http://tracker2.example.com/announce".into()).await.unwrap();
+        assert_eq!(session.tracker_list(info_hash).await.unwrap().len(), 2);
+
+        // Replace with 1 different tracker.
+        session.replace_trackers(info_hash, vec![
+            "http://replacement.example.com/announce".into(),
+        ]).await.unwrap();
+
+        let after = session.tracker_list(info_hash).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].url, "http://replacement.example.com/announce");
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: add_tracker_deduplicates ----
+
+    #[tokio::test]
+    async fn add_tracker_deduplicates() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Add the same tracker URL twice.
+        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+
+        // Should only have 1 tracker (deduplicated).
+        let trackers = session.tracker_list(info_hash).await.unwrap();
+        assert_eq!(trackers.len(), 1);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: info_hashes_matches_added_torrent ----
+
+    #[tokio::test]
+    async fn info_hashes_matches_added_torrent() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let expected_v1 = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let hashes = session.info_hashes(info_hash).await.unwrap();
+        assert_eq!(hashes.v1, Some(expected_v1));
+        // v1-only torrent should not have v2 hash
+        assert!(hashes.v2.is_none());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: torrent_file_returns_meta ----
+
+    #[tokio::test]
+    async fn torrent_file_returns_meta() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let torrent = session.torrent_file(info_hash).await.unwrap();
+        assert!(torrent.is_some());
+        let torrent = torrent.unwrap();
+        assert_eq!(torrent.info_hash, info_hash);
+        assert_eq!(torrent.info.name, "test");
+        assert_eq!(torrent.info.total_length(), 32768);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: torrent_file_none_before_metadata ----
+
+    #[tokio::test]
+    async fn torrent_file_none_before_metadata() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let magnet = ferrite_core::Magnet::parse(
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test"
+        ).unwrap();
+
+        let info_hash = session.add_magnet(magnet).await.unwrap();
+        let torrent = session.torrent_file(info_hash).await.unwrap();
+        // Before metadata is received, torrent_file should return None.
+        assert!(torrent.is_none());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_dht_announce_no_error ----
+
+    #[tokio::test]
+    async fn force_dht_announce_no_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed even without DHT enabled (no-op, no error).
+        let result = session.force_dht_announce(info_hash).await;
+        assert!(result.is_ok(), "force_dht_announce should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.force_dht_announce(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_lsd_announce_no_error ----
+
+    #[tokio::test]
+    async fn force_lsd_announce_no_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Should succeed even without LSD enabled (no-op announce, no error).
+        let result = session.force_lsd_announce(info_hash).await;
+        assert!(result.is_ok(), "force_lsd_announce should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.force_lsd_announce(fake).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: read_piece_after_download ----
+
+    #[tokio::test]
+    async fn read_piece_after_download() {
+        let data = vec![0xCD; 32768]; // 2 pieces of 16384
+        let meta = make_test_torrent(&data, 16384);
+        let lengths = Lengths::new(data.len() as u64, 16384, DEFAULT_CHUNK_SIZE);
+        let storage = Arc::new(MemoryStorage::new(lengths));
+        // Pre-fill storage with the data
+        storage.write_chunk(0, 0, &data[..16384]).unwrap();
+        storage.write_chunk(1, 0, &data[16384..]).unwrap();
+
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // Read piece 0
+        let piece_data = session.read_piece(info_hash, 0).await.unwrap();
+        assert_eq!(piece_data.len(), 16384);
+        assert!(piece_data.iter().all(|&b| b == 0xCD));
+
+        // Read piece 1
+        let piece_data = session.read_piece(info_hash, 1).await.unwrap();
+        assert_eq!(piece_data.len(), 16384);
+        assert!(piece_data.iter().all(|&b| b == 0xCD));
+
+        // Out-of-range piece should fail
+        let result = session.read_piece(info_hash, 999).await;
+        assert!(result.is_err(), "read_piece out of range should fail");
+
+        // Unknown torrent should fail
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.read_piece(fake, 0).await.is_err());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: flush_cache_completes ----
+
+    #[tokio::test]
+    async fn flush_cache_completes() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+
+        // flush_cache should succeed.
+        let result = session.flush_cache(info_hash).await;
+        assert!(result.is_ok(), "flush_cache should succeed: {result:?}");
+
+        // Should fail for unknown torrent.
+        let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(session.flush_cache(fake).await.is_err());
 
         session.shutdown().await.unwrap();
     }

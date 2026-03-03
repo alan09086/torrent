@@ -15,6 +15,13 @@ pub use ferrite_session::{
     TorrentInfo,
     // File info
     FileInfo,
+    FileMode,
+    FileStatus,
+    // Peer introspection (M53)
+    PeerInfo,
+    PartialPieceInfo,
+    // Torrent flags (M53)
+    TorrentFlags,
     // Storage factory type alias
     StorageFactory,
     // Alert system (M15)

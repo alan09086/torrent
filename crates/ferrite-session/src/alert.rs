@@ -98,6 +98,11 @@ pub enum AlertKind {
         /// Display name from the received metadata.
         name: String,
     },
+    /// Metadata download failed for a magnet link torrent.
+    MetadataFailed {
+        /// Info hash of the torrent whose metadata download failed.
+        info_hash: Id20,
+    },
 
     // ── Checking (STATUS) ──
 
@@ -277,6 +282,13 @@ pub enum AlertKind {
         index: usize,
         /// The new filesystem path of the file.
         new_path: std::path::PathBuf,
+    },
+    /// All pieces belonging to a file have been downloaded and verified.
+    FileCompleted {
+        /// Info hash of the affected torrent.
+        info_hash: Id20,
+        /// Zero-based file index that is now complete.
+        file_index: usize,
     },
     /// A torrent's storage was moved to a new directory.
     StorageMoved {
@@ -486,6 +498,14 @@ pub enum AlertKind {
         values: Vec<i64>,
     },
 
+    // ── Network (STATUS) ──
+
+    /// An external IP address was detected or updated (e.g. from tracker/NAT/DHT).
+    ExternalIpDetected {
+        /// The detected external IP address.
+        ip: std::net::IpAddr,
+    },
+
     // ── Settings (M31) ──
 
     /// Session settings were changed via `apply_settings()`.
@@ -510,6 +530,8 @@ impl AlertKind {
             | ResumeDataSaved { .. }
             | TorrentChecked { .. }
             | CheckingProgress { .. } => AlertCategory::STATUS,
+
+            MetadataFailed { .. } => AlertCategory::STATUS | AlertCategory::ERROR,
 
             SessionStatsUpdate(_) => AlertCategory::STATS,
 
@@ -543,7 +565,8 @@ impl AlertKind {
 
             // STORAGE
             FileRenamed { .. }
-            | StorageMoved { .. } => AlertCategory::STORAGE,
+            | StorageMoved { .. }
+            | FileCompleted { .. } => AlertCategory::STORAGE,
             FileError { .. } => AlertCategory::STORAGE | AlertCategory::ERROR,
             DiskStatsUpdate(_) => AlertCategory::STATS | AlertCategory::STORAGE,
 
@@ -582,6 +605,9 @@ impl AlertKind {
 
             // SESSION STATS (M50)
             SessionStatsAlert { .. } => AlertCategory::STATS,
+
+            // NETWORK
+            ExternalIpDetected { .. } => AlertCategory::STATUS,
 
             // SETTINGS
             SettingsChanged => AlertCategory::STATUS,

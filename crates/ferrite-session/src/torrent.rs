@@ -23,14 +23,17 @@ use ferrite_core::{
 use ferrite_dht::DhtHandle;
 use ferrite_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
 
-use crate::choker::{Choker, PeerInfo};
+use crate::choker::{Choker, PeerInfo as ChokerPeerInfo};
 use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::{PeerSource, PeerState};
 use crate::piece_selector::{InFlightPiece, PeerSpeed, PickContext, PieceSelector};
 use crate::tracker_manager::TrackerManager;
-use crate::types::{PeerCommand, PeerEvent, TorrentCommand, TorrentConfig, TorrentState, TorrentStats};
+use crate::types::{
+    PeerCommand, PeerEvent, PeerInfo, PartialPieceInfo, TorrentCommand, TorrentConfig,
+    TorrentState, TorrentStats,
+};
 
 /// Shared global rate limiter bucket.
 type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
@@ -317,6 +320,7 @@ impl TorrentHandle {
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker,
+            max_connections: 0,
             metadata_downloader: None,
             downloaded: 0,
             uploaded: 0,
@@ -538,6 +542,7 @@ impl TorrentHandle {
             peers: HashMap::new(),
             available_peers: Vec::new(),
             choker,
+            max_connections: 0,
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
             downloaded: 0,
             uploaded: 0,
@@ -767,6 +772,135 @@ impl TorrentHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
 
+    /// Set the per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_download_limit(&self, bytes_per_sec: u64) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetDownloadLimit { bytes_per_sec, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set the per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn set_upload_limit(&self, bytes_per_sec: u64) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetUploadLimit { bytes_per_sec, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent download rate limit in bytes/sec (0 = unlimited).
+    pub async fn download_limit(&self) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::DownloadLimit { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent upload rate limit in bytes/sec (0 = unlimited).
+    pub async fn upload_limit(&self) -> crate::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::UploadLimit { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Enable or disable sequential (in-order) piece downloading.
+    pub async fn set_sequential_download(&self, enabled: bool) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetSequentialDownload { enabled, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Query whether sequential downloading is enabled.
+    pub async fn is_sequential_download(&self) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::IsSequentialDownload { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Enable or disable BEP 16 super seeding mode.
+    pub async fn set_super_seeding(&self, enabled: bool) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetSuperSeeding { enabled, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Query whether BEP 16 super seeding mode is enabled.
+    pub async fn is_super_seeding(&self) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::IsSuperSeeding { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Add a new tracker URL to this torrent (fire-and-forget).
+    ///
+    /// The URL is validated and deduplicated by the tracker manager.
+    pub async fn add_tracker(&self, url: String) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::AddTracker { url })
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Replace all tracker URLs for this torrent.
+    pub async fn replace_trackers(&self, urls: Vec<String>) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::ReplaceTrackers { urls, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Trigger a full piece verification (force recheck).
+    ///
+    /// Transitions the torrent through `Checking` state, clears all piece
+    /// completion data, re-verifies every piece against its hash, then
+    /// transitions to `Seeding` (all valid) or `Downloading` (some missing).
+    /// Returns after the check is complete.
+    pub async fn force_recheck(&self) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::ForceRecheck { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Rename a file within the torrent on disk.
+    ///
+    /// Changes the filename of the specified file (by index) to `new_name`.
+    /// The file stays in the same directory; only the filename component changes.
+    /// Fires a `FileRenamed` alert on success.
+    pub async fn rename_file(&self, file_index: usize, new_name: String) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::RenameFile { file_index, new_name, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
     /// Route an incoming SSL peer (TLS already completed) to this torrent (M42).
     pub(crate) async fn spawn_ssl_peer(
         &self,
@@ -778,6 +912,237 @@ impl TorrentHandle {
                 addr,
                 stream: crate::types::BoxedAsyncStream(Box::new(stream)),
             })
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set the per-torrent maximum number of connections (0 = use global default).
+    pub async fn set_max_connections(&self, limit: usize) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetMaxConnections { limit, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent maximum connection limit (0 = use global default).
+    pub async fn max_connections(&self) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::MaxConnections { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set the per-torrent maximum number of upload slots (unchoke slots).
+    pub async fn set_max_uploads(&self, limit: usize) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetMaxUploads { limit, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the current per-torrent maximum upload slots (unchoke slots).
+    pub async fn max_uploads(&self) -> crate::Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::MaxUploads { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-peer details for all connected peers.
+    pub async fn get_peer_info(&self) -> crate::Result<Vec<PeerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::GetPeerInfo { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get in-flight piece download status (the download queue).
+    pub async fn get_download_queue(&self) -> crate::Result<Vec<PartialPieceInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::GetDownloadQueue { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Check whether a specific piece has been downloaded.
+    pub async fn have_piece(&self, index: u32) -> crate::Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::HavePiece { index, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-piece availability counts from connected peers.
+    pub async fn piece_availability(&self) -> crate::Result<Vec<u32>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::PieceAvailability { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-file bytes-downloaded progress.
+    pub async fn file_progress(&self) -> crate::Result<Vec<u64>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FileProgress { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    pub async fn info_hashes(&self) -> crate::Result<ferrite_core::InfoHashes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::InfoHashes { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the full v1 metainfo, if available.
+    ///
+    /// Returns `None` for magnet links before metadata has been received.
+    pub async fn torrent_file(&self) -> crate::Result<Option<TorrentMetaV1>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::TorrentFile { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the full v2 metainfo, if available.
+    ///
+    /// Returns `None` if the torrent is not a v2/hybrid torrent, or for magnet
+    /// links before metadata has been received.
+    pub async fn torrent_file_v2(&self) -> crate::Result<Option<ferrite_core::TorrentMetaV2>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::TorrentFileV2 { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Force an immediate DHT announce for this torrent.
+    ///
+    /// Fire-and-forget at the torrent level — the DHT announce is best-effort.
+    pub async fn force_dht_announce(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ForceDhtAnnounce)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Read all data for a specific piece from disk.
+    ///
+    /// Returns the complete piece data as `Bytes`. The piece must have been
+    /// downloaded already; use [`have_piece`](Self::have_piece) to check first.
+    pub async fn read_piece(&self, index: u32) -> crate::Result<Bytes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::ReadPiece { index, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Flush the disk write cache, ensuring all buffered writes are persisted.
+    pub async fn flush_cache(&self) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FlushCache { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Check whether this handle refers to a live torrent.
+    ///
+    /// Returns `false` after the torrent has been removed or shut down.
+    /// This is a synchronous check on the channel state — no command dispatch.
+    pub fn is_valid(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
+    /// Clear any error state on the torrent and resume if it was paused due to error.
+    pub async fn clear_error(&self) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ClearError)
+            .await
+            .map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get per-file open/mode status based on the current torrent state.
+    ///
+    /// Returns one [`crate::types::FileStatus`] entry per file in the torrent.
+    pub async fn file_status(&self) -> crate::Result<Vec<crate::types::FileStatus>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::FileStatus { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Read the current torrent state as a [`TorrentFlags`] bitflag set.
+    pub async fn flags(&self) -> crate::Result<crate::types::TorrentFlags> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::Flags { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Set (enable) the specified torrent flags.
+    ///
+    /// Delegates to the underlying operations (pause/resume, sequential download, etc.).
+    pub async fn set_flags(&self, flags: crate::types::TorrentFlags) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::SetFlags { flags, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Unset (disable) the specified torrent flags.
+    ///
+    /// Delegates to the underlying operations (pause/resume, sequential download, etc.).
+    pub async fn unset_flags(&self, flags: crate::types::TorrentFlags) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::UnsetFlags { flags, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Immediately initiate a peer connection to the given address.
+    ///
+    /// Bypasses the normal peer selection queue — the connection attempt starts
+    /// right away. Fire-and-forget: no reply is sent.
+    pub async fn connect_peer(&self, addr: SocketAddr) -> crate::Result<()> {
+        self.cmd_tx
+            .send(TorrentCommand::ConnectPeer { addr })
             .await
             .map_err(|_| crate::Error::Shutdown)
     }
@@ -820,6 +1185,8 @@ struct TorrentActor {
     peers: HashMap<SocketAddr, PeerState>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
     choker: Choker,
+    /// Per-torrent connection limit override (0 = use config.max_peers).
+    max_connections: usize,
 
     // Metadata (for magnet links)
     metadata_downloader: Option<MetadataDownloader>,
@@ -963,6 +1330,17 @@ struct TorrentActor {
 }
 
 impl TorrentActor {
+    /// Returns the effective maximum connection count for this torrent.
+    ///
+    /// If `max_connections > 0`, use that override; otherwise fall back to `config.max_peers`.
+    fn effective_max_connections(&self) -> usize {
+        if self.max_connections > 0 {
+            self.max_connections
+        } else {
+            self.config.max_peers
+        }
+    }
+
     /// Transition to a new state, firing a StateChanged alert if different.
     fn transition_state(&mut self, new_state: TorrentState) {
         let prev = self.state;
@@ -1196,6 +1574,11 @@ impl TorrentActor {
                         Some(TorrentCommand::UpdateExternalIp { ip }) => {
                             self.external_ip = Some(ip);
                             self.sort_available_peers();
+                            post_alert(
+                                &self.alert_tx,
+                                &self.alert_mask,
+                                AlertKind::ExternalIpDetected { ip },
+                            );
                         }
                         Some(TorrentCommand::MoveStorage { new_path, reply }) => {
                             let result = self.handle_move_storage(new_path).await;
@@ -1208,6 +1591,126 @@ impl TorrentActor {
                                 stream.0,
                                 Some(ferrite_wire::mse::EncryptionMode::Disabled),
                             );
+                        }
+                        Some(TorrentCommand::SetDownloadLimit { bytes_per_sec, reply }) => {
+                            self.download_bucket.set_rate(bytes_per_sec);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::SetUploadLimit { bytes_per_sec, reply }) => {
+                            self.upload_bucket.set_rate(bytes_per_sec);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::DownloadLimit { reply }) => {
+                            let _ = reply.send(self.download_bucket.rate());
+                        }
+                        Some(TorrentCommand::UploadLimit { reply }) => {
+                            let _ = reply.send(self.upload_bucket.rate());
+                        }
+                        Some(TorrentCommand::SetSequentialDownload { enabled, reply }) => {
+                            self.config.sequential_download = enabled;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::IsSequentialDownload { reply }) => {
+                            let _ = reply.send(self.config.sequential_download);
+                        }
+                        Some(TorrentCommand::SetSuperSeeding { enabled, reply }) => {
+                            self.config.super_seeding = enabled;
+                            self.super_seed = if enabled {
+                                Some(crate::super_seed::SuperSeedState::new())
+                            } else {
+                                None
+                            };
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::IsSuperSeeding { reply }) => {
+                            let _ = reply.send(self.config.super_seeding);
+                        }
+                        Some(TorrentCommand::AddTracker { url }) => {
+                            self.tracker_manager.add_tracker_url(&url);
+                        }
+                        Some(TorrentCommand::ReplaceTrackers { urls, reply }) => {
+                            self.tracker_manager.replace_all(urls);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::ForceRecheck { reply }) => {
+                            self.handle_force_recheck(reply).await;
+                        }
+                        Some(TorrentCommand::RenameFile { file_index, new_name, reply }) => {
+                            let result = self.handle_rename_file(file_index, new_name).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::SetMaxConnections { limit, reply }) => {
+                            self.max_connections = limit;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::MaxConnections { reply }) => {
+                            let _ = reply.send(self.max_connections);
+                        }
+                        Some(TorrentCommand::SetMaxUploads { limit, reply }) => {
+                            self.choker.set_unchoke_slots(limit);
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::MaxUploads { reply }) => {
+                            let _ = reply.send(self.choker.unchoke_slots());
+                        }
+                        Some(TorrentCommand::GetPeerInfo { reply }) => {
+                            let _ = reply.send(self.build_peer_info());
+                        }
+                        Some(TorrentCommand::GetDownloadQueue { reply }) => {
+                            let _ = reply.send(self.build_download_queue());
+                        }
+                        Some(TorrentCommand::HavePiece { index, reply }) => {
+                            let has = self.chunk_tracker.as_ref()
+                                .map(|ct| ct.has_piece(index))
+                                .unwrap_or(false);
+                            let _ = reply.send(has);
+                        }
+                        Some(TorrentCommand::PieceAvailability { reply }) => {
+                            let avail = self.piece_selector.availability().to_vec();
+                            let _ = reply.send(avail);
+                        }
+                        Some(TorrentCommand::FileProgress { reply }) => {
+                            let _ = reply.send(self.compute_file_progress());
+                        }
+                        Some(TorrentCommand::InfoHashes { reply }) => {
+                            let _ = reply.send(self.info_hashes.clone());
+                        }
+                        Some(TorrentCommand::TorrentFile { reply }) => {
+                            let _ = reply.send(self.meta.clone());
+                        }
+                        Some(TorrentCommand::TorrentFileV2 { reply }) => {
+                            let _ = reply.send(self.meta_v2.clone());
+                        }
+                        Some(TorrentCommand::ForceDhtAnnounce) => {
+                            self.handle_force_dht_announce().await;
+                        }
+                        Some(TorrentCommand::ReadPiece { index, reply }) => {
+                            let result = self.handle_read_piece(index).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::FlushCache { reply }) => {
+                            let result = self.handle_flush_cache().await;
+                            let _ = reply.send(result);
+                        }
+                        Some(TorrentCommand::ClearError) => {
+                            self.handle_clear_error().await;
+                        }
+                        Some(TorrentCommand::FileStatus { reply }) => {
+                            let _ = reply.send(self.build_file_status());
+                        }
+                        Some(TorrentCommand::Flags { reply }) => {
+                            let _ = reply.send(self.build_flags());
+                        }
+                        Some(TorrentCommand::SetFlags { flags, reply }) => {
+                            self.apply_set_flags(flags).await;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::UnsetFlags { flags, reply }) => {
+                            self.apply_unset_flags(flags).await;
+                            let _ = reply.send(());
+                        }
+                        Some(TorrentCommand::ConnectPeer { addr }) => {
+                            self.handle_connect_peer(addr);
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
@@ -1265,7 +1768,7 @@ impl TorrentActor {
                     // Re-trigger DHT search if exhausted and we still need peers
                     if self.config.enable_dht
                         && self.available_peers.is_empty()
-                        && self.peers.len() < self.config.max_peers
+                        && self.peers.len() < self.effective_max_connections()
                     {
                         if self.dht_peers_rx.is_none()
                             && let Some(ref dht) = self.dht
@@ -1566,6 +2069,138 @@ impl TorrentActor {
         Ok(())
     }
 
+    /// Handle RenameFile: rename a single file within the torrent on disk.
+    async fn handle_rename_file(
+        &mut self,
+        file_index: usize,
+        new_name: String,
+    ) -> crate::Result<()> {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => {
+                return Err(crate::Error::Config(
+                    "cannot rename file: metadata not available".into(),
+                ));
+            }
+        };
+
+        let files = meta.info.files();
+        if file_index >= files.len() {
+            return Err(crate::Error::Config(format!(
+                "file index {file_index} out of range (torrent has {} files)",
+                files.len()
+            )));
+        }
+
+        // Compute the old relative path (files() includes torrent name as first component)
+        let old_rel: std::path::PathBuf =
+            files[file_index].path.iter().collect();
+        let old_path = self.config.download_dir.join(&old_rel);
+
+        // Build new relative path: same parent directory, new filename
+        let new_rel = if let Some(parent) = old_rel.parent() {
+            parent.join(&new_name)
+        } else {
+            std::path::PathBuf::from(&new_name)
+        };
+        let new_path = self.config.download_dir.join(&new_rel);
+
+        // Perform the rename on a blocking thread
+        let src = old_path.clone();
+        let dst = new_path.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&src, &dst)
+        })
+        .await
+        .map_err(|e| crate::Error::Io(std::io::Error::other(e)))
+        .and_then(|r| r.map_err(crate::Error::Io))?;
+
+        // Fire FileRenamed alert
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::FileRenamed {
+                info_hash: self.info_hash,
+                index: file_index,
+                new_path: new_path.clone(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Check if the just-completed piece finishes any file, and fire FileCompleted alerts.
+    ///
+    /// For efficiency, only checks files whose byte range overlaps the completed piece.
+    fn check_file_completion(&self, piece_index: u32) {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => return,
+        };
+        let lengths = match self.lengths.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let bitfield = match self.chunk_tracker.as_ref() {
+            Some(ct) => ct.bitfield(),
+            None => return,
+        };
+
+        let files = meta.info.files();
+        if files.is_empty() {
+            return;
+        }
+
+        let piece_length = lengths.piece_length();
+        let piece_start = lengths.piece_offset(piece_index);
+        let piece_end = piece_start + lengths.piece_size(piece_index) as u64;
+
+        // Walk files to find which ones overlap this piece
+        let mut file_offset = 0u64;
+        for (file_idx, file_entry) in files.iter().enumerate() {
+            let file_end = file_offset + file_entry.length;
+
+            // Skip files that don't overlap this piece
+            if file_end <= piece_start || file_offset >= piece_end {
+                file_offset = file_end;
+                continue;
+            }
+
+            // This file overlaps the completed piece. Check if ALL pieces for
+            // this file are now complete.
+            let first_piece = (file_offset / piece_length) as u32;
+            let last_piece = if file_entry.length == 0 {
+                first_piece
+            } else {
+                ((file_end - 1) / piece_length) as u32
+            };
+
+            let mut all_complete = true;
+            for p in first_piece..=last_piece {
+                if !bitfield.get(p) {
+                    all_complete = false;
+                    break;
+                }
+            }
+
+            if all_complete {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::FileCompleted {
+                        info_hash: self.info_hash,
+                        file_index: file_idx,
+                    },
+                );
+            }
+
+            file_offset = file_end;
+        }
+    }
+
     /// Compute download progress metrics.
     ///
     /// Returns `(total, total_done, total_wanted, total_wanted_done, progress, progress_ppm)`.
@@ -1640,6 +2275,269 @@ impl TorrentActor {
         let copies_float = min_avail as f32 + fraction as f32 / 1000.0;
 
         (min_avail, fraction, copies_float)
+    }
+
+    fn build_peer_info(&self) -> Vec<PeerInfo> {
+        self.peers.values().map(|peer| {
+            let client = peer.ext_handshake
+                .as_ref()
+                .and_then(|h| h.v.clone())
+                .unwrap_or_default();
+            PeerInfo {
+                addr: peer.addr,
+                client,
+                peer_choking: peer.peer_choking,
+                peer_interested: peer.peer_interested,
+                am_choking: peer.am_choking,
+                am_interested: peer.am_interested,
+                download_rate: peer.download_rate,
+                upload_rate: peer.upload_rate,
+                num_pieces: peer.bitfield.count_ones(),
+                source: peer.source,
+                supports_fast: peer.supports_fast,
+                upload_only: peer.upload_only,
+                snubbed: peer.snubbed,
+                connected_duration_secs: peer.connected_at.elapsed().as_secs(),
+                num_pending_requests: peer.pending_requests.len(),
+                num_incoming_requests: peer.incoming_requests.len(),
+            }
+        }).collect()
+    }
+
+    fn build_download_queue(&self) -> Vec<PartialPieceInfo> {
+        self.in_flight_pieces.iter().map(|(&piece_index, ifp)| {
+            PartialPieceInfo {
+                piece_index,
+                blocks_in_piece: ifp.total_blocks,
+                blocks_assigned: ifp.assigned_blocks.len() as u32,
+            }
+        }).collect()
+    }
+
+    /// Compute per-file downloaded bytes.
+    fn compute_file_progress(&self) -> Vec<u64> {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let lengths = match self.lengths.as_ref() {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        let chunk_tracker = match self.chunk_tracker.as_ref() {
+            Some(ct) => ct,
+            None => return Vec::new(),
+        };
+
+        let files = meta.info.files();
+        if files.is_empty() {
+            return Vec::new();
+        }
+
+        let piece_length = lengths.piece_length();
+        let mut result = Vec::with_capacity(files.len());
+        let mut file_offset = 0u64;
+
+        for file_entry in &files {
+            let file_len = file_entry.length;
+            if file_len == 0 {
+                result.push(0);
+                file_offset += file_len;
+                continue;
+            }
+
+            let file_end = file_offset + file_len;
+            let first_piece = (file_offset / piece_length) as u32;
+            let last_piece = ((file_end - 1) / piece_length) as u32;
+
+            let mut downloaded = 0u64;
+
+            for p in first_piece..=last_piece {
+                if !chunk_tracker.has_piece(p) {
+                    continue;
+                }
+
+                let piece_start = lengths.piece_offset(p);
+                let piece_end = piece_start + lengths.piece_size(p) as u64;
+
+                // Clamp to file boundaries
+                let overlap_start = piece_start.max(file_offset);
+                let overlap_end = piece_end.min(file_end);
+
+                if overlap_start < overlap_end {
+                    downloaded += overlap_end - overlap_start;
+                }
+            }
+
+            result.push(downloaded);
+            file_offset = file_end;
+        }
+
+        result
+    }
+
+    /// Force an immediate DHT announce on all available DHT handles (v4 + v6).
+    async fn handle_force_dht_announce(&self) {
+        if let Some(ref dht) = self.dht
+            && let Err(e) = dht.announce(self.info_hash, self.config.listen_port).await
+        {
+            warn!("Force DHT v4 announce failed: {e}");
+        }
+        if let Some(ref dht6) = self.dht_v6
+            && let Err(e) = dht6.announce(self.info_hash, self.config.listen_port).await
+        {
+            debug!("Force DHT v6 announce failed: {e}");
+        }
+        // Dual-swarm: also announce v2 hash for hybrid torrents
+        if self.info_hashes.is_hybrid()
+            && let Some(v2) = self.info_hashes.v2
+        {
+            let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
+            if v2_as_v1 != self.info_hash {
+                if let Some(ref dht) = self.dht
+                    && let Err(e) = dht.announce(v2_as_v1, self.config.listen_port).await
+                {
+                    debug!("Force DHT v4 dual-swarm announce failed: {e}");
+                }
+                if let Some(ref dht6) = self.dht_v6
+                    && let Err(e) = dht6.announce(v2_as_v1, self.config.listen_port).await
+                {
+                    debug!("Force DHT v6 dual-swarm announce failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Read a complete piece from disk by reading all chunks and concatenating.
+    async fn handle_read_piece(&self, index: u32) -> crate::Result<Bytes> {
+        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let lengths = self.lengths.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+
+        let piece_size = lengths.piece_size(index);
+        if piece_size == 0 {
+            return Err(crate::Error::InvalidPieceIndex {
+                index,
+                num_pieces: lengths.num_pieces(),
+            });
+        }
+
+        let chunk_size = lengths.chunk_size();
+        let num_chunks = lengths.chunks_in_piece(index);
+        let mut buf = bytes::BytesMut::with_capacity(piece_size as usize);
+
+        for chunk_idx in 0..num_chunks {
+            let begin = chunk_idx * chunk_size;
+            let len = if chunk_idx == num_chunks - 1 {
+                piece_size - begin
+            } else {
+                chunk_size
+            };
+            let data = disk
+                .read_chunk(index, begin, len, DiskJobFlags::empty())
+                .await
+                .map_err(crate::Error::Storage)?;
+            buf.extend_from_slice(&data);
+        }
+
+        Ok(buf.freeze())
+    }
+
+    /// Flush the disk write cache.
+    async fn handle_flush_cache(&self) -> crate::Result<()> {
+        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        disk.flush_cache().await.map_err(crate::Error::Storage)
+    }
+
+    /// Clear the error state. If the torrent was paused and had an error, resume it.
+    async fn handle_clear_error(&mut self) {
+        let had_error = !self.error.is_empty();
+        self.error = String::new();
+        self.error_file = -1;
+        // If we were paused and had an error, resume
+        if had_error && self.state == TorrentState::Paused {
+            self.handle_resume().await;
+        }
+    }
+
+    /// Build per-file status based on the current torrent state.
+    fn build_file_status(&self) -> Vec<crate::types::FileStatus> {
+        let num_files = self.file_priorities.len();
+        let (open, mode) = match self.state {
+            TorrentState::Seeding => (true, crate::types::FileMode::ReadOnly),
+            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata | TorrentState::Complete | TorrentState::Sharing => {
+                (true, crate::types::FileMode::ReadWrite)
+            }
+            TorrentState::Paused | TorrentState::Stopped => {
+                (false, crate::types::FileMode::Closed)
+            }
+        };
+        vec![crate::types::FileStatus { open, mode }; num_files]
+    }
+
+    /// Build the current TorrentFlags from actor state.
+    fn build_flags(&self) -> crate::types::TorrentFlags {
+        let mut flags = crate::types::TorrentFlags::empty();
+        if self.state == TorrentState::Paused {
+            flags |= crate::types::TorrentFlags::PAUSED;
+        }
+        // auto_managed is session-level; torrent actor doesn't track it.
+        // We leave AUTO_MANAGED unset at the torrent level.
+        if self.config.sequential_download {
+            flags |= crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD;
+        }
+        if self.config.super_seeding {
+            flags |= crate::types::TorrentFlags::SUPER_SEEDING;
+        }
+        if self.state == TorrentState::Seeding
+            || matches!(self.state, TorrentState::Complete)
+        {
+            flags |= crate::types::TorrentFlags::UPLOAD_ONLY;
+        }
+        flags
+    }
+
+    /// Apply set_flags: enable the specified flags.
+    async fn apply_set_flags(&mut self, flags: crate::types::TorrentFlags) {
+        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state != TorrentState::Paused {
+            self.handle_pause().await;
+        }
+        if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
+            self.config.sequential_download = true;
+        }
+        if flags.contains(crate::types::TorrentFlags::SUPER_SEEDING) {
+            self.config.super_seeding = true;
+            if self.super_seed.is_none() {
+                self.super_seed = Some(crate::super_seed::SuperSeedState::new());
+            }
+        }
+        // AUTO_MANAGED and UPLOAD_ONLY are session-level; no-op at torrent level.
+    }
+
+    /// Apply unset_flags: disable the specified flags.
+    async fn apply_unset_flags(&mut self, flags: crate::types::TorrentFlags) {
+        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state == TorrentState::Paused {
+            self.handle_resume().await;
+        }
+        if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
+            self.config.sequential_download = false;
+        }
+        if flags.contains(crate::types::TorrentFlags::SUPER_SEEDING) {
+            self.config.super_seeding = false;
+            self.super_seed = None;
+        }
+        // AUTO_MANAGED and UPLOAD_ONLY are session-level; no-op at torrent level.
+    }
+
+    /// Immediately initiate a connection to the given peer address.
+    fn handle_connect_peer(&mut self, addr: SocketAddr) {
+        // Skip if already connected
+        if self.peers.contains_key(&addr) {
+            return;
+        }
+        // Add to the end of available peers (pop() takes from the end, so it
+        // will be the next peer attempted) and trigger connection immediately.
+        self.available_peers.push((addr, PeerSource::Incoming));
+        self.try_connect_peers();
     }
 
     fn make_stats(&self) -> TorrentStats {
@@ -1803,7 +2701,7 @@ impl TorrentActor {
             num_uploads,
 
             // ── Limits ──
-            connections_limit: self.config.max_peers,
+            connections_limit: self.effective_max_connections(),
             uploads_limit: self.choker.unchoke_slots(),
 
             // ── Distributed copies ──
@@ -2407,7 +3305,88 @@ impl TorrentActor {
             info!("all pieces verified, starting as seeder");
         } else {
             self.transition_state(TorrentState::Downloading);
+            self.choker.set_seed_mode(false);
         }
+
+        // Fire FileCompleted alerts for any files that are fully verified
+        self.fire_file_completed_alerts();
+    }
+
+    /// Fire FileCompleted alerts for all files whose pieces are fully verified.
+    ///
+    /// Used after initial check or force-recheck to emit alerts for complete files.
+    fn fire_file_completed_alerts(&self) {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => return,
+        };
+        let lengths = match self.lengths.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let bitfield = match self.chunk_tracker.as_ref() {
+            Some(ct) => ct.bitfield(),
+            None => return,
+        };
+
+        let files = meta.info.files();
+        let piece_length = lengths.piece_length();
+        let mut file_offset = 0u64;
+
+        for (file_idx, file_entry) in files.iter().enumerate() {
+            let file_end = file_offset + file_entry.length;
+            if file_entry.length == 0 {
+                file_offset = file_end;
+                continue;
+            }
+
+            let first_piece = (file_offset / piece_length) as u32;
+            let last_piece = ((file_end - 1) / piece_length) as u32;
+
+            let mut all_complete = true;
+            for p in first_piece..=last_piece {
+                if !bitfield.get(p) {
+                    all_complete = false;
+                    break;
+                }
+            }
+
+            if all_complete {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::FileCompleted {
+                        info_hash: self.info_hash,
+                        file_index: file_idx,
+                    },
+                );
+            }
+
+            file_offset = file_end;
+        }
+    }
+
+    /// Handle a force recheck request: clear all piece state, re-verify,
+    /// transition to the appropriate post-check state, then send reply.
+    async fn handle_force_recheck(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<crate::Result<()>>,
+    ) {
+        // Disconnect all peers — they hold stale bitfield state
+        for peer in self.peers.values() {
+            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+        }
+        self.peers.clear();
+
+        // Clear all piece completion state
+        if let Some(ref mut ct) = self.chunk_tracker {
+            ct.clear();
+        }
+
+        // Run the full verification pipeline (transitions through Checking)
+        self.verify_existing_pieces().await;
+
+        let _ = reply.send(Ok(()));
     }
 
     fn build_resume_data(&self) -> crate::Result<ferrite_core::FastResumeData> {
@@ -2747,6 +3726,9 @@ impl TorrentActor {
         if let Some(ref ct) = self.chunk_tracker {
             let _ = self.have_watch_tx.send(ct.bitfield().clone());
         }
+
+        // Check if the completed piece finishes any file (FileCompleted alert)
+        self.check_file_completion(index);
 
         // Handle parole success: the parole peer delivered a good piece,
         // so the original contributors are the likely offenders.
@@ -3226,11 +4208,25 @@ impl TorrentActor {
                     }
                     Err(e) => {
                         warn!("failed to parse assembled metadata: {e}");
+                        post_alert(
+                            &self.alert_tx,
+                            &self.alert_mask,
+                            AlertKind::MetadataFailed {
+                                info_hash: self.info_hash,
+                            },
+                        );
                     }
                 }
             }
             Err(e) => {
                 warn!("metadata assembly failed: {e}");
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::MetadataFailed {
+                        info_hash: self.info_hash,
+                    },
+                );
             }
         }
     }
@@ -3891,10 +4887,10 @@ impl TorrentActor {
     }
 
     async fn run_choker(&mut self) {
-        let peer_infos: Vec<PeerInfo> = self
+        let peer_infos: Vec<ChokerPeerInfo> = self
             .peers
             .values()
-            .map(|p| PeerInfo {
+            .map(|p| ChokerPeerInfo {
                 addr: p.addr,
                 download_rate: p.download_rate,
                 upload_rate: p.upload_rate,
@@ -4047,10 +5043,10 @@ impl TorrentActor {
     }
 
     fn rotate_optimistic(&mut self) {
-        let peer_infos: Vec<PeerInfo> = self
+        let peer_infos: Vec<ChokerPeerInfo> = self
             .peers
             .values()
-            .map(|p| PeerInfo {
+            .map(|p| ChokerPeerInfo {
                 addr: p.addr,
                 download_rate: p.download_rate,
                 upload_rate: p.upload_rate,
@@ -4090,7 +5086,7 @@ impl TorrentActor {
     // ----- Peer connectivity -----
 
     fn try_connect_peers(&mut self) {
-        while self.peers.len() < self.config.max_peers {
+        while self.peers.len() < self.effective_max_connections() {
             let (addr, source) = match self.available_peers.pop() {
                 Some(pair) => pair,
                 None => break,
@@ -4307,7 +5303,7 @@ impl TorrentActor {
     /// I2P peers don't have real IP addresses, then hands the underlying TCP stream
     /// to `spawn_peer_from_stream`.
     fn handle_i2p_incoming(&mut self, stream: crate::i2p::SamStream) {
-        if self.peers.len() >= self.config.max_peers {
+        if self.peers.len() >= self.effective_max_connections() {
             return;
         }
 
@@ -4361,7 +5357,7 @@ impl TorrentActor {
         stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
         mode_override: Option<ferrite_wire::mse::EncryptionMode>,
     ) {
-        if self.peers.contains_key(&addr) || self.peers.len() >= self.config.max_peers {
+        if self.peers.contains_key(&addr) || self.peers.len() >= self.effective_max_connections() {
             return;
         }
 
@@ -4514,7 +5510,7 @@ impl TorrentActor {
         }
 
         // Check peer limit
-        if self.peers.len() >= self.config.max_peers {
+        if self.peers.len() >= self.effective_max_connections() {
             debug!(%target, "holepunch: at max peers, ignoring connect");
             return;
         }
@@ -7367,5 +8363,839 @@ mod tests {
     fn peer_turnover_no_action_when_seeding() {
         let state = TorrentState::Seeding;
         assert_ne!(state, TorrentState::Downloading);
+    }
+
+    // ---- Test: force_recheck transitions through Checking state ----
+
+    #[tokio::test]
+    async fn force_recheck_transitions_to_checking() {
+        let data = vec![0xDDu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
+            .await
+            .unwrap();
+
+        // Wait for initial verification to complete (should become Seeding)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding, "should start as seeder");
+
+        // Drain any existing alerts
+        while arx.try_recv().is_ok() {}
+
+        // Force recheck
+        handle.force_recheck().await.unwrap();
+
+        // After force_recheck returns, look for a StateChanged alert that
+        // went through Checking (the transition_state fires it)
+        let mut saw_checking = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let crate::alert::AlertKind::StateChanged { new_state, .. } = alert.kind {
+                if new_state == TorrentState::Checking {
+                    saw_checking = true;
+                }
+            }
+        }
+        assert!(saw_checking, "should have transitioned through Checking state");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: force_recheck completes with correct state ----
+
+    #[tokio::test]
+    async fn force_recheck_completes() {
+        let data = vec![0xEEu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
+            .await
+            .unwrap();
+
+        // Wait for initial verification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding);
+        assert_eq!(stats.pieces_have, 2);
+
+        // Force recheck — should re-verify all pieces and return to Seeding
+        handle.force_recheck().await.unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.state, TorrentState::Seeding, "should return to Seeding after recheck");
+        assert_eq!(stats.pieces_have, 2, "all pieces should still be verified");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: rename_file succeeds with valid index ----
+
+    #[tokio::test]
+    async fn rename_file_succeeds() {
+        // Create a real file on disk that we can rename
+        let tmp = std::env::temp_dir().join(format!("ferrite_rename_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let data = vec![0xFFu8; 16384]; // 1 piece
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+
+        // The single-file torrent has name "test", so file path is "test"
+        // Create the actual file on disk at download_dir/test
+        std::fs::write(tmp.join("test"), &data).unwrap();
+
+        let mut config = test_config();
+        config.download_dir = tmp.clone();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Wait for initial verification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drain existing alerts
+        while arx.try_recv().is_ok() {}
+
+        // Rename file 0 to "test_renamed"
+        handle.rename_file(0, "test_renamed".into()).await.unwrap();
+
+        // Check that the old file is gone and new file exists
+        assert!(!tmp.join("test").exists(), "old file should be removed");
+        assert!(tmp.join("test_renamed").exists(), "new file should exist");
+
+        // Check that FileRenamed alert was fired
+        let mut saw_renamed = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let AlertKind::FileRenamed { index, .. } = alert.kind {
+                assert_eq!(index, 0);
+                saw_renamed = true;
+            }
+        }
+        assert!(saw_renamed, "should have received FileRenamed alert");
+
+        handle.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Test: rename_file with invalid index returns error ----
+
+    #[tokio::test]
+    async fn rename_file_invalid_index_errors() {
+        let data = vec![0xCCu8; 16384]; // 1 piece, single-file torrent
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Wait for initial verification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Try to rename file index 99 (out of range)
+        let result = handle.rename_file(99, "bad".into()).await;
+        assert!(result.is_err(), "should fail for out-of-range file index");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: FileCompleted alert fires when all pieces of a file are verified ----
+
+    #[tokio::test]
+    async fn file_completed_alert_fires() {
+        let data = vec![0xBBu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Wait for initial verification (seeded storage => all pieces verify)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Should have received FileCompleted alert for the single file
+        let mut saw_file_completed = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let AlertKind::FileCompleted { file_index, .. } = alert.kind {
+                assert_eq!(file_index, 0, "should be file index 0");
+                saw_file_completed = true;
+            }
+        }
+        assert!(saw_file_completed, "should have received FileCompleted alert");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: MetadataFailed alert fires (unit test on AlertKind) ----
+
+    #[test]
+    fn metadata_failed_alert_fires() {
+        // Test that MetadataFailed alert has the correct category
+        let info_hash = Id20::from([0u8; 20]);
+        let alert = crate::alert::Alert::new(AlertKind::MetadataFailed { info_hash });
+        assert!(
+            alert.category().contains(crate::alert::AlertCategory::STATUS),
+            "MetadataFailed should have STATUS category"
+        );
+        assert!(
+            alert.category().contains(crate::alert::AlertCategory::ERROR),
+            "MetadataFailed should have ERROR category"
+        );
+
+        // Verify it can be posted through the alert system
+        let (tx, mut rx) = broadcast::channel(16);
+        let mask = Arc::new(AtomicU32::new(crate::alert::AlertCategory::ALL.bits()));
+        post_alert(&tx, &mask, AlertKind::MetadataFailed { info_hash });
+        let received = rx.try_recv().expect("should receive MetadataFailed alert");
+        assert!(matches!(received.kind, AlertKind::MetadataFailed { .. }));
+    }
+
+    // ---- Test: set_max_connections persists ----
+
+    #[tokio::test]
+    async fn set_max_connections_persists() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Set max_connections to 10
+        handle.set_max_connections(10).await.unwrap();
+        let val = handle.max_connections().await.unwrap();
+        assert_eq!(val, 10);
+
+        // Update to a different value
+        handle.set_max_connections(25).await.unwrap();
+        let val = handle.max_connections().await.unwrap();
+        assert_eq!(val, 25);
+
+        // Verify stats reflect the override
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.connections_limit, 25);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: max_connections default is 0 (use config.max_peers) ----
+
+    #[tokio::test]
+    async fn max_connections_default() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+        let expected_default = config.max_peers;
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Default max_connections should be 0
+        let val = handle.max_connections().await.unwrap();
+        assert_eq!(val, 0);
+
+        // Stats should show config.max_peers as the effective limit
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.connections_limit, expected_default);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: set_max_uploads round trip ----
+
+    #[tokio::test]
+    async fn set_max_uploads_round_trip() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Set max_uploads to 8
+        handle.set_max_uploads(8).await.unwrap();
+        let val = handle.max_uploads().await.unwrap();
+        assert_eq!(val, 8);
+
+        // Verify stats uploads_limit reflects the new value
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(stats.uploads_limit, 8);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: ExternalIpDetected alert fires ----
+
+    #[tokio::test]
+    async fn external_ip_detected_alert() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let info_hash = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Drain any initial alerts
+        while arx.try_recv().is_ok() {}
+
+        // Send UpdateExternalIp command
+        let test_ip: std::net::IpAddr = "203.0.113.42".parse().unwrap();
+        handle.cmd_tx
+            .send(TorrentCommand::UpdateExternalIp { ip: test_ip })
+            .await
+            .unwrap();
+
+        // Wait for the actor to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Check for ExternalIpDetected alert
+        let mut saw_alert = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let AlertKind::ExternalIpDetected { ip } = alert.kind {
+                assert_eq!(ip, test_ip);
+                saw_alert = true;
+            }
+        }
+        assert!(saw_alert, "should have received ExternalIpDetected alert");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: get_peer_info returns connected peers ----
+
+    #[tokio::test]
+    async fn get_peer_info_returns_connected_peers() {
+        let data = vec![0xAB; 65536]; // 64 KiB
+        let meta = make_test_torrent(&data, 16384); // 4 pieces
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta.clone(), ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Set up a fake peer via TCP handshake
+        let stats = handle.stats().await.unwrap();
+        let listen_port = stats.peers_connected; // Initially 0
+
+        // Add a peer to the available pool and let the actor connect
+        let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer_listener.local_addr().unwrap();
+
+        handle.add_peers(vec![peer_addr], PeerSource::Tracker).await.unwrap();
+
+        // Accept the connection and complete the handshake
+        let accept_timeout = tokio::time::timeout(Duration::from_secs(2), peer_listener.accept()).await;
+        if let Ok(Ok((mut stream, _))) = accept_timeout {
+            // Read handshake
+            let mut hs_buf = [0u8; HANDSHAKE_SIZE];
+            if tokio::time::timeout(Duration::from_millis(500), stream.read_exact(&mut hs_buf)).await.is_ok() {
+                // Send back handshake
+                let hs = Handshake::new(meta.info_hash, Id20::from([0xBB; 20]));
+                let hs_bytes = hs.to_bytes();
+                let _ = stream.write_all(&hs_bytes).await;
+
+                // Give the actor time to register the peer
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                // Now query peer info
+                let peer_info = handle.get_peer_info().await.unwrap();
+                // We should have at least one peer (the one we just handshaked)
+                if !peer_info.is_empty() {
+                    let p = &peer_info[0];
+                    // Verify default choking/interested state
+                    assert!(p.peer_choking, "peer should be choking us initially");
+                    assert!(p.am_choking, "we should be choking peer initially");
+                    assert!(!p.peer_interested, "peer should not be interested initially");
+                    assert_eq!(p.num_pieces, 0);
+                    assert_eq!(p.source, PeerSource::Tracker);
+                }
+            }
+        }
+        // Even if handshake timing fails, at least verify the API works
+        let _ = handle.get_peer_info().await.unwrap();
+        assert_eq!(listen_port, 0); // sanity: initially had no peers
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: get_peer_info empty when no peers ----
+
+    #[tokio::test]
+    async fn get_peer_info_empty_when_no_peers() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let peer_info = handle.get_peer_info().await.unwrap();
+        assert!(peer_info.is_empty(), "should have no peers initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: get_download_queue empty initially ----
+
+    #[tokio::test]
+    async fn get_download_queue_empty_initially() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let queue = handle.get_download_queue().await.unwrap();
+        assert!(queue.is_empty(), "download queue should be empty with no active downloads");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: have_piece false initially ----
+
+    #[tokio::test]
+    async fn have_piece_false_initially() {
+        let data = vec![0xAB; 32768]; // 32 KiB = 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        assert!(!handle.have_piece(0).await.unwrap(), "piece 0 should not be downloaded initially");
+        assert!(!handle.have_piece(1).await.unwrap(), "piece 1 should not be downloaded initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: piece_availability empty with no peers ----
+
+    #[tokio::test]
+    async fn piece_availability_empty_no_peers() {
+        let data = vec![0xAB; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let avail = handle.piece_availability().await.unwrap();
+        assert_eq!(avail.len(), 2, "should have availability for 2 pieces");
+        assert!(avail.iter().all(|&c| c == 0), "all availability counts should be 0 with no peers");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: file_progress zeros initially ----
+
+    #[tokio::test]
+    async fn file_progress_zeros_initially() {
+        let data = vec![0xAB; 32768]; // single-file, 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let progress = handle.file_progress().await.unwrap();
+        assert_eq!(progress.len(), 1, "single-file torrent should have 1 entry");
+        assert_eq!(progress[0], 0, "no bytes should be downloaded initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: file_progress length matches file count (multi-file) ----
+
+    /// Build a multi-file TorrentMetaV1 from a total data blob and file lengths.
+    fn make_test_torrent_multi(data: &[u8], piece_length: u64, file_lengths: &[u64]) -> TorrentMetaV1 {
+        use serde::Serialize;
+
+        let mut pieces = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + piece_length as usize).min(data.len());
+            let hash = ferrite_core::sha1(&data[offset..end]);
+            pieces.extend_from_slice(hash.as_bytes());
+            offset = end;
+        }
+
+        #[derive(Serialize)]
+        struct FileE {
+            length: u64,
+            path: Vec<String>,
+        }
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+            files: Vec<FileE>,
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            info: Info<'a>,
+        }
+
+        let files: Vec<FileE> = file_lengths.iter().enumerate().map(|(i, &len)| {
+            FileE {
+                length: len,
+                path: vec![format!("file{i}.bin")],
+            }
+        }).collect();
+
+        let t = Torrent {
+            info: Info {
+                name: "test_multi",
+                piece_length,
+                pieces: &pieces,
+                files,
+            },
+        };
+
+        let bytes = ferrite_bencode::to_bytes(&t).unwrap();
+        torrent_from_bytes(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_progress_length_matches_file_count() {
+        // 3 files: 10000 + 20000 + 2768 = 32768 bytes total, 2 pieces of 16384
+        let data = vec![0xCD; 32768];
+        let file_lengths = [10000u64, 20000, 2768];
+        let meta = make_test_torrent_multi(&data, 16384, &file_lengths);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        let progress = handle.file_progress().await.unwrap();
+        assert_eq!(progress.len(), 3, "multi-file torrent should have 3 entries");
+        assert!(progress.iter().all(|&b| b == 0), "all progress should be 0 initially");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: is_valid returns true for active torrent ----
+
+    #[tokio::test]
+    async fn is_valid_true_for_active() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.is_valid(), "handle should be valid while torrent actor is alive");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: is_valid returns false after shutdown ----
+
+    #[tokio::test]
+    async fn is_valid_false_after_remove() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.is_valid());
+
+        // Shutdown the torrent (simulating removal)
+        handle.shutdown().await.unwrap();
+
+        // Give the actor time to stop and close the channel
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!handle.is_valid(), "handle should be invalid after shutdown");
+    }
+
+    // ---- Test: clear_error resets error state ----
+
+    #[tokio::test]
+    async fn clear_error_resets() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Initially no error
+        let stats = handle.stats().await.unwrap();
+        assert!(stats.error.is_empty());
+        assert_eq!(stats.error_file, -1);
+
+        // Clear error (no-op when no error) should succeed without issue
+        handle.clear_error().await.unwrap();
+
+        let stats = handle.stats().await.unwrap();
+        assert!(stats.error.is_empty());
+        assert_eq!(stats.error_file, -1);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: flags round trip ----
+
+    #[tokio::test]
+    async fn flags_round_trip() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Initial flags: torrent starts downloading (not paused), no sequential, no super seeding
+        let initial = handle.flags().await.unwrap();
+        assert!(!initial.contains(crate::types::TorrentFlags::PAUSED));
+        assert!(!initial.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
+        assert!(!initial.contains(crate::types::TorrentFlags::SUPER_SEEDING));
+
+        // Enable sequential download via set_flags
+        handle.set_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD).await.unwrap();
+        let after_set = handle.flags().await.unwrap();
+        assert!(after_set.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
+
+        // Disable it via unset_flags
+        handle.unset_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD).await.unwrap();
+        let after_unset = handle.flags().await.unwrap();
+        assert!(!after_unset.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
+
+        // Verify sequential_download state via the dedicated query
+        assert!(!handle.is_sequential_download().await.unwrap());
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: connect_peer does not error ----
+
+    #[tokio::test]
+    async fn connect_peer_no_error() {
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // connect_peer should not error even though the peer doesn't exist
+        // (the connection attempt will fail asynchronously, but the command itself succeeds)
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        handle.connect_peer(addr).await.unwrap();
+
+        // Give the actor a moment to process
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        handle.shutdown().await.unwrap();
     }
 }

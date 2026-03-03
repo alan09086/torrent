@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use bitflags::bitflags;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -764,6 +765,195 @@ pub(crate) enum TorrentCommand {
         addr: SocketAddr,
         stream: BoxedAsyncStream,
     },
+    /// Set the per-torrent download rate limit (bytes/sec, 0 = unlimited).
+    SetDownloadLimit {
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<()>,
+    },
+    /// Set the per-torrent upload rate limit (bytes/sec, 0 = unlimited).
+    SetUploadLimit {
+        bytes_per_sec: u64,
+        reply: oneshot::Sender<()>,
+    },
+    /// Get the current per-torrent download rate limit (bytes/sec, 0 = unlimited).
+    DownloadLimit {
+        reply: oneshot::Sender<u64>,
+    },
+    /// Get the current per-torrent upload rate limit (bytes/sec, 0 = unlimited).
+    UploadLimit {
+        reply: oneshot::Sender<u64>,
+    },
+    /// Enable or disable sequential (in-order) piece downloading.
+    SetSequentialDownload {
+        enabled: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Query whether sequential downloading is enabled.
+    IsSequentialDownload {
+        reply: oneshot::Sender<bool>,
+    },
+    /// Enable or disable BEP 16 super seeding mode.
+    SetSuperSeeding {
+        enabled: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Query whether super seeding mode is enabled.
+    IsSuperSeeding {
+        reply: oneshot::Sender<bool>,
+    },
+    /// Add a new tracker URL (fire-and-forget at torrent level).
+    AddTracker {
+        url: String,
+    },
+    /// Replace all tracker URLs with a new set.
+    ReplaceTrackers {
+        urls: Vec<String>,
+        reply: oneshot::Sender<()>,
+    },
+    /// Trigger a full piece verification (force recheck).
+    ForceRecheck {
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Rename a file within the torrent on disk.
+    RenameFile {
+        file_index: usize,
+        new_name: String,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Set the per-torrent maximum number of connections (0 = use global default).
+    SetMaxConnections {
+        limit: usize,
+        reply: oneshot::Sender<()>,
+    },
+    /// Get the current per-torrent maximum connection limit.
+    MaxConnections {
+        reply: oneshot::Sender<usize>,
+    },
+    /// Set the per-torrent maximum number of unchoke slots (upload slots).
+    SetMaxUploads {
+        limit: usize,
+        reply: oneshot::Sender<()>,
+    },
+    /// Get the current per-torrent maximum unchoke slots (upload slots).
+    MaxUploads {
+        reply: oneshot::Sender<usize>,
+    },
+    /// Get per-peer details for all connected peers.
+    GetPeerInfo {
+        reply: oneshot::Sender<Vec<PeerInfo>>,
+    },
+    /// Get in-flight piece download status (the download queue).
+    GetDownloadQueue {
+        reply: oneshot::Sender<Vec<PartialPieceInfo>>,
+    },
+    /// Check whether a specific piece has been downloaded.
+    HavePiece {
+        index: u32,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Get per-piece availability counts from connected peers.
+    PieceAvailability {
+        reply: oneshot::Sender<Vec<u32>>,
+    },
+    /// Get per-file bytes-downloaded progress.
+    FileProgress {
+        reply: oneshot::Sender<Vec<u64>>,
+    },
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    InfoHashes {
+        reply: oneshot::Sender<ferrite_core::InfoHashes>,
+    },
+    /// Get the full v1 metainfo (None for magnet links before metadata received).
+    TorrentFile {
+        reply: oneshot::Sender<Option<ferrite_core::TorrentMetaV1>>,
+    },
+    /// Get the full v2 metainfo (None if not a v2/hybrid torrent or before metadata received).
+    TorrentFileV2 {
+        reply: oneshot::Sender<Option<ferrite_core::TorrentMetaV2>>,
+    },
+    /// Force an immediate DHT announce (fire-and-forget at torrent level).
+    ForceDhtAnnounce,
+    /// Read all data for a specific piece from disk.
+    ReadPiece {
+        index: u32,
+        reply: oneshot::Sender<crate::Result<bytes::Bytes>>,
+    },
+    /// Flush the disk write cache for this torrent.
+    FlushCache {
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
+    /// Clear the error state and resume if the torrent was paused due to error.
+    ClearError,
+    /// Get per-file open/mode status based on torrent state.
+    FileStatus {
+        reply: oneshot::Sender<Vec<crate::types::FileStatus>>,
+    },
+    /// Read the current torrent flags as a bitflag set.
+    Flags {
+        reply: oneshot::Sender<TorrentFlags>,
+    },
+    /// Set (enable) the specified torrent flags.
+    SetFlags {
+        flags: TorrentFlags,
+        reply: oneshot::Sender<()>,
+    },
+    /// Unset (disable) the specified torrent flags.
+    UnsetFlags {
+        flags: TorrentFlags,
+        reply: oneshot::Sender<()>,
+    },
+    /// Immediately initiate a peer connection to the given address.
+    ConnectPeer {
+        addr: SocketAddr,
+    },
+}
+
+/// Per-peer details exported for client UI introspection.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    /// Remote peer address (IP + port).
+    pub addr: SocketAddr,
+    /// Client identification string (from extension handshake `v` field, or empty).
+    pub client: String,
+    /// Whether the peer is choking us.
+    pub peer_choking: bool,
+    /// Whether the peer is interested in our data.
+    pub peer_interested: bool,
+    /// Whether we are choking the peer.
+    pub am_choking: bool,
+    /// Whether we are interested in the peer's data.
+    pub am_interested: bool,
+    /// Current download rate from this peer in bytes/sec.
+    pub download_rate: u64,
+    /// Current upload rate to this peer in bytes/sec.
+    pub upload_rate: u64,
+    /// Number of pieces the peer has (bitfield population count).
+    pub num_pieces: u32,
+    /// How the peer was discovered.
+    pub source: crate::peer_state::PeerSource,
+    /// Whether the peer supports BEP 6 Fast Extension.
+    pub supports_fast: bool,
+    /// Whether the peer declared upload-only status (BEP 21).
+    pub upload_only: bool,
+    /// Whether the peer is snubbed (no data for snub_timeout_secs).
+    pub snubbed: bool,
+    /// Seconds since the peer connection was established.
+    pub connected_duration_secs: u64,
+    /// Number of outstanding piece requests to this peer.
+    pub num_pending_requests: usize,
+    /// Number of incoming piece requests from this peer.
+    pub num_incoming_requests: usize,
+}
+
+/// In-flight piece download status for the download queue.
+#[derive(Debug, Clone)]
+pub struct PartialPieceInfo {
+    /// Index of the piece being downloaded.
+    pub piece_index: u32,
+    /// Total number of blocks in this piece.
+    pub blocks_in_piece: u32,
+    /// Number of blocks that have been assigned to peers.
+    pub blocks_assigned: u32,
 }
 
 /// Info about a file within a torrent.
@@ -805,6 +995,46 @@ pub struct SessionStats {
     pub total_uploaded: u64,
     /// Number of nodes in the DHT routing table.
     pub dht_nodes: usize,
+}
+
+/// Whether a file in a torrent is open and its I/O access mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// File is open for reading only (e.g. seeding).
+    ReadOnly,
+    /// File is open for reading and writing (e.g. downloading).
+    ReadWrite,
+    /// File is not currently open.
+    Closed,
+}
+
+/// Status of a single file within a torrent.
+#[derive(Debug, Clone)]
+pub struct FileStatus {
+    /// Whether the file is currently open.
+    pub open: bool,
+    /// The current access mode.
+    pub mode: FileMode,
+}
+
+bitflags! {
+    /// Bitflag convenience wrapper for common torrent state flags.
+    ///
+    /// These map to existing torrent actor fields; `set_flags` / `unset_flags`
+    /// delegate to the underlying operations (pause/resume, set_sequential, etc.).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TorrentFlags: u32 {
+        /// Torrent is paused.
+        const PAUSED = 0x1;
+        /// Torrent is auto-managed by the session queuing system.
+        const AUTO_MANAGED = 0x2;
+        /// Sequential (in-order) piece downloading is enabled.
+        const SEQUENTIAL_DOWNLOAD = 0x4;
+        /// BEP 16 super seeding mode is active.
+        const SUPER_SEEDING = 0x8;
+        /// Upload-only status (seeding complete, no wanted pieces).
+        const UPLOAD_ONLY = 0x10;
+    }
 }
 
 /// Type alias for a factory that creates per-torrent storage.

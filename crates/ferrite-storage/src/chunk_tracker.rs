@@ -121,6 +121,19 @@ impl ChunkTracker {
         }
     }
 
+    /// Reset all piece completion state (for force recheck).
+    ///
+    /// Clears the have bitfield, in-progress chunk tracking, and v2 block
+    /// verification state. After calling this the tracker looks like a fresh
+    /// `ChunkTracker::new()`.
+    pub fn clear(&mut self) {
+        self.have = Bitfield::new(self.have.len());
+        self.in_progress.clear();
+        if let Some(ref mut bv) = self.block_verified {
+            bv.clear();
+        }
+    }
+
     /// Enable v2 per-block Merkle verification tracking.
     pub fn enable_v2_tracking(&mut self) {
         self.block_verified = Some(HashMap::new());
@@ -319,5 +332,38 @@ mod tests {
         ct.mark_block_verified(0, 1);
         ct.mark_failed(0);
         assert!(!ct.is_block_verified(0, 0));
+    }
+
+    #[test]
+    fn clear_resets_all_state() {
+        let mut ct = make_tracker();
+        ct.enable_v2_tracking();
+
+        // Download and verify piece 0
+        ct.chunk_received(0, 0);
+        ct.chunk_received(0, 16384);
+        ct.chunk_received(0, 32768);
+        ct.chunk_received(0, 49152);
+        ct.mark_verified(0);
+        assert!(ct.has_piece(0));
+
+        // Start downloading piece 1 (partial)
+        ct.chunk_received(1, 0);
+
+        // Mark some v2 block as verified
+        ct.mark_block_verified(1, 0);
+
+        // Clear everything
+        ct.clear();
+
+        // All state should be reset
+        assert!(!ct.has_piece(0), "have bitfield should be cleared");
+        assert_eq!(ct.bitfield().count_ones(), 0, "no pieces should be marked");
+        assert!(!ct.has_chunk(1, 0), "in_progress should be cleared");
+        assert!(!ct.is_block_verified(1, 0), "block_verified should be cleared");
+
+        // missing_chunks should report all chunks again
+        assert_eq!(ct.missing_chunks(0).len(), 4);
+        assert_eq!(ct.missing_chunks(1).len(), 4);
     }
 }

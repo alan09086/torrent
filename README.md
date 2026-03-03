@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1320-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1366-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.59.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.60.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -22,7 +22,7 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **95-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1320 tests, zero clippy warnings**
+- 📊 **1366 tests, zero clippy warnings**
 
 ---
 
@@ -32,7 +32,7 @@ Add ferrite to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrite = "0.59.0"
+ferrite = "0.60.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -193,6 +193,7 @@ See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 10: Security & Hardening | M47–M48 | SSRF mitigation, DSCP, anonymous mode | ✅ Done |
 | 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | ✅ Done |
 | 12: Simulation | M51 | In-process network simulation framework | ✅ Done |
+| 13: API Parity | M52–M53 | API documentation, full torrent operations API parity | ✅ Done |
 
 ---
 
@@ -217,6 +218,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.60.0 | M53 | Full torrent operations API parity — 40+ SessionHandle methods, PeerInfo, TorrentFlags |
 | 0.59.0 | — | Full libtorrent `torrent_status` parity — ~55-field TorrentStats |
 | 0.58.0 | M52 | API documentation: `#![warn(missing_docs)]` on all 12 crates, example programs, `SessionHandle::open_file()` |
 | 0.57.0 | M51 | Network simulation: ferrite-sim crate, NetworkFactory pluggable transport, SimNetwork/SimSwarm, 5 integration tests |
