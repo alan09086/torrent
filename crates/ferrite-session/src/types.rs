@@ -837,6 +837,62 @@ pub(crate) enum TorrentCommand {
     MaxUploads {
         reply: oneshot::Sender<usize>,
     },
+    /// Get per-peer details for all connected peers.
+    GetPeerInfo {
+        reply: oneshot::Sender<Vec<PeerInfo>>,
+    },
+    /// Get in-flight piece download status (the download queue).
+    GetDownloadQueue {
+        reply: oneshot::Sender<Vec<PartialPieceInfo>>,
+    },
+}
+
+/// Per-peer details exported for client UI introspection.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    /// Remote peer address (IP + port).
+    pub addr: SocketAddr,
+    /// Client identification string (from extension handshake `v` field, or empty).
+    pub client: String,
+    /// Whether the peer is choking us.
+    pub peer_choking: bool,
+    /// Whether the peer is interested in our data.
+    pub peer_interested: bool,
+    /// Whether we are choking the peer.
+    pub am_choking: bool,
+    /// Whether we are interested in the peer's data.
+    pub am_interested: bool,
+    /// Current download rate from this peer in bytes/sec.
+    pub download_rate: u64,
+    /// Current upload rate to this peer in bytes/sec.
+    pub upload_rate: u64,
+    /// Number of pieces the peer has (bitfield population count).
+    pub num_pieces: u32,
+    /// How the peer was discovered.
+    pub source: crate::peer_state::PeerSource,
+    /// Whether the peer supports BEP 6 Fast Extension.
+    pub supports_fast: bool,
+    /// Whether the peer declared upload-only status (BEP 21).
+    pub upload_only: bool,
+    /// Whether the peer is snubbed (no data for snub_timeout_secs).
+    pub snubbed: bool,
+    /// Seconds since the peer connection was established.
+    pub connected_duration_secs: u64,
+    /// Number of outstanding piece requests to this peer.
+    pub num_pending_requests: usize,
+    /// Number of incoming piece requests from this peer.
+    pub num_incoming_requests: usize,
+}
+
+/// In-flight piece download status for the download queue.
+#[derive(Debug, Clone)]
+pub struct PartialPieceInfo {
+    /// Index of the piece being downloaded.
+    pub piece_index: u32,
+    /// Total number of blocks in this piece.
+    pub blocks_in_piece: u32,
+    /// Number of blocks that have been assigned to peers.
+    pub blocks_assigned: u32,
 }
 
 /// Info about a file within a torrent.

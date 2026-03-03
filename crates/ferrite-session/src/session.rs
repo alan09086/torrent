@@ -264,6 +264,16 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<usize>>,
     },
+    /// Get per-peer details for all connected peers of a torrent.
+    GetPeerInfo {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::types::PeerInfo>>>,
+    },
+    /// Get in-flight piece download status for a torrent.
+    GetDownloadQueue {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Vec<crate::types::PartialPieceInfo>>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1323,6 +1333,38 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Get per-peer details for all connected peers of a torrent.
+    pub async fn get_peer_info(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::types::PeerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::GetPeerInfo {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get in-flight piece download status for a torrent (the download queue).
+    pub async fn get_download_queue(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Vec<crate::types::PartialPieceInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::GetDownloadQueue {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,6 +1727,22 @@ impl SessionActor {
                         Some(SessionCommand::MaxUploads { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.max_uploads().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::GetPeerInfo { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.get_peer_info().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::GetDownloadQueue { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.get_download_queue().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
