@@ -5800,7 +5800,7 @@ mod tests {
     fn test_config() -> TorrentConfig {
         TorrentConfig {
             listen_port: 0, // random port
-            max_peers: 50,
+            max_peers: 200,
             target_request_queue: 5,
             download_dir: std::path::PathBuf::from("/tmp"),
             enable_dht: false,

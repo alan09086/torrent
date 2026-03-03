@@ -115,7 +115,7 @@ impl Default for TorrentConfig {
     fn default() -> Self {
         Self {
             listen_port: 6881,
-            max_peers: 50,
+            max_peers: 200,
             target_request_queue: 5,
             download_dir: PathBuf::from("."),
             enable_dht: true,
@@ -168,7 +168,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
     fn from(s: &crate::settings::Settings) -> Self {
         Self {
             listen_port: 0, // Each torrent gets a random port (matches make_torrent_config)
-            max_peers: 50,
+            max_peers: 200,
             target_request_queue: 5,
             download_dir: s.download_dir.clone(),
             enable_dht: s.enable_dht,
