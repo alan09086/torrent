@@ -858,6 +858,18 @@ pub(crate) enum TorrentCommand {
     FileProgress {
         reply: oneshot::Sender<Vec<u64>>,
     },
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    InfoHashes {
+        reply: oneshot::Sender<ferrite_core::InfoHashes>,
+    },
+    /// Get the full v1 metainfo (None for magnet links before metadata received).
+    TorrentFile {
+        reply: oneshot::Sender<Option<ferrite_core::TorrentMetaV1>>,
+    },
+    /// Get the full v2 metainfo (None if not a v2/hybrid torrent or before metadata received).
+    TorrentFileV2 {
+        reply: oneshot::Sender<Option<ferrite_core::TorrentMetaV2>>,
+    },
 }
 
 /// Per-peer details exported for client UI introspection.

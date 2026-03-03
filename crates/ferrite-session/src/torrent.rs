@@ -1005,6 +1005,41 @@ impl TorrentHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
     }
+
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    pub async fn info_hashes(&self) -> crate::Result<ferrite_core::InfoHashes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::InfoHashes { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the full v1 metainfo, if available.
+    ///
+    /// Returns `None` for magnet links before metadata has been received.
+    pub async fn torrent_file(&self) -> crate::Result<Option<TorrentMetaV1>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::TorrentFile { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
+
+    /// Get the full v2 metainfo, if available.
+    ///
+    /// Returns `None` if the torrent is not a v2/hybrid torrent, or for magnet
+    /// links before metadata has been received.
+    pub async fn torrent_file_v2(&self) -> crate::Result<Option<ferrite_core::TorrentMetaV2>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::TorrentFileV2 { reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,6 +1565,15 @@ impl TorrentActor {
                         }
                         Some(TorrentCommand::FileProgress { reply }) => {
                             let _ = reply.send(self.compute_file_progress());
+                        }
+                        Some(TorrentCommand::InfoHashes { reply }) => {
+                            let _ = reply.send(self.info_hashes.clone());
+                        }
+                        Some(TorrentCommand::TorrentFile { reply }) => {
+                            let _ = reply.send(self.meta.clone());
+                        }
+                        Some(TorrentCommand::TorrentFileV2 { reply }) => {
+                            let _ = reply.send(self.meta_v2.clone());
                         }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;

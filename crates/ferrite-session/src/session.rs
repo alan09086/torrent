@@ -290,6 +290,21 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<Vec<u64>>>,
     },
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    InfoHashesQuery {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<ferrite_core::InfoHashes>>,
+    },
+    /// Get the full v1 metainfo for a torrent.
+    TorrentFile {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Option<ferrite_core::TorrentMetaV1>>>,
+    },
+    /// Get the full v2 metainfo for a torrent.
+    TorrentFileV2 {
+        info_hash: Id20,
+        reply: oneshot::Sender<crate::Result<Option<ferrite_core::TorrentMetaV2>>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1431,6 +1446,59 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Get the torrent's identity hashes (v1 and/or v2).
+    pub async fn info_hashes(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<ferrite_core::InfoHashes> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::InfoHashesQuery {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the full v1 metainfo for a torrent.
+    ///
+    /// Returns `None` for magnet links before metadata has been received.
+    pub async fn torrent_file(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Option<ferrite_core::TorrentMetaV1>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::TorrentFile {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Get the full v2 metainfo for a torrent.
+    ///
+    /// Returns `None` if the torrent is not a v2/hybrid torrent, or for magnet
+    /// links before metadata has been received.
+    pub async fn torrent_file_v2(
+        &self,
+        info_hash: Id20,
+    ) -> crate::Result<Option<ferrite_core::TorrentMetaV2>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::TorrentFileV2 {
+                info_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1833,6 +1901,30 @@ impl SessionActor {
                         Some(SessionCommand::FileProgress { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.file_progress().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::InfoHashesQuery { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.info_hashes().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TorrentFile { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.torrent_file().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::TorrentFileV2 { info_hash, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.torrent_file_v2().await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
@@ -4198,6 +4290,62 @@ mod tests {
         // Should only have 1 tracker (deduplicated).
         let trackers = session.tracker_list(info_hash).await.unwrap();
         assert_eq!(trackers.len(), 1);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: info_hashes_matches_added_torrent ----
+
+    #[tokio::test]
+    async fn info_hashes_matches_added_torrent() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        let expected_v1 = meta.info_hash;
+        let storage = make_storage(&data, 16384);
+
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let hashes = session.info_hashes(info_hash).await.unwrap();
+        assert_eq!(hashes.v1, Some(expected_v1));
+        // v1-only torrent should not have v2 hash
+        assert!(hashes.v2.is_none());
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: torrent_file_returns_meta ----
+
+    #[tokio::test]
+    async fn torrent_file_returns_meta() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 32768];
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+
+        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let torrent = session.torrent_file(info_hash).await.unwrap();
+        assert!(torrent.is_some());
+        let torrent = torrent.unwrap();
+        assert_eq!(torrent.info_hash, info_hash);
+        assert_eq!(torrent.info.name, "test");
+        assert_eq!(torrent.info.total_length(), 32768);
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- Test: torrent_file_none_before_metadata ----
+
+    #[tokio::test]
+    async fn torrent_file_none_before_metadata() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let magnet = ferrite_core::Magnet::parse(
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test"
+        ).unwrap();
+
+        let info_hash = session.add_magnet(magnet).await.unwrap();
+        let torrent = session.torrent_file(info_hash).await.unwrap();
+        // Before metadata is received, torrent_file should return None.
+        assert!(torrent.is_none());
 
         session.shutdown().await.unwrap();
     }
