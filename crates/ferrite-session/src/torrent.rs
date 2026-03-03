@@ -1843,6 +1843,7 @@ impl TorrentActor {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v4 returned peers");
                             self.handle_add_peers(peers, PeerSource::Dht);
+                            self.try_connect_peers();
                         }
                         None => {
                             debug!("DHT v4 peer search exhausted");
@@ -1861,6 +1862,7 @@ impl TorrentActor {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v6 returned peers");
                             self.handle_add_peers(peers, PeerSource::Dht);
+                            self.try_connect_peers();
                         }
                         None => {
                             debug!("DHT v6 peer search exhausted");
@@ -1879,6 +1881,7 @@ impl TorrentActor {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v4 v2-swarm returned peers");
                             self.handle_add_peers(peers, PeerSource::Dht);
+                            self.try_connect_peers();
                         }
                         None => {
                             debug!("DHT v4 v2-swarm peer search exhausted");
@@ -1897,6 +1900,7 @@ impl TorrentActor {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v6 v2-swarm returned peers");
                             self.handle_add_peers(peers, PeerSource::Dht);
+                            self.try_connect_peers();
                         }
                         None => {
                             debug!("DHT v6 v2-swarm peer search exhausted");
