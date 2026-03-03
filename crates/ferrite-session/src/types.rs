@@ -813,6 +813,12 @@ pub(crate) enum TorrentCommand {
     ForceRecheck {
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Rename a file within the torrent on disk.
+    RenameFile {
+        file_index: usize,
+        new_name: String,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
 }
 
 /// Info about a file within a torrent.

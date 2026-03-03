@@ -882,6 +882,20 @@ impl TorrentHandle {
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
 
+    /// Rename a file within the torrent on disk.
+    ///
+    /// Changes the filename of the specified file (by index) to `new_name`.
+    /// The file stays in the same directory; only the filename component changes.
+    /// Fires a `FileRenamed` alert on success.
+    pub async fn rename_file(&self, file_index: usize, new_name: String) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TorrentCommand::RenameFile { file_index, new_name, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
     /// Route an incoming SSL peer (TLS already completed) to this torrent (M42).
     pub(crate) async fn spawn_ssl_peer(
         &self,
@@ -1367,6 +1381,10 @@ impl TorrentActor {
                         Some(TorrentCommand::ForceRecheck { reply }) => {
                             self.handle_force_recheck(reply).await;
                         }
+                        Some(TorrentCommand::RenameFile { file_index, new_name, reply }) => {
+                            let result = self.handle_rename_file(file_index, new_name).await;
+                            let _ = reply.send(result);
+                        }
                         Some(TorrentCommand::Shutdown) | None => {
                             self.shutdown_web_seeds().await;
                             self.shutdown_peers().await;
@@ -1722,6 +1740,138 @@ impl TorrentActor {
 
         self.moving_storage = false;
         Ok(())
+    }
+
+    /// Handle RenameFile: rename a single file within the torrent on disk.
+    async fn handle_rename_file(
+        &mut self,
+        file_index: usize,
+        new_name: String,
+    ) -> crate::Result<()> {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => {
+                return Err(crate::Error::Config(
+                    "cannot rename file: metadata not available".into(),
+                ));
+            }
+        };
+
+        let files = meta.info.files();
+        if file_index >= files.len() {
+            return Err(crate::Error::Config(format!(
+                "file index {file_index} out of range (torrent has {} files)",
+                files.len()
+            )));
+        }
+
+        // Compute the old relative path (files() includes torrent name as first component)
+        let old_rel: std::path::PathBuf =
+            files[file_index].path.iter().collect();
+        let old_path = self.config.download_dir.join(&old_rel);
+
+        // Build new relative path: same parent directory, new filename
+        let new_rel = if let Some(parent) = old_rel.parent() {
+            parent.join(&new_name)
+        } else {
+            std::path::PathBuf::from(&new_name)
+        };
+        let new_path = self.config.download_dir.join(&new_rel);
+
+        // Perform the rename on a blocking thread
+        let src = old_path.clone();
+        let dst = new_path.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&src, &dst)
+        })
+        .await
+        .map_err(|e| crate::Error::Io(std::io::Error::other(e)))
+        .and_then(|r| r.map_err(crate::Error::Io))?;
+
+        // Fire FileRenamed alert
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::FileRenamed {
+                info_hash: self.info_hash,
+                index: file_index,
+                new_path: new_path.clone(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Check if the just-completed piece finishes any file, and fire FileCompleted alerts.
+    ///
+    /// For efficiency, only checks files whose byte range overlaps the completed piece.
+    fn check_file_completion(&self, piece_index: u32) {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => return,
+        };
+        let lengths = match self.lengths.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let bitfield = match self.chunk_tracker.as_ref() {
+            Some(ct) => ct.bitfield(),
+            None => return,
+        };
+
+        let files = meta.info.files();
+        if files.is_empty() {
+            return;
+        }
+
+        let piece_length = lengths.piece_length();
+        let piece_start = lengths.piece_offset(piece_index);
+        let piece_end = piece_start + lengths.piece_size(piece_index) as u64;
+
+        // Walk files to find which ones overlap this piece
+        let mut file_offset = 0u64;
+        for (file_idx, file_entry) in files.iter().enumerate() {
+            let file_end = file_offset + file_entry.length;
+
+            // Skip files that don't overlap this piece
+            if file_end <= piece_start || file_offset >= piece_end {
+                file_offset = file_end;
+                continue;
+            }
+
+            // This file overlaps the completed piece. Check if ALL pieces for
+            // this file are now complete.
+            let first_piece = (file_offset / piece_length) as u32;
+            let last_piece = if file_entry.length == 0 {
+                first_piece
+            } else {
+                ((file_end - 1) / piece_length) as u32
+            };
+
+            let mut all_complete = true;
+            for p in first_piece..=last_piece {
+                if !bitfield.get(p) {
+                    all_complete = false;
+                    break;
+                }
+            }
+
+            if all_complete {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::FileCompleted {
+                        info_hash: self.info_hash,
+                        file_index: file_idx,
+                    },
+                );
+            }
+
+            file_offset = file_end;
+        }
     }
 
     /// Compute download progress metrics.
@@ -2567,6 +2717,63 @@ impl TorrentActor {
             self.transition_state(TorrentState::Downloading);
             self.choker.set_seed_mode(false);
         }
+
+        // Fire FileCompleted alerts for any files that are fully verified
+        self.fire_file_completed_alerts();
+    }
+
+    /// Fire FileCompleted alerts for all files whose pieces are fully verified.
+    ///
+    /// Used after initial check or force-recheck to emit alerts for complete files.
+    fn fire_file_completed_alerts(&self) {
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => return,
+        };
+        let lengths = match self.lengths.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let bitfield = match self.chunk_tracker.as_ref() {
+            Some(ct) => ct.bitfield(),
+            None => return,
+        };
+
+        let files = meta.info.files();
+        let piece_length = lengths.piece_length();
+        let mut file_offset = 0u64;
+
+        for (file_idx, file_entry) in files.iter().enumerate() {
+            let file_end = file_offset + file_entry.length;
+            if file_entry.length == 0 {
+                file_offset = file_end;
+                continue;
+            }
+
+            let first_piece = (file_offset / piece_length) as u32;
+            let last_piece = ((file_end - 1) / piece_length) as u32;
+
+            let mut all_complete = true;
+            for p in first_piece..=last_piece {
+                if !bitfield.get(p) {
+                    all_complete = false;
+                    break;
+                }
+            }
+
+            if all_complete {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::FileCompleted {
+                        info_hash: self.info_hash,
+                        file_index: file_idx,
+                    },
+                );
+            }
+
+            file_offset = file_end;
+        }
     }
 
     /// Handle a force recheck request: clear all piece state, re-verify,
@@ -2929,6 +3136,9 @@ impl TorrentActor {
         if let Some(ref ct) = self.chunk_tracker {
             let _ = self.have_watch_tx.send(ct.bitfield().clone());
         }
+
+        // Check if the completed piece finishes any file (FileCompleted alert)
+        self.check_file_completion(index);
 
         // Handle parole success: the parole peer delivered a good piece,
         // so the original contributors are the likely offenders.
@@ -3408,11 +3618,25 @@ impl TorrentActor {
                     }
                     Err(e) => {
                         warn!("failed to parse assembled metadata: {e}");
+                        post_alert(
+                            &self.alert_tx,
+                            &self.alert_mask,
+                            AlertKind::MetadataFailed {
+                                info_hash: self.info_hash,
+                            },
+                        );
                     }
                 }
             }
             Err(e) => {
                 warn!("metadata assembly failed: {e}");
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::MetadataFailed {
+                        info_hash: self.info_hash,
+                    },
+                );
             }
         }
     }
@@ -7622,5 +7846,157 @@ mod tests {
         assert_eq!(stats.pieces_have, 2, "all pieces should still be verified");
 
         handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: rename_file succeeds with valid index ----
+
+    #[tokio::test]
+    async fn rename_file_succeeds() {
+        // Create a real file on disk that we can rename
+        let tmp = std::env::temp_dir().join(format!("ferrite_rename_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let data = vec![0xFFu8; 16384]; // 1 piece
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+
+        // The single-file torrent has name "test", so file path is "test"
+        // Create the actual file on disk at download_dir/test
+        std::fs::write(tmp.join("test"), &data).unwrap();
+
+        let mut config = test_config();
+        config.download_dir = tmp.clone();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Wait for initial verification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drain existing alerts
+        while arx.try_recv().is_ok() {}
+
+        // Rename file 0 to "test_renamed"
+        handle.rename_file(0, "test_renamed".into()).await.unwrap();
+
+        // Check that the old file is gone and new file exists
+        assert!(!tmp.join("test").exists(), "old file should be removed");
+        assert!(tmp.join("test_renamed").exists(), "new file should exist");
+
+        // Check that FileRenamed alert was fired
+        let mut saw_renamed = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let AlertKind::FileRenamed { index, .. } = alert.kind {
+                assert_eq!(index, 0);
+                saw_renamed = true;
+            }
+        }
+        assert!(saw_renamed, "should have received FileRenamed alert");
+
+        handle.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- Test: rename_file with invalid index returns error ----
+
+    #[tokio::test]
+    async fn rename_file_invalid_index_errors() {
+        let data = vec![0xCCu8; 16384]; // 1 piece, single-file torrent
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Wait for initial verification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Try to rename file index 99 (out of range)
+        let result = handle.rename_file(99, "bad".into()).await;
+        assert!(result.is_err(), "should fail for out-of-range file index");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: FileCompleted alert fires when all pieces of a file are verified ----
+
+    #[tokio::test]
+    async fn file_completed_alert_fires() {
+        let data = vec![0xBBu8; 32768]; // 2 pieces
+        let meta = make_test_torrent(&data, 16384);
+        let storage = make_seeded_storage(&data, 16384);
+        let config = test_config();
+
+        let (atx, amask) = test_alert_channel();
+        let mut arx = atx.subscribe();
+        let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
+        let handle = TorrentHandle::from_torrent(
+            meta, ferrite_core::TorrentVersion::V1Only, None, dh, dm, config,
+            None, None, None, None,
+            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
+            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
+            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
+
+        // Wait for initial verification (seeded storage => all pieces verify)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Should have received FileCompleted alert for the single file
+        let mut saw_file_completed = false;
+        while let Ok(alert) = arx.try_recv() {
+            if let AlertKind::FileCompleted { file_index, .. } = alert.kind {
+                assert_eq!(file_index, 0, "should be file index 0");
+                saw_file_completed = true;
+            }
+        }
+        assert!(saw_file_completed, "should have received FileCompleted alert");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    // ---- Test: MetadataFailed alert fires (unit test on AlertKind) ----
+
+    #[test]
+    fn metadata_failed_alert_fires() {
+        // Test that MetadataFailed alert has the correct category
+        let info_hash = Id20::from([0u8; 20]);
+        let alert = crate::alert::Alert::new(AlertKind::MetadataFailed { info_hash });
+        assert!(
+            alert.category().contains(crate::alert::AlertCategory::STATUS),
+            "MetadataFailed should have STATUS category"
+        );
+        assert!(
+            alert.category().contains(crate::alert::AlertCategory::ERROR),
+            "MetadataFailed should have ERROR category"
+        );
+
+        // Verify it can be posted through the alert system
+        let (tx, mut rx) = broadcast::channel(16);
+        let mask = Arc::new(AtomicU32::new(crate::alert::AlertCategory::ALL.bits()));
+        post_alert(&tx, &mask, AlertKind::MetadataFailed { info_hash });
+        let received = rx.try_recv().expect("should receive MetadataFailed alert");
+        assert!(matches!(received.kind, AlertKind::MetadataFailed { .. }));
     }
 }

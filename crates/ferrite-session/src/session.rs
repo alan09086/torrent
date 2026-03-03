@@ -235,6 +235,13 @@ enum SessionCommand {
         info_hash: Id20,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    /// Rename a file within a torrent on disk.
+    RenameFile {
+        info_hash: Id20,
+        file_index: usize,
+        new_name: String,
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1208,6 +1215,30 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Rename a file within a torrent on disk.
+    ///
+    /// Changes the filename of the specified file (by index) to `new_name`.
+    /// The file stays in the same directory; only the filename component changes.
+    /// Fires a `FileRenamed` alert on success.
+    pub async fn rename_file(
+        &self,
+        info_hash: Id20,
+        file_index: usize,
+        new_name: String,
+    ) -> crate::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::RenameFile {
+                info_hash,
+                file_index,
+                new_name,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,6 +1561,14 @@ impl SessionActor {
                         Some(SessionCommand::ForceRecheck { info_hash, reply }) => {
                             let result = if let Some(entry) = self.torrents.get(&info_hash) {
                                 entry.handle.force_recheck().await
+                            } else {
+                                Err(crate::Error::TorrentNotFound(info_hash))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::RenameFile { info_hash, file_index, new_name, reply }) => {
+                            let result = if let Some(entry) = self.torrents.get(&info_hash) {
+                                entry.handle.rename_file(file_index, new_name).await
                             } else {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
