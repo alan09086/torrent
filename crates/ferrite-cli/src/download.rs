@@ -1,9 +1,12 @@
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use ferrite::core::{Lengths, DEFAULT_CHUNK_SIZE, TorrentMeta};
+use ferrite::storage::{FilesystemStorage, TorrentStorage};
 
 pub struct DownloadOpts<'a> {
     pub source: &'a str,
@@ -55,7 +58,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         let meta = ferrite::core::torrent_from_bytes_any(&data)
             .map_err(|e| anyhow::anyhow!("failed to parse torrent: {e}"))?;
         let ih = meta.info_hashes().best_v1();
-        session.add_torrent(meta, None).await?;
+        let storage = make_filesystem_storage(&meta, output)?;
+        session.add_torrent(meta, Some(storage)).await?;
         ih
     };
 
@@ -158,6 +162,30 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn make_filesystem_storage(
+    meta: &TorrentMeta,
+    output: &Path,
+) -> anyhow::Result<Arc<dyn TorrentStorage>> {
+    let (file_paths, file_lengths, total_length, piece_length) = if let Some(v1) = meta.as_v1() {
+        let files = v1.info.files();
+        let paths: Vec<PathBuf> = files.iter().map(|f| f.path.iter().collect::<PathBuf>()).collect();
+        let lengths: Vec<u64> = files.iter().map(|f| f.length).collect();
+        (paths, lengths, v1.info.total_length(), v1.info.piece_length)
+    } else if let Some(v2) = meta.as_v2() {
+        let files = v2.info.files();
+        let paths: Vec<PathBuf> = files.iter().map(|f| f.path.iter().collect::<PathBuf>()).collect();
+        let lengths: Vec<u64> = files.iter().map(|f| f.attr.length).collect();
+        (paths, lengths, v2.info.total_length(), v2.info.piece_length)
+    } else {
+        anyhow::bail!("torrent has no file metadata");
+    };
+
+    let lengths_calc = Lengths::new(total_length, piece_length, DEFAULT_CHUNK_SIZE);
+    let storage = FilesystemStorage::new(output, file_paths, file_lengths, lengths_calc, None, false)
+        .map_err(|e| anyhow::anyhow!("failed to create storage: {e}"))?;
+    Ok(Arc::new(storage))
 }
 
 fn format_rate(bytes_per_sec: u64) -> String {

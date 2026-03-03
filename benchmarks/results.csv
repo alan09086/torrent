@@ -1,0 +1,10 @@
+client,trial,time_secs,avg_speed_mbps,peak_rss_kb
+ferrite,1,77.73,18.67,26388
+rqbit,1,23.27,62.38,42212
+libtorrent,1,44.13,32.89,1519216
+ferrite,2,81.72,17.76,28588
+rqbit,2,18.71,77.58,42792
+libtorrent,2,31.11,46.66,1523164
+ferrite,3,79.65,18.22,27088
+rqbit,3,17.72,81.92,42752
+libtorrent,3,131.7,11.02,1522860
