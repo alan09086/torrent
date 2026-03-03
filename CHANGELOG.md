@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.63.0 — M56: Speed Optimization
+
+### Added
+- **DHT routing table persistence** — saves DHT routing table nodes on shutdown and reloads on startup for instant peer discovery (eliminates cold-start penalty)
+- **Piece stealing** — faster peers steal in-flight blocks from peers running at less than 1/10th their download rate (configurable `steal_threshold_ratio`, default 10.0)
+- **`initial_queue_depth`** setting — configurable per-peer initial request pipeline depth (default: 128, embedded: 16, high_performance: 256)
+- **`steal_threshold_ratio`** setting — configurable steal aggressiveness (default: 10.0, high_performance: 5.0)
+- **`dht_saved_nodes`** runtime field — builder API for injecting saved DHT nodes before session start
+
+### Changed
+- **Initial pipeline queue depth** raised from 2 to 128 per peer — matches rqbit's semaphore-permit model for faster ramp-up
+- **PeerState::new()** now accepts configurable pipeline parameters instead of hardcoded values
+- **Session state** now populates `dht_nodes` field (previously always empty `Vec::new()`)
+
+### CLI
+- **DHT state persistence** — `ferrite download` saves/loads DHT routing table to `$XDG_DATA_HOME/ferrite/session.dat` across runs
+
+### Benchmark (Arch ISO 1.42 GiB, 3 trials)
+| Client | Time (s) | Speed (MB/s) | RSS (MiB) |
+|--------|----------|-------------|-----------|
+| ferrite | 96.8 ±1.1 | 15.0 ±0.2 | 29.3 ±0.9 |
+| rqbit | 17.1 ±0.6 | 84.9 ±2.8 | 42.3 ±1.7 |
+| libtorrent | 32.7 ±0.7 | 44.4 ±0.9 | 1487.8 ±0.1 |
+
+**Note:** No speed improvement observed — the primary bottleneck is in the transfer pipeline itself (not peer discovery, queue depth, or block assignment). DHT persistence saves 40 nodes per session. Further investigation needed for M57.
+
 ## 0.62.0 — M55: Download Speed Optimization
 
 ### Changed
