@@ -268,6 +268,14 @@ impl RoutingTable {
         id
     }
 
+    /// Return all nodes in the routing table as (id, addr) pairs.
+    pub fn all_nodes(&self) -> Vec<(Id20, SocketAddr)> {
+        self.buckets
+            .iter()
+            .flat_map(|b| b.nodes.iter().map(|n| (n.id, n.addr)))
+            .collect()
+    }
+
     /// Get a reference to a node by ID.
     pub fn get(&self, id: &Id20) -> Option<&RoutingNode> {
         let bucket_idx = self.bucket_index(id);

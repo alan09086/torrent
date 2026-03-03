@@ -176,6 +176,9 @@ enum DhtCommand {
         target: Id20,
         reply: oneshot::Sender<Result<SampleInfohashesResult>>,
     },
+    GetRoutingNodes {
+        reply: oneshot::Sender<Vec<(Id20, SocketAddr)>>,
+    },
     Shutdown,
 }
 
@@ -349,6 +352,13 @@ impl DhtHandle {
             .await
             .map_err(|_| Error::Shutdown)?;
         reply_rx.await.map_err(|_| Error::Shutdown)?
+    }
+
+    /// Return all nodes currently in the DHT routing table.
+    pub async fn get_routing_nodes(&self) -> Vec<(Id20, SocketAddr)> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self.tx.send(DhtCommand::GetRoutingNodes { reply: reply_tx }).await;
+        reply_rx.await.unwrap_or_default()
     }
 }
 
@@ -563,6 +573,10 @@ impl DhtActor {
                         }
                         Some(DhtCommand::SampleInfohashes { target, reply }) => {
                             self.handle_sample_infohashes(target, reply).await;
+                        }
+                        Some(DhtCommand::GetRoutingNodes { reply }) => {
+                            let nodes = self.routing_table.all_nodes();
+                            let _ = reply.send(nodes);
                         }
                         Some(DhtCommand::Shutdown) | None => {
                             debug!("DHT shutting down");
