@@ -98,7 +98,6 @@ fn relocate_files(
 }
 
 /// Current time as POSIX seconds (0 on clock error).
-#[allow(dead_code)] // used in Task 4 (event-driven timestamp tracking)
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -845,7 +844,6 @@ struct TorrentActor {
     finished_duration: i64,
     seeding_duration: i64,
     active_since: Option<std::time::Instant>,
-    #[allow(dead_code)] // wired in Task 4 (event tracking)
     state_duration_since: Option<std::time::Instant>,
     moving_storage: bool,
     has_incoming: bool,
@@ -968,14 +966,57 @@ impl TorrentActor {
     /// Transition to a new state, firing a StateChanged alert if different.
     fn transition_state(&mut self, new_state: TorrentState) {
         let prev = self.state;
-        if prev != new_state {
-            self.state = new_state;
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::StateChanged {
-                info_hash: self.info_hash,
-                prev_state: prev,
-                new_state,
-            });
+        if prev == new_state {
+            return;
         }
+
+        let now = std::time::Instant::now();
+
+        // Accumulate durations for the state we're LEAVING
+        if let Some(since) = self.state_duration_since {
+            let elapsed = now.duration_since(since).as_secs() as i64;
+            match prev {
+                TorrentState::Seeding => {
+                    self.seeding_duration += elapsed;
+                    self.finished_duration += elapsed;
+                }
+                TorrentState::Complete => {
+                    self.finished_duration += elapsed;
+                }
+                _ => {}
+            }
+        }
+
+        // Handle active_duration on pause transitions
+        if new_state == TorrentState::Paused {
+            // Entering paused: accumulate active time and clear timer
+            if let Some(since) = self.active_since {
+                self.active_duration += now.duration_since(since).as_secs() as i64;
+            }
+            self.active_since = None;
+        } else if prev == TorrentState::Paused {
+            // Leaving paused: restart active timer
+            self.active_since = Some(now);
+        }
+
+        // Track first completion
+        if matches!(new_state, TorrentState::Complete | TorrentState::Seeding)
+            && !matches!(prev, TorrentState::Complete | TorrentState::Seeding)
+            && self.completed_time == 0
+        {
+            self.completed_time = now_unix();
+        }
+
+        // Update state duration tracking
+        self.state_duration_since = Some(now);
+        self.need_save_resume = true;
+
+        self.state = new_state;
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::StateChanged {
+            info_hash: self.info_hash,
+            prev_state: prev,
+            new_state,
+        });
     }
 
     /// Count connected peers by transport type.
@@ -1448,9 +1489,15 @@ impl TorrentActor {
 
     /// Handle MoveStorage: relocate data files, re-register storage.
     async fn handle_move_storage(&mut self, new_path: std::path::PathBuf) -> crate::Result<()> {
-        let meta = self.meta.as_ref().ok_or_else(|| {
-            crate::Error::Config("cannot move storage: metadata not available".into())
-        })?;
+        self.moving_storage = true;
+
+        let meta = match self.meta.as_ref() {
+            Some(m) => m,
+            None => {
+                self.moving_storage = false;
+                return Err(crate::Error::Config("cannot move storage: metadata not available".into()));
+            }
+        };
 
         let file_paths: Vec<std::path::PathBuf> = meta
             .info
@@ -1468,28 +1515,40 @@ impl TorrentActor {
         let src = src_base.clone();
         let dst = dst_base.clone();
         let paths = file_paths.clone();
-        tokio::task::spawn_blocking(move || relocate_files(&src, &dst, &paths))
+        let result = tokio::task::spawn_blocking(move || relocate_files(&src, &dst, &paths))
             .await
-            .map_err(|e| crate::Error::Io(std::io::Error::other(e)))?
-            .map_err(crate::Error::Io)?;
+            .map_err(|e| crate::Error::Io(std::io::Error::other(e)))
+            .and_then(|r| r.map_err(crate::Error::Io));
+        if let Err(e) = result {
+            self.moving_storage = false;
+            return Err(e);
+        }
 
         // Unregister old storage
         self.disk_manager.unregister_torrent(self.info_hash).await;
 
         // Create new storage at destination
-        let lengths = self.lengths.clone().ok_or_else(|| {
-            crate::Error::Config("lengths not available".into())
-        })?;
-        let storage: Arc<dyn TorrentStorage> = Arc::new(
-            ferrite_storage::FilesystemStorage::new(
-                &new_path,
-                file_paths,
-                file_lengths,
-                lengths,
-                Some(&self.file_priorities),
-                false,
-            )?,
-        );
+        let lengths = match self.lengths.clone() {
+            Some(l) => l,
+            None => {
+                self.moving_storage = false;
+                return Err(crate::Error::Config("lengths not available".into()));
+            }
+        };
+        let storage: Arc<dyn TorrentStorage> = match ferrite_storage::FilesystemStorage::new(
+            &new_path,
+            file_paths,
+            file_lengths,
+            lengths,
+            Some(&self.file_priorities),
+            false,
+        ) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                self.moving_storage = false;
+                return Err(e.into());
+            }
+        };
 
         // Re-register with disk manager
         self.disk = Some(self.disk_manager.register_torrent(self.info_hash, storage).await);
@@ -1503,6 +1562,7 @@ impl TorrentActor {
             new_path,
         });
 
+        self.moving_storage = false;
         Ok(())
     }
 
@@ -1646,6 +1706,22 @@ impl TorrentActor {
                 .map(|since| since.elapsed().as_secs() as i64)
                 .unwrap_or(0);
 
+        // ── Finished duration (include current stint if Complete or Seeding) ──
+        let finished_duration = self.finished_duration
+            + self
+                .state_duration_since
+                .filter(|_| matches!(self.state, TorrentState::Complete | TorrentState::Seeding))
+                .map(|since| since.elapsed().as_secs() as i64)
+                .unwrap_or(0);
+
+        // ── Seeding duration (include current stint if Seeding) ──
+        let seeding_duration = self.seeding_duration
+            + self
+                .state_duration_since
+                .filter(|_| self.state == TorrentState::Seeding)
+                .map(|since| since.elapsed().as_secs() as i64)
+                .unwrap_or(0);
+
         // ── Name ──
         let name = self
             .meta
@@ -1750,8 +1826,8 @@ impl TorrentActor {
 
             // ── Durations ──
             active_duration,
-            finished_duration: self.finished_duration,
-            seeding_duration: self.seeding_duration,
+            finished_duration,
+            seeding_duration,
 
             // ── Storage ──
             save_path: self.config.download_dir.to_string_lossy().into_owned(),
@@ -1883,6 +1959,9 @@ impl TorrentActor {
                 self.piece_selector.add_peer_bitfield(&bitfield);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield = bitfield;
+                    if self.num_pieces > 0 && peer.bitfield.count_ones() == self.num_pieces {
+                        self.last_seen_complete = now_unix();
+                    }
                 }
                 // BEP 16: assign a piece in super-seed mode
                 self.assign_next_piece_for_peer(peer_addr).await;
@@ -2144,6 +2223,9 @@ impl TorrentActor {
         }
 
         self.downloaded += data.len() as u64;
+        self.total_download += data.len() as u64 + 13; // payload + message header
+        self.last_download = now_unix();
+        self.need_save_resume = true;
 
         // Smart banning: track which peers contribute to each piece
         self.piece_contributors.entry(index).or_default().insert(peer_addr.ip());
@@ -2763,6 +2845,10 @@ impl TorrentActor {
 
         warn!(index, contributors = contributors.len(), "piece hash verification failed");
 
+        self.total_failed_bytes += self.lengths.as_ref()
+            .map(|l| l.piece_size(index) as u64)
+            .unwrap_or(0);
+
         self.predictive_have_sent.remove(&index);
 
         // Check if this is a parole failure
@@ -3325,6 +3411,9 @@ impl TorrentActor {
         }
 
         self.downloaded += data.len() as u64;
+        self.total_download += data.len() as u64 + 13; // payload + message header
+        self.last_download = now_unix();
+        self.need_save_resume = true;
 
         // Verify the piece hash
         self.verify_and_mark_piece(index).await;
@@ -3923,6 +4012,8 @@ impl TorrentActor {
                             })
                             .await;
                         self.uploaded += chunk_size;
+                        self.total_upload += chunk_size + 13; // payload + message header
+                        self.last_upload = now_unix();
                         self.upload_bytes_interval += chunk_size;
                         peer.upload_bytes_window += chunk_size;
                     }
@@ -4255,6 +4346,7 @@ impl TorrentActor {
         addr: SocketAddr,
         stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     ) {
+        self.has_incoming = true;
         self.spawn_peer_from_stream_with_mode(addr, stream, None);
     }
 
