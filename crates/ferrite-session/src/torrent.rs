@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::alert::{post_alert, Alert, AlertKind};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
@@ -446,8 +446,12 @@ impl TorrentHandle {
         };
         // Note: DSCP on listener is skipped for transport-abstracted sockets (no raw fd)
 
-        let tracker_manager =
+        let mut tracker_manager =
             TrackerManager::empty(magnet.info_hash(), our_peer_id, config.listen_port, config.peer_dscp, config.anonymous_mode);
+        // Add tracker URLs from the magnet link (BEP 9 §3.1)
+        for url in &magnet.trackers {
+            tracker_manager.add_tracker_url(url);
+        }
 
         let enable_dht = config.enable_dht;
 
@@ -1441,6 +1445,8 @@ impl TorrentActor {
         } else {
             None
         };
+        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
@@ -1453,6 +1459,8 @@ impl TorrentActor {
         if let Some(ref mut interval) = turnover_interval {
             interval.tick().await;
         }
+        pipeline_tick_interval.tick().await;
+        diag_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
         // DHT announce (v4 + v6) — dual-swarm for hybrid torrents
@@ -1813,27 +1821,26 @@ impl TorrentActor {
                         }
                     }
                 }
-                // Tracker re-announce timer
+                // Tracker re-announce timer — also fires during FetchingMetadata
+                // so magnets with &tr= URLs can discover peers before metadata arrives
                 _ = async {
                     match self.tracker_manager.next_announce_in() {
                         Some(dur) => tokio::time::sleep(dur).await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    if self.state != TorrentState::FetchingMetadata {
-                        let left = self.calculate_left();
-                        let result = self.tracker_manager.announce(
-                            ferrite_tracker::AnnounceEvent::None,
-                            self.uploaded,
-                            self.downloaded,
-                            left,
-                        ).await;
-                        self.fire_tracker_alerts(&result.outcomes);
-                        if !result.peers.is_empty() {
-                            debug!(count = result.peers.len(), "tracker returned peers");
-                            self.handle_add_peers(result.peers, PeerSource::Tracker);
-                            self.try_connect_peers();
-                        }
+                    let left = self.calculate_left();
+                    let result = self.tracker_manager.announce(
+                        ferrite_tracker::AnnounceEvent::None,
+                        self.uploaded,
+                        self.downloaded,
+                        left,
+                    ).await;
+                    self.fire_tracker_alerts(&result.outcomes);
+                    if !result.peers.is_empty() {
+                        debug!(count = result.peers.len(), "tracker returned peers");
+                        self.handle_add_peers(result.peers, PeerSource::Tracker);
+                        self.try_connect_peers();
                     }
                 }
                 // DHT v4 peer discovery
@@ -1938,6 +1945,58 @@ impl TorrentActor {
                     }
                 } => {
                     self.run_peer_turnover().await;
+                }
+                // Pipeline tick (1s) — update EWMA, snub detection, stale block cleanup
+                _ = pipeline_tick_interval.tick() => {
+                    let snub_timeout = Duration::from_secs(self.config.snub_timeout_secs as u64);
+                    let mut snubbed_peers = Vec::new();
+
+                    for (addr, peer) in self.peers.iter_mut() {
+                        peer.pipeline.tick();
+
+                        // Snub detection: no data for snub_timeout_secs while unchoked
+                        if !peer.peer_choking && !peer.snubbed {
+                            let idle = peer.last_data_received
+                                .map(|t| t.elapsed() > snub_timeout)
+                                .unwrap_or(false);
+                            if idle {
+                                peer.snubbed = true;
+                                peer.pipeline.set_queue_depth_override(1);
+                                snubbed_peers.push(*addr);
+                                debug!(%addr, "peer snubbed — no data for {}s", self.config.snub_timeout_secs);
+                            }
+                        }
+                    }
+
+                    // Free assigned blocks from snubbed peers so pick_partial can reassign
+                    if !snubbed_peers.is_empty() {
+                        for ifp in self.in_flight_pieces.values_mut() {
+                            ifp.assigned_blocks.retain(|_, addr| !snubbed_peers.contains(addr));
+                        }
+                    }
+                }
+                // Periodic download status report (5s)
+                _ = diag_interval.tick() => {
+                    if self.state == TorrentState::Downloading {
+                        let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
+                        let in_flight = self.in_flight_pieces.len();
+                        let unchoked = self.peers.values().filter(|p| !p.peer_choking).count();
+                        info!(have, in_flight, total = self.num_pieces,
+                              downloaded_mb = self.downloaded / (1024 * 1024),
+                              peers = self.peers.len(), unchoked,
+                              "download progress");
+                        for (addr, p) in &self.peers {
+                            let last_data = p.last_data_received.map(|t| t.elapsed().as_secs()).unwrap_or(9999);
+                            trace!(%addr,
+                                   choking = p.peer_choking,
+                                   pending = p.pending_requests.len(),
+                                   depth = p.pipeline.queue_depth(),
+                                   ewma_rate = p.pipeline.ewma_rate() as u64,
+                                   last_data_secs = last_data,
+                                   bf_ones = p.bitfield.count_ones(),
+                                   "peer state");
+                        }
+                    }
                 }
                 // Rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
@@ -2862,6 +2921,9 @@ impl TorrentActor {
                 peer_addr,
                 bitfield,
             } => {
+                let ones = bitfield.count_ones();
+                let is_choking = self.peers.get(&peer_addr).map(|p| p.peer_choking).unwrap_or(true);
+                debug!(%peer_addr, ones, is_choking, state = ?self.state, "bitfield event received");
                 self.piece_selector.add_peer_bitfield(&bitfield);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield = bitfield;
@@ -3111,6 +3173,14 @@ impl TorrentActor {
                     message,
                 });
             }
+            PeerEvent::MseRetry { peer_addr, cmd_tx } => {
+                // MSE handshake failed, peer is retrying with plaintext.
+                // Update the peer state with the new command channel.
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    debug!(%peer_addr, "MSE retry: updating cmd_tx for plaintext attempt");
+                    peer.cmd_tx = cmd_tx;
+                }
+            }
         }
     }
 
@@ -3169,12 +3239,11 @@ impl TorrentActor {
                 if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
                     let _ = cancel_peer
                         .cmd_tx
-                        .send(PeerCommand::Cancel {
+                        .try_send(PeerCommand::Cancel {
                             index: ci,
                             begin: cb,
                             length: cl,
-                        })
-                        .await;
+                        });
                     if let Some(pos) = cancel_peer
                         .pending_requests
                         .iter()
@@ -3201,7 +3270,7 @@ impl TorrentActor {
                 self.predictive_have_sent.insert(index);
                 for peer in self.peers.values() {
                     if !peer.bitfield.get(index) {
-                        let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                        let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
                     }
                 }
             }
@@ -3753,9 +3822,10 @@ impl TorrentActor {
                     self.have_buffer.push(index);
                 } else {
                     // Immediate mode — with redundancy elimination
+                    // Use try_send to avoid blocking the actor if any peer's channel is full
                     for peer in self.peers.values() {
                         if !peer.bitfield.get(index) {
-                            let _ = peer.cmd_tx.send(PeerCommand::Have(index)).await;
+                            let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
                         }
                     }
                 }
@@ -3774,7 +3844,7 @@ impl TorrentActor {
                 if should_suggest && !already.contains(&index)
                     && let Some(peer) = self.peers.get(&peer_addr)
                 {
-                    let _ = peer.cmd_tx.send(PeerCommand::SuggestPiece(index)).await;
+                    let _ = peer.cmd_tx.try_send(PeerCommand::SuggestPiece(index));
                     already.insert(index);
                 }
             }
@@ -3814,7 +3884,7 @@ impl TorrentActor {
             if self.config.upload_only_announce {
                 let hs = ferrite_wire::ExtHandshake::new_upload_only();
                 for peer in self.peers.values() {
-                    let _ = peer.cmd_tx.send(PeerCommand::SendExtHandshake(hs.clone())).await;
+                    let _ = peer.cmd_tx.try_send(PeerCommand::SendExtHandshake(hs.clone()));
                 }
             }
             // Announce completion to trackers
@@ -4050,7 +4120,7 @@ impl TorrentActor {
                 for peer in self.peers.values() {
                     for &idx in &pieces {
                         if !peer.bitfield.get(idx) {
-                            let _ = peer.cmd_tx.send(PeerCommand::Have(idx)).await;
+                            let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));
                         }
                     }
                 }
@@ -4058,7 +4128,7 @@ impl TorrentActor {
             Some(crate::have_buffer::FlushResult::SendBitfield(bf)) => {
                 let data = Bytes::copy_from_slice(bf.as_bytes());
                 for peer in self.peers.values() {
-                    let _ = peer.cmd_tx.send(PeerCommand::SendBitfield(data.clone())).await;
+                    let _ = peer.cmd_tx.try_send(PeerCommand::SendBitfield(data.clone()));
                 }
             }
             None => {}
@@ -4091,7 +4161,7 @@ impl TorrentActor {
                 if peer_has_piece(piece) { continue; }
                 if already_suggested.contains(&piece) { continue; }
                 if let Some(peer) = self.peers.get(&peer_addr) {
-                    let _ = peer.cmd_tx.send(PeerCommand::SuggestPiece(piece)).await;
+                    let _ = peer.cmd_tx.try_send(PeerCommand::SuggestPiece(piece));
                     already_suggested.insert(piece);
                     sent += 1;
                 }
@@ -4236,6 +4306,21 @@ impl TorrentActor {
                         // Start web seeds now that we have metadata
                         self.spawn_web_seeds();
                         self.assign_pieces_to_web_seeds();
+
+                        // Kick-start piece requesting for all peers that connected during
+                        // metadata phase.  Their Bitfield/Unchoke events were processed when
+                        // state was FetchingMetadata, so request_pieces_from_peer() returned
+                        // early.  Now that we're Downloading, trigger requests for every
+                        // unchoked peer that has pieces we want.
+                        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+                        info!(connected_peers = peer_addrs.len(), "kick-starting piece requests for pre-connected peers");
+                        for addr in peer_addrs {
+                            let has_bitfield = self.peers.get(&addr).map(|p| p.bitfield.count_ones()).unwrap_or(0);
+                            let is_choking = self.peers.get(&addr).map(|p| p.peer_choking).unwrap_or(true);
+                            debug!(%addr, has_bitfield, is_choking, "post-metadata peer state");
+                            self.maybe_express_interest(addr).await;
+                            self.request_pieces_from_peer(addr).await;
+                        }
                     }
                     Err(e) => {
                         warn!("failed to parse assembled metadata: {e}");
@@ -4495,19 +4580,22 @@ impl TorrentActor {
 
     async fn request_pieces_from_peer(&mut self, peer_addr: SocketAddr) {
         if self.state != TorrentState::Downloading {
+            debug!(%peer_addr, state = ?self.state, "request_pieces: not downloading");
             return;
         }
 
         let ct = match &self.chunk_tracker {
             Some(ct) => ct,
-            None => return,
+            None => { debug!(%peer_addr, "request_pieces: no chunk_tracker"); return; },
         };
         if self.meta.is_none() {
+            debug!(%peer_addr, "request_pieces: no meta");
             return;
         }
 
         // Rate limit: don't send new requests if download budget exhausted
         if !self.download_bucket.is_unlimited() && self.download_bucket.available() == 0 {
+            debug!(%peer_addr, "request_pieces: rate limited");
             return;
         }
 
@@ -4520,18 +4608,20 @@ impl TorrentActor {
         // Compute available slots from pipeline
         let (slots, peer_speed, peer_rate, is_snubbed) = match self.peers.get(&peer_addr) {
             Some(p) => {
-                if p.peer_choking || p.upload_only {
+                if p.peer_choking {
+                    debug!(%peer_addr, "request_pieces: peer choking");
                     return;
                 }
                 let depth = if p.snubbed { 1 } else { p.pipeline.queue_depth() };
                 let avail = depth.saturating_sub(p.pending_requests.len());
                 if avail == 0 {
+                    debug!(%peer_addr, depth, pending = p.pending_requests.len(), "request_pieces: no pipeline slots");
                     return;
                 }
                 let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
                 (avail, speed, p.pipeline.ewma_rate(), p.snubbed)
             }
-            None => return,
+            None => { debug!(%peer_addr, "request_pieces: peer not found"); return; },
         };
 
         // Parole piece assignment: check if any parole piece can be assigned
@@ -4603,6 +4693,7 @@ impl TorrentActor {
         };
 
         if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
+            debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots, "pick_blocks: sending requests");
             // Track in in_flight_pieces
             let total_blocks = self.chunk_tracker.as_ref()
                 .map(|ct| ct.missing_chunks(result.piece).len() as u32)
@@ -4612,8 +4703,6 @@ impl TorrentActor {
                 .or_insert_with(|| InFlightPiece::new(total_blocks));
 
             for (begin, length) in result.blocks.iter().take(slots) {
-                ifp.assigned_blocks.insert((result.piece, *begin), peer_addr);
-
                 // Check download rate limits
                 if !self.download_bucket.is_unlimited() {
                     let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
@@ -4628,20 +4717,26 @@ impl TorrentActor {
                     }
                 }
 
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                if let Some(peer) = self.peers.get_mut(&peer_addr)
+                    && peer.cmd_tx.try_send(PeerCommand::Request {
+                        index: result.piece,
+                        begin: *begin,
+                        length: *length,
+                    }).is_ok()
+                {
+                    // Only mark as assigned AFTER successful send — phantom
+                    // assignments block piece completion permanently.
+                    ifp.assigned_blocks.insert((result.piece, *begin), peer_addr);
                     peer.pipeline.request_sent(result.piece, *begin, std::time::Instant::now());
-                    let _ = peer
-                        .cmd_tx
-                        .send(PeerCommand::Request {
-                            index: result.piece,
-                            begin: *begin,
-                            length: *length,
-                        })
-                        .await;
                     peer.pending_requests.push((result.piece, *begin, *length));
                 }
+                // If channel full, skip — block will be re-requested next cycle
             }
         } else {
+            let bf_ones = self.peers.get(&peer_addr).map(|p| p.bitfield.count_ones()).unwrap_or(0);
+            let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
+            let in_flight = self.in_flight_pieces.len();
+            debug!(%peer_addr, bf_ones, have, in_flight, "pick_blocks: no blocks available");
             self.check_end_game_activation();
         }
     }
@@ -4691,19 +4786,16 @@ impl TorrentActor {
             self.end_game.pick_block(peer_addr, &peer_bitfield)
         };
 
-        if let Some((index, begin, length)) = block {
+        if let Some((index, begin, length)) = block
+            && let Some(peer) = self.peers.get_mut(&peer_addr)
+            && peer.cmd_tx.try_send(PeerCommand::Request {
+                index,
+                begin,
+                length,
+            }).is_ok()
+        {
             self.end_game.register_request(index, begin, peer_addr);
-            if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                let _ = peer
-                    .cmd_tx
-                    .send(PeerCommand::Request {
-                        index,
-                        begin,
-                        length,
-                    })
-                    .await;
-                peer.pending_requests.push((index, begin, length));
-            }
+            peer.pending_requests.push((index, begin, length));
         }
     }
 
@@ -4771,8 +4863,14 @@ impl TorrentActor {
             && let Some(peer) = self.peers.get_mut(&peer_addr)
             && !peer.am_interested
         {
+            debug!(%peer_addr, "sending Interested");
             peer.am_interested = true;
-            let _ = peer.cmd_tx.send(PeerCommand::SetInterested(true)).await;
+            let _ = peer.cmd_tx.try_send(PeerCommand::SetInterested(true));
+        } else {
+            let bf_ones = self.peers.get(&peer_addr).map(|p| p.bitfield.count_ones()).unwrap_or(0);
+            if bf_ones > 0 {
+                debug!(%peer_addr, ?dominated, bf_ones, "not interested despite bitfield");
+            }
         }
     }
 
@@ -4944,7 +5042,7 @@ impl TorrentActor {
                 && peer.am_choking
             {
                 peer.am_choking = false;
-                let _ = peer.cmd_tx.send(PeerCommand::SetChoking(false)).await;
+                let _ = peer.cmd_tx.try_send(PeerCommand::SetChoking(false));
             }
         }
 
@@ -4958,16 +5056,15 @@ impl TorrentActor {
                     for (index, begin, length) in pending {
                         let _ = peer
                             .cmd_tx
-                            .send(PeerCommand::RejectRequest {
+                            .try_send(PeerCommand::RejectRequest {
                                 index,
                                 begin,
                                 length,
-                            })
-                            .await;
+                            });
                     }
                 }
                 peer.am_choking = true;
-                let _ = peer.cmd_tx.send(PeerCommand::SetChoking(true)).await;
+                let _ = peer.cmd_tx.try_send(PeerCommand::SetChoking(true));
             }
         }
 
@@ -5010,8 +5107,7 @@ impl TorrentActor {
                     .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
                 let _ = peer
                     .cmd_tx
-                    .send(PeerCommand::RejectRequest { index, begin, length })
-                    .await;
+                    .try_send(PeerCommand::RejectRequest { index, begin, length });
             }
         }
 
@@ -5038,12 +5134,11 @@ impl TorrentActor {
                             .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
                         let _ = peer
                             .cmd_tx
-                            .send(PeerCommand::SendPiece {
+                            .try_send(PeerCommand::SendPiece {
                                 index,
                                 begin,
                                 data,
-                            })
-                            .await;
+                            });
                         self.uploaded += chunk_size;
                         self.total_upload += chunk_size + 13; // payload + message header
                         self.last_upload = now_unix();
@@ -5116,7 +5211,7 @@ impl TorrentActor {
         if let Some(idx) = ss.assign_piece(peer_addr, &peer_bitfield, availability, self.num_pieces)
             && let Some(peer) = self.peers.get(&peer_addr)
         {
-            let _ = peer.cmd_tx.send(PeerCommand::Have(idx)).await;
+            let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));
         }
     }
 
@@ -5233,9 +5328,9 @@ impl TorrentActor {
                                 stream,
                                 info_hash,
                                 peer_id,
-                                bitfield,
+                                bitfield.clone(),
                                 num_pieces,
-                                event_tx,
+                                event_tx.clone(),
                                 cmd_rx,
                                 enable_dht,
                                 enable_fast,
@@ -5249,7 +5344,61 @@ impl TorrentActor {
                             .await
                             {
                                 Ok(()) => debug!(%addr, "uTP peer session ended normally"),
-                                Err(e) => debug!(%addr, error = %e, "uTP peer session failed"),
+                                Err(e) => {
+                                    // MSE fallback: reconnect with plaintext on failure
+                                    if encryption_mode == ferrite_wire::mse::EncryptionMode::Enabled {
+                                        debug!(%addr, error = %e, "uTP MSE failed, retrying plaintext");
+                                        if let Ok(Ok(stream2)) = tokio::time::timeout(
+                                            Duration::from_secs(5),
+                                            socket.connect(addr),
+                                        ).await {
+                                            let (retry_tx, retry_rx) = mpsc::channel(64);
+                                            let _ = event_tx.send(PeerEvent::MseRetry {
+                                                peer_addr: addr,
+                                                cmd_tx: retry_tx,
+                                            }).await;
+                                            match run_peer(
+                                                addr,
+                                                stream2,
+                                                info_hash,
+                                                peer_id,
+                                                bitfield,
+                                                num_pieces,
+                                                event_tx.clone(),
+                                                retry_rx,
+                                                enable_dht,
+                                                enable_fast,
+                                                ferrite_wire::mse::EncryptionMode::Disabled,
+                                                true,
+                                                anonymous_mode,
+                                                info_bytes.clone(),
+                                                Arc::clone(&plugins),
+                                                enable_holepunch,
+                                            ).await {
+                                                Ok(()) => debug!(%addr, "uTP plaintext session ended normally"),
+                                                Err(e2) => {
+                                                    debug!(%addr, error = %e2, "uTP plaintext also failed");
+                                                    let _ = event_tx.send(PeerEvent::Disconnected {
+                                                        peer_addr: addr,
+                                                        reason: Some(e2.to_string()),
+                                                    }).await;
+                                                }
+                                            }
+                                        } else {
+                                            debug!(%addr, "uTP plaintext reconnect failed");
+                                            let _ = event_tx.send(PeerEvent::Disconnected {
+                                                peer_addr: addr,
+                                                reason: Some(e.to_string()),
+                                            }).await;
+                                        }
+                                    } else {
+                                        debug!(%addr, error = %e, "uTP peer session failed");
+                                        let _ = event_tx.send(PeerEvent::Disconnected {
+                                            peer_addr: addr,
+                                            reason: Some(e.to_string()),
+                                        }).await;
+                                    }
+                                }
                             }
                             return;
                         }
@@ -5328,23 +5477,74 @@ impl TorrentActor {
                                 stream,
                                 info_hash,
                                 peer_id,
-                                bitfield,
+                                bitfield.clone(),
                                 num_pieces,
-                                event_tx,
+                                event_tx.clone(),
                                 cmd_rx,
                                 enable_dht,
                                 enable_fast,
                                 encryption_mode,
                                 true, // outbound
                                 anonymous_mode,
-                                info_bytes,
-                                plugins,
+                                info_bytes.clone(),
+                                Arc::clone(&plugins),
                                 enable_holepunch,
                             )
                             .await
                             {
                                 Ok(()) => debug!(%addr, "TCP peer session ended normally"),
-                                Err(e) => debug!(%addr, error = %e, "TCP peer session failed"),
+                                Err(e) => {
+                                    // MSE fallback for TCP
+                                    if encryption_mode == ferrite_wire::mse::EncryptionMode::Enabled {
+                                        debug!(%addr, error = %e, "TCP MSE failed, retrying plaintext");
+                                        if let Ok(tcp2) = factory.connect_tcp(addr).await {
+                                            let (retry_tx, retry_rx) = mpsc::channel(64);
+                                            let _ = event_tx.send(PeerEvent::MseRetry {
+                                                peer_addr: addr,
+                                                cmd_tx: retry_tx,
+                                            }).await;
+                                            match run_peer(
+                                                addr,
+                                                tcp2,
+                                                info_hash,
+                                                peer_id,
+                                                bitfield,
+                                                num_pieces,
+                                                event_tx.clone(),
+                                                retry_rx,
+                                                enable_dht,
+                                                enable_fast,
+                                                ferrite_wire::mse::EncryptionMode::Disabled,
+                                                true,
+                                                anonymous_mode,
+                                                info_bytes,
+                                                plugins,
+                                                enable_holepunch,
+                                            ).await {
+                                                Ok(()) => debug!(%addr, "TCP plaintext session ended normally"),
+                                                Err(e2) => {
+                                                    debug!(%addr, error = %e2, "TCP plaintext also failed");
+                                                    let _ = event_tx.send(PeerEvent::Disconnected {
+                                                        peer_addr: addr,
+                                                        reason: Some(e2.to_string()),
+                                                    }).await;
+                                                }
+                                            }
+                                        } else {
+                                            debug!(%addr, "TCP plaintext reconnect failed");
+                                            let _ = event_tx.send(PeerEvent::Disconnected {
+                                                peer_addr: addr,
+                                                reason: Some(e.to_string()),
+                                            }).await;
+                                        }
+                                    } else {
+                                        debug!(%addr, error = %e, "TCP peer session failed");
+                                        let _ = event_tx.send(PeerEvent::Disconnected {
+                                            peer_addr: addr,
+                                            reason: Some(e.to_string()),
+                                        }).await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -7101,8 +7301,9 @@ mod tests {
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::FetchingMetadata);
 
-        // No tracker announces should happen in FetchingMetadata state
-        // (verified by the tracker_announce arm checking state != FetchingMetadata)
+        // With no trackers configured, no announces happen regardless of state.
+        // Note: tracker announces ARE now allowed during FetchingMetadata for
+        // magnets with &tr= URLs (needed to discover peers before metadata).
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         handle.shutdown().await.unwrap();
