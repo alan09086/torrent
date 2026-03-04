@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1373-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1376-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.63.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.63.1-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -19,10 +19,10 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
 - 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
 - 📡 **27 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
-- 🎛️ **95-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
+- 🎛️ **102-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1373 tests, zero clippy warnings**
+- 📊 **1376 tests, zero clippy warnings**
 
 ---
 
@@ -32,7 +32,7 @@ Add ferrite to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrite = "0.61.0"
+ferrite = "0.63.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -115,20 +115,20 @@ ferrite-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 | Crate | Description | Tests |
 |-------|-------------|:-----:|
 | `ferrite-bencode` | Serde-based bencode serialization with sorted map key ordering | 64 |
-| `ferrite-core` | Id20/Id32, TorrentMeta (v1/v2/hybrid), InfoHashes, MerkleTree, Magnet (v1+v2), CreateTorrent, FastResumeData, FilePriority, FileSelection (BEP 53) | 177 |
-| `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH), SSL/TLS transport | 75 |
-| `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 37 |
-| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 148 |
-| `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 65 |
-| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 610 |
-| `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 21 |
+| `ferrite-core` | Id20/Id32, TorrentMeta (v1/v2/hybrid), InfoHashes, MerkleTree, Magnet (v1+v2), CreateTorrent, FastResumeData, FilePriority, FileSelection (BEP 53) | 183 |
+| `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH), SSL/TLS transport | 91 |
+| `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 40 |
+| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 141 |
+| `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 66 |
+| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 659 |
+| `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
 | `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
-| `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 49 |
+| `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
 | `ferrite-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
 
 ### 🎯 Session Features
 
-The `ferrite-session` crate (610 tests) includes:
+The `ferrite-session` crate (659 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -138,7 +138,7 @@ The `ferrite-session` crate (610 tests) includes:
 | **Storage** | Pluggable DiskIoBackend trait (Posix/Mmap/Disabled), async DiskActor, ARC read cache, write buffering, parallel hashing, move storage |
 | **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport, pluggable transport (NetworkFactory) |
 | **Security** | SSRF mitigation (URL guard + redirect policy), IDNA/homograph rejection, HTTPS tracker validation, IP filtering (.dat parser), smart banning + parole |
-| **Management** | Unified Settings (95 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
+| **Management** | Unified Settings (102 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
 | **Persistence** | FastResumeData (bencode), session state, DHT node cache |
 | **Extensibility** | Extension plugin trait, share mode, hybrid v1+v2 dual verification, dual-swarm announces, pure v2 torrent support |
 
@@ -235,6 +235,9 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.63.1 | — | Settings ↔ TorrentConfig wiring fix (13 fields), throughput fixes (try_send, phantom blocks, snub detection) |
+| 0.63.0 | M56 | Speed optimization — DHT persistence, piece stealing, initial queue depth 128 |
+| 0.62.0 | M55 | Download speed — immediate peer connection, max_peers 200, connect_interval 5s |
 | 0.61.0 | M53 | Full torrent operations API parity — 40+ SessionHandle methods, PeerInfo, TorrentFlags |
 | 0.59.0 | — | Full libtorrent `torrent_status` parity — ~55-field TorrentStats |
 | 0.58.0 | M52 | API documentation: `#![warn(missing_docs)]` on all 12 crates, example programs, `SessionHandle::open_file()` |

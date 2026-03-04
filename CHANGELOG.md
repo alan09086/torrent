@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.63.1 — Settings Wiring & Throughput Fixes
+
+### Fixed
+- **13 TorrentConfig fields now wired from Settings** — `upload_rate_limit`, `download_rate_limit`, `strict_end_game`, `max_web_seeds`, `initial_picker_threshold`, `whole_pieces_threshold`, `snub_timeout_secs`, `readahead_pieces`, and `streaming_timeout_escalation` were hardcoded in `From<&Settings>`, silently ignoring user configuration
+- **4 new TorrentConfig fields** — `storage_mode`, `block_request_timeout_secs`, `enable_lsd`, `force_proxy` now flow from Settings to per-torrent config
+- **Storage mode wired to disk** — `FilesystemStorage::new()` preallocate parameter now respects `StorageMode::Full` instead of always being `false`
+- **MSE PadB handling** — VC scan was broken for all real peers (desynchronized RC4 cipher on unencrypted padding)
+- **uTP ext type 3** — libtorrent close_reason extension caused parse failures
+
+### Performance
+- **TorrentActor unblocked** — all peer command broadcasts converted from `.send().await` (blocking) to `try_send()` (non-blocking), preventing deadlocks on bounded channels
+- **Phantom block assignments eliminated** — `assigned_blocks.insert()` moved after `try_send().is_ok()`, preventing permanent piece stalls when send fails
+- **Snub detection** — peers marked as snubbed after 60s of no data while unchoked, freeing their assigned blocks
+- **Pipeline tick** — `PeerPipelineState::tick()` now called every 1s for EWMA throughput updates
+
+### Added
+- 7 new Settings fields: `strict_end_game`, `max_web_seeds`, `initial_picker_threshold`, `whole_pieces_threshold`, `snub_timeout_secs`, `readahead_pieces`, `streaming_timeout_escalation`
+- Regression test with non-default Settings values to prevent re-hardcoding
+
+### Changed
+- Test count: 1376 (was under-reported as 1153 due to `--fail-fast` hiding 4 crates behind pre-existing sim test failure)
+
 ## 0.63.0 — M56: Speed Optimization
 
 ### Added
