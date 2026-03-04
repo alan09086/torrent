@@ -455,7 +455,8 @@ pub struct Settings {
     #[serde(default = "default_dht_timeout")]
     pub dht_query_timeout_secs: u64,
     /// BEP 42: Enforce node ID verification in DHT routing table.
-    #[serde(default = "default_true")]
+    /// Disabled by default: too many real DHT nodes lack BEP 42-compliant IDs.
+    #[serde(default)]
     pub dht_enforce_node_id: bool,
     /// BEP 42: Restrict DHT routing table to one node per IP.
     #[serde(default = "default_true")]
@@ -669,7 +670,7 @@ impl Default for Settings {
             // DHT tuning
             dht_queries_per_second: 50,
             dht_query_timeout_secs: 10,
-            dht_enforce_node_id: true,
+            dht_enforce_node_id: false,
             dht_restrict_routing_ips: true,
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
@@ -1116,7 +1117,7 @@ mod tests {
         assert!(s.apply_ip_filter_to_trackers);
         assert_eq!(s.dht_queries_per_second, 50);
         assert_eq!(s.dht_query_timeout_secs, 10);
-        assert!(s.dht_enforce_node_id);
+        assert!(!s.dht_enforce_node_id);
         assert!(s.dht_restrict_routing_ips);
         assert_eq!(s.upnp_lease_duration, 3600);
         assert_eq!(s.natpmp_lifetime, 7200);

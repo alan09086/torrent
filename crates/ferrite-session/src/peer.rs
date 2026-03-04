@@ -33,7 +33,7 @@ pub(crate) async fn run_peer(
     info_hash: Id20,
     our_peer_id: Id20,
     our_bitfield: Bitfield,
-    num_pieces: u32,
+    mut num_pieces: u32,
     event_tx: mpsc::Sender<PeerEvent>,
     mut cmd_rx: mpsc::Receiver<PeerCommand>,
     enable_dht: bool,
@@ -240,6 +240,9 @@ pub(crate) async fn run_peer(
                 match cmd {
                     Some(PeerCommand::Shutdown) => {
                         break None;
+                    }
+                    Some(PeerCommand::UpdateNumPieces(n)) => {
+                        num_pieces = n;
                     }
                     Some(cmd) => {
                         if let Err(e) = handle_command(
@@ -789,7 +792,7 @@ async fn handle_command(
             }
             return Ok(());
         }
-        PeerCommand::Shutdown => {
+        PeerCommand::UpdateNumPieces(_) | PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());
         }

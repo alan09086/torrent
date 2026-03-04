@@ -707,6 +707,8 @@ pub(crate) enum PeerCommand {
     SendHashReject(ferrite_core::HashRequest),
     /// BEP 55: Send a holepunch message to this peer.
     SendHolepunch(ferrite_wire::HolepunchMessage),
+    /// Update the piece count after BEP 9 metadata assembly.
+    UpdateNumPieces(u32),
     Shutdown,
 }
 

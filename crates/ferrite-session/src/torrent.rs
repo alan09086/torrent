@@ -4126,9 +4126,26 @@ impl TorrentActor {
                             DEFAULT_CHUNK_SIZE,
                         );
 
-                        // Create storage and register with disk manager
-                        let storage: Arc<dyn TorrentStorage> =
-                            Arc::new(MemoryStorage::new(lengths.clone()));
+                        // Create filesystem storage now that we know the file layout
+                        let files = meta.info.files();
+                        let file_paths: Vec<std::path::PathBuf> = files.iter()
+                            .map(|f| f.path.iter().collect::<std::path::PathBuf>())
+                            .collect();
+                        let file_lengths_vec: Vec<u64> = files.iter().map(|f| f.length).collect();
+                        let storage: Arc<dyn TorrentStorage> = match ferrite_storage::FilesystemStorage::new(
+                            &self.config.download_dir,
+                            file_paths,
+                            file_lengths_vec,
+                            lengths.clone(),
+                            None,
+                            false,
+                        ) {
+                            Ok(s) => Arc::new(s),
+                            Err(e) => {
+                                warn!("failed to create filesystem storage: {e}, falling back to memory");
+                                Arc::new(MemoryStorage::new(lengths.clone()))
+                            }
+                        };
                         let disk_handle = self.disk_manager.register_torrent(
                             self.info_hash, storage,
                         ).await;
@@ -4137,6 +4154,11 @@ impl TorrentActor {
                         self.chunk_tracker = Some(ChunkTracker::new(lengths.clone()));
                         self.lengths = Some(lengths);
                         self.num_pieces = num_pieces;
+                        // Update all connected peer tasks so they can validate
+                        // incoming Bitfield messages with the correct piece count.
+                        for peer in self.peers.values() {
+                            let _ = peer.cmd_tx.try_send(PeerCommand::UpdateNumPieces(num_pieces));
+                        }
                         self.piece_selector = PieceSelector::new(num_pieces);
                         let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
                         let mut meta = meta;
