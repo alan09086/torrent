@@ -169,6 +169,24 @@ fn default_max_peers_per_torrent() -> usize {
 fn default_stats_report_interval() -> u64 {
     1000
 }
+fn default_strict_end_game() -> bool {
+    true
+}
+fn default_max_web_seeds() -> usize {
+    4
+}
+fn default_initial_picker_threshold() -> u32 {
+    4
+}
+fn default_whole_pieces_threshold() -> u32 {
+    20
+}
+fn default_snub_timeout_secs() -> u32 {
+    60
+}
+fn default_readahead_pieces() -> u32 {
+    8
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -411,6 +429,32 @@ pub struct Settings {
     /// pieces accumulate. Uses hysteresis (1.6x activate / 1.3x deactivate).
     #[serde(default = "default_true")]
     pub auto_sequential: bool,
+    /// In end-game mode, cancel duplicate requests when a piece completes.
+    /// When false, both copies download — wastes bandwidth but finishes faster
+    /// on unreliable peers. Default: true.
+    #[serde(default = "default_strict_end_game")]
+    pub strict_end_game: bool,
+    /// Maximum concurrent web seed connections per torrent (default: 4).
+    #[serde(default = "default_max_web_seeds")]
+    pub max_web_seeds: usize,
+    /// Completed piece count below which the picker uses random selection
+    /// to promote piece diversity in the swarm. Default: 4.
+    #[serde(default = "default_initial_picker_threshold")]
+    pub initial_picker_threshold: u32,
+    /// Seconds to download a piece — if a peer is faster, it gets exclusive
+    /// assignment (no block splitting). Default: 20.
+    #[serde(default = "default_whole_pieces_threshold")]
+    pub whole_pieces_threshold: u32,
+    /// Seconds without data from a peer before marking it as snubbed.
+    /// Snubbed peers get queue depth clamped to 1. Default: 60.
+    #[serde(default = "default_snub_timeout_secs")]
+    pub snub_timeout_secs: u32,
+    /// Number of pieces ahead of the streaming cursor to prioritize (default: 8).
+    #[serde(default = "default_readahead_pieces")]
+    pub readahead_pieces: u32,
+    /// Escalate streaming piece requests that exceed the mean RTT. Default: true.
+    #[serde(default = "default_true")]
+    pub streaming_timeout_escalation: bool,
     /// Steal blocks from peers this many times slower than the requesting peer (default: 10.0).
     /// Set to 0.0 to disable stealing.
     #[serde(default = "default_steal_threshold_ratio")]
@@ -658,6 +702,13 @@ impl Default for Settings {
             max_concurrent_stream_reads: 8,
             auto_sequential: true,
             steal_threshold_ratio: 10.0,
+            strict_end_game: true,
+            max_web_seeds: 4,
+            initial_picker_threshold: 4,
+            whole_pieces_threshold: 20,
+            snub_timeout_secs: 60,
+            readahead_pieces: 8,
+            streaming_timeout_escalation: true,
             // Piece picker enhancements (M44)
             piece_extent_affinity: true,
             suggest_mode: false,
@@ -1019,6 +1070,13 @@ impl PartialEq for Settings {
             && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
             && self.auto_sequential == other.auto_sequential
             && self.steal_threshold_ratio.to_bits() == other.steal_threshold_ratio.to_bits()
+            && self.strict_end_game == other.strict_end_game
+            && self.max_web_seeds == other.max_web_seeds
+            && self.initial_picker_threshold == other.initial_picker_threshold
+            && self.whole_pieces_threshold == other.whole_pieces_threshold
+            && self.snub_timeout_secs == other.snub_timeout_secs
+            && self.readahead_pieces == other.readahead_pieces
+            && self.streaming_timeout_escalation == other.streaming_timeout_escalation
             && self.piece_extent_affinity == other.piece_extent_affinity
             && self.suggest_mode == other.suggest_mode
             && self.max_suggest_pieces == other.max_suggest_pieces
@@ -1124,6 +1182,13 @@ mod tests {
         assert_eq!(s.utp_max_connections, 256);
         assert_eq!(s.mixed_mode_algorithm, MixedModeAlgorithm::PeerProportional);
         assert!(s.auto_sequential);
+        assert!(s.strict_end_game);
+        assert_eq!(s.max_web_seeds, 4);
+        assert_eq!(s.initial_picker_threshold, 4);
+        assert_eq!(s.whole_pieces_threshold, 20);
+        assert_eq!(s.snub_timeout_secs, 60);
+        assert_eq!(s.readahead_pieces, 8);
+        assert!(s.streaming_timeout_escalation);
         assert_eq!(s.max_peers_per_torrent, 200);
     }
 
@@ -1233,6 +1298,56 @@ mod tests {
         assert_eq!(tc.anonymous_mode, s.anonymous_mode);
         assert_eq!(tc.enable_i2p, s.enable_i2p);
         assert_eq!(tc.allow_i2p_mixed, s.allow_i2p_mixed);
+        // Previously hardcoded — now wired from Settings
+        assert_eq!(tc.strict_end_game, s.strict_end_game);
+        assert_eq!(tc.upload_rate_limit, s.upload_rate_limit);
+        assert_eq!(tc.download_rate_limit, s.download_rate_limit);
+        assert_eq!(tc.max_web_seeds, s.max_web_seeds);
+        assert_eq!(tc.initial_picker_threshold, s.initial_picker_threshold);
+        assert_eq!(tc.whole_pieces_threshold, s.whole_pieces_threshold);
+        assert_eq!(tc.snub_timeout_secs, s.snub_timeout_secs);
+        assert_eq!(tc.readahead_pieces, s.readahead_pieces);
+        assert_eq!(tc.streaming_timeout_escalation, s.streaming_timeout_escalation);
+        // New fields
+        assert_eq!(tc.storage_mode, s.storage_mode);
+        assert_eq!(tc.block_request_timeout_secs, s.block_request_timeout_secs);
+        assert_eq!(tc.enable_lsd, s.enable_lsd);
+        assert_eq!(tc.force_proxy, s.force_proxy);
+    }
+
+    #[test]
+    fn torrent_config_from_nondefault_settings() {
+        // Verify non-default values flow through (catches re-hardcoding regressions)
+        let mut s = Settings::default();
+        s.strict_end_game = false;
+        s.upload_rate_limit = 1_000_000;
+        s.download_rate_limit = 2_000_000;
+        s.max_web_seeds = 8;
+        s.initial_picker_threshold = 10;
+        s.whole_pieces_threshold = 50;
+        s.snub_timeout_secs = 120;
+        s.readahead_pieces = 16;
+        s.streaming_timeout_escalation = false;
+        s.storage_mode = StorageMode::Full;
+        s.block_request_timeout_secs = 30;
+        s.enable_lsd = false;
+        s.force_proxy = true;
+        s.proxy.proxy_type = crate::proxy::ProxyType::Socks5;
+
+        let tc = crate::types::TorrentConfig::from(&s);
+        assert!(!tc.strict_end_game);
+        assert_eq!(tc.upload_rate_limit, 1_000_000);
+        assert_eq!(tc.download_rate_limit, 2_000_000);
+        assert_eq!(tc.max_web_seeds, 8);
+        assert_eq!(tc.initial_picker_threshold, 10);
+        assert_eq!(tc.whole_pieces_threshold, 50);
+        assert_eq!(tc.snub_timeout_secs, 120);
+        assert_eq!(tc.readahead_pieces, 16);
+        assert!(!tc.streaming_timeout_escalation);
+        assert_eq!(tc.storage_mode, StorageMode::Full);
+        assert_eq!(tc.block_request_timeout_secs, 30);
+        assert!(!tc.enable_lsd);
+        assert!(tc.force_proxy);
     }
 
     #[test]

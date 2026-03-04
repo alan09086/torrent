@@ -2105,13 +2105,14 @@ impl TorrentActor {
                 return Err(crate::Error::Config("lengths not available".into()));
             }
         };
+        let preallocate = self.config.storage_mode == ferrite_core::StorageMode::Full;
         let storage: Arc<dyn TorrentStorage> = match ferrite_storage::FilesystemStorage::new(
             &new_path,
             file_paths,
             file_lengths,
             lengths,
             Some(&self.file_priorities),
-            false,
+            preallocate,
         ) {
             Ok(s) => Arc::new(s),
             Err(e) => {
@@ -4202,13 +4203,14 @@ impl TorrentActor {
                             .map(|f| f.path.iter().collect::<std::path::PathBuf>())
                             .collect();
                         let file_lengths_vec: Vec<u64> = files.iter().map(|f| f.length).collect();
+                        let preallocate = self.config.storage_mode == ferrite_core::StorageMode::Full;
                         let storage: Arc<dyn TorrentStorage> = match ferrite_storage::FilesystemStorage::new(
                             &self.config.download_dir,
                             file_paths,
                             file_lengths_vec,
                             lengths.clone(),
                             None,
-                            false,
+                            preallocate,
                         ) {
                             Ok(s) => Arc::new(s),
                             Err(e) => {
@@ -6113,6 +6115,10 @@ mod tests {
             predictive_piece_announce_ms: 0,
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
+            storage_mode: ferrite_core::StorageMode::Auto,
+            block_request_timeout_secs: 60,
+            enable_lsd: false,
+            force_proxy: false,
             steal_threshold_ratio: 10.0,
             peer_turnover: 0.04,
             peer_turnover_cutoff: 0.9,
