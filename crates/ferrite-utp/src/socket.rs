@@ -685,6 +685,7 @@ mod tests {
                 ack_nr: SeqNr(0),
             },
             sack: None,
+            close_reason: None,
             payload: Bytes::from_static(b"unexpected"),
         };
 

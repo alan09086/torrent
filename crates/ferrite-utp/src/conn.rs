@@ -534,6 +534,7 @@ impl Connection {
         let packet = Packet {
             header,
             sack,
+            close_reason: None,
             payload: Bytes::new(),
         };
         packet.encode()
@@ -566,6 +567,7 @@ impl Connection {
         let packet = Packet {
             header,
             sack: None,
+            close_reason: None,
             payload,
         };
         packet.encode()
@@ -602,6 +604,7 @@ pub fn build_reset(connection_id: u16) -> Bytes {
     let packet = Packet {
         header,
         sack: None,
+        close_reason: None,
         payload: Bytes::new(),
     };
     packet.encode()
@@ -635,6 +638,7 @@ mod tests {
                 ack_nr: SeqNr(1), // ACKs our SYN
             },
             sack: None,
+            close_reason: None,
             payload: Bytes::new(),
         };
 
