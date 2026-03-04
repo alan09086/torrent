@@ -35,7 +35,7 @@ where
     // Phase 1: DH key exchange
     let dh = DhKeypair::generate();
 
-    // Send Ya + PadA (no padding for simplicity)
+    // Send Ya (no PadA for simplicity — 0 padding is valid per spec)
     stream.write_all(&dh.public).await?;
     stream.flush().await?;
 
@@ -73,26 +73,25 @@ where
     stream.flush().await?;
 
     // Phase 3: Receive responder's encrypted reply
-    // Read until we find VC (8 zero bytes) in the encrypted stream
-    // The responder sends: ENCRYPT_B(VC + crypto_select + len(PadD) + PadD)
-    // We need to scan for VC after decrypting
+    // The responder sends: [PadB 0-512 random unencrypted] [ENCRYPT_B(VC + crypto_select + len(PadD) + PadD)]
+    // Since VC = [0; 8], ENCRYPT_B(VC) equals the first 8 bytes of the RC4 keystream for key_b.
+    // We scan the RAW (non-decrypted) stream for this known pattern.
 
-    // Read up to 512 + 8 + 4 + 2 + 512 bytes looking for decrypted VC
-    let mut resp_buf = Vec::new();
-    let max_scan = 512 + 8 + 4 + 2 + 512; // Yb padding + VC + select + len + PadD
+    // Pre-compute what ENCRYPT_B(VC) looks like on the wire
+    let mut encrypted_vc = crypto::VC; // [0u8; 8]
+    let mut vc_cipher = Rc4::new(&kb);
+    vc_cipher.apply(&mut encrypted_vc); // encrypted_vc = keystream_b[0..8]
 
-    // We need to scan byte by byte through encrypted data to find VC
-    // Create a temporary decrypt cipher to test
-    let mut scan_cipher = Rc4::new(&kb);
+    let mut raw_buf = Vec::new();
+    let max_scan = 512 + 8; // PadB (max 512) + VC (8)
     let mut found_vc = false;
 
     for _ in 0..max_scan {
         let mut byte = [0u8; 1];
         stream.read_exact(&mut byte).await?;
-        scan_cipher.apply(&mut byte);
-        resp_buf.push(byte[0]);
+        raw_buf.push(byte[0]);
 
-        if resp_buf.len() >= 8 && resp_buf[resp_buf.len() - 8..] == crypto::VC {
+        if raw_buf.len() >= 8 && raw_buf[raw_buf.len() - 8..] == encrypted_vc {
             found_vc = true;
             break;
         }
@@ -103,6 +102,11 @@ where
             "VC not found in responder reply".into(),
         ));
     }
+
+    // Create decrypt cipher positioned after VC (8 bytes into keystream)
+    let mut scan_cipher = Rc4::new(&kb);
+    let mut skip = [0u8; 8];
+    scan_cipher.apply(&mut skip); // Advance past the 8 VC bytes we already consumed
 
     // Read crypto_select (4 bytes) + len(PadD) (2 bytes)
     let mut select_buf = [0u8; 6];
@@ -356,6 +360,111 @@ mod tests {
 
         assert_eq!(client_result.crypto_method, crypto::CRYPTO_PLAINTEXT);
         assert_eq!(server_result.crypto_method, crypto::CRYPTO_PLAINTEXT);
+    }
+
+    /// Test that the initiator correctly handles PadB (random unencrypted padding after Yb).
+    /// This simulates a real-world responder (like libtorrent) that sends PadB.
+    #[tokio::test]
+    async fn full_handshake_with_pad_b() {
+        let info_hash = Id20::from([0xEE; 20]);
+        let pad_b_len = 73; // Arbitrary non-zero PadB length
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+
+        // Client uses normal negotiate_outbound
+        let client_handle = tokio::spawn(async move {
+            negotiate_outbound(
+                client_stream,
+                &info_hash,
+                crypto::CRYPTO_RC4 | crypto::CRYPTO_PLAINTEXT,
+            ).await
+        });
+
+        // Server manually implements the responder with PadB
+        let server_handle = tokio::spawn(async move {
+            let skey_bytes = info_hash.as_bytes();
+
+            // Phase 1: Receive Ya, send Yb + PadB
+            let mut ya = [0u8; DH_KEY_SIZE];
+            server_stream.read_exact(&mut ya).await.unwrap();
+
+            let dh = DhKeypair::generate();
+            server_stream.write_all(&dh.public).await.unwrap();
+
+            // Send PadB (random unencrypted padding)
+            let pad_b = vec![0xABu8; pad_b_len];
+            server_stream.write_all(&pad_b).await.unwrap();
+            server_stream.flush().await.unwrap();
+
+            // Compute shared secret
+            let s = dh.shared_secret(&ya);
+
+            // Phase 2: Find sync marker
+            let expected_sync = crypto::sync_marker(&s);
+            let mut scan_buf = Vec::new();
+            for _ in 0..(512 + 20) {
+                let mut byte = [0u8; 1];
+                server_stream.read_exact(&mut byte).await.unwrap();
+                scan_buf.push(byte[0]);
+                if scan_buf.len() >= 20 && scan_buf[scan_buf.len() - 20..] == expected_sync {
+                    break;
+                }
+            }
+
+            // Read SKEY proof
+            let mut proof = [0u8; 20];
+            server_stream.read_exact(&mut proof).await.unwrap();
+
+            // Decrypt initiator's encrypted data
+            let ka = crypto::key_a(&s, skey_bytes);
+            let kb = crypto::key_b(&s, skey_bytes);
+            let mut decrypt_cipher = Rc4::new(&ka);
+            let mut encrypt_cipher = Rc4::new(&kb);
+
+            let mut enc_header = [0u8; 14];
+            server_stream.read_exact(&mut enc_header).await.unwrap();
+            decrypt_cipher.apply(&mut enc_header);
+            assert_eq!(&enc_header[..8], &crypto::VC);
+
+            // Read len(IA)
+            let mut ia_len_buf = [0u8; 2];
+            server_stream.read_exact(&mut ia_len_buf).await.unwrap();
+            decrypt_cipher.apply(&mut ia_len_buf);
+
+            // Phase 3: Send ENCRYPT_B(VC + crypto_select + len(PadD))
+            let mut response = Vec::new();
+            response.extend_from_slice(&crypto::VC);
+            response.extend_from_slice(&crypto::CRYPTO_RC4.to_be_bytes());
+            response.extend_from_slice(&0u16.to_be_bytes()); // len(PadD) = 0
+            encrypt_cipher.apply(&mut response);
+            server_stream.write_all(&response).await.unwrap();
+            server_stream.flush().await.unwrap();
+
+            // Build MseStream for bidirectional test
+            MseStream::encrypted(server_stream, decrypt_cipher, encrypt_cipher)
+        });
+
+        let client_result = client_handle.await.unwrap().unwrap();
+        let mut server_stream = server_handle.await.unwrap();
+
+        assert_eq!(client_result.crypto_method, crypto::CRYPTO_RC4);
+
+        // Verify bidirectional communication works
+        let mut client = client_result.stream;
+
+        client.write_all(b"hello pad").await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut buf = [0u8; 9];
+        server_stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello pad");
+
+        server_stream.write_all(b"world pad").await.unwrap();
+        server_stream.flush().await.unwrap();
+
+        let mut buf = [0u8; 9];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"world pad");
     }
 
     #[tokio::test]

@@ -5204,7 +5204,7 @@ impl TorrentActor {
                                 peer_addr: addr,
                                 transport: crate::rate_limiter::PeerTransport::Utp,
                             }).await;
-                            let _ = run_peer(
+                            match run_peer(
                                 addr,
                                 stream,
                                 info_hash,
@@ -5222,7 +5222,11 @@ impl TorrentActor {
                                 Arc::clone(&plugins),
                                 enable_holepunch,
                             )
-                            .await;
+                            .await
+                            {
+                                Ok(()) => debug!(%addr, "uTP peer session ended normally"),
+                                Err(e) => debug!(%addr, error = %e, "uTP peer session failed"),
+                            }
                             return;
                         }
                         Ok(Err(e)) => {
@@ -5295,7 +5299,7 @@ impl TorrentActor {
                                 }
                             }
                         } else {
-                            let _ = run_peer(
+                            match run_peer(
                                 addr,
                                 stream,
                                 info_hash,
@@ -5313,7 +5317,11 @@ impl TorrentActor {
                                 plugins,
                                 enable_holepunch,
                             )
-                            .await;
+                            .await
+                            {
+                                Ok(()) => debug!(%addr, "TCP peer session ended normally"),
+                                Err(e) => debug!(%addr, error = %e, "TCP peer session failed"),
+                            }
                         }
                     }
                     Err(e) => {
