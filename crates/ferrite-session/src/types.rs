@@ -675,6 +675,13 @@ pub(crate) enum PeerEvent {
         target: SocketAddr,
         error_code: u32,
     },
+    /// MSE handshake failed — peer is being retried with plaintext.
+    /// Carries the new command channel sender so the TorrentActor can
+    /// update its PeerState.
+    MseRetry {
+        peer_addr: SocketAddr,
+        cmd_tx: tokio::sync::mpsc::Sender<PeerCommand>,
+    },
 }
 
 /// Commands sent from the `TorrentActor` to a `PeerTask`.

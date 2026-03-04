@@ -268,9 +268,17 @@ impl UdpTracker {
         tracker_addr: &str,
         req: &AnnounceRequest,
     ) -> Result<UdpAnnounceResponse> {
-        let addr: SocketAddr = tracker_addr
-            .parse()
-            .map_err(|_| Error::InvalidUrl(format!("invalid socket address: {tracker_addr}")))?;
+        // Resolve hostname:port — supports both "1.2.3.4:6969" and "tracker.example.com:6969"
+        let addr: SocketAddr = match tracker_addr.parse() {
+            Ok(sa) => sa,
+            Err(_) => {
+                tokio::net::lookup_host(tracker_addr)
+                    .await
+                    .map_err(|e| Error::InvalidUrl(format!("DNS lookup failed for {tracker_addr}: {e}")))?
+                    .next()
+                    .ok_or_else(|| Error::InvalidUrl(format!("no addresses for {tracker_addr}")))?
+            }
+        };
 
         let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
         let socket = UdpSocket::bind(bind_addr).await?;
@@ -385,9 +393,17 @@ impl UdpTracker {
         tracker_addr: &str,
         info_hashes: &[Id20],
     ) -> Result<UdpScrapeResponse> {
-        let addr: SocketAddr = tracker_addr
-            .parse()
-            .map_err(|_| Error::InvalidUrl(format!("invalid socket address: {tracker_addr}")))?;
+        // Resolve hostname:port — supports both "1.2.3.4:6969" and "tracker.example.com:6969"
+        let addr: SocketAddr = match tracker_addr.parse() {
+            Ok(sa) => sa,
+            Err(_) => {
+                tokio::net::lookup_host(tracker_addr)
+                    .await
+                    .map_err(|e| Error::InvalidUrl(format!("DNS lookup failed for {tracker_addr}: {e}")))?
+                    .next()
+                    .ok_or_else(|| Error::InvalidUrl(format!("no addresses for {tracker_addr}")))?
+            }
+        };
 
         let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
         let socket = UdpSocket::bind(bind_addr).await?;

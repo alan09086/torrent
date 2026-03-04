@@ -10,7 +10,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use ferrite_core::Id20;
 use ferrite_storage::Bitfield;
@@ -48,6 +48,8 @@ pub(crate) async fn run_peer(
     use ferrite_wire::mse::{self, EncryptionMode, MseStream};
 
     // --- Phase 0: MSE/PE encryption ---
+    // Timeout MSE handshake at 5 seconds to avoid blocking on plaintext-only
+    // peers that won't respond to our DH key exchange.
     let mut stream = if encryption_mode != EncryptionMode::Disabled {
         let crypto_provide = if encryption_mode == EncryptionMode::Forced {
             ferrite_wire::mse::CRYPTO_RC4
@@ -56,7 +58,15 @@ pub(crate) async fn run_peer(
         };
 
         let result = if outbound {
-            mse::handshake::negotiate_outbound(stream, &info_hash, crypto_provide).await
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                mse::handshake::negotiate_outbound(stream, &info_hash, crypto_provide),
+            ).await {
+                Ok(r) => r,
+                Err(_) => Err(ferrite_wire::Error::EncryptionHandshakeFailed(
+                    "MSE handshake timed out".into()
+                )),
+            }
         } else {
             mse::handshake::negotiate_inbound(
                 stream,
@@ -126,7 +136,7 @@ pub(crate) async fn run_peer(
     // --- Phase 4: Send our bitfield (fast-aware) ---
     let both_support_fast = enable_fast && their_hs.supports_fast();
     if both_support_fast {
-        if our_bitfield.count_ones() == num_pieces {
+        if num_pieces > 0 && our_bitfield.count_ones() == num_pieces {
             framed_write
                 .send(Message::HaveAll)
                 .await
@@ -189,12 +199,46 @@ pub(crate) async fn run_peer(
         plugin.on_peer_connected(&info_hash, addr);
     }
 
+    // Deferred bitfield: when we receive Bitfield/HaveAll/HaveNone before
+    // metadata assembly (num_pieces == 0), store it and replay after
+    // UpdateNumPieces arrives with the real piece count.
+    #[derive(Debug)]
+    enum DeferredBitfield {
+        Raw(Vec<u8>),
+        HaveAll,
+        HaveNone,
+    }
+    let mut deferred_bitfield: Option<DeferredBitfield> = None;
+
     // --- Phase 5: Main loop ---
+    debug!(%addr, num_pieces, "entering main loop");
     let disconnect_reason: Option<String> = loop {
         tokio::select! {
             frame = framed_read.next() => {
                 match frame {
                     Some(Ok(msg)) => {
+                        // Defer Bitfield/HaveAll/HaveNone when num_pieces is
+                        // unknown (magnet phase).  Replay after UpdateNumPieces.
+                        if num_pieces == 0 {
+                            match &msg {
+                                Message::Bitfield(data) => {
+                                    debug!(%addr, data_len = data.len(), "deferring bitfield (num_pieces=0)");
+                                    deferred_bitfield = Some(DeferredBitfield::Raw(data.to_vec()));
+                                    continue;
+                                }
+                                Message::HaveAll => {
+                                    debug!(%addr, "deferring HaveAll (num_pieces=0)");
+                                    deferred_bitfield = Some(DeferredBitfield::HaveAll);
+                                    continue;
+                                }
+                                Message::HaveNone => {
+                                    debug!(%addr, "deferring HaveNone (num_pieces=0)");
+                                    deferred_bitfield = Some(DeferredBitfield::HaveNone);
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
                         match handle_message(
                             msg,
                             addr,
@@ -243,6 +287,47 @@ pub(crate) async fn run_peer(
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
                         num_pieces = n;
+                        // Replay deferred bitfield/HaveAll/HaveNone now that
+                        // we know num_pieces
+                        if let Some(deferred) = deferred_bitfield.take() {
+                            let bitfield = match deferred {
+                                DeferredBitfield::Raw(data) => {
+                                    debug!(%addr, num_pieces, data_len = data.len(), "replaying deferred bitfield");
+                                    match Bitfield::from_bytes(data, num_pieces) {
+                                        Ok(bf) => Some(bf),
+                                        Err(e) => {
+                                            warn!(%addr, "deferred bitfield invalid: {e}");
+                                            None
+                                        }
+                                    }
+                                }
+                                DeferredBitfield::HaveAll => {
+                                    debug!(%addr, num_pieces, "replaying deferred HaveAll");
+                                    let mut bf = Bitfield::new(num_pieces);
+                                    for i in 0..num_pieces {
+                                        bf.set(i);
+                                    }
+                                    Some(bf)
+                                }
+                                DeferredBitfield::HaveNone => {
+                                    debug!(%addr, num_pieces, "replaying deferred HaveNone");
+                                    Some(Bitfield::new(num_pieces))
+                                }
+                            };
+                            if let Some(bitfield) = bitfield {
+                                debug!(%addr, ones = bitfield.count_ones(), "deferred bitfield sent");
+                                if event_tx
+                                    .send(PeerEvent::Bitfield {
+                                        peer_addr: addr,
+                                        bitfield,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break None; // TorrentActor gone
+                                }
+                            }
+                        }
                     }
                     Some(cmd) => {
                         if let Err(e) = handle_command(
