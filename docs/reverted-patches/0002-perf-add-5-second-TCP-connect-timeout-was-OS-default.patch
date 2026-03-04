@@ -1,0 +1,129 @@
+From c677d2370ea73c2cc6326991129afe9518f0aa8a Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Tue, 3 Mar 2026 23:12:24 -0500
+Subject: [PATCH 02/12] perf: add 5-second TCP connect timeout (was OS default
+ ~2min) (M57)
+
+Unreachable peers previously blocked a connection slot for the OS
+default timeout (~2 minutes on Linux). Add a configurable
+peer_connect_timeout setting (default 5 seconds) that wraps outbound
+TCP connections with tokio::time::timeout.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ crates/ferrite-session/src/settings.rs |  9 +++++++++
+ crates/ferrite-session/src/torrent.rs  | 13 +++++++++++++
+ crates/ferrite-session/src/types.rs    |  4 ++++
+ 3 files changed, 26 insertions(+)
+
+diff --git a/crates/ferrite-session/src/settings.rs b/crates/ferrite-session/src/settings.rs
+index 229a96b..eb3ce62 100644
+--- a/crates/ferrite-session/src/settings.rs
++++ b/crates/ferrite-session/src/settings.rs
+@@ -157,6 +157,9 @@ fn default_steal_threshold_ratio() -> f64 {
+ fn default_peer_turnover_interval() -> u64 {
+     300
+ }
++fn default_peer_connect_timeout() -> u64 {
++    5
++}
+ fn default_peer_dscp() -> u8 {
+     0x08 // CS1 (scavenger/low-priority)
+ }
+@@ -558,6 +561,10 @@ pub struct Settings {
+     /// Require HTTPS for HTTP tracker announces (UDP trackers are unaffected).
+     #[serde(default = "default_true")]
+     pub validate_https_trackers: bool,
++    /// Timeout in seconds for outbound TCP peer connections.
++    /// Default 5. Set to 0 to use the OS default (~2 minutes on Linux).
++    #[serde(default = "default_peer_connect_timeout")]
++    pub peer_connect_timeout: u64,
+     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
+     /// Applied to TCP listeners, outbound TCP connections, uTP sockets, and UDP tracker sockets.
+     /// Default 0x08 (CS1/scavenger — low-priority background). Set to 0 to disable DSCP marking.
+@@ -698,6 +705,7 @@ impl Default for Settings {
+             ssrf_mitigation: true,
+             allow_idna: false,
+             validate_https_trackers: true,
++            peer_connect_timeout: 5,
+             peer_dscp: 0x08,
+             // Session Stats (M50)
+             stats_report_interval: 1000,
+@@ -1046,6 +1054,7 @@ impl PartialEq for Settings {
+             && self.ssrf_mitigation == other.ssrf_mitigation
+             && self.allow_idna == other.allow_idna
+             && self.validate_https_trackers == other.validate_https_trackers
++            && self.peer_connect_timeout == other.peer_connect_timeout
+             && self.peer_dscp == other.peer_dscp
+             && self.stats_report_interval == other.stats_report_interval
+             && self.dht_saved_nodes == other.dht_saved_nodes
+diff --git a/crates/ferrite-session/src/torrent.rs b/crates/ferrite-session/src/torrent.rs
+index 5ec2502..40b9474 100644
+--- a/crates/ferrite-session/src/torrent.rs
++++ b/crates/ferrite-session/src/torrent.rs
+@@ -5158,6 +5158,7 @@ impl TorrentActor {
+                 && proxy_config.proxy_peer_connections;
+             let anonymous_mode = self.config.anonymous_mode;
+             let enable_holepunch = self.config.enable_holepunch;
++            let peer_connect_timeout = self.config.peer_connect_timeout;
+             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
+             let factory = Arc::clone(&self.factory);
+             // Pick the uTP socket matching the peer's address family
+@@ -5237,6 +5238,17 @@ impl TorrentActor {
+                 let tcp_result = if use_proxy {
+                     crate::proxy::connect_through_proxy(&proxy_config, addr).await
+                         .map(crate::transport::BoxedStream::new)
++                } else if peer_connect_timeout > 0 {
++                    match tokio::time::timeout(
++                        Duration::from_secs(peer_connect_timeout),
++                        factory.connect_tcp(addr),
++                    ).await {
++                        Ok(result) => result,
++                        Err(_) => {
++                            debug!(%addr, timeout_secs = peer_connect_timeout, "TCP connect timed out");
++                            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))
++                        }
++                    }
+                 } else {
+                     factory.connect_tcp(addr).await
+                 };
+@@ -5874,6 +5886,7 @@ mod tests {
+             peer_turnover_cutoff: 0.9,
+             peer_turnover_interval: 300,
+             url_security: crate::url_guard::UrlSecurityConfig::default(),
++            peer_connect_timeout: 5,
+             peer_dscp: 0x08,
+             initial_queue_depth: 128,
+             max_request_queue_depth: 250,
+diff --git a/crates/ferrite-session/src/types.rs b/crates/ferrite-session/src/types.rs
+index 8666768..c66e8d6 100644
+--- a/crates/ferrite-session/src/types.rs
++++ b/crates/ferrite-session/src/types.rs
+@@ -109,6 +109,8 @@ pub struct TorrentConfig {
+     pub peer_turnover_interval: u64,
+     /// URL security configuration for SSRF mitigation and IDNA checking.
+     pub url_security: crate::url_guard::UrlSecurityConfig,
++    /// Timeout in seconds for outbound TCP peer connections (0 = OS default).
++    pub peer_connect_timeout: u64,
+     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
+     pub peer_dscp: u8,
+     /// Initial per-peer request queue depth for the pipeline slow-start.
+@@ -168,6 +170,7 @@ impl Default for TorrentConfig {
+             peer_turnover_cutoff: 0.9,
+             peer_turnover_interval: 300,
+             url_security: crate::url_guard::UrlSecurityConfig::default(),
++            peer_connect_timeout: 5,
+             peer_dscp: 0x08,
+             initial_queue_depth: 128,
+             max_request_queue_depth: 250,
+@@ -225,6 +228,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
+             peer_turnover_cutoff: s.peer_turnover_cutoff,
+             peer_turnover_interval: s.peer_turnover_interval,
+             url_security: crate::url_guard::UrlSecurityConfig::from(s),
++            peer_connect_timeout: s.peer_connect_timeout,
+             peer_dscp: s.peer_dscp,
+             initial_queue_depth: s.initial_queue_depth,
+             max_request_queue_depth: s.max_request_queue_depth,
+-- 
+2.53.0
+

@@ -1,0 +1,62 @@
+From 37a2b736d4b8ed7911af651ad9810785b473c2d2 Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Wed, 4 Mar 2026 03:05:32 -0500
+Subject: [PATCH 11/12] feat: version bump to 0.64.0, changelog for M57
+ non-blocking pipeline
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ CHANGELOG.md | 23 +++++++++++++++++++++++
+ Cargo.toml   |  2 +-
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3588995..f81d8f7 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
+ 
+ ## [Unreleased]
+ 
++## 0.64.0 — M57: Non-Blocking Transfer Pipeline
++
++### Performance
++- **Non-blocking disk writes:** `handle_piece_data()` uses fire-and-forget `enqueue_write()` instead of blocking `write_chunk().await`, unblocking the TorrentActor select! loop
++- **Async v1 piece verification:** SHA-1 hash verification dispatched via `enqueue_verify()` with results returned through select! branch (v2/hybrid remain inline due to Merkle tree state requirements)
++- **Zero-copy piece data:** `Bytes` moved directly from wire codec to disk actor, eliminating `Bytes::copy_from_slice` in the hot path
++- **O(1) peer dedup:** `HashSet` replaces linear scan in `handle_add_peers()`
++- **TCP connect timeout:** 5-second timeout replaces OS default (~2 minutes)
++
++### Benchmarks (criterion, 256x16KB burst)
++| Path | Time | Throughput |
++|------|------|-----------|
++| Blocking (`write_chunk().await`) | 7.87 ms | 508 MiB/s |
++| Non-blocking (`enqueue_write()`) | 4.99 ms | 802 MiB/s |
++
++### Internal
++- New `DiskJob::WriteAsync`, `VerifyAsync`, `VerifyV2Async` variants
++- New `DiskHandle::enqueue_write()`, `enqueue_verify()`, `enqueue_verify_v2()` methods
++- New `DiskWriteError` and `VerifyResult` types for async result reporting
++- TorrentActor `write_error_rx` and `verify_result_rx` select! branches
++- Backpressure: bounded channel with fallback to blocking write when full
++- `available_peers_set: HashSet<SocketAddr>` synced at all 4 mutation sites
++
+ ## 0.63.0 — M56: Speed Optimization
+ 
+ ### Added
+diff --git a/Cargo.toml b/Cargo.toml
+index 4a4154e..4dcec89 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -3,7 +3,7 @@ members = ["crates/*"]
+ resolver = "2"
+ 
+ [workspace.package]
+-version = "0.63.0"
++version = "0.64.0"
+ edition = "2024"
+ license = "GPL-3.0-or-later"
+ repository = "https://codeberg.org/alan090/ferrite"
+-- 
+2.53.0
+

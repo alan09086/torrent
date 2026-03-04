@@ -1,0 +1,66 @@
+From 87c8991af1d753f36aa7a855399f224a4de2da1d Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Wed, 4 Mar 2026 02:50:51 -0500
+Subject: [PATCH 06/12] perf: async v1 piece verification via enqueue_verify
+ (M57)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ crates/ferrite-session/src/torrent.rs | 27 ++++++++++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/crates/ferrite-session/src/torrent.rs b/crates/ferrite-session/src/torrent.rs
+index 387800e..95b9cc0 100644
+--- a/crates/ferrite-session/src/torrent.rs
++++ b/crates/ferrite-session/src/torrent.rs
+@@ -1244,7 +1244,6 @@ struct TorrentActor {
+     /// Channel for receiving async piece verification results.
+     verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
+     /// Sender half kept for cloning into DiskHandle enqueue calls.
+-    #[allow(dead_code)] // used in Task 7 (async verification dispatch)
+     verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
+ 
+     // TCP listener for incoming peer connections
+@@ -1760,6 +1759,11 @@ impl TorrentActor {
+                         self.on_piece_verified(result.piece).await;
+                     } else {
+                         self.on_piece_hash_failed(result.piece).await;
++                        // Re-request from peers that have the failed piece
++                        let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
++                        for addr in addrs {
++                            self.request_pieces_from_peer(addr).await;
++                        }
+                     }
+                 }
+                 // Accept incoming peers
+@@ -3243,8 +3247,25 @@ impl TorrentActor {
+                 }
+             }
+ 
+-            // Still blocking for now — Task 7 converts v1 to async
+-            self.verify_and_mark_piece(index).await;
++            match self.version {
++                ferrite_core::TorrentVersion::V1Only => {
++                    // Async: result arrives via verify_result_rx select! branch
++                    if let Some(ref disk) = self.disk
++                        && let Some(expected) = self.meta.as_ref()
++                            .and_then(|m| m.info.piece_hash(index as usize))
++                    {
++                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
++                    }
++                }
++                ferrite_core::TorrentVersion::V2Only => {
++                    // Blocking: needs mutable hash_picker for Merkle tree
++                    self.verify_and_mark_piece_v2(index).await;
++                }
++                ferrite_core::TorrentVersion::Hybrid => {
++                    // Blocking: needs both v1+v2 decision matrix
++                    self.verify_and_mark_piece_hybrid(index).await;
++                }
++            }
+         }
+ 
+         // Request more pieces from this peer
+-- 
+2.53.0
+

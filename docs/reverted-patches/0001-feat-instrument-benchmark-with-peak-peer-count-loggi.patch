@@ -1,0 +1,103 @@
+From dca4e43b16034361b7fe3e939a4e18357fca82d8 Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Tue, 3 Mar 2026 23:07:43 -0500
+Subject: [PATCH 01/12] feat: instrument benchmark with peak peer count logging
+ (M57)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ benchmarks/run_benchmark.sh        |  5 +++-
+ crates/ferrite-cli/src/download.rs | 37 +++++++++++++++++++-----------
+ 2 files changed, 27 insertions(+), 15 deletions(-)
+
+diff --git a/benchmarks/run_benchmark.sh b/benchmarks/run_benchmark.sh
+index effba90..601eaa6 100755
+--- a/benchmarks/run_benchmark.sh
++++ b/benchmarks/run_benchmark.sh
+@@ -44,8 +44,9 @@ run_trial() {
+ 
+     echo "  Trial $trial: $client..."
+     local time_file="$OUTPUT_DIR/${client}-time-${trial}.txt"
++    local stats_file="$OUTPUT_DIR/${client}-stats-${trial}.txt"
+ 
+-    /usr/bin/time -v bash -c "$cmd" 2>"$time_file" || true
++    /usr/bin/time -v bash -c "$cmd 2>\"$stats_file\"" 2>"$time_file" || true
+ 
+     read -r wall_time rss <<< "$(parse_time_output "$time_file")"
+     local size
+@@ -72,6 +73,8 @@ for trial in $(seq 1 "$TRIALS"); do
+     echo ""
+ done
+ 
++echo "=== Ferrite peer stats ===" && cat "$OUTPUT_DIR"/ferrite-stats-*.txt 2>/dev/null || true
++echo ""
+ echo "Results saved to $RESULTS"
+ echo ""
+ python benchmarks/summarize.py "$RESULTS"
+diff --git a/crates/ferrite-cli/src/download.rs b/crates/ferrite-cli/src/download.rs
+index 2878295..8bf0f7d 100644
+--- a/crates/ferrite-cli/src/download.rs
++++ b/crates/ferrite-cli/src/download.rs
+@@ -101,6 +101,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
+ 
+     // Poll loop
+     let mut finished = false;
++    let mut peak_peers: usize = 0;
++    let mut last_download_rate: u64 = 0;
+     loop {
+         if shutdown.load(Ordering::SeqCst) {
+             if let Some(ref pb) = pb {
+@@ -127,6 +129,10 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
+                 pb.set_position(100);
+                 pb.finish_with_message("download complete!");
+             }
++            eprintln!(
++                "ferrite: peak_peers={peak_peers} final_speed={:.1}MB/s",
++                last_download_rate as f64 / 1_048_576.0
++            );
+             if seed {
+                 eprintln!("Seeding... press Ctrl-C to stop.");
+                 tokio::signal::ctrl_c().await?;
+@@ -139,22 +145,25 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
+         }
+ 
+         // Update progress
+-        if let Ok(stats) = session.torrent_stats(info_hash).await
+-            && let Some(ref pb) = pb
+-        {
+-            let pct = (stats.progress * 100.0) as u64;
+-            pb.set_position(pct);
++        if let Ok(stats) = session.torrent_stats(info_hash).await {
++            peak_peers = peak_peers.max(stats.peers_connected);
++            last_download_rate = stats.download_rate;
+ 
+-            let done = format_size(stats.total_done);
+-            let total = format_size(stats.total_wanted);
+-            let down_rate = format_rate(stats.download_rate);
+-            let up_rate = format_rate(stats.upload_rate);
+-            let peers = stats.peers_connected;
++            if let Some(ref pb) = pb {
++                let pct = (stats.progress * 100.0) as u64;
++                pb.set_position(pct);
++
++                let done = format_size(stats.total_done);
++                let total = format_size(stats.total_wanted);
++                let down_rate = format_rate(stats.download_rate);
++                let up_rate = format_rate(stats.upload_rate);
++                let peers = stats.peers_connected;
+ 
+-            pb.set_message(format!(
+-                "{:.1}% | {done}/{total} | down {down_rate} up {up_rate} | {peers} peers",
+-                stats.progress * 100.0,
+-            ));
++                pb.set_message(format!(
++                    "{:.1}% | {done}/{total} | down {down_rate} up {up_rate} | {peers} peers",
++                    stats.progress * 100.0,
++                ));
++            }
+         }
+ 
+         tokio::time::sleep(Duration::from_millis(500)).await;
+-- 
+2.53.0
+

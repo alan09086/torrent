@@ -1,0 +1,29 @@
+From 5cc1c559048f53a3c39afe12f31d1394a3fbc332 Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Wed, 4 Mar 2026 06:27:48 -0500
+Subject: [PATCH 12/12] docs: update README badges for v0.64.0 (M57)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ README.md | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index 915c65b..f568e4e 100644
+--- a/README.md
++++ b/README.md
+@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
+ 
+ Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
+ 
+-[![Tests](https://img.shields.io/badge/tests-1373-brightgreen)](#-testing)
++[![Tests](https://img.shields.io/badge/tests-1155-brightgreen)](#-testing)
+ [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
+-[![Version](https://img.shields.io/badge/version-0.63.0-blue)](#-versioning)
++[![Version](https://img.shields.io/badge/version-0.64.0-blue)](#-versioning)
+ [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
+ [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
+ 
+-- 
+2.53.0
+

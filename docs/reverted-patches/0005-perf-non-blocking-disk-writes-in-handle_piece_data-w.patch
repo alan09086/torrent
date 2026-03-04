@@ -1,0 +1,139 @@
+From 6491e898abdddbdf71e1e81c3124af81d0c1da60 Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Wed, 4 Mar 2026 02:41:40 -0500
+Subject: [PATCH 05/12] perf: non-blocking disk writes in handle_piece_data
+ with zero-copy (M57)
+
+Replace blocking disk.write_chunk().await with fire-and-forget
+disk.enqueue_write() in handle_piece_data(). Change signature from
+&[u8] to Bytes for zero-copy transfer from wire codec to disk actor.
+Falls back to blocking write when the channel is full.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ crates/ferrite-session/src/torrent.rs | 47 ++++++++++++++-------------
+ 1 file changed, 25 insertions(+), 22 deletions(-)
+
+diff --git a/crates/ferrite-session/src/torrent.rs b/crates/ferrite-session/src/torrent.rs
+index 737cff6..387800e 100644
+--- a/crates/ferrite-session/src/torrent.rs
++++ b/crates/ferrite-session/src/torrent.rs
+@@ -1240,7 +1240,6 @@ struct TorrentActor {
+     /// Channel for receiving async disk write errors.
+     write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
+     /// Sender half kept for cloning into DiskHandle enqueue calls.
+-    #[allow(dead_code)] // used in Task 6 (handle_piece_data rewrite)
+     write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
+     /// Channel for receiving async piece verification results.
+     verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
+@@ -2930,7 +2929,7 @@ impl TorrentActor {
+                 begin,
+                 data,
+             } => {
+-                self.handle_piece_data(peer_addr, index, begin, &data)
++                self.handle_piece_data(peer_addr, index, begin, data)
+                     .await;
+             }
+             PeerEvent::PeerChoking {
+@@ -3154,22 +3153,30 @@ impl TorrentActor {
+         peer_addr: SocketAddr,
+         index: u32,
+         begin: u32,
+-        data: &[u8],
++        data: Bytes,
+     ) {
+-        // Write chunk to disk
+-        if let Some(ref disk) = self.disk
+-            && let Err(e) = disk.write_chunk(index, begin, Bytes::copy_from_slice(data), DiskJobFlags::empty()).await
+-        {
+-            warn!(index, begin, "failed to write chunk: {e}");
+-            return;
++        let data_len = data.len();
++
++        // Fire-and-forget write (zero-copy: Bytes moved from wire codec -> disk)
++        if let Some(ref disk) = self.disk {
++            match disk.enqueue_write(index, begin, data, DiskJobFlags::empty(), &self.write_error_tx) {
++                Ok(()) => {}
++                Err(_data) => {
++                    // Channel full — fall back to blocking write
++                    warn!(index, begin, "disk channel full, blocking write");
++                    if let Err(e) = disk.write_chunk(index, begin, _data, DiskJobFlags::empty()).await {
++                        warn!(index, begin, "failed to write chunk: {e}");
++                        return;
++                    }
++                }
++            }
+         }
+ 
+-        self.downloaded += data.len() as u64;
+-        self.total_download += data.len() as u64 + 13; // payload + message header
++        self.downloaded += data_len as u64;
++        self.total_download += data_len as u64 + 13;
+         self.last_download = now_unix();
+         self.need_save_resume = true;
+ 
+-        // Smart banning: track which peers contribute to each piece
+         self.piece_contributors.entry(index).or_default().insert(peer_addr.ip());
+ 
+         if let Some(peer) = self.peers.get_mut(&peer_addr) {
+@@ -3180,24 +3187,20 @@ impl TorrentActor {
+             {
+                 peer.pending_requests.swap_remove(pos);
+             }
+-            peer.download_bytes_window += data.len() as u64;
+-
+-            // Update pipeline state (M28)
+-            peer.pipeline.block_received(index, begin, data.len() as u32, std::time::Instant::now());
++            peer.download_bytes_window += data_len as u64;
++            peer.pipeline.block_received(index, begin, data_len as u32, std::time::Instant::now());
+             peer.last_data_received = Some(std::time::Instant::now());
+-            // Clear snub if snubbed
+             if peer.snubbed {
+                 peer.snubbed = false;
+                 peer.pipeline.reset_to_slow_start();
+             }
+         }
+ 
+-        // Remove block assignment from InFlightPiece
+         if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
+             ifp.assigned_blocks.remove(&(index, begin));
+         }
+ 
+-        // End-game: cancel this block on all other peers
++        // End-game cancellation
+         if self.end_game.is_active() {
+             let cancels = self.end_game.block_received(index, begin, peer_addr);
+             for (cancel_addr, ci, cb, cl) in cancels {
+@@ -3221,7 +3224,6 @@ impl TorrentActor {
+             }
+         }
+ 
+-        // Track chunk completion
+         let piece_complete = if let Some(ref mut ct) = self.chunk_tracker {
+             ct.chunk_received(index, begin)
+         } else {
+@@ -3229,7 +3231,7 @@ impl TorrentActor {
+         };
+ 
+         if piece_complete {
+-            // M44: Predictive piece announce — send Have before verification
++            // M44: Predictive piece announce — BEFORE verification
+             if self.config.predictive_piece_announce_ms > 0
+                 && !self.predictive_have_sent.contains(&index)
+             {
+@@ -3241,10 +3243,11 @@ impl TorrentActor {
+                 }
+             }
+ 
++            // Still blocking for now — Task 7 converts v1 to async
+             self.verify_and_mark_piece(index).await;
+         }
+ 
+-        // Try to request more from this peer
++        // Request more pieces from this peer
+         self.request_pieces_from_peer(peer_addr).await;
+     }
+ 
+-- 
+2.53.0
+

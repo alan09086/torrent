@@ -1,0 +1,97 @@
+From 7054925fceec3962b4e2be7f6b81571c0a2ccb45 Mon Sep 17 00:00:00 2001
+From: Alan <alan.c.gaudet@gmail.com>
+Date: Wed, 4 Mar 2026 02:33:10 -0500
+Subject: [PATCH 04/12] feat: wire async disk channels into TorrentActor select
+ loop (M57)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ crates/ferrite-session/src/torrent.rs | 37 +++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/crates/ferrite-session/src/torrent.rs b/crates/ferrite-session/src/torrent.rs
+index 40b9474..737cff6 100644
+--- a/crates/ferrite-session/src/torrent.rs
++++ b/crates/ferrite-session/src/torrent.rs
+@@ -279,6 +279,9 @@ impl TorrentHandle {
+         let have_buffer = crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
+         let is_share_mode = config.share_mode;
+ 
++        let (write_error_tx, write_error_rx) = mpsc::channel(64);
++        let (verify_result_tx, verify_result_rx) = mpsc::channel(64);
++
+         let (piece_ready_tx, _) = broadcast::channel(64);
+         let initial_have = chunk_tracker.bitfield().clone();
+         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(initial_have);
+@@ -350,6 +353,10 @@ impl TorrentHandle {
+             cmd_rx,
+             event_tx,
+             event_rx,
++            write_error_rx,
++            write_error_tx,
++            verify_result_rx,
++            verify_result_tx,
+             meta: Some(meta),
+             listener,
+             utp_socket,
+@@ -502,6 +509,9 @@ impl TorrentHandle {
+         let magnet_selected_files = magnet.selected_files.clone();
+         let info_hashes = magnet.info_hashes.clone();
+ 
++        let (write_error_tx, write_error_rx) = mpsc::channel(64);
++        let (verify_result_tx, verify_result_rx) = mpsc::channel(64);
++
+         let (piece_ready_tx, _) = broadcast::channel(64);
+         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
+         let stream_read_semaphore = crate::streaming::stream_read_semaphore(
+@@ -572,6 +582,10 @@ impl TorrentHandle {
+             cmd_rx,
+             event_tx,
+             event_rx,
++            write_error_rx,
++            write_error_tx,
++            verify_result_rx,
++            verify_result_tx,
+             meta: None,
+             listener,
+             utp_socket,
+@@ -1223,6 +1237,17 @@ struct TorrentActor {
+     event_tx: mpsc::Sender<PeerEvent>,
+     event_rx: mpsc::Receiver<PeerEvent>,
+ 
++    /// Channel for receiving async disk write errors.
++    write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
++    /// Sender half kept for cloning into DiskHandle enqueue calls.
++    #[allow(dead_code)] // used in Task 6 (handle_piece_data rewrite)
++    write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
++    /// Channel for receiving async piece verification results.
++    verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
++    /// Sender half kept for cloning into DiskHandle enqueue calls.
++    #[allow(dead_code)] // used in Task 7 (async verification dispatch)
++    verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
++
+     // TCP listener for incoming peer connections
+     listener: Option<Box<dyn crate::transport::TransportListener>>,
+ 
+@@ -1726,6 +1751,18 @@ impl TorrentActor {
+                         self.handle_peer_event(event).await;
+                     }
+                 }
++                // Async disk write errors
++                Some(err) = self.write_error_rx.recv() => {
++                    warn!(piece = err.piece, begin = err.begin, "async disk write failed: {}", err.error);
++                }
++                // Async piece verification results
++                Some(result) = self.verify_result_rx.recv() => {
++                    if result.passed {
++                        self.on_piece_verified(result.piece).await;
++                    } else {
++                        self.on_piece_hash_failed(result.piece).await;
++                    }
++                }
+                 // Accept incoming peers
+                 result = accept_incoming(&mut self.listener) => {
+                     if let Ok((stream, addr)) = result {
+-- 
+2.53.0
+
