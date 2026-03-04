@@ -109,6 +109,8 @@ pub struct TorrentConfig {
     pub peer_turnover_interval: u64,
     /// URL security configuration for SSRF mitigation and IDNA checking.
     pub url_security: crate::url_guard::UrlSecurityConfig,
+    /// Timeout in seconds for outbound TCP peer connections (0 = OS default).
+    pub peer_connect_timeout: u64,
     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
     pub peer_dscp: u8,
     /// Initial per-peer request queue depth for the pipeline slow-start.
@@ -168,6 +170,7 @@ impl Default for TorrentConfig {
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
+            peer_connect_timeout: 5,
             peer_dscp: 0x08,
             initial_queue_depth: 128,
             max_request_queue_depth: 250,
@@ -225,6 +228,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             peer_turnover_cutoff: s.peer_turnover_cutoff,
             peer_turnover_interval: s.peer_turnover_interval,
             url_security: crate::url_guard::UrlSecurityConfig::from(s),
+            peer_connect_timeout: s.peer_connect_timeout,
             peer_dscp: s.peer_dscp,
             initial_queue_depth: s.initial_queue_depth,
             max_request_queue_depth: s.max_request_queue_depth,

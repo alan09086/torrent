@@ -5158,6 +5158,7 @@ impl TorrentActor {
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
             let enable_holepunch = self.config.enable_holepunch;
+            let peer_connect_timeout = self.config.peer_connect_timeout;
             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
             let factory = Arc::clone(&self.factory);
             // Pick the uTP socket matching the peer's address family
@@ -5237,6 +5238,17 @@ impl TorrentActor {
                 let tcp_result = if use_proxy {
                     crate::proxy::connect_through_proxy(&proxy_config, addr).await
                         .map(crate::transport::BoxedStream::new)
+                } else if peer_connect_timeout > 0 {
+                    match tokio::time::timeout(
+                        Duration::from_secs(peer_connect_timeout),
+                        factory.connect_tcp(addr),
+                    ).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            debug!(%addr, timeout_secs = peer_connect_timeout, "TCP connect timed out");
+                            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))
+                        }
+                    }
                 } else {
                     factory.connect_tcp(addr).await
                 };
@@ -5874,6 +5886,7 @@ mod tests {
             peer_turnover_cutoff: 0.9,
             peer_turnover_interval: 300,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
+            peer_connect_timeout: 5,
             peer_dscp: 0x08,
             initial_queue_depth: 128,
             max_request_queue_depth: 250,

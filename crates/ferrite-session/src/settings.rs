@@ -157,6 +157,9 @@ fn default_steal_threshold_ratio() -> f64 {
 fn default_peer_turnover_interval() -> u64 {
     300
 }
+fn default_peer_connect_timeout() -> u64 {
+    5
+}
 fn default_peer_dscp() -> u8 {
     0x08 // CS1 (scavenger/low-priority)
 }
@@ -558,6 +561,10 @@ pub struct Settings {
     /// Require HTTPS for HTTP tracker announces (UDP trackers are unaffected).
     #[serde(default = "default_true")]
     pub validate_https_trackers: bool,
+    /// Timeout in seconds for outbound TCP peer connections.
+    /// Default 5. Set to 0 to use the OS default (~2 minutes on Linux).
+    #[serde(default = "default_peer_connect_timeout")]
+    pub peer_connect_timeout: u64,
     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
     /// Applied to TCP listeners, outbound TCP connections, uTP sockets, and UDP tracker sockets.
     /// Default 0x08 (CS1/scavenger — low-priority background). Set to 0 to disable DSCP marking.
@@ -698,6 +705,7 @@ impl Default for Settings {
             ssrf_mitigation: true,
             allow_idna: false,
             validate_https_trackers: true,
+            peer_connect_timeout: 5,
             peer_dscp: 0x08,
             // Session Stats (M50)
             stats_report_interval: 1000,
@@ -1046,6 +1054,7 @@ impl PartialEq for Settings {
             && self.ssrf_mitigation == other.ssrf_mitigation
             && self.allow_idna == other.allow_idna
             && self.validate_https_trackers == other.validate_https_trackers
+            && self.peer_connect_timeout == other.peer_connect_timeout
             && self.peer_dscp == other.peer_dscp
             && self.stats_report_interval == other.stats_report_interval
             && self.dht_saved_nodes == other.dht_saved_nodes
