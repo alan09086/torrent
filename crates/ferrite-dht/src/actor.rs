@@ -65,7 +65,7 @@ impl Default for DhtConfig {
             queries_per_second: 50,
             query_timeout: Duration::from_secs(10),
             address_family: AddressFamily::V4,
-            enforce_node_id: true,
+            enforce_node_id: false,
             restrict_routing_ips: true,
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
@@ -86,7 +86,7 @@ impl DhtConfig {
             queries_per_second: 50,
             query_timeout: Duration::from_secs(10),
             address_family: AddressFamily::V6,
-            enforce_node_id: true,
+            enforce_node_id: false,
             restrict_routing_ips: true,
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
@@ -1366,6 +1366,16 @@ impl DhtActor {
             })
             .collect();
 
+        // If routing table is empty (e.g. bootstrap not yet complete), drop the
+        // reply sender immediately so the caller's channel closes.  This lets
+        // TorrentActor detect dht_peers_rx = None and re-trigger later when the
+        // routing table has been populated.
+        if initial_nodes.is_empty() {
+            debug!("get_peers: routing table empty, dropping lookup (will retry)");
+            drop(reply);
+            return;
+        }
+
         let mut queried = std::collections::HashSet::new();
 
         // Query initial closest nodes
@@ -1944,13 +1954,25 @@ impl DhtActor {
     }
 
     /// Regenerate our node ID to be BEP 42-compliant for the given external IP.
+    ///
+    /// Preserves existing routing table nodes by re-inserting them into the
+    /// new table. This avoids losing bootstrap-discovered nodes when the IP
+    /// voter reaches consensus shortly after startup.
     fn regenerate_node_id(&mut self, external_ip: std::net::IpAddr) {
         let r = self.routing_table.own_id().0[19] & 0x07;
         let new_id = node_id::generate_node_id(external_ip, r);
         let restrict_ips = self.config.restrict_routing_ips;
-        debug!(old_id = %self.routing_table.own_id(), new_id = %new_id, "BEP 42: regenerating node ID");
+        let old_nodes = self.routing_table.all_nodes();
+        debug!(
+            old_id = %self.routing_table.own_id(),
+            new_id = %new_id,
+            preserved_nodes = old_nodes.len(),
+            "BEP 42: regenerating node ID"
+        );
         self.routing_table = RoutingTable::new_with_config(new_id, restrict_ips);
-        // Note: routing table is now empty — bootstrap will repopulate it
+        for (id, addr) in old_nodes {
+            self.routing_table.insert(id, addr);
+        }
     }
 
     fn make_stats(&self) -> DhtStats {
@@ -2180,11 +2202,12 @@ mod tests {
     #[test]
     fn dht_config_security_defaults() {
         let config = DhtConfig::default();
-        assert!(config.enforce_node_id);
+        // enforce_node_id off by default: too many real DHT nodes lack BEP 42 IDs
+        assert!(!config.enforce_node_id);
         assert!(config.restrict_routing_ips);
 
         let config_v6 = DhtConfig::default_v6();
-        assert!(config_v6.enforce_node_id);
+        assert!(!config_v6.enforce_node_id);
         assert!(config_v6.restrict_routing_ips);
     }
 

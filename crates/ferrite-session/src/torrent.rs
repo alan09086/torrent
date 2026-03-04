@@ -1766,9 +1766,11 @@ impl TorrentActor {
                 _ = connect_interval.tick() => {
                     self.try_connect_peers();
                     self.assign_pieces_to_web_seeds();
-                    // Re-trigger DHT search if exhausted and we still need peers
+                    // Re-trigger DHT search if no active search and we still need peers.
+                    // Don't gate on available_peers being empty — tracker peers alone
+                    // shouldn't prevent DHT from running (initial get_peers may have
+                    // raced with bootstrap and found an empty routing table).
                     if self.config.enable_dht
-                        && self.available_peers.is_empty()
                         && self.peers.len() < self.effective_max_connections()
                     {
                         if self.dht_peers_rx.is_none()
