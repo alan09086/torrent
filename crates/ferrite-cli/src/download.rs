@@ -101,6 +101,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
 
     // Poll loop
     let mut finished = false;
+    let mut peak_peers: usize = 0;
+    let mut last_download_rate: u64 = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             if let Some(ref pb) = pb {
@@ -127,6 +129,10 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
                 pb.set_position(100);
                 pb.finish_with_message("download complete!");
             }
+            eprintln!(
+                "ferrite: peak_peers={peak_peers} final_speed={:.1}MB/s",
+                last_download_rate as f64 / 1_048_576.0
+            );
             if seed {
                 eprintln!("Seeding... press Ctrl-C to stop.");
                 tokio::signal::ctrl_c().await?;
@@ -139,22 +145,25 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         }
 
         // Update progress
-        if let Ok(stats) = session.torrent_stats(info_hash).await
-            && let Some(ref pb) = pb
-        {
-            let pct = (stats.progress * 100.0) as u64;
-            pb.set_position(pct);
+        if let Ok(stats) = session.torrent_stats(info_hash).await {
+            peak_peers = peak_peers.max(stats.peers_connected);
+            last_download_rate = stats.download_rate;
 
-            let done = format_size(stats.total_done);
-            let total = format_size(stats.total_wanted);
-            let down_rate = format_rate(stats.download_rate);
-            let up_rate = format_rate(stats.upload_rate);
-            let peers = stats.peers_connected;
+            if let Some(ref pb) = pb {
+                let pct = (stats.progress * 100.0) as u64;
+                pb.set_position(pct);
 
-            pb.set_message(format!(
-                "{:.1}% | {done}/{total} | down {down_rate} up {up_rate} | {peers} peers",
-                stats.progress * 100.0,
-            ));
+                let done = format_size(stats.total_done);
+                let total = format_size(stats.total_wanted);
+                let down_rate = format_rate(stats.download_rate);
+                let up_rate = format_rate(stats.upload_rate);
+                let peers = stats.peers_connected;
+
+                pb.set_message(format!(
+                    "{:.1}% | {done}/{total} | down {down_rate} up {up_rate} | {peers} peers",
+                    stats.progress * 100.0,
+                ));
+            }
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;

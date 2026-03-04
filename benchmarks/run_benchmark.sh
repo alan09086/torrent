@@ -44,8 +44,9 @@ run_trial() {
 
     echo "  Trial $trial: $client..."
     local time_file="$OUTPUT_DIR/${client}-time-${trial}.txt"
+    local stats_file="$OUTPUT_DIR/${client}-stats-${trial}.txt"
 
-    /usr/bin/time -v bash -c "$cmd" 2>"$time_file" || true
+    /usr/bin/time -v bash -c "$cmd 2>\"$stats_file\"" 2>"$time_file" || true
 
     read -r wall_time rss <<< "$(parse_time_output "$time_file")"
     local size
@@ -72,6 +73,8 @@ for trial in $(seq 1 "$TRIALS"); do
     echo ""
 done
 
+echo "=== Ferrite peer stats ===" && cat "$OUTPUT_DIR"/ferrite-stats-*.txt 2>/dev/null || true
+echo ""
 echo "Results saved to $RESULTS"
 echo ""
 python benchmarks/summarize.py "$RESULTS"
