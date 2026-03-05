@@ -3289,6 +3289,7 @@ impl TorrentActor {
                         .iter()
                         .map(|&(idx, _, _)| idx)
                         .collect();
+                    let had_pending = !peer_pieces.is_empty();
                     for piece_idx in peer_pieces {
                         let other_has = self
                             .peers
@@ -3304,6 +3305,13 @@ impl TorrentActor {
                     }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
+                    }
+                    // Re-request freed blocks from remaining peers
+                    if had_pending {
+                        let addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+                        for addr in addrs {
+                            self.request_pieces_from_peer(addr).await;
+                        }
                     }
                 }
                 self.suggested_to_peers.remove(&peer_addr);
