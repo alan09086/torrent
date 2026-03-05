@@ -3563,9 +3563,12 @@ impl TorrentActor {
             ifp.assigned_blocks.remove(&(index, begin));
         }
 
-        // End-game: cancel this block on all other peers
+        // End-game: cancel this block on all other peers, then immediately
+        // re-request from cancelled peers. Without reactive re-requesting,
+        // cancelled peers go idle until the next pipeline tick (up to 1s).
         if self.end_game.is_active() {
             let cancels = self.end_game.block_received(index, begin, peer_addr);
+            let mut freed_peers = Vec::new();
             for (cancel_addr, ci, cb, cl) in cancels {
                 if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
                     let _ = cancel_peer.cmd_tx.try_send(PeerCommand::Cancel {
@@ -3580,7 +3583,12 @@ impl TorrentActor {
                     {
                         cancel_peer.pending_requests.swap_remove(pos);
                     }
+                    freed_peers.push(cancel_addr);
                 }
+            }
+            // Reactive scheduling: feed cancelled peers new blocks immediately
+            for addr in freed_peers {
+                self.request_end_game_block(addr).await;
             }
         }
 
@@ -5303,12 +5311,18 @@ impl TorrentActor {
     }
 
     async fn request_end_game_block(&mut self, peer_addr: SocketAddr) {
+        // End-game pipeline depth: allow moderate pipelining (4 requests)
+        // instead of 1. With 1 request per peer, throughput drops ~128x
+        // because each peer's round-trip latency becomes the bottleneck.
+        // libtorrent continues full pipelining in end-game.
+        const END_GAME_DEPTH: usize = 4;
+
         let can_request = self
             .peers
             .get(&peer_addr)
-            .is_some_and(|p| !p.peer_choking && p.pending_requests.is_empty());
+            .is_some_and(|p| !p.peer_choking && p.pending_requests.len() < END_GAME_DEPTH);
         if !can_request {
-            return; // In end-game: only 1 pending request per peer (no pipelining)
+            return;
         }
 
         let peer_bitfield = match self.peers.get(&peer_addr) {
@@ -5316,29 +5330,41 @@ impl TorrentActor {
             None => return,
         };
 
-        let block = if !self.streaming_pieces.is_empty() {
-            self.end_game
-                .pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
-        } else if self.config.strict_end_game {
-            self.end_game
-                .pick_block_strict(peer_addr, &peer_bitfield, &[])
-        } else {
-            self.end_game.pick_block(peer_addr, &peer_bitfield)
-        };
+        // Fill up to END_GAME_DEPTH slots
+        let slots = END_GAME_DEPTH
+            - self
+                .peers
+                .get(&peer_addr)
+                .map(|p| p.pending_requests.len())
+                .unwrap_or(END_GAME_DEPTH);
 
-        if let Some((index, begin, length)) = block
-            && let Some(peer) = self.peers.get_mut(&peer_addr)
-            && peer
-                .cmd_tx
-                .try_send(PeerCommand::Request {
-                    index,
-                    begin,
-                    length,
-                })
-                .is_ok()
-        {
-            self.end_game.register_request(index, begin, peer_addr);
-            peer.pending_requests.push((index, begin, length));
+        for _ in 0..slots {
+            let block = if !self.streaming_pieces.is_empty() {
+                self.end_game
+                    .pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
+            } else if self.config.strict_end_game {
+                self.end_game
+                    .pick_block_strict(peer_addr, &peer_bitfield, &[])
+            } else {
+                self.end_game.pick_block(peer_addr, &peer_bitfield)
+            };
+
+            if let Some((index, begin, length)) = block
+                && let Some(peer) = self.peers.get_mut(&peer_addr)
+                && peer
+                    .cmd_tx
+                    .try_send(PeerCommand::Request {
+                        index,
+                        begin,
+                        length,
+                    })
+                    .is_ok()
+            {
+                self.end_game.register_request(index, begin, peer_addr);
+                peer.pending_requests.push((index, begin, length));
+            } else {
+                break;
+            }
         }
     }
 
