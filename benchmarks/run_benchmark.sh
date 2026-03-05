@@ -1,19 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-# Benchmark: ferrite vs rqbit vs libtorrent
+# Benchmark: torrent vs rqbit vs libtorrent
 # Usage: ./benchmarks/run_benchmark.sh <magnet_uri> [trials]
 
 MAGNET="${1:?Usage: $0 <magnet_uri> [trials]}"
 TRIALS="${2:-3}"
-OUTPUT_DIR="/tmp/ferrite-bench"
+OUTPUT_DIR="/tmp/torrent-bench"
 RESULTS="benchmarks/results.csv"
 
-echo "Building ferrite-cli (release)..."
-cargo build --release -p ferrite-cli 2>/dev/null
-FERRITE="target/release/ferrite"
+echo "Building torrent-cli (release)..."
+cargo build --release -p torrent-cli 2>/dev/null
+TORRENT="target/release/torrent"
 
-echo "Ferrite binary: $FERRITE"
+echo "Ferrite binary: $TORRENT"
 echo "Magnet: $MAGNET"
 echo "Trials: $TRIALS"
 echo ""
@@ -61,8 +61,8 @@ run_trial() {
 for trial in $(seq 1 "$TRIALS"); do
     echo "=== Trial $trial/$TRIALS ==="
 
-    run_trial "ferrite" "$trial" \
-        "$FERRITE download '$MAGNET' -o '$OUTPUT_DIR/ferrite' -q"
+    run_trial "torrent" "$trial" \
+        "$TORRENT download '$MAGNET' -o '$OUTPUT_DIR/torrent' -q"
 
     run_trial "rqbit" "$trial" \
         "rqbit download '$MAGNET' -o '$OUTPUT_DIR/rqbit' -e"
@@ -73,7 +73,7 @@ for trial in $(seq 1 "$TRIALS"); do
     echo ""
 done
 
-echo "=== Ferrite peer stats ===" && cat "$OUTPUT_DIR"/ferrite-stats-*.txt 2>/dev/null || true
+echo "=== Ferrite peer stats ===" && cat "$OUTPUT_DIR"/torrent-stats-*.txt 2>/dev/null || true
 echo ""
 echo "Results saved to $RESULTS"
 echo ""

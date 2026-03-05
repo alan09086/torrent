@@ -1,0 +1,21 @@
+[package]
+name = "torrent-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line BitTorrent client powered by torrent"
+publish = false
+
+[[bin]]
+name = "torrent"
+path = "src/main.rs"
+
+[dependencies]
+torrent = { path = "../torrent" }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+serde_json = "1"

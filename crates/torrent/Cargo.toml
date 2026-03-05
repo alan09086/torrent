@@ -1,0 +1,25 @@
+[package]
+name = "torrent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A Rust BitTorrent library — ergonomic facade for the torrent crate family"
+
+[dependencies]
+torrent-bencode = { path = "../torrent-bencode" }
+torrent-core = { path = "../torrent-core" }
+torrent-wire = { path = "../torrent-wire" }
+torrent-tracker = { path = "../torrent-tracker" }
+torrent-dht = { path = "../torrent-dht" }
+torrent-storage = { path = "../torrent-storage" }
+torrent-session = { path = "../torrent-session" }
+torrent-utp = { path = "../torrent-utp" }
+torrent-nat = { path = "../torrent-nat" }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util"] }

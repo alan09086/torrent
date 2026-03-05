@@ -1,0 +1,19 @@
+[package]
+name = "torrent-utp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "uTP (BEP 29) Micro Transport Protocol for torrent"
+
+[dependencies]
+torrent-core = { path = "../torrent-core" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+sha1 = "0.10"
+tokio = { workspace = true, features = ["full"] }

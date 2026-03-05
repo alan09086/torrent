@@ -14,6 +14,13 @@ Publish ferrite as `torrent` on crates.io — the default BitTorrent library for
 
 Must land first — everything after uses the new names.
 
+### Pre-Flight: Crate Name Availability Check
+
+**Before starting any rename work**, verify all 11 crate names are available on crates.io:
+- `torrent`, `torrent-bencode`, `torrent-core`, `torrent-wire`, `torrent-tracker`, `torrent-dht`, `torrent-storage`, `torrent-utp`, `torrent-nat`, `torrent-session`, `torrent-sim`
+- Run `cargo search torrent --limit 10` and check each name individually
+- If any name is taken, stop and choose an alternative namespace before proceeding
+
 ### Task 1: Crate Rename (Cargo.toml + Directories)
 
 - Rename all 12 `crates/ferrite-*` directories to `crates/torrent-*`
@@ -29,6 +36,8 @@ Must land first — everything after uses the new names.
   - `publish = false` (not going to crates.io)
 - Add crates.io metadata to all publishable crates:
   - `repository`, `homepage`, `documentation`, `keywords`, `categories`
+- Add `rust-version = "1.85"` (MSRV — minimum for edition 2024) to all 11 publishable crates
+- Verify `LICENSE` file exists at workspace root and is referenced correctly
 
 ### Task 2: Source Code Path Updates
 
@@ -41,6 +50,7 @@ Must land first — everything after uses the new names.
   - Tracing spans and log messages
   - Example files, benchmark files, integration tests
   - `ferrite-sim` → `torrent-sim` internal references
+- Verify example programs compile: `cargo build --examples`
 
 ### Task 3: Documentation & Repository Updates
 
@@ -76,11 +86,10 @@ Core architectural change — replace blocking disk I/O in TorrentActor with fir
 
 Existing M58 implementation plan: `docs/plans/2026-03-04-m58-non-blocking-transfer-pipeline.md`
 
-### Task 5: Supplementary Performance Fixes
+### Task 5: O(1) Peer Dedup
 
-- **TCP 5s connect timeout** — replaces OS default (~2 min), prevents connection slot waste
 - **O(1) peer dedup** — `HashSet<SocketAddr>` in `handle_add_peers()` replacing linear scan
-- Small, independent changes that complement the pipeline work.
+- ~~TCP 5s connect timeout~~ — already implemented (`peer_connect_timeout` in Settings, enforced in `try_connect_peers()`)
 
 ### Task 6: Live Verification + Criterion Benchmarks
 
@@ -176,6 +185,7 @@ Add bounds checks where missing, wire to `Settings` where appropriate.
 ### Task 13: Architecture Documentation
 
 - `docs/architecture.md` — crate roles, actor model, data flow, concurrency
+  - Include **crash containment** section: `spawn_blocking` panic behaviour, channel closure semantics, backpressure fallback documentation for the async pipeline
 - `docs/configuration.md` — Settings fields reference, presets, runtime mutation
 - `docs/security.md` — threat model, mitigations (SSRF, IP filter, smart ban, encryption)
 
@@ -183,6 +193,7 @@ Concise reference material, not tutorials.
 
 ### Task 14: crates.io Publication
 
+- Pre-flight: `cargo audit` + `cargo deny check` (supply chain hygiene)
 - `cargo publish --dry-run` on all 11 crates (excludes `torrent-cli`)
 - Publish in dependency order:
   1. `torrent-bencode`
@@ -213,9 +224,12 @@ Concise reference material, not tutorials.
 
 - All 12 crates compile and pass tests under `torrent-*` names
 - `cargo test --workspace` passes (1378+ tests)
+- `cargo build --examples` compiles all example programs
 - `cargo clippy --workspace -- -D warnings` clean
 - Live BT download achieves >30 MB/s (target 50–80 MB/s)
 - No `unwrap()`/`expect()`/`panic!()` on network-facing code paths
+- `rust-version` (MSRV) set on all 11 publishable crates
+- `cargo audit` reports no critical vulnerabilities
 - All 11 library crates published on crates.io
 - docs.rs builds successfully for all crates
 - Fuzz targets compile and run without panics on seed corpus

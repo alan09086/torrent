@@ -1,0 +1,285 @@
+use anyhow::Context;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use torrent::core::{Lengths, DEFAULT_CHUNK_SIZE, TorrentMeta};
+use torrent::session::SessionState;
+use torrent::storage::{FilesystemStorage, TorrentStorage};
+
+pub struct DownloadOpts<'a> {
+    pub source: &'a str,
+    pub output: &'a Path,
+    pub no_dht: bool,
+    pub config: Option<&'a Path>,
+    pub seed: bool,
+    pub port: u16,
+    pub quiet: bool,
+}
+
+pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
+    let DownloadOpts { source, output, no_dht, config, seed, port, quiet } = opts;
+
+    // Global state file for DHT node persistence across sessions
+    let state_path = state_file_path();
+
+    // Load settings
+    let mut builder = if let Some(config_path) = config {
+        let data = std::fs::read_to_string(config_path)
+            .with_context(|| format!("failed to read config: {}", config_path.display()))?;
+        let settings: torrent::session::Settings = serde_json::from_str(&data)
+            .with_context(|| "failed to parse settings JSON")?;
+        let mut b = torrent::ClientBuilder::new();
+        b = b.listen_port(settings.listen_port);
+        b
+    } else {
+        torrent::ClientBuilder::new()
+    };
+
+    builder = builder.listen_port(port).download_dir(output);
+
+    if no_dht {
+        builder = builder.enable_dht(false);
+    }
+
+    // Load saved DHT nodes from previous session for instant peer discovery
+    if let Some(saved_nodes) = load_dht_nodes(&state_path) {
+        if !quiet {
+            eprintln!("Loaded {} saved DHT nodes from previous session", saved_nodes.len());
+        }
+        builder = builder.dht_saved_nodes(saved_nodes);
+    }
+
+    let session = builder.start().await?;
+
+    // Subscribe for all alerts (raw broadcast receiver so we can try_recv)
+    let mut alerts = session.subscribe();
+
+    // Parse source and add torrent
+    let info_hash = if source.starts_with("magnet:") {
+        let magnet = torrent::core::Magnet::parse(source)
+            .map_err(|e| anyhow::anyhow!("invalid magnet URI: {e}"))?;
+        if let Some(ref name) = magnet.display_name {
+            eprintln!("Adding: {name}");
+        }
+        session.add_magnet(magnet).await?
+    } else {
+        let data = std::fs::read(source)
+            .with_context(|| format!("failed to read torrent file: {source}"))?;
+        let meta = torrent::core::torrent_from_bytes_any(&data)
+            .map_err(|e| anyhow::anyhow!("failed to parse torrent: {e}"))?;
+        let ih = meta.info_hashes().best_v1();
+        let storage = make_filesystem_storage(&meta, output)?;
+        session.add_torrent(meta, Some(storage)).await?;
+        ih
+    };
+
+    // Ctrl-C handler
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let s = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        s.store(true, Ordering::SeqCst);
+    });
+
+    // Progress bar
+    let pb = if quiet {
+        None
+    } else {
+        let pb = ProgressBar::new(100);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{bar:40.cyan/blue}] {msg}"
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        Some(pb)
+    };
+
+    // Poll loop
+    let mut finished = false;
+    let mut peak_peers: usize = 0;
+    let mut last_download_rate: u64 = 0;
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            if let Some(ref pb) = pb {
+                pb.finish_with_message("shutting down...");
+            }
+            eprintln!("\nShutting down...");
+            save_session_state(&session, &state_path, quiet).await;
+            session.shutdown().await?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            break;
+        }
+
+        // Drain alerts (non-blocking)
+        while let Ok(alert) = alerts.try_recv() {
+            if let torrent::session::AlertKind::TorrentFinished { info_hash: ih } = alert.kind
+                && ih == info_hash
+            {
+                finished = true;
+            }
+        }
+
+        if finished {
+            if let Some(ref pb) = pb {
+                pb.set_position(100);
+                pb.finish_with_message("download complete!");
+            }
+            eprintln!(
+                "torrent: peak_peers={peak_peers} final_speed={:.1}MB/s",
+                last_download_rate as f64 / 1_048_576.0
+            );
+            if seed {
+                eprintln!("Seeding... press Ctrl-C to stop.");
+                tokio::signal::ctrl_c().await?;
+                eprintln!("\nShutting down...");
+            }
+            save_session_state(&session, &state_path, quiet).await;
+            session.shutdown().await?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            break;
+        }
+
+        // Update progress
+        if let Ok(stats) = session.torrent_stats(info_hash).await {
+            peak_peers = peak_peers.max(stats.peers_connected);
+            last_download_rate = stats.download_rate;
+
+            if let Some(ref pb) = pb {
+                let pct = (stats.progress * 100.0) as u64;
+                pb.set_position(pct);
+
+                let done = format_size(stats.total_done);
+                let total = format_size(stats.total_wanted);
+                let down_rate = format_rate(stats.download_rate);
+                let up_rate = format_rate(stats.upload_rate);
+                let peers = stats.peers_connected;
+
+                pb.set_message(format!(
+                    "{:.1}% | {done}/{total} | down {down_rate} up {up_rate} | {peers} peers",
+                    stats.progress * 100.0,
+                ));
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Ok(())
+}
+
+fn format_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn make_filesystem_storage(
+    meta: &TorrentMeta,
+    output: &Path,
+) -> anyhow::Result<Arc<dyn TorrentStorage>> {
+    let (file_paths, file_lengths, total_length, piece_length) = if let Some(v1) = meta.as_v1() {
+        let files = v1.info.files();
+        let paths: Vec<PathBuf> = files.iter().map(|f| f.path.iter().collect::<PathBuf>()).collect();
+        let lengths: Vec<u64> = files.iter().map(|f| f.length).collect();
+        (paths, lengths, v1.info.total_length(), v1.info.piece_length)
+    } else if let Some(v2) = meta.as_v2() {
+        let files = v2.info.files();
+        let paths: Vec<PathBuf> = files.iter().map(|f| f.path.iter().collect::<PathBuf>()).collect();
+        let lengths: Vec<u64> = files.iter().map(|f| f.attr.length).collect();
+        (paths, lengths, v2.info.total_length(), v2.info.piece_length)
+    } else {
+        anyhow::bail!("torrent has no file metadata");
+    };
+
+    let lengths_calc = Lengths::new(total_length, piece_length, DEFAULT_CHUNK_SIZE);
+    let storage = FilesystemStorage::new(output, file_paths, file_lengths, lengths_calc, None, false)
+        .map_err(|e| anyhow::anyhow!("failed to create storage: {e}"))?;
+    Ok(Arc::new(storage))
+}
+
+fn format_rate(bytes_per_sec: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+
+    if bytes_per_sec >= MIB {
+        format!("{:.1} MB/s", bytes_per_sec as f64 / MIB as f64)
+    } else if bytes_per_sec >= KIB {
+        format!("{:.1} KB/s", bytes_per_sec as f64 / KIB as f64)
+    } else {
+        format!("{bytes_per_sec} B/s")
+    }
+}
+
+/// Return the global state file path (`$XDG_DATA_HOME/torrent/session.dat`).
+///
+/// Respects `XDG_DATA_HOME`, falls back to `~/.local/share/torrent`.
+/// Creates the parent directory if it doesn't exist.
+fn state_file_path() -> PathBuf {
+    let dir = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("torrent");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("session.dat")
+}
+
+/// Load DHT node addresses from a previously saved state file.
+///
+/// Returns `None` if the file doesn't exist or can't be parsed.
+fn load_dht_nodes(state_path: &Path) -> Option<Vec<String>> {
+    let data = std::fs::read(state_path).ok()?;
+    let state: SessionState = torrent::bencode::from_bytes(&data).ok()?;
+    if state.dht_nodes.is_empty() {
+        return None;
+    }
+    let nodes: Vec<String> = state
+        .dht_nodes
+        .iter()
+        .map(|entry| format!("{}:{}", entry.host, entry.port))
+        .collect();
+    Some(nodes)
+}
+
+/// Save session state (DHT nodes, etc.) to the state file.
+async fn save_session_state(
+    session: &torrent::session::SessionHandle,
+    state_path: &Path,
+    quiet: bool,
+) {
+    match session.save_session_state().await {
+        Ok(state) => {
+            if !quiet && !state.dht_nodes.is_empty() {
+                eprintln!("Saving {} DHT nodes for next session", state.dht_nodes.len());
+            }
+            match torrent::bencode::to_bytes(&state) {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(state_path, &bytes) {
+                        eprintln!("Warning: failed to write state file: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to encode session state: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to save session state: {e}");
+        }
+    }
+}

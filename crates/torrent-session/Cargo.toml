@@ -1,0 +1,35 @@
+[package]
+name = "torrent-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BitTorrent session management: peers, torrents, and piece selection"
+
+[dependencies]
+torrent-bencode = { path = "../torrent-bencode" }
+torrent-core = { path = "../torrent-core" }
+torrent-wire = { path = "../torrent-wire" }
+torrent-tracker = { path = "../torrent-tracker" }
+torrent-dht = { path = "../torrent-dht" }
+torrent-storage = { path = "../torrent-storage" }
+torrent-utp = { path = "../torrent-utp" }
+torrent-nat = { path = "../torrent-nat" }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+bitflags = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+libc = "0.2"
+futures = "0.3"
+url = "2"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true, features = ["full"] }

@@ -16,6 +16,22 @@
 
 ## Phase 1: Identity — Rename `ferrite` → `torrent`
 
+### Pre-Flight: Crate Name Availability Check
+
+**Goal:** Verify all 11 publishable crate names are available on crates.io before starting any rename work.
+
+```bash
+# Check each name — any "torrent-*" or "torrent" result means the name is taken
+for name in torrent torrent-bencode torrent-core torrent-wire torrent-tracker torrent-dht torrent-storage torrent-utp torrent-nat torrent-session torrent-sim; do
+  echo -n "$name: "
+  curl -s "https://crates.io/api/v1/crates/$name" | grep -q '"name"' && echo "TAKEN" || echo "available"
+done
+```
+
+**If any name is taken**: Stop. Choose an alternative namespace (e.g. `bittorrent-*`, `bt-*`) and update both plan files before proceeding.
+
+---
+
 ### Task 1: Rename Crate Directories and Cargo.toml Files
 
 **Goal:** Rename all 12 crate directories and update every Cargo.toml so the workspace compiles under `torrent-*` names.
@@ -102,7 +118,32 @@ documentation = "https://docs.rs/torrent"
 
 Adjust `documentation` per crate (e.g., `https://docs.rs/torrent-wire`).
 
-**Step 6: Verify workspace resolves**
+**Step 6: Add MSRV to all publishable crates**
+
+Add `rust-version = "1.85"` to `[package]` in all 11 publishable crate Cargo.toml files (edition 2024 requires Rust 1.85+):
+
+```bash
+for toml in crates/torrent-*/Cargo.toml crates/torrent/Cargo.toml; do
+  # Skip torrent-cli
+  if [[ "$toml" == *"torrent-cli"* ]]; then continue; fi
+  # Add rust-version after edition line
+  sed -i '/^edition = /a rust-version = "1.85"' "$toml"
+done
+```
+
+**Step 7: Verify LICENSE file**
+
+```bash
+# Ensure LICENSE exists at workspace root
+test -f LICENSE && echo "LICENSE exists" || echo "MISSING — create GPL-3.0 LICENSE file"
+
+# Ensure each publishable crate's Cargo.toml has license field
+grep -L "license" crates/torrent-*/Cargo.toml crates/torrent/Cargo.toml
+```
+
+If `license` field is missing, add `license = "GPL-3.0-or-later"` to each crate's `[package]`.
+
+**Step 8: Verify workspace resolves**
 
 ```bash
 cargo metadata --no-deps 2>&1 | head -5
@@ -201,7 +242,15 @@ cargo test --workspace 2>&1 | tail -30
 
 Expected: All 1378 tests pass.
 
-**Step 6: Run clippy**
+**Step 6: Build examples**
+
+```bash
+cargo build --examples 2>&1 | tail -10
+```
+
+Expected: All 4 examples (download.rs, create.rs, stream.rs, dht_lookup.rs) compile successfully.
+
+**Step 7: Run clippy**
 
 ```bash
 cargo clippy --workspace -- -D warnings 2>&1 | tail -10
@@ -209,7 +258,7 @@ cargo clippy --workspace -- -D warnings 2>&1 | tail -10
 
 Expected: Zero warnings.
 
-**Step 7: Commit the rename**
+**Step 8: Commit the rename**
 
 ```bash
 git add -A
@@ -571,37 +620,18 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: Supplementary Performance Fixes
+### Task 5: O(1) Peer Dedup
 
-**Goal:** Apply two small independent performance improvements.
+**Goal:** Replace linear peer dedup scan with HashSet for O(1) lookup.
+
+> **Note:** TCP 5-second connect timeout is already implemented (`peer_connect_timeout` in Settings, enforced in `try_connect_peers()`). No work needed there.
 
 **Files:**
-- Modify: `crates/torrent-session/src/torrent.rs` (handle_add_peers, try_connect_peers)
+- Modify: `crates/torrent-session/src/torrent.rs` (handle_add_peers)
 
-**Step 1: Add TCP 5-second connect timeout**
+**Step 1: Add O(1) peer dedup**
 
-Find `TcpStream::connect()` calls in `torrent.rs` and `peer.rs`. Wrap with:
-
-```rust
-match tokio::time::timeout(
-    std::time::Duration::from_secs(5),
-    TcpStream::connect(addr),
-).await {
-    Ok(Ok(stream)) => stream,
-    Ok(Err(e)) => { /* connection error */ return; }
-    Err(_) => { /* timeout */ return; }
-}
-```
-
-Search for the exact location:
-
-```bash
-grep -n "TcpStream::connect" crates/torrent-session/src/*.rs
-```
-
-**Step 2: Add O(1) peer dedup**
-
-In `handle_add_peers()` (search for `fn handle_add_peers` in `torrent.rs`), the current implementation likely uses linear scan to check for duplicate peers. Replace with `HashSet<SocketAddr>`:
+In `handle_add_peers()` (search for `fn handle_add_peers` in `torrent.rs`), the current implementation uses linear scan (`available_peers.iter().any(|(a, _)| *a == addr)`). Replace with `HashSet<SocketAddr>`:
 
 ```rust
 use std::collections::HashSet;
@@ -619,21 +649,22 @@ fn handle_add_peers(&mut self, peers: Vec<(SocketAddr, PeerSource)>) {
 }
 ```
 
-**Step 3: Run tests and clippy**
+**Step 2: Run tests and clippy**
 
 ```bash
 cargo test --workspace 2>&1 | tail -10
 cargo clippy --workspace -- -D warnings
 ```
 
-**Step 4: Commit**
+**Step 3: Commit**
 
 ```bash
 git add crates/torrent-session/
-git commit -m "perf(m60): TCP 5s connect timeout and O(1) peer dedup
+git commit -m "perf(m60): O(1) peer dedup in handle_add_peers
 
-Prevent 2-minute OS default TCP timeout from wasting connection slots.
 Replace linear peer dedup scan with HashSet for O(1) lookup.
+With ~200 max peers per torrent, this eliminates 100-200 comparisons
+per peer batch from tracker/DHT announces.
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
@@ -1369,6 +1400,11 @@ Cover:
 - Concurrency model: tokio `select!` loops, mpsc channels, no shared mutable state between actors
 - Disk I/O pipeline: DiskActor with WriteBuffer, ARC cache, semaphore-gated spawn_blocking
 - Key types: SessionHandle, TorrentHandle, DiskHandle, Settings
+- **Crash containment** section covering:
+  - What happens if a `spawn_blocking` task panics (JoinError, channel sender dropped)
+  - Channel closure semantics: `write_error_rx`/`verify_result_rx` return `None` → TorrentActor logs but continues
+  - Backpressure fallback: when `enqueue_write()` channel is full, blocking `.send().await` is used — documents potential stall under extreme disk pressure
+  - Actor restart: TorrentActor does not auto-restart; session must remove/re-add the torrent
 
 **Step 2: Write docs/configuration.md**
 
@@ -1419,7 +1455,16 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 # 4. Formatting clean
 cargo fmt --all -- --check
+
+# 5. Examples compile
+cargo build --examples
+
+# 6. Supply chain hygiene (install if needed: cargo install cargo-audit cargo-deny)
+cargo audit
+cargo deny check 2>/dev/null || echo "cargo-deny not configured — skip if deny.toml absent"
 ```
+
+Note: `cargo audit` failures on non-critical/informational advisories are not blockers for 0.65.0. Only critical/high severity CVEs in direct dependencies should block publication.
 
 **Step 1: Dry-run publish for each crate**
 
@@ -1494,16 +1539,21 @@ Via Codeberg and GitHub web UI:
 
 ## Post-Completion Checklist
 
+- [ ] Crate names verified available on crates.io
 - [ ] All 12 crates compile under `torrent-*` names
 - [ ] All 1378+ tests pass
+- [ ] `cargo build --examples` compiles all example programs
 - [ ] Zero clippy warnings with expanded lints
 - [ ] Live BT download achieves >30 MB/s
 - [ ] No unwrap/expect/panic on network paths
+- [ ] `rust-version` (MSRV) set on all 11 publishable crates
+- [ ] LICENSE file verified at workspace root
 - [ ] rustfmt.toml enforced, all code formatted
 - [ ] Criterion benchmarks established (bencode, hashing)
 - [ ] 4 fuzz targets compile and run on seed corpus
+- [ ] `cargo audit` reports no critical vulnerabilities
 - [ ] README overhauled with vision, features, security
-- [ ] Architecture docs written (architecture.md, configuration.md, security.md)
+- [ ] Architecture docs written (architecture.md, configuration.md, security.md) — includes crash containment
 - [ ] 11 crates published on crates.io
 - [ ] docs.rs builds verified
 - [ ] v0.65.0 tagged and pushed to both remotes

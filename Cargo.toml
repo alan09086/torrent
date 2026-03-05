@@ -3,10 +3,15 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.64.0"
+version = "0.65.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://codeberg.org/alan090/ferrite"
+repository = "https://codeberg.org/alan090/torrent"
+rust-version = "1.85"
+homepage = "https://codeberg.org/alan090/torrent"
+documentation = "https://docs.rs/torrent"
+keywords = ["bittorrent", "torrent", "peer-to-peer", "p2p", "download"]
+categories = ["network-programming"]
 
 [workspace.dependencies]
 # Serialization

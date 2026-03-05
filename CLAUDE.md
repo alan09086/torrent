@@ -1,6 +1,6 @@
-# Ferrite
+# Torrent
 
-Rust BitTorrent library targeting libtorrent-rasterbar + rqbit streaming parity.
+Rust BitTorrent library — libtorrent-rasterbar + rqbit streaming parity.
 
 ## Build & Test
 
@@ -11,10 +11,10 @@ cargo clippy --workspace -- -D warnings
 
 ## Architecture
 
-12-crate workspace: `ferrite-bencode` → `ferrite-core` → `ferrite-wire`/`ferrite-tracker`/`ferrite-dht`/`ferrite-storage`/`ferrite-utp`/`ferrite-nat` → `ferrite-session` → `ferrite` (facade) + `ferrite-sim` (simulation)
+12-crate workspace: `torrent-bencode` → `torrent-core` → `torrent-wire`/`torrent-tracker`/`torrent-dht`/`torrent-storage`/`torrent-utp`/`torrent-nat` → `torrent-session` → `torrent` (facade) + `torrent-sim` (simulation)
 
-- **ferrite-session**: Actor model — `SessionActor`/`TorrentActor` with `tokio::select!` loops and command channels
-- **ferrite** (facade): `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module
+- **torrent-session**: Actor model — `SessionActor`/`TorrentActor` with `tokio::select!` loops and command channels
+- **torrent** (facade): `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module
 
 ## Conventions
 
@@ -44,14 +44,14 @@ cargo clippy --workspace -- -D warnings
 
 ## Key Types & Patterns Reference
 
-### Bencode Serialization (`ferrite-bencode`)
+### Bencode Serialization (`torrent-bencode`)
 - `to_bytes<T: Serialize>(value) -> Vec<u8>` / `from_bytes<T: Deserialize>(bytes) -> T`
 - `SortedMapSerializer`: buffers all key-value pairs, sorts by key bytes, writes in order — ensures BEP 3 dict key ordering automatically
 - `find_dict_key_span(data, "info") -> Range<usize>`: finds raw byte span of a dict key's value (used for info-hash computation)
 - `BencodeValue` enum: `Integer(i64)`, `Bytes(Vec<u8>)`, `List(Vec<_>)`, `Dict(BTreeMap<Vec<u8>, _>)`
 - **Bencode has no null** — `serialize_none()` returns error. All `Option` fields on serializable structs must use `#[serde(skip_serializing_if = "Option::is_none")]`
 
-### Core Types (`ferrite-core`)
+### Core Types (`torrent-core`)
 - `Id20([u8; 20])` — SHA1 hash (info hash, piece hash). Methods: `from_hex()`, `to_hex()`, `as_bytes()`
 - `Id32([u8; 32])` — SHA-256 (BEP 52). Methods: `from_hex()`, `to_hex()`, `from_base32()`, `to_base32()`, `from_multihash_hex()`, `to_multihash_hex()`
 - `InfoHashes { v1: Option<Id20>, v2: Option<Id32> }` — unified hash container. Constructors: `v1_only()`, `v2_only()`, `hybrid()`. `best_v1()` for tracker/DHT compat
@@ -61,7 +61,7 @@ cargo clippy --workspace -- -D warnings
 - `Lengths { total_length, piece_length, chunk_size }` — piece arithmetic: `num_pieces()`, `piece_size(idx)`, `piece_offset(idx)`
 - `DEFAULT_CHUNK_SIZE = 16384`
 
-### Torrent Metadata (`ferrite-core/src/metainfo.rs`, `metainfo_v2.rs`, `detect.rs`)
+### Torrent Metadata (`torrent-core/src/metainfo.rs`, `metainfo_v2.rs`, `detect.rs`)
 - `TorrentMetaV1` — NOT a serde struct (manually constructed). Fields: info_hash, announce, announce_list, comment, created_by, creation_date, info, url_list, httpseeds
 - `InfoDict` — `Deserialize + Serialize`. Fields: name, piece_length (renamed), pieces (serde_bytes), length (Option), files (Option), private (Option<i64>), source (Option<String>)
 - `FileEntry` — `Deserialize + Serialize`. Fields: length, path (Vec<String>), attr (Option<String>, BEP 47), mtime (Option<i64>), symlink_path (Option<Vec<String>>)
@@ -75,7 +75,7 @@ cargo clippy --workspace -- -D warnings
 - `FileSelection` enum (`Single(usize)` / `Range(usize, usize)`) — BEP 53 file selection. `parse(value) -> Result<Vec<FileSelection>>`, `to_priorities(sels, num_files) -> Vec<FilePriority>`, `to_so_value(sels) -> String`
 - Info-hash = SHA1 (v1) or SHA-256 (v2) of **raw bencode bytes** of info dict (not re-serialized)
 
-### BEP 52 Hash Coordination (`ferrite-core`, M34a)
+### BEP 52 Hash Coordination (`torrent-core`, M34a)
 - `HashRequest` — Merkle tree hash range request: `file_root`, `base` (layer), `index`, `count`, `proof_layers`
 - `validate_hash_request(req, file_num_blocks, file_num_pieces) -> bool` — tree geometry bounds check
 - `MerkleTreeState` — per-file verification state: stores piece-layer + block-layer hashes, tracks verified blocks
@@ -85,13 +85,13 @@ cargo clippy --workspace -- -D warnings
 - `AddHashesResult` — `{ valid: bool, hash_passed: Vec<u32>, hash_failed: Vec<u32> }`
 - Wire messages: `Message::HashRequest` (ID 21), `Message::Hashes` (ID 22), `Message::HashReject` (ID 23) — 49-byte fixed layout + variable hash array
 
-### Storage (`ferrite-storage`)
+### Storage (`torrent-storage`)
 - `FileMap::new(file_lengths, lengths)` — O(log n) piece-to-file segment mapping
 - `TorrentStorage` trait: `write_chunk()`, `read_chunk()`, `read_piece()`, `verify_piece()`, `verify_piece_v2()` (SHA-256), `hash_block()` (per-block SHA-256)
 - `ChunkTracker`: v1 chunk tracking + optional v2 block-level Merkle verification (`enable_v2_tracking()`, `mark_block_verified()`, `all_blocks_verified()`)
 - `DiskHandle`: `verify_piece_v2()`, `hash_block()` async methods for v2 disk I/O
 
-### BEP 52 Session Integration (`ferrite-session/src/torrent.rs`, M34c/M35)
+### BEP 52 Session Integration (`torrent-session/src/torrent.rs`, M34c/M35)
 - `TorrentActor` fields: `hash_picker: Option<HashPicker>`, `version: TorrentVersion`, `meta_v2: Option<TorrentMetaV2>`
 - `verify_and_mark_piece()` dispatches to v1 (SHA-1), v2 (SHA-256 Merkle), or hybrid (both) path
 - `verify_and_mark_piece_hybrid()` — dual verification with `HashResult` tribool decision matrix
@@ -101,7 +101,7 @@ cargo clippy --workspace -- -D warnings
 - `PeerEvent`/`PeerCommand` v2 variants for hash message exchange (wire IDs 21-23)
 - `FastResumeData` v2 fields: `info_hash2` (SHA-256), `trees` (piece-layer hash cache)
 
-### Session Configuration (`ferrite-session/src/settings.rs`)
+### Session Configuration (`torrent-session/src/settings.rs`)
 - `Settings` — unified 102-field session configuration (replaces former `SessionConfig`)
 - Presets: `Settings::min_memory()`, `Settings::high_performance()`
 - `Settings::validate()` — 7 checks (piece size power-of-2, thread counts, proxy config)
@@ -111,12 +111,12 @@ cargo clippy --workspace -- -D warnings
 - `SessionHandle::settings()` / `apply_settings()` — runtime query and mutation
 - Runtime `apply_settings()` updates rate limiters + alert mask immediately; sub-actor reconfig on restart
 
-### Facade (`ferrite`)
+### Facade (`torrent`)
 - `ClientBuilder` — fluent builder → `SessionHandle`. Takes owned `self` for chaining. `into_settings()` returns `Settings`.
 - `AddTorrentParams` — `from_torrent()`, `from_magnet()`, `from_file()`, `from_bytes()`
-- Re-exports: `ferrite/src/core.rs` (core types), `ferrite/src/session.rs` (session types), `ferrite/src/prelude.rs` (convenience)
+- Re-exports: `torrent/src/core.rs` (core types), `torrent/src/session.rs` (session types), `torrent/src/prelude.rs` (convenience)
 
-### Torrent Creation (`ferrite-core/src/create.rs`)
+### Torrent Creation (`torrent-core/src/create.rs`)
 - `CreateTorrent` — owned-self builder: `new()` → `add_file/dir()` → `set_*()` → `generate()`
 - `CreateTorrentResult` — `meta: TorrentMeta` + `bytes: Vec<u8>` (raw .torrent file)
 - `set_version(TorrentVersion)` — create v1, hybrid, or v2 .torrent files (v2-only not yet supported)
@@ -128,7 +128,7 @@ cargo clippy --workspace -- -D warnings
 
 ### Error Pattern
 - Per-crate `thiserror` enums with `#[from]` for upstream errors
-- Facade `ferrite::Error` wraps all crate errors: `Core(#[from])`, `Session(#[from])`, `Io(#[from])`, etc.
+- Facade `torrent::Error` wraps all crate errors: `Core(#[from])`, `Session(#[from])`, `Io(#[from])`, etc.
 
 ### Session Sharing Patterns
 - `SharedBanManager = Arc<std::sync::RwLock<BanManager>>` — created in `SessionHandle::start()`, cloned to each `TorrentActor`

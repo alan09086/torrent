@@ -1,0 +1,19 @@
+[package]
+name = "torrent-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-process network simulation for torrent swarm integration testing"
+
+[dependencies]
+torrent-session = { path = "../torrent-session" }
+torrent-core = { path = "../torrent-core" }
+torrent-bencode = { path = "../torrent-bencode" }
+torrent-storage = { path = "../torrent-storage" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
