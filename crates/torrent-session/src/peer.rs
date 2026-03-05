@@ -930,6 +930,7 @@ async fn handle_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
@@ -976,7 +977,7 @@ mod tests {
         if len > 0 {
             stream.read_exact(&mut payload).await.unwrap();
         }
-        Message::from_payload(&payload).unwrap()
+        Message::from_payload(BytesMut::from(&payload[..])).unwrap()
     }
 
     /// Write one framed message to a raw stream (length-prefix + payload).
