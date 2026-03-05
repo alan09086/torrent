@@ -401,6 +401,7 @@ impl TorrentHandle {
             have_buffer,
             suggested_to_peers: HashMap::new(),
             predictive_have_sent: HashSet::new(),
+
             ban_manager,
             ip_filter,
             piece_contributors: HashMap::new(),
@@ -644,6 +645,7 @@ impl TorrentHandle {
             have_buffer,
             suggested_to_peers: HashMap::new(),
             predictive_have_sent: HashSet::new(),
+
             ban_manager,
             ip_filter,
             piece_contributors: HashMap::new(),
@@ -1822,13 +1824,19 @@ impl TorrentActor {
                 }
                 // Async piece verification results
                 Some(result) = self.verify_result_rx.recv() => {
-                    if result.passed {
-                        self.on_piece_verified(result.piece).await;
-                    } else {
-                        self.on_piece_hash_failed(result.piece).await;
-                        let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
-                        for addr in addrs {
-                            self.request_pieces_from_peer(addr).await;
+                    // Guard: ignore stale/duplicate results for already-verified pieces
+                    let dominated = self.chunk_tracker.as_ref()
+                        .map(|ct| ct.bitfield().get(result.piece))
+                        .unwrap_or(false);
+                    if !dominated {
+                        if result.passed {
+                            self.on_piece_verified(result.piece).await;
+                        } else {
+                            self.on_piece_hash_failed(result.piece).await;
+                            let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
+                            for addr in addrs {
+                                self.request_pieces_from_peer(addr).await;
+                            }
                         }
                     }
                 }
