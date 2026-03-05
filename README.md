@@ -19,7 +19,8 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
 - 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
 - 📡 **27 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
-- 🎛️ **102-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
+- 🔒 **Resource exhaustion hardening** — configurable limits on metadata, message, piece, and request queue sizes
+- 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
 - 📊 **1378 tests, zero clippy warnings**
@@ -103,7 +104,7 @@ torrent-utp          🚀 uTP (BEP 29) micro transport protocol, LEDBAT congesti
      │
 torrent-nat          🔓 PCP / NAT-PMP / UPnP IGD automatic port mapping
      │
-ferrite              📦 Public facade: ClientBuilder + prelude + unified error
+torrent              📦 Public facade: ClientBuilder + prelude + unified error
      │
 torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, virtual clock
 ```
@@ -231,10 +232,11 @@ See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03
 
 ## 🔖 Versioning
 
-Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone bumps the version:
+Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone bumps the version:
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.65.0 | M60 | Rename ferrite → torrent, non-blocking disk I/O, async piece verification, resource exhaustion limits, cargo-fuzz scaffolding, workspace clippy lints |
 | 0.64.0 | — | TCP listener for incoming peers, UPnP gateway probe fallback + IGD v2, log spam cleanup |
 | 0.63.1 | — | Settings ↔ TorrentConfig wiring fix (13 fields), throughput fixes (try_send, phantom blocks, snub detection) |
 | 0.63.0 | M56 | Speed optimization — DHT persistence, piece stealing, initial queue depth 128 |
