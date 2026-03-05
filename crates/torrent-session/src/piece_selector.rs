@@ -1,4 +1,6 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+
+use rustc_hash::FxHashMap;
 use std::net::SocketAddr;
 
 use torrent_core::{FilePriority, Lengths};
@@ -51,14 +53,14 @@ impl PeerSpeedClassifier {
 /// Tracks which blocks of an in-flight piece are assigned to which peer.
 #[derive(Debug, Clone)]
 pub(crate) struct InFlightPiece {
-    pub assigned_blocks: HashMap<(u32, u32), SocketAddr>,
+    pub assigned_blocks: FxHashMap<(u32, u32), SocketAddr>,
     pub total_blocks: u32,
 }
 
 impl InFlightPiece {
     pub fn new(total_blocks: u32) -> Self {
         Self {
-            assigned_blocks: HashMap::new(),
+            assigned_blocks: FxHashMap::default(),
             total_blocks,
         }
     }
@@ -81,7 +83,7 @@ pub(crate) struct PickContext<'a> {
     pub peer_is_snubbed: bool,
     pub peer_rate: f64,
     pub we_have: &'a Bitfield,
-    pub in_flight_pieces: &'a HashMap<u32, InFlightPiece>,
+    pub in_flight_pieces: &'a FxHashMap<u32, InFlightPiece>,
     pub wanted: &'a Bitfield,
     pub streaming_pieces: &'a BTreeSet<u32>,
     pub time_critical_pieces: &'a BTreeSet<u32>,
@@ -97,7 +99,7 @@ pub(crate) struct PickContext<'a> {
     /// Whether auto-sequential mode is currently active (managed by TorrentActor).
     pub auto_sequential_active: bool,
     /// Map of peer address to their download rate (bytes/sec) for steal decisions.
-    pub peer_rates: &'a HashMap<SocketAddr, f64>,
+    pub peer_rates: &'a FxHashMap<SocketAddr, f64>,
     /// Ratio threshold for stealing: steal if target peer rate < requesting peer rate / ratio.
     pub steal_threshold_ratio: f64,
 }
@@ -463,7 +465,7 @@ impl PieceSelector {
 
     /// Find the preferred extent based on which extents have pieces currently in-flight.
     fn preferred_extent(&self, ctx: &PickContext<'_>) -> Option<u32> {
-        let mut extent_counts: HashMap<u32, u32> = HashMap::new();
+        let mut extent_counts: FxHashMap<u32, u32> = FxHashMap::default();
         for &piece in ctx.in_flight_pieces.keys() {
             let extent = Self::extent_of(piece, ctx.piece_size);
             *extent_counts.entry(extent).or_default() += 1;
@@ -1037,13 +1039,13 @@ mod tests {
         peer_has: &'a Bitfield,
         we_have: &'a Bitfield,
         wanted: &'a Bitfield,
-        in_flight_pieces: &'a HashMap<u32, InFlightPiece>,
+        in_flight_pieces: &'a FxHashMap<u32, InFlightPiece>,
         streaming_pieces: &'a BTreeSet<u32>,
         time_critical_pieces: &'a BTreeSet<u32>,
         suggested_pieces: &'a HashSet<u32>,
     ) -> PickContext<'a> {
-        static EMPTY_RATES: std::sync::LazyLock<HashMap<SocketAddr, f64>> =
-            std::sync::LazyLock::new(HashMap::new);
+        static EMPTY_RATES: std::sync::LazyLock<FxHashMap<SocketAddr, f64>> =
+            std::sync::LazyLock::new(FxHashMap::default);
         PickContext {
             peer_addr,
             peer_has,
@@ -1090,7 +1092,7 @@ mod tests {
         let streaming = BTreeSet::new();
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         // Peer A picks first — gets both blocks
         let ctx_a = default_pick_context(
@@ -1112,7 +1114,7 @@ mod tests {
         let mut ifp = InFlightPiece::new(2);
         ifp.assigned_blocks.insert((0, 0), addr(1000));
         ifp.assigned_blocks.insert((0, 16384), addr(1000));
-        let mut in_flight2 = HashMap::new();
+        let mut in_flight2 = FxHashMap::default();
         in_flight2.insert(0u32, ifp);
 
         // Peer B picks — all blocks assigned, so unassigned_blocks is empty
@@ -1149,7 +1151,7 @@ mod tests {
         streaming.insert(0); // streaming piece 0
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         let ctx = default_pick_context(
             addr(3000),
@@ -1185,7 +1187,7 @@ mod tests {
         streaming.insert(0);
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         // Fast peer should get streaming blocks
         let mut ctx_fast = default_pick_context(
@@ -1253,7 +1255,7 @@ mod tests {
         time_critical.insert(0); // first piece
         time_critical.insert(9); // last piece
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         let ctx = default_pick_context(
             addr(5000),
@@ -1293,7 +1295,7 @@ mod tests {
         let streaming = BTreeSet::new();
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         let mut ctx = default_pick_context(
             addr(6000),
@@ -1333,7 +1335,7 @@ mod tests {
         let streaming = BTreeSet::new();
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         let mut ctx = default_pick_context(
             addr(7000),
@@ -1369,7 +1371,7 @@ mod tests {
         let streaming = BTreeSet::new();
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         let mut ctx = default_pick_context(
             addr(8000),
@@ -1423,7 +1425,7 @@ mod tests {
         ifp0.assigned_blocks.insert((0, 0), addr(9000));
         ifp0.assigned_blocks.insert((0, 16384), addr(9000));
 
-        let mut in_flight = HashMap::new();
+        let mut in_flight = FxHashMap::default();
         in_flight.insert(0u32, ifp0);
 
         let mut ctx = default_pick_context(
@@ -1472,7 +1474,7 @@ mod tests {
         let streaming = BTreeSet::new();
         let time_critical = BTreeSet::new();
         let suggested = HashSet::new();
-        let in_flight = HashMap::new();
+        let in_flight = FxHashMap::default();
 
         let mut ctx = default_pick_context(
             addr(10000),
@@ -1517,7 +1519,7 @@ mod tests {
         let suggested = HashSet::new();
 
         // 10 in-flight pieces with connected_peer_count=4 → 10 > 1.5*4=6
-        let mut in_flight = HashMap::new();
+        let mut in_flight = FxHashMap::default();
         for i in 0..10 {
             let mut ifp = InFlightPiece::new(2);
             // All blocks assigned so partial won't find unassigned blocks
@@ -1643,7 +1645,7 @@ mod tests {
         // Piece 10 in-flight in extent 0
         let mut ifp = InFlightPiece::new(2);
         ifp.assigned_blocks.insert((10, 0), addr(9999));
-        let mut in_flight = HashMap::new();
+        let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
         let streaming = BTreeSet::new();
@@ -1691,7 +1693,7 @@ mod tests {
 
         let mut ifp = InFlightPiece::new(2);
         ifp.assigned_blocks.insert((10, 0), addr(9999));
-        let mut in_flight = HashMap::new();
+        let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
         let streaming = BTreeSet::new();
@@ -1740,7 +1742,7 @@ mod tests {
 
         let mut ifp = InFlightPiece::new(2);
         ifp.assigned_blocks.insert((10, 0), addr(9999));
-        let mut in_flight = HashMap::new();
+        let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
         let streaming = BTreeSet::new();

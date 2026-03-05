@@ -1,4 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+
+use rustc_hash::FxHashMap;
 use std::net::SocketAddr;
 
 use torrent_storage::Bitfield;
@@ -17,7 +19,7 @@ type PendingBlocks = Vec<(SocketAddr, Vec<(u32, u32, u32)>)>;
 pub(crate) struct EndGame {
     active: bool,
     /// (piece_index, begin) → { length, list of peers assigned this block }
-    blocks: HashMap<(u32, u32), BlockEntry>,
+    blocks: FxHashMap<(u32, u32), BlockEntry>,
 }
 
 struct BlockEntry {
@@ -29,7 +31,7 @@ impl EndGame {
     pub fn new() -> Self {
         Self {
             active: false,
-            blocks: HashMap::new(),
+            blocks: FxHashMap::default(),
         }
     }
 
@@ -157,7 +159,7 @@ impl EndGame {
     /// requests, ensuring all outstanding blocks are covered.
     pub fn activate_with_inflight(
         &mut self,
-        in_flight_pieces: &HashMap<u32, InFlightPiece>,
+        in_flight_pieces: &FxHashMap<u32, InFlightPiece>,
         pending: &PendingBlocks,
     ) {
         self.active = true;

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use torrent_core::Lengths;
 
@@ -12,11 +12,11 @@ pub struct ChunkTracker {
     /// Piece-level completion bitfield.
     have: Bitfield,
     /// Per-piece chunk bitmaps for pieces currently being downloaded.
-    in_progress: HashMap<u32, Bitfield>,
+    in_progress: FxHashMap<u32, Bitfield>,
     /// Piece/chunk arithmetic.
     lengths: Lengths,
     /// Per-block Merkle verification state (v2 only). None for v1 torrents.
-    block_verified: Option<HashMap<u32, Bitfield>>,
+    block_verified: Option<FxHashMap<u32, Bitfield>>,
 }
 
 impl ChunkTracker {
@@ -25,7 +25,7 @@ impl ChunkTracker {
         let have = Bitfield::new(lengths.num_pieces());
         ChunkTracker {
             have,
-            in_progress: HashMap::new(),
+            in_progress: FxHashMap::default(),
             lengths,
             block_verified: None,
         }
@@ -35,7 +35,7 @@ impl ChunkTracker {
     pub fn from_bitfield(have: Bitfield, lengths: Lengths) -> Self {
         ChunkTracker {
             have,
-            in_progress: HashMap::new(),
+            in_progress: FxHashMap::default(),
             lengths,
             block_verified: None,
         }
@@ -136,7 +136,7 @@ impl ChunkTracker {
 
     /// Enable v2 per-block Merkle verification tracking.
     pub fn enable_v2_tracking(&mut self) {
-        self.block_verified = Some(HashMap::new());
+        self.block_verified = Some(FxHashMap::default());
     }
 
     /// Whether v2 block tracking is enabled.

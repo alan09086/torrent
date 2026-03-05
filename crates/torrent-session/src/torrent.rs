@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
+
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
@@ -325,7 +327,7 @@ impl TorrentHandle {
             lengths: Some(lengths),
             num_pieces,
             piece_selector,
-            in_flight_pieces: HashMap::new(),
+            in_flight_pieces: FxHashMap::default(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
             streaming_cursors: Vec::new(),
@@ -568,7 +570,7 @@ impl TorrentHandle {
             lengths: None,
             num_pieces: 0,
             piece_selector: PieceSelector::new(0),
-            in_flight_pieces: HashMap::new(),
+            in_flight_pieces: FxHashMap::default(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
             streaming_cursors: Vec::new(),
@@ -1235,7 +1237,7 @@ struct TorrentActor {
 
     // Piece management
     piece_selector: PieceSelector,
-    in_flight_pieces: HashMap<u32, InFlightPiece>,
+    in_flight_pieces: FxHashMap<u32, InFlightPiece>,
     file_priorities: Vec<FilePriority>,
     wanted_pieces: Bitfield,
     end_game: EndGame,
@@ -5019,7 +5021,7 @@ impl TorrentActor {
             .map(|p| p.suggested_pieces.clone())
             .unwrap_or_default();
 
-        let peer_rates: HashMap<SocketAddr, f64> = self
+        let peer_rates: FxHashMap<SocketAddr, f64> = self
             .peers
             .iter()
             .map(|(&addr, p)| (addr, p.pipeline.ewma_rate()))

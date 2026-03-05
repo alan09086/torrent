@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 torrent-core = { path = "../torrent-core" }
 memmap2 = "0.9"
+rustc-hash = "2"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
