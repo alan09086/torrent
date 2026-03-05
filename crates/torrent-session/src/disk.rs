@@ -551,10 +551,9 @@ impl DiskHandle {
         let result_tx = result_tx.clone();
         tokio::spawn(async move {
             let passed = tokio::task::spawn_blocking(move || {
-                let blocks = store_buffer
-                    .lock()
-                    .unwrap()
-                    .remove(&(info_hash, piece));
+                let blocks = {
+                    store_buffer.lock().unwrap().remove(&(info_hash, piece))
+                };
                 if let Some(blocks) = blocks {
                     let mut piece_data =
                         Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
@@ -589,10 +588,9 @@ impl DiskHandle {
         let result_tx = result_tx.clone();
         tokio::spawn(async move {
             let passed = tokio::task::spawn_blocking(move || {
-                let blocks = store_buffer
-                    .lock()
-                    .unwrap()
-                    .remove(&(info_hash, piece));
+                let blocks = {
+                    store_buffer.lock().unwrap().remove(&(info_hash, piece))
+                };
                 if let Some(blocks) = blocks {
                     let mut piece_data =
                         Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
@@ -1227,6 +1225,75 @@ mod tests {
         let result = result_rx.recv().await.unwrap();
         assert_eq!(result.piece, 0);
         assert!(result.passed, "store buffer verify should pass");
+
+        // Store buffer should be empty after verify consumed the entry
+        assert!(
+            disk.store_buffer
+                .lock()
+                .unwrap()
+                .get(&(ih, 0))
+                .is_none(),
+            "store buffer entry should be removed after verify"
+        );
+
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn store_buffer_verify_v2_from_memory() {
+        // Verify that enqueue_write + enqueue_verify_v2 hashes from the store buffer
+        // using SHA-256 without needing disk writes to complete first.
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(21);
+        let lengths = Lengths::new(50, 50, 25);
+        let storage = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, storage).await;
+
+        let chunk0 = Bytes::from(vec![0xCCu8; 25]);
+        let chunk1 = Bytes::from(vec![0xDDu8; 25]);
+        let mut piece_data = vec![0xCCu8; 25];
+        piece_data.extend_from_slice(&[0xDDu8; 25]);
+        let expected = torrent_core::sha256(&piece_data);
+
+        let (error_tx, _error_rx) = mpsc::channel(4);
+        let (result_tx, mut result_rx) = mpsc::channel(4);
+
+        // Enqueue writes (populates store buffer)
+        disk.enqueue_write(0, 0, chunk0, DiskJobFlags::empty(), &error_tx)
+            .unwrap();
+        disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
+            .unwrap();
+
+        // Enqueue v2 verify — should hash from store buffer (spawns task directly)
+        disk.enqueue_verify_v2(0, expected, &result_tx);
+
+        // Wait for result
+        let result = result_rx.recv().await.unwrap();
+        assert_eq!(result.piece, 0);
+        assert!(result.passed, "store buffer v2 verify should pass");
+
+        // Store buffer should be empty after verify consumed the entry
+        assert!(
+            disk.store_buffer
+                .lock()
+                .unwrap()
+                .get(&(ih, 0))
+                .is_none(),
+            "store buffer entry should be removed after v2 verify"
+        );
+
+        // Verify wrong hash fails
+        let chunk0 = Bytes::from(vec![0xCCu8; 25]);
+        let chunk1 = Bytes::from(vec![0xDDu8; 25]);
+        disk.enqueue_write(0, 0, chunk0, DiskJobFlags::empty(), &error_tx)
+            .unwrap();
+        disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
+            .unwrap();
+        disk.enqueue_verify_v2(0, Id32::ZERO, &result_tx);
+
+        let result = result_rx.recv().await.unwrap();
+        assert_eq!(result.piece, 0);
+        assert!(!result.passed, "wrong hash should fail v2 verify");
 
         mgr.shutdown().await;
     }
