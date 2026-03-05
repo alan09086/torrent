@@ -52,6 +52,12 @@ pub struct BoxedStream {
     inner: Pin<Box<dyn StreamRw + Send>>,
 }
 
+impl std::fmt::Debug for BoxedStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxedStream").finish_non_exhaustive()
+    }
+}
+
 /// Combined read/write supertrait for dyn compatibility.
 trait StreamRw: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> StreamRw for T {}

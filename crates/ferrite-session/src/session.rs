@@ -588,6 +588,19 @@ impl SessionHandle {
             None
         };
 
+        // TCP listener: bind on the main listen port for incoming peer connections.
+        let tcp_listener: Option<Box<dyn crate::transport::TransportListener>> =
+            match factory.bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.listen_port))).await {
+                Ok(l) => {
+                    info!(port = settings.listen_port, "TCP listener started");
+                    Some(l)
+                }
+                Err(e) => {
+                    warn!(port = settings.listen_port, error = %e, "TCP listener bind failed");
+                    None
+                }
+            };
+
         // SSL listener (M42): bind if ssl_listen_port != 0
         let ssl_listener: Option<Box<dyn crate::transport::TransportListener>> = if settings.ssl_listen_port != 0 {
             match factory.bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.ssl_listen_port))).await {
@@ -679,6 +692,7 @@ impl SessionHandle {
             plugins,
             sam_session,
             ssl_manager,
+            tcp_listener,
             ssl_listener,
             counters: Arc::clone(&counters),
             factory: Arc::clone(&factory),
@@ -1774,6 +1788,8 @@ struct SessionActor {
     sam_session: Option<Arc<crate::i2p::SamSession>>,
     /// SSL manager for SSL torrent certificate handling (M42).
     ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+    /// TCP listener on the main listen port for incoming peer connections.
+    tcp_listener: Option<Box<dyn crate::transport::TransportListener>>,
     /// SSL/TLS TCP listener (separate port from the main listener) (M42).
     ssl_listener: Option<Box<dyn crate::transport::TransportListener>>,
     /// Shared atomic session counters (M50).
@@ -2274,6 +2290,18 @@ impl SessionActor {
                         && let Some(entry) = self.torrents.get(&info_hash)
                     {
                         let _ = entry.handle.add_peers(vec![peer_addr], crate::peer_state::PeerSource::Lsd).await;
+                    }
+                }
+                // TCP inbound connections (main listen port)
+                result = async {
+                    if let Some(ref mut listener) = self.tcp_listener {
+                        listener.accept().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Ok((stream, addr)) = result {
+                        self.handle_tcp_inbound(stream, addr);
                     }
                 }
                 // uTP inbound connections (IPv4)
@@ -3036,6 +3064,20 @@ impl SessionActor {
 
     /// Route an inbound uTP connection to the correct torrent.
     fn handle_utp_inbound(&self, stream: ferrite_utp::UtpStream, addr: std::net::SocketAddr) {
+        self.route_inbound_stream(stream, addr, "uTP");
+    }
+
+    /// Handle an incoming TCP connection from the main listen port.
+    fn handle_tcp_inbound(&self, stream: crate::transport::BoxedStream, addr: std::net::SocketAddr) {
+        self.route_inbound_stream(stream, addr, "TCP");
+    }
+
+    /// Route an inbound stream (TCP or uTP) to the appropriate torrent by reading the
+    /// BitTorrent handshake preamble.
+    fn route_inbound_stream<S>(&self, stream: S, addr: std::net::SocketAddr, transport: &'static str)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         // Clone torrent handles so the routing task can look up by info_hash.
         let torrent_handles: HashMap<Id20, TorrentHandle> = self
             .torrents
@@ -3047,17 +3089,18 @@ impl SessionActor {
             match crate::utp_routing::identify_plaintext_connection(stream).await {
                 Ok(Some((info_hash, prefixed_stream))) => {
                     if let Some(handle) = torrent_handles.get(&info_hash) {
-                        debug!(%addr, %info_hash, "routing inbound uTP peer to torrent");
-                        let _ = handle.send_incoming_peer(prefixed_stream, addr).await;
+                        debug!(%addr, %info_hash, "routing inbound {transport} peer to torrent");
+                        let boxed = crate::transport::BoxedStream::new(prefixed_stream);
+                        let _ = handle.send_incoming_peer(boxed, addr).await;
                     } else {
-                        debug!(%addr, %info_hash, "inbound uTP peer for unknown torrent, dropping");
+                        debug!(%addr, %info_hash, "inbound {transport} peer for unknown torrent, dropping");
                     }
                 }
                 Ok(None) => {
-                    debug!(%addr, "inbound uTP peer is encrypted (MSE), dropping (deferred)");
+                    debug!(%addr, "inbound {transport} peer is encrypted (MSE), dropping (deferred)");
                 }
                 Err(e) => {
-                    debug!(%addr, error = %e, "failed to identify inbound uTP peer");
+                    debug!(%addr, error = %e, "failed to identify inbound {transport} peer");
                 }
             }
         });

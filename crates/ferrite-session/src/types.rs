@@ -784,9 +784,9 @@ pub(crate) enum TorrentCommand {
     Scrape {
         reply: oneshot::Sender<Option<(String, ferrite_tracker::ScrapeInfo)>>,
     },
-    /// Incoming uTP peer routed from the session-level accept loop.
+    /// Incoming peer routed from the session-level accept loop (TCP or uTP).
     IncomingPeer {
-        stream: crate::utp_routing::PrefixedStream<ferrite_utp::UtpStream>,
+        stream: crate::transport::BoxedStream,
         addr: SocketAddr,
     },
     /// Open a streaming reader for a file within the torrent.

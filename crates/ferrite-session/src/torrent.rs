@@ -629,10 +629,10 @@ impl TorrentHandle {
         Ok(TorrentHandle { cmd_tx })
     }
 
-    /// Send an incoming uTP peer (routed by the session) to this torrent.
+    /// Send an incoming peer (routed by the session) to this torrent.
     pub(crate) async fn send_incoming_peer(
         &self,
-        stream: crate::utp_routing::PrefixedStream<ferrite_utp::UtpStream>,
+        stream: crate::transport::BoxedStream,
         addr: SocketAddr,
     ) -> crate::Result<()> {
         self.cmd_tx

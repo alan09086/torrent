@@ -1,4 +1,4 @@
-//! uTP inbound connection routing: preamble identification and stream wrapping.
+//! Inbound connection routing: preamble identification and stream wrapping.
 
 use std::fmt;
 use std::io;
@@ -76,20 +76,19 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
     }
 }
 
-// Compile-time check: PrefixedStream<UtpStream> satisfies run_peer() bounds.
-const _: fn() = || {
-    fn assert_bounds<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>() {}
-    assert_bounds::<PrefixedStream<ferrite_utp::UtpStream>>();
-};
-
 /// Attempt to identify a plaintext BitTorrent connection by reading the 48-byte preamble.
 ///
 /// Returns `Some((info_hash, prefixed_stream))` if the first byte is 0x13 (BT pstrlen)
 /// and the full 48-byte handshake preamble can be read. Returns `None` for encrypted
 /// (MSE) connections (first byte != 0x13).
-pub async fn identify_plaintext_connection(
-    mut stream: ferrite_utp::UtpStream,
-) -> io::Result<Option<(ferrite_core::Id20, PrefixedStream<ferrite_utp::UtpStream>)>> {
+///
+/// Generic over any async stream type (uTP, TCP `BoxedStream`, duplex, etc.).
+pub async fn identify_plaintext_connection<S>(
+    mut stream: S,
+) -> io::Result<Option<(ferrite_core::Id20, PrefixedStream<S>)>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     use tokio::io::AsyncReadExt;
 
     // Read the first byte to check if it's a plaintext BT handshake
