@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bitflags::bitflags;
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use torrent_core::{Id20, Id32};
 use torrent_storage::TorrentStorage;
 use tracing::warn;
@@ -557,6 +559,9 @@ struct DiskActor {
     rx: mpsc::Receiver<DiskJob>,
     backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     semaphore: Arc<tokio::sync::Semaphore>,
+    /// Outstanding fire-and-forget write tasks per piece index.
+    /// VerifyAsync drains these before hashing to avoid read-before-write races.
+    pending_writes: HashMap<u32, Vec<JoinHandle<()>>>,
     #[allow(dead_code)]
     config: DiskConfig,
 }
@@ -571,6 +576,7 @@ impl DiskActor {
             rx,
             backend,
             semaphore: Arc::new(tokio::sync::Semaphore::new(config.io_threads)),
+            pending_writes: HashMap::new(),
             config,
         }
     }
@@ -648,20 +654,27 @@ impl DiskActor {
             } => {
                 let flush = flags.contains(DiskJobFlags::FLUSH_PIECE);
                 let backend = Arc::clone(&self.backend);
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let result = tokio::task::spawn_blocking(move || {
-                    backend.write_chunk(info_hash, piece, begin, &data, flush)
-                })
-                .await
-                .unwrap();
-                drop(permit);
-                if let Err(e) = to_storage_result(result) {
-                    let _ = error_tx.try_send(DiskWriteError {
-                        piece,
-                        begin,
-                        error: e,
-                    });
-                }
+                let semaphore = self.semaphore.clone();
+                // Fire-and-forget: spawn the write and move on to the next job.
+                // The semaphore limits concurrent I/O; errors report via error_tx.
+                // Track the JoinHandle so VerifyAsync can await completion.
+                let handle = tokio::spawn(async move {
+                    let permit = semaphore.acquire_owned().await.unwrap();
+                    let result = tokio::task::spawn_blocking(move || {
+                        backend.write_chunk(info_hash, piece, begin, &data, flush)
+                    })
+                    .await
+                    .unwrap();
+                    drop(permit);
+                    if let Err(e) = to_storage_result(result) {
+                        let _ = error_tx.try_send(DiskWriteError {
+                            piece,
+                            begin,
+                            error: e,
+                        });
+                    }
+                });
+                self.pending_writes.entry(piece).or_default().push(handle);
             }
             DiskJob::Read {
                 info_hash,
@@ -722,17 +735,27 @@ impl DiskActor {
                 expected,
                 result_tx,
             } => {
+                // Drain all outstanding writes for this piece to avoid
+                // read-before-write races (writes are fire-and-forget).
+                let write_handles = self.pending_writes.remove(&piece).unwrap_or_default();
                 let backend = Arc::clone(&self.backend);
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let result = tokio::task::spawn_blocking(move || {
-                    let _ = backend.flush_piece(info_hash, piece);
-                    backend.hash_piece(info_hash, piece, &expected)
-                })
-                .await
-                .unwrap();
-                drop(permit);
-                let passed = to_storage_result(result).unwrap_or(false);
-                let _ = result_tx.try_send(VerifyResult { piece, passed });
+                let semaphore = self.semaphore.clone();
+                tokio::spawn(async move {
+                    // Wait for all writes to this piece to complete first.
+                    for h in write_handles {
+                        let _ = h.await;
+                    }
+                    let permit = semaphore.acquire_owned().await.unwrap();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _ = backend.flush_piece(info_hash, piece);
+                        backend.hash_piece(info_hash, piece, &expected)
+                    })
+                    .await
+                    .unwrap();
+                    drop(permit);
+                    let passed = to_storage_result(result).unwrap_or(false);
+                    let _ = result_tx.try_send(VerifyResult { piece, passed });
+                });
             }
             DiskJob::VerifyV2Async {
                 info_hash,
@@ -740,17 +763,24 @@ impl DiskActor {
                 expected,
                 result_tx,
             } => {
+                let write_handles = self.pending_writes.remove(&piece).unwrap_or_default();
                 let backend = Arc::clone(&self.backend);
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let result = tokio::task::spawn_blocking(move || {
-                    let _ = backend.flush_piece(info_hash, piece);
-                    backend.hash_piece_v2(info_hash, piece, &expected)
-                })
-                .await
-                .unwrap();
-                drop(permit);
-                let passed = to_storage_result(result).unwrap_or(false);
-                let _ = result_tx.try_send(VerifyResult { piece, passed });
+                let semaphore = self.semaphore.clone();
+                tokio::spawn(async move {
+                    for h in write_handles {
+                        let _ = h.await;
+                    }
+                    let permit = semaphore.acquire_owned().await.unwrap();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _ = backend.flush_piece(info_hash, piece);
+                        backend.hash_piece_v2(info_hash, piece, &expected)
+                    })
+                    .await
+                    .unwrap();
+                    drop(permit);
+                    let passed = to_storage_result(result).unwrap_or(false);
+                    let _ = result_tx.try_send(VerifyResult { piece, passed });
+                });
             }
             DiskJob::BlockHash {
                 info_hash,
