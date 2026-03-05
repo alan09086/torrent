@@ -191,9 +191,9 @@ impl Default for TorrentConfig {
             enable_lsd: true,
             force_proxy: false,
             steal_threshold_ratio: 10.0,
-            peer_turnover: 0.04,
+            peer_turnover: 0.08,
             peer_turnover_cutoff: 0.9,
-            peer_turnover_interval: 300,
+            peer_turnover_interval: 120,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
@@ -1378,9 +1378,9 @@ mod tests {
     #[test]
     fn torrent_config_peer_turnover_defaults() {
         let cfg = TorrentConfig::default();
-        assert!((cfg.peer_turnover - 0.04).abs() < f64::EPSILON);
+        assert!((cfg.peer_turnover - 0.08).abs() < f64::EPSILON);
         assert!((cfg.peer_turnover_cutoff - 0.9).abs() < f64::EPSILON);
-        assert_eq!(cfg.peer_turnover_interval, 300);
+        assert_eq!(cfg.peer_turnover_interval, 120);
     }
 
     #[test]

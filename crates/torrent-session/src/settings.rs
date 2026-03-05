@@ -152,7 +152,7 @@ fn default_mixed_mode() -> MixedModeAlgorithm {
     MixedModeAlgorithm::PeerProportional
 }
 fn default_peer_turnover() -> f64 {
-    0.04
+    0.08
 }
 fn default_peer_turnover_cutoff() -> f64 {
     0.9
@@ -161,7 +161,7 @@ fn default_steal_threshold_ratio() -> f64 {
     10.0
 }
 fn default_peer_turnover_interval() -> u64 {
-    300
+    120
 }
 fn default_peer_connect_timeout() -> u64 {
     5
@@ -785,9 +785,9 @@ impl Default for Settings {
             // Peer connections
             max_peers_per_torrent: 200,
             // Peer turnover
-            peer_turnover: 0.04,
+            peer_turnover: 0.08,
             peer_turnover_cutoff: 0.9,
-            peer_turnover_interval: 300,
+            peer_turnover_interval: 120,
             // Security
             ssrf_mitigation: true,
             allow_idna: false,
@@ -1691,9 +1691,9 @@ mod tests {
     #[test]
     fn peer_turnover_defaults() {
         let s = Settings::default();
-        assert!((s.peer_turnover - 0.04).abs() < f64::EPSILON);
+        assert!((s.peer_turnover - 0.08).abs() < f64::EPSILON);
         assert!((s.peer_turnover_cutoff - 0.9).abs() < f64::EPSILON);
-        assert_eq!(s.peer_turnover_interval, 300);
+        assert_eq!(s.peer_turnover_interval, 120);
     }
 
     #[test]
