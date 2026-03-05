@@ -113,7 +113,7 @@ fn default_dht_qps() -> usize {
     50
 }
 fn default_dht_timeout() -> u64 {
-    10
+    5
 }
 fn default_upnp_lease() -> u32 {
     3600
@@ -513,7 +513,7 @@ pub struct Settings {
     /// Maximum DHT queries per second to control network traffic (default: 50).
     #[serde(default = "default_dht_qps")]
     pub dht_queries_per_second: usize,
-    /// Timeout in seconds for a single DHT query before it is abandoned (default: 10).
+    /// Timeout in seconds for a single DHT query before it is abandoned (default: 5).
     #[serde(default = "default_dht_timeout")]
     pub dht_query_timeout_secs: u64,
     /// BEP 42: Enforce node ID verification in DHT routing table.
@@ -755,7 +755,7 @@ impl Default for Settings {
             apply_ip_filter_to_trackers: true,
             // DHT tuning
             dht_queries_per_second: 50,
-            dht_query_timeout_secs: 10,
+            dht_query_timeout_secs: 5,
             dht_enforce_node_id: false,
             dht_restrict_routing_ips: true,
             dht_max_items: 700,
@@ -1214,7 +1214,7 @@ mod tests {
         assert!(!s.force_proxy);
         assert!(s.apply_ip_filter_to_trackers);
         assert_eq!(s.dht_queries_per_second, 50);
-        assert_eq!(s.dht_query_timeout_secs, 10);
+        assert_eq!(s.dht_query_timeout_secs, 5);
         assert!(!s.dht_enforce_node_id);
         assert!(s.dht_restrict_routing_ips);
         assert_eq!(s.upnp_lease_duration, 3600);

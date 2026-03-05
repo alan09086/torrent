@@ -63,7 +63,7 @@ impl Default for DhtConfig {
             ],
             own_id: None,
             queries_per_second: 50,
-            query_timeout: Duration::from_secs(10),
+            query_timeout: Duration::from_secs(5),
             address_family: AddressFamily::V4,
             enforce_node_id: false,
             restrict_routing_ips: true,
@@ -84,7 +84,7 @@ impl DhtConfig {
             ],
             own_id: None,
             queries_per_second: 50,
-            query_timeout: Duration::from_secs(10),
+            query_timeout: Duration::from_secs(5),
             address_family: AddressFamily::V6,
             enforce_node_id: false,
             restrict_routing_ips: true,
@@ -1390,15 +1390,28 @@ impl DhtActor {
         // TorrentActor detect dht_peers_rx = None and re-trigger later when the
         // routing table has been populated.
         if initial_nodes.is_empty() {
-            debug!("get_peers: routing table empty, dropping lookup (will retry)");
+            debug!(
+                family = ?self.address_family,
+                table_size = self.routing_table.len(),
+                "get_peers: routing table empty, dropping lookup (will retry)"
+            );
             drop(reply);
             return;
         }
+        debug!(
+            family = ?self.address_family,
+            %info_hash,
+            closest_count = initial_nodes.len(),
+            table_size = self.routing_table.len(),
+            "get_peers: starting lookup"
+        );
 
         let mut queried = std::collections::HashSet::new();
 
-        // Query initial closest nodes
-        let to_query: Vec<_> = initial_nodes.iter().take(3).copied().collect();
+        // Query ALL initial closest nodes in parallel (alpha = K).
+        // libtorrent uses alpha=8 for get_peers — querying all K closest
+        // nodes immediately maximizes the chance of fast convergence.
+        let to_query: Vec<_> = initial_nodes.to_vec();
         for node in &to_query {
             queried.insert(node.id);
             self.send_get_peers(node.addr, info_hash).await;
@@ -1482,6 +1495,14 @@ impl DhtActor {
         if expired.is_empty() {
             return;
         }
+
+        debug!(
+            family = ?self.address_family,
+            expired_count = expired.len(),
+            total_pending = self.pending.len(),
+            active_lookups = self.lookups.len(),
+            "expiring timed-out queries"
+        );
 
         let mut stalled_lookups: Vec<Id20> = Vec::new();
 
@@ -2016,7 +2037,7 @@ impl DhtActor {
         let r = self.routing_table.own_id().0[19] & 0x07;
         let new_id = node_id::generate_node_id(external_ip, r);
         let restrict_ips = self.config.restrict_routing_ips;
-        let old_nodes = self.routing_table.all_nodes();
+        let mut old_nodes = self.routing_table.all_nodes();
         debug!(
             old_id = %self.routing_table.own_id(),
             new_id = %new_id,
@@ -2024,9 +2045,26 @@ impl DhtActor {
             "BEP 42: regenerating node ID"
         );
         self.routing_table = RoutingTable::new_with_config(new_id, restrict_ips);
-        for (id, addr) in old_nodes {
-            self.routing_table.insert(id, addr);
+
+        // Sort nodes by XOR distance to the new ID (closest first).
+        // This maximizes bucket splits: close nodes fill the home bucket,
+        // triggering splits that create capacity for more distant nodes.
+        // Without sorting, distant nodes fill non-splittable buckets first
+        // and get rejected (we saw 72→20 node loss without this).
+        old_nodes.sort_by_key(|(id, _)| id.xor_distance(&new_id));
+
+        let mut inserted = 0usize;
+        for (id, addr) in &old_nodes {
+            if self.routing_table.insert(*id, *addr) {
+                inserted += 1;
+            }
         }
+        debug!(
+            new_table_size = self.routing_table.len(),
+            attempted = old_nodes.len(),
+            inserted,
+            "BEP 42: node ID regeneration complete"
+        );
     }
 
     fn make_stats(&self) -> DhtStats {

@@ -367,7 +367,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the DHT query timeout in seconds. Default: 15.
+    /// Set the DHT query timeout in seconds. Default: 5.
     pub fn dht_query_timeout_secs(mut self, secs: u64) -> Self {
         self.settings.dht_query_timeout_secs = secs;
         self
