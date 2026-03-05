@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1376-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1378-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.63.1-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.64.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -22,7 +22,7 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **102-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1376 tests, zero clippy warnings**
+- 📊 **1378 tests, zero clippy warnings**
 
 ---
 
@@ -32,7 +32,7 @@ Add ferrite to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrite = "0.63.1"
+ferrite = "0.64.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -235,6 +235,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.64.0 | — | TCP listener for incoming peers, UPnP gateway probe fallback + IGD v2, log spam cleanup |
 | 0.63.1 | — | Settings ↔ TorrentConfig wiring fix (13 fields), throughput fixes (try_send, phantom blocks, snub detection) |
 | 0.63.0 | M56 | Speed optimization — DHT persistence, piece stealing, initial queue depth 128 |
 | 0.62.0 | M55 | Download speed — immediate peer connection, max_peers 200, connect_interval 5s |

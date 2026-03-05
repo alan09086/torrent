@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.64.0 — TCP Listener, UPnP Gateway Probe & Log Cleanup
+
+### Fixed
+- **TCP listener for incoming peer connections** — `SessionActor` only had uTP and SSL listeners, never binding a plain TCP accept loop on the main listen port. Incoming TCP connections were refused, preventing peers from connecting to us. Added TCP listener bind, generalized `identify_plaintext_connection` to any `AsyncRead+AsyncWrite` stream, and unified routing via `route_inbound_stream<S>`
+- **UPnP discovery with gateway probe fallback** — many consumer routers have broken SSDP (don't respond to multicast M-SEARCH) but serve valid UPnP descriptions over HTTP. Added fallback that probes the default gateway on common UPnP ports (49152, 5000, 5431, 2869, 49153) and description paths (`/rootDesc.xml`, `/gatedesc.xml`, etc.)
+- **UPnP IGD v2 support** — SSDP now sends both v1 and v2 M-SEARCH, and service type search includes `WANIPConnection:2` alongside v1 and `WANPPPConnection:1` (PPPoE)
+- **SSDP response filtering** — discovery loop now skips non-IGD responders (e.g. Plex DLNA servers) and accepts only `InternetGatewayDevice` matches
+- **Log spam reduced** — demoted routine peer churn events (uTP max timeouts, wire errors, send errors) from `warn!` to `debug!`
+
+### Changed
+- `identify_plaintext_connection` generalized from `UtpStream`-specific to generic `S: AsyncRead + AsyncWrite + Unpin + Send`
+- `TorrentCommand::IncomingPeer` now carries `BoxedStream` instead of `PrefixedStream<UtpStream>`
+- `BoxedStream` now implements `Debug`
+- Test count: 1378
+
+### Benchmark (Arch ISO 1.5 GiB, with UPnP port mapping)
+| Metric | Value |
+|--------|-------|
+| Peak 5s speed | 56.0 MB/s |
+| Average speed | 29.4 MB/s |
+| Peak unchoked | 156 peers |
+| Total peers | 200 |
+
 ## 0.63.1 — Settings Wiring & Throughput Fixes
 
 ### Fixed
