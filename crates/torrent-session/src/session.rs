@@ -706,7 +706,28 @@ impl SessionHandle {
             factory: Arc::clone(&factory),
         };
 
-        tokio::spawn(actor.run());
+        let join_handle = tokio::spawn(actor.run());
+        tokio::spawn(async move {
+            match join_handle.await {
+                Ok(()) => {
+                    tracing::warn!("session actor exited cleanly");
+                }
+                Err(e) if e.is_panic() => {
+                    let panic_payload = e.into_panic();
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    tracing::error!("session actor PANICKED: {msg}");
+                }
+                Err(e) => {
+                    tracing::error!("session actor task error: {e}");
+                }
+            }
+        });
         Ok(SessionHandle {
             cmd_tx,
             alert_tx,

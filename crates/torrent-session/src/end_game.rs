@@ -147,8 +147,7 @@ impl EndGame {
         }
     }
 
-    /// Remove all block entries for a given piece (e.g., after hash failure).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Remove all block entries for a given piece (e.g., after verification or hash failure).
     pub fn remove_piece(&mut self, index: u32) {
         self.blocks.retain(|&(pi, _), _| pi != index);
     }

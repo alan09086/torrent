@@ -427,7 +427,30 @@ impl TorrentHandle {
             factory,
         };
 
-        tokio::spawn(actor.run());
+        let spawn_info_hash = actor.info_hash;
+        let join_handle = tokio::spawn(actor.run());
+        // Monitor the actor task so panics/exits are logged instead of silently swallowed.
+        tokio::spawn(async move {
+            match join_handle.await {
+                Ok(()) => {
+                    tracing::warn!(%spawn_info_hash, "torrent actor exited cleanly");
+                }
+                Err(e) if e.is_panic() => {
+                    let panic_payload = e.into_panic();
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    tracing::error!(%spawn_info_hash, "torrent actor PANICKED: {msg}");
+                }
+                Err(e) => {
+                    tracing::error!(%spawn_info_hash, "torrent actor task error: {e}");
+                }
+            }
+        });
         Ok(TorrentHandle { cmd_tx })
     }
 
@@ -672,7 +695,29 @@ impl TorrentHandle {
             factory,
         };
 
-        tokio::spawn(actor.run());
+        let spawn_info_hash = actor.info_hash;
+        let join_handle = tokio::spawn(actor.run());
+        tokio::spawn(async move {
+            match join_handle.await {
+                Ok(()) => {
+                    tracing::warn!(%spawn_info_hash, "torrent actor exited cleanly");
+                }
+                Err(e) if e.is_panic() => {
+                    let panic_payload = e.into_panic();
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    tracing::error!(%spawn_info_hash, "torrent actor PANICKED: {msg}");
+                }
+                Err(e) => {
+                    tracing::error!(%spawn_info_hash, "torrent actor task error: {e}");
+                }
+            }
+        });
         Ok(TorrentHandle { cmd_tx })
     }
 
@@ -1810,7 +1855,14 @@ impl TorrentActor {
                         Some(TorrentCommand::ConnectPeer { addr }) => {
                             self.handle_connect_peer(addr);
                         }
-                        Some(TorrentCommand::Shutdown) | None => {
+                        Some(TorrentCommand::Shutdown) => {
+                            info!("torrent actor: received Shutdown command, exiting");
+                            self.shutdown_web_seeds().await;
+                            self.shutdown_peers().await;
+                            return;
+                        }
+                        None => {
+                            warn!("torrent actor: cmd_rx channel closed (all senders dropped), exiting");
                             self.shutdown_web_seeds().await;
                             self.shutdown_peers().await;
                             return;
@@ -2086,9 +2138,32 @@ impl TorrentActor {
                             ifp.assigned_blocks.retain(|_, addr| !snubbed_peers.contains(addr));
                         }
                     }
+
+                    // Proactive request scheduling: re-evaluate all unchoked peers
+                    // for new work. Without this, peers that become idle (e.g. after
+                    // duplicate block rejection or piece completion) never recover,
+                    // causing download stalls at high completion percentages.
+                    if self.state == TorrentState::Downloading {
+                        let idle_peers: Vec<SocketAddr> = self.peers.iter()
+                            .filter(|(_, p)| {
+                                !p.peer_choking && p.pending_requests.is_empty()
+                            })
+                            .map(|(addr, _)| *addr)
+                            .collect();
+                        for addr in idle_peers {
+                            self.request_pieces_from_peer(addr).await;
+                        }
+                    }
                 }
                 // Periodic download status report (5s)
                 _ = diag_interval.tick() => {
+                    // Heartbeat: log state regardless of download state
+                    {
+                        let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
+                        let eg = self.end_game.is_active();
+                        let eg_blocks = self.end_game.block_count();
+                        info!(state = ?self.state, have, total = self.num_pieces, end_game = eg, eg_blocks, "heartbeat");
+                    }
                     if self.state == TorrentState::Downloading {
                         let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
                         let in_flight = self.in_flight_pieces.len();
@@ -3014,9 +3089,9 @@ impl TorrentActor {
                 info_hash: self.info_hash,
             },
         );
-        // Disconnect all peers
+        // Disconnect all peers (non-blocking — peer may already be dead)
         for peer in self.peers.values() {
-            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
         }
         self.peers.clear();
         // Announce Stopped to trackers
@@ -3403,6 +3478,27 @@ impl TorrentActor {
             && ct.has_chunk(index, begin)
         {
             self.total_download += data.len() as u64 + 13;
+            // Remove from pending_requests to free pipeline slots. Without this,
+            // the peer accumulates phantom entries from already-verified pieces
+            // and eventually has zero available pipeline slots — permanent stall.
+            if let Some(peer) = self.peers.get_mut(&peer_addr)
+                && let Some(pos) = peer
+                    .pending_requests
+                    .iter()
+                    .position(|&(i, b, _)| i == index && b == begin)
+            {
+                peer.pending_requests.swap_remove(pos);
+            }
+            if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
+                ifp.assigned_blocks.remove(&(index, begin));
+            }
+            // Remove from end-game tracker so pick_block won't return this
+            // block again. The normal path calls block_received which does
+            // this, but we skip that path for duplicates.
+            if self.end_game.is_active() {
+                self.end_game.block_received(index, begin, peer_addr);
+            }
+            self.request_pieces_from_peer(peer_addr).await;
             return;
         }
 
@@ -3704,9 +3800,9 @@ impl TorrentActor {
         &mut self,
         reply: tokio::sync::oneshot::Sender<crate::Result<()>>,
     ) {
-        // Disconnect all peers — they hold stale bitfield state
+        // Disconnect all peers — they hold stale bitfield state (non-blocking)
         for peer in self.peers.values() {
-            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
         }
         self.peers.clear();
 
@@ -4081,6 +4177,13 @@ impl TorrentActor {
         }
         self.in_flight_pieces.remove(&index);
         self.piece_contributors.remove(&index);
+        // Remove stale end-game blocks for this piece. Without this,
+        // pick_block() returns these blocks, peers request them, has_chunk
+        // rejects them, and register_request accumulates until every peer
+        // is registered for every stale block — permanent stall.
+        if self.end_game.is_active() {
+            self.end_game.remove_piece(index);
+        }
         info!(index, "piece verified");
         post_alert(
             &self.alert_tx,
@@ -4340,7 +4443,7 @@ impl TorrentActor {
 
         // Reject if we don't have a hash picker (v1 torrent or no metadata yet)
         // TODO(M35): serve hashes from our Merkle tree state when seeding v2
-        let _ = peer.cmd_tx.send(PeerCommand::SendHashReject(request)).await;
+        let _ = peer.cmd_tx.try_send(PeerCommand::SendHashReject(request));
     }
 
     // ── Smart banning helpers (M25) ────────────────────────────────────
@@ -4424,7 +4527,7 @@ impl TorrentActor {
             .collect();
         for addr in addrs_to_remove {
             if let Some(peer) = self.peers.remove(&addr) {
-                let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+                let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                 post_alert(
                     &self.alert_tx,
                     &self.alert_mask,
@@ -5440,8 +5543,8 @@ impl TorrentActor {
                 if self.end_game.is_active() {
                     self.end_game.peer_disconnected(addr);
                 }
-                // Send shutdown command (peer is still connected, unlike normal disconnect)
-                let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+                // Send shutdown command (non-blocking — peer may have a full channel)
+                let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                 post_alert(
                     &self.alert_tx,
                     &self.alert_mask,
@@ -5565,7 +5668,7 @@ impl TorrentActor {
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(addr);
                     }
-                    let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+                    let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                     post_alert(
                         &self.alert_tx,
                         &self.alert_mask,
@@ -6318,11 +6421,10 @@ impl TorrentActor {
             if let Some(peer) = self.peers.get(&initiator_addr) {
                 let _ = peer
                     .cmd_tx
-                    .send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
                         target,
                         torrent_wire::HolepunchError::NoSelf,
-                    )))
-                    .await;
+                    )));
             }
             return;
         }
@@ -6335,11 +6437,10 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.get(&initiator_addr) {
                     let _ = peer
                         .cmd_tx
-                        .send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                        .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
                             target,
                             torrent_wire::HolepunchError::NotConnected,
-                        )))
-                        .await;
+                        )));
                 }
                 return;
             }
@@ -6351,11 +6452,10 @@ impl TorrentActor {
             if let Some(peer) = self.peers.get(&initiator_addr) {
                 let _ = peer
                     .cmd_tx
-                    .send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
                         target,
                         torrent_wire::HolepunchError::NoSupport,
-                    )))
-                    .await;
+                    )));
             }
             return;
         }
@@ -6363,19 +6463,17 @@ impl TorrentActor {
         // Forward Connect to target: "connect to the initiator"
         let _ = target_peer
             .cmd_tx
-            .send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
+            .try_send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
                 initiator_addr,
-            )))
-            .await;
+            )));
 
         // Forward Connect to initiator: "connect to the target"
         if let Some(initiator) = self.peers.get(&initiator_addr) {
             let _ = initiator
                 .cmd_tx
-                .send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
+                .try_send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
                     target,
-                )))
-                .await;
+                )));
         }
 
         debug!(%initiator_addr, %target, "holepunch: relayed connect to both peers");
@@ -6627,10 +6725,9 @@ impl TorrentActor {
         if let Some(relay) = self.peers.get(&relay_addr) {
             let _ = relay
                 .cmd_tx
-                .send(PeerCommand::SendHolepunch(HolepunchMessage::rendezvous(
+                .try_send(PeerCommand::SendHolepunch(HolepunchMessage::rendezvous(
                     target,
-                )))
-                .await;
+                )));
         }
     }
 }
