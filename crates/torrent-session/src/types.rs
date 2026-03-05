@@ -127,6 +127,14 @@ pub struct TorrentConfig {
     pub max_request_queue_depth: usize,
     /// Request queue time multiplier in seconds for steady-state depth.
     pub request_queue_time: f64,
+    /// Maximum BEP 9 metadata size in bytes accepted from peers.
+    pub max_metadata_size: u64,
+    /// Maximum wire protocol message size in bytes for the codec.
+    pub max_message_size: usize,
+    /// Maximum accepted piece length when adding a torrent.
+    pub max_piece_length: u64,
+    /// Maximum outstanding incoming requests per peer.
+    pub max_outstanding_requests: usize,
 }
 
 impl Default for TorrentConfig {
@@ -187,6 +195,10 @@ impl Default for TorrentConfig {
             initial_queue_depth: 128,
             max_request_queue_depth: 250,
             request_queue_time: 3.0,
+            max_metadata_size: 4 * 1024 * 1024,
+            max_message_size: 16 * 1024 * 1024,
+            max_piece_length: 32 * 1024 * 1024,
+            max_outstanding_requests: 500,
         }
     }
 }
@@ -249,6 +261,10 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             initial_queue_depth: s.initial_queue_depth,
             max_request_queue_depth: s.max_request_queue_depth,
             request_queue_time: s.request_queue_time,
+            max_metadata_size: s.max_metadata_size,
+            max_message_size: s.max_message_size,
+            max_piece_length: s.max_piece_length,
+            max_outstanding_requests: s.max_outstanding_requests,
         }
     }
 }

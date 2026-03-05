@@ -162,6 +162,13 @@ impl TorrentHandle {
             _ => torrent_core::InfoHashes::v1_only(meta.info_hash),
         };
 
+        if meta.info.piece_length > config.max_piece_length {
+            return Err(crate::Error::InvalidSettings(format!(
+                "piece_length {} exceeds max_piece_length {}",
+                meta.info.piece_length, config.max_piece_length
+            )));
+        }
+
         let num_pieces = meta.info.num_pieces() as u32;
         let lengths = Lengths::new(
             meta.info.total_length(),
@@ -3125,14 +3132,23 @@ impl TorrentActor {
                     && let Some(size) = handshake.metadata_size
                     && let Some(ref mut dl) = self.metadata_downloader
                 {
-                    dl.set_total_size(size);
-                    let missing = dl.missing_pieces();
-                    for piece in missing {
-                        if let Some(peer) = self.peers.get(&peer_addr) {
-                            let _ = peer
-                                .cmd_tx
-                                .send(PeerCommand::RequestMetadata { piece })
-                                .await;
+                    if size > self.config.max_metadata_size {
+                        warn!(
+                            size,
+                            max = self.config.max_metadata_size,
+                            %peer_addr,
+                            "peer advertises metadata_size exceeding limit, ignoring"
+                        );
+                    } else {
+                        dl.set_total_size(size);
+                        let missing = dl.missing_pieces();
+                        for piece in missing {
+                            if let Some(peer) = self.peers.get(&peer_addr) {
+                                let _ = peer
+                                    .cmd_tx
+                                    .send(PeerCommand::RequestMetadata { piece })
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -3188,7 +3204,15 @@ impl TorrentActor {
                 length,
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.incoming_requests.push((index, begin, length));
+                    if peer.incoming_requests.len() < self.config.max_outstanding_requests {
+                        peer.incoming_requests.push((index, begin, length));
+                    } else {
+                        debug!(
+                            %peer_addr,
+                            queue = peer.incoming_requests.len(),
+                            "dropping incoming request: max_outstanding_requests exceeded"
+                        );
+                    }
                 }
                 self.serve_incoming_requests().await;
             }
@@ -5669,6 +5693,7 @@ impl TorrentActor {
                 && proxy_config.proxy_peer_connections;
             let anonymous_mode = self.config.anonymous_mode;
             let enable_holepunch = self.config.enable_holepunch;
+            let max_message_size = self.config.max_message_size;
             let peer_connect_timeout = self.config.peer_connect_timeout;
             let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
             let factory = Arc::clone(&self.factory);
@@ -5732,6 +5757,7 @@ impl TorrentActor {
                                 info_bytes.clone(),
                                 Arc::clone(&plugins),
                                 enable_holepunch,
+                                max_message_size,
                             )
                             .await
                             {
@@ -5771,6 +5797,7 @@ impl TorrentActor {
                                                 info_bytes.clone(),
                                                 Arc::clone(&plugins),
                                                 enable_holepunch,
+                                                max_message_size,
                                             )
                                             .await
                                             {
@@ -5879,6 +5906,7 @@ impl TorrentActor {
                                         info_bytes,
                                         plugins,
                                         enable_holepunch,
+                                        max_message_size,
                                     )
                                     .await;
                                 }
@@ -5910,6 +5938,7 @@ impl TorrentActor {
                                 info_bytes.clone(),
                                 Arc::clone(&plugins),
                                 enable_holepunch,
+                                max_message_size,
                             )
                             .await
                             {
@@ -5944,6 +5973,7 @@ impl TorrentActor {
                                                 info_bytes,
                                                 plugins,
                                                 enable_holepunch,
+                                                max_message_size,
                                             )
                                             .await
                                             {
@@ -6130,6 +6160,7 @@ impl TorrentActor {
         let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
         let anonymous_mode = self.config.anonymous_mode;
         let enable_holepunch = self.config.enable_holepunch;
+        let max_message_size = self.config.max_message_size;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let plugins = Arc::clone(&self.plugins);
 
@@ -6151,6 +6182,7 @@ impl TorrentActor {
                 info_bytes,
                 plugins,
                 enable_holepunch,
+                max_message_size,
             )
             .await;
         });
@@ -6317,6 +6349,7 @@ impl TorrentActor {
         let enable_utp = self.config.enable_utp;
         let anonymous_mode = self.config.anonymous_mode;
         let enable_holepunch = self.config.enable_holepunch;
+        let max_message_size = self.config.max_message_size;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let utp_socket = if target.is_ipv6() {
             self.utp_socket_v6.clone()
@@ -6358,6 +6391,7 @@ impl TorrentActor {
                             info_bytes,
                             plugins,
                             enable_holepunch,
+                            max_message_size,
                         )
                         .await;
                         return; // uTP succeeded — don't fall through to TCP
@@ -6400,6 +6434,7 @@ impl TorrentActor {
                         info_bytes,
                         plugins,
                         enable_holepunch,
+                        max_message_size,
                     )
                     .await;
                 }
@@ -6628,6 +6663,10 @@ mod tests {
             initial_queue_depth: 128,
             max_request_queue_depth: 250,
             request_queue_time: 3.0,
+            max_metadata_size: 4 * 1024 * 1024,
+            max_message_size: 16 * 1024 * 1024,
+            max_piece_length: 32 * 1024 * 1024,
+            max_outstanding_requests: 500,
         }
     }
 

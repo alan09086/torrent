@@ -46,6 +46,7 @@ pub(crate) async fn run_peer(
     info_bytes: Option<Bytes>,
     plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
     enable_holepunch: bool,
+    max_message_size: usize,
 ) -> crate::Result<()> {
     use torrent_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -110,7 +111,8 @@ pub(crate) async fn run_peer(
 
     // --- Phase 2: Wrap stream in framed codec ---
     let (reader, writer) = tokio::io::split(stream);
-    let mut framed_read = FramedRead::new(reader, MessageCodec::new());
+    let mut framed_read =
+        FramedRead::new(reader, MessageCodec::new().with_max_size(max_message_size));
     let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
 
     // --- Phase 3: BEP 10 Extension Handshake ---
@@ -1038,6 +1040,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1089,6 +1092,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1140,6 +1144,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1200,6 +1205,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1251,6 +1257,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1311,6 +1318,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1368,6 +1376,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1415,6 +1424,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1501,6 +1511,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1552,6 +1563,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1605,6 +1617,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1671,6 +1684,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1768,6 +1782,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1820,6 +1835,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1869,6 +1885,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1935,6 +1952,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -1980,6 +1998,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2044,6 +2063,7 @@ mod tests {
                 Some(info_bytes),
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2152,6 +2172,7 @@ mod tests {
                 None,  // info_bytes
                 plugins,
                 true, // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2206,6 +2227,7 @@ mod tests {
                 None,  // info_bytes
                 plugins,
                 true, // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2357,6 +2379,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 false,                           // enable_holepunch = DISABLED
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2410,6 +2433,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch = ENABLED
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2463,6 +2487,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });
@@ -2546,6 +2571,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
+                16 * 1024 * 1024,              // max_message_size
             )
             .await
         });

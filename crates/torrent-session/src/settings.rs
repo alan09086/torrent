@@ -187,6 +187,18 @@ fn default_snub_timeout_secs() -> u32 {
 fn default_readahead_pieces() -> u32 {
     8
 }
+fn default_max_metadata_size() -> u64 {
+    4 * 1024 * 1024 // 4 MiB — libtorrent default
+}
+fn default_max_message_size() -> usize {
+    16 * 1024 * 1024 // 16 MiB — matches wire codec constant
+}
+fn default_max_piece_length() -> u64 {
+    32 * 1024 * 1024 // 32 MiB — largest reasonable piece size
+}
+fn default_max_outstanding_requests() -> usize {
+    500
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -606,6 +618,23 @@ pub struct Settings {
     /// Require HTTPS for HTTP tracker announces (UDP trackers are unaffected).
     #[serde(default = "default_true")]
     pub validate_https_trackers: bool,
+    /// Maximum BEP 9 metadata size in bytes that will be accepted from peers.
+    /// Protects against OOM from peers claiming enormous metadata. Default: 4 MiB.
+    #[serde(default = "default_max_metadata_size")]
+    pub max_metadata_size: u64,
+    /// Maximum wire protocol message size in bytes. Messages exceeding this are
+    /// rejected by the codec. Default: 16 MiB.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+    /// Maximum accepted piece length when adding a torrent. Rejects torrents
+    /// with piece sizes above this limit. Default: 32 MiB.
+    #[serde(default = "default_max_piece_length")]
+    pub max_piece_length: u64,
+    /// Maximum outstanding incoming requests per peer. When a peer sends more
+    /// Request messages than this without them being served, excess requests
+    /// are dropped. Default: 500.
+    #[serde(default = "default_max_outstanding_requests")]
+    pub max_outstanding_requests: usize,
     /// Timeout in seconds for outbound TCP peer connections.
     /// Default 5. Set to 0 to use the OS default (~2 minutes on Linux).
     #[serde(default = "default_peer_connect_timeout")]
@@ -757,6 +786,10 @@ impl Default for Settings {
             ssrf_mitigation: true,
             allow_idna: false,
             validate_https_trackers: true,
+            max_metadata_size: 4 * 1024 * 1024,
+            max_message_size: 16 * 1024 * 1024,
+            max_piece_length: 32 * 1024 * 1024,
+            max_outstanding_requests: 500,
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
             // Session Stats (M50)
@@ -1110,6 +1143,10 @@ impl PartialEq for Settings {
             && self.ssrf_mitigation == other.ssrf_mitigation
             && self.allow_idna == other.allow_idna
             && self.validate_https_trackers == other.validate_https_trackers
+            && self.max_metadata_size == other.max_metadata_size
+            && self.max_message_size == other.max_message_size
+            && self.max_piece_length == other.max_piece_length
+            && self.max_outstanding_requests == other.max_outstanding_requests
             && self.peer_connect_timeout == other.peer_connect_timeout
             && self.peer_dscp == other.peer_dscp
             && self.stats_report_interval == other.stats_report_interval

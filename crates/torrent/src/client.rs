@@ -574,6 +574,41 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum BEP 9 metadata size accepted from peers.
+    ///
+    /// Protects against OOM from peers advertising enormous metadata.
+    /// Default: 4 MiB.
+    pub fn max_metadata_size(mut self, bytes: u64) -> Self {
+        self.settings.max_metadata_size = bytes;
+        self
+    }
+
+    /// Set the maximum wire protocol message size.
+    ///
+    /// Messages exceeding this size are rejected by the codec. Default: 16 MiB.
+    pub fn max_message_size(mut self, bytes: usize) -> Self {
+        self.settings.max_message_size = bytes;
+        self
+    }
+
+    /// Set the maximum accepted piece length when adding a torrent.
+    ///
+    /// Torrents with piece sizes above this are rejected at add time.
+    /// Default: 32 MiB.
+    pub fn max_piece_length(mut self, bytes: u64) -> Self {
+        self.settings.max_piece_length = bytes;
+        self
+    }
+
+    /// Set the maximum outstanding incoming requests per peer.
+    ///
+    /// When a peer sends more Request messages than this without them being
+    /// served, excess requests are silently dropped. Default: 500.
+    pub fn max_outstanding_requests(mut self, n: usize) -> Self {
+        self.settings.max_outstanding_requests = n;
+        self
+    }
+
     /// Enable or disable SSRF mitigation for tracker and web seed URLs.
     ///
     /// When enabled (default), localhost tracker paths are restricted to `/announce`,
