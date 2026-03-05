@@ -15,8 +15,10 @@ All notable changes to this project will be documented in this file.
 - **DHT stalled lookups** — `get_peers` queries now advance on timeout instead of stalling; query expiry logging added
 - **DHT BEP42 node sorting** — routing table now sorts by XOR distance for correct closest-node selection; all-K parallel `get_peers` queries for faster peer discovery
 - **DHT timeout** — reduced from 10s to 5s for faster peer discovery
+- **Shutdown hang** — `shutdown_peers()` converted peer shutdown from blocking `.send().await` to `try_send()`; `announce_stopped()` wrapped in 3s timeout; `TorrentHandle::shutdown()` and `SessionHandle::shutdown()` wrapped in 5s/10s timeouts
 
 ### Changed
+- **Parallel tracker announces** — all tracker announces now fire concurrently via `tokio::task::JoinSet` instead of sequentially. Time-to-first-piece reduced from `sum(tracker_timeouts)` to `max(tracker_timeouts)`
 - **Fixed permit pipeline model** — replaced EWMA-computed queue depth with fixed 128 permits (rqbit model). `queue_depth()` is now constant — zero-latency scheduling with no negative feedback loops
 - **End-game pipelining** — end-game mode now sends up to 4 requests per peer (was 1), eliminating the 128x pipeline depth reduction that caused last-3% slowdowns
 - **Reactive end-game cancel re-requesting** — when a block is received and duplicate requests are cancelled, freed peers immediately get new end-game blocks instead of waiting for the next tick
