@@ -12,6 +12,10 @@ pub struct Lengths {
     piece_length: u64,
     /// Size of each chunk/block in bytes (typically 16384).
     chunk_size: u32,
+    /// Pre-computed number of pieces.
+    num_pieces: u32,
+    /// Pre-computed size of the last piece.
+    last_piece_size: u32,
 }
 
 /// Default chunk size (16 KiB) — standard in BitTorrent.
@@ -25,10 +29,30 @@ impl Lengths {
     pub fn new(total_length: u64, piece_length: u64, chunk_size: u32) -> Self {
         assert!(piece_length > 0, "piece_length must be > 0");
         assert!(chunk_size > 0, "chunk_size must be > 0");
+
+        let num_pieces = if total_length == 0 {
+            0
+        } else {
+            total_length.div_ceil(piece_length) as u32
+        };
+
+        let last_piece_size = if num_pieces == 0 {
+            0
+        } else {
+            let remainder = total_length % piece_length;
+            if remainder == 0 {
+                piece_length as u32
+            } else {
+                remainder as u32
+            }
+        };
+
         Lengths {
             total_length,
             piece_length,
             chunk_size,
+            num_pieces,
+            last_piece_size,
         }
     }
 
@@ -49,26 +73,15 @@ impl Lengths {
 
     /// Total number of pieces.
     pub fn num_pieces(&self) -> u32 {
-        if self.total_length == 0 {
-            return 0;
-        }
-        self.total_length.div_ceil(self.piece_length) as u32
+        self.num_pieces
     }
 
     /// Actual length of a specific piece (last piece may be shorter).
     pub fn piece_size(&self, piece_index: u32) -> u32 {
-        let num = self.num_pieces();
-        if piece_index >= num {
-            return 0;
-        }
-        if piece_index == num - 1 {
-            // Last piece
-            let remainder = self.total_length % self.piece_length;
-            if remainder == 0 {
-                self.piece_length as u32
-            } else {
-                remainder as u32
-            }
+        if piece_index >= self.num_pieces {
+            0
+        } else if piece_index == self.num_pieces - 1 {
+            self.last_piece_size
         } else {
             self.piece_length as u32
         }
