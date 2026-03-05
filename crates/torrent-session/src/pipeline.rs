@@ -1,91 +1,74 @@
-//! Per-peer dynamic request queue sizing with slow-start.
+//! Per-peer request pipeline with fixed permit-based queue depth.
 //!
-//! Each peer connection maintains a `PeerPipelineState` that adaptively sizes
-//! its request queue. New connections start in slow-start mode (growing by one
-//! per received block), then switch to a steady-state formula based on EWMA
-//! throughput once the transfer rate plateaus.
+//! Modelled after rqbit's semaphore approach: each peer gets a fixed number of
+//! request slots (default 128). Slots are consumed when requests are sent and
+//! replenished when blocks arrive. No EWMA formula, no slow-start — the queue
+//! depth is constant and immediately responsive.
+//!
+//! The pipeline tick is retained for throughput statistics and snub detection,
+//! but no longer drives depth decisions.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use torrent_core::DEFAULT_CHUNK_SIZE;
-
-/// Default initial per-peer request queue depth.
+/// Default per-peer request queue depth (matches rqbit's 128 semaphore permits).
 ///
-/// Starting at 128 lets peers reach full throughput immediately instead of
-/// slowly growing from 2 during slow-start (which requires ~126 blocks / ~2 MB
-/// before saturating the link). rqbit uses 128 semaphore permits as well.
-const INITIAL_QUEUE_DEPTH: usize = 128;
+/// 128 × 16 KiB = 2 MiB in flight — enough to saturate a 100 Mbps link at
+/// 100 ms RTT. See <https://www.desmos.com/calculator/x3szur87ps>.
+const DEFAULT_QUEUE_DEPTH: usize = 128;
 
-/// Minimum queue depth floor. Prevents EWMA-driven depth from spiralling
-/// to near-zero during brief throughput dips.
-const MIN_QUEUE_DEPTH: usize = 64;
-
-/// Per-peer dynamic request queue sizing with slow-start.
+/// Per-peer request pipeline state.
 ///
-/// Tracks in-flight requests, measures throughput via EWMA, and adjusts the
-/// number of concurrent requests to keep the peer's connection saturated
-/// without over-requesting.
+/// Tracks in-flight requests and measures throughput. Queue depth is fixed
+/// at construction (like rqbit's semaphore permits) — no adaptive resizing.
 pub(crate) struct PeerPipelineState {
-    /// Exponentially weighted moving average of bytes/sec throughput.
-    ewma_rate_bytes_sec: f64,
-    /// Current number of concurrent requests to maintain.
-    queue_depth: usize,
-    /// Whether we are still in slow-start phase.
-    in_slow_start: bool,
-    /// Bytes received in the current second.
+    /// Bytes received in the current tick window (for throughput stats).
     last_second_bytes: u64,
-    /// Bytes received in the previous second (for plateau detection).
-    prev_second_bytes: u64,
+    /// EWMA throughput estimate in bytes/sec (for reporting only).
+    ewma_rate_bytes_sec: f64,
     /// When the last tick occurred.
     last_tick: Instant,
     /// Map of (piece, begin) -> request send time for RTT tracking.
     request_times: HashMap<(u32, u32), Instant>,
+    /// Fixed queue depth (number of concurrent request slots).
+    queue_depth: usize,
     /// Hard ceiling on queue depth.
     max_queue_depth: usize,
-    /// Target request queue time in seconds (how far ahead to request).
-    request_queue_time: f64,
-    /// Whether slow-start has ever been exited (prevents re-entry detection issues).
-    slow_start_exited: bool,
 }
 
-#[allow(dead_code)] // consumed by TorrentActor integration (Task 4)
+#[allow(dead_code)]
 impl PeerPipelineState {
-    /// Create a new pipeline state starting in slow-start.
+    /// Create a new pipeline state with fixed queue depth.
     ///
-    /// `initial_queue_depth` sets the starting queue depth (default: [`INITIAL_QUEUE_DEPTH`]).
-    /// The value is clamped to `[1, max_queue_depth]`.
+    /// `max_queue_depth` is the hard ceiling. `initial_queue_depth` sets the
+    /// starting depth (clamped to `[1, max_queue_depth]`).
     pub fn new(
         max_queue_depth: usize,
-        request_queue_time: f64,
+        _request_queue_time: f64, // kept for API compat, unused
         initial_queue_depth: usize,
     ) -> Self {
         let depth = initial_queue_depth.clamp(1, max_queue_depth);
         Self {
-            ewma_rate_bytes_sec: 0.0,
-            queue_depth: depth,
-            in_slow_start: true,
             last_second_bytes: 0,
-            prev_second_bytes: 0,
+            ewma_rate_bytes_sec: 0.0,
             last_tick: Instant::now(),
             request_times: HashMap::new(),
+            queue_depth: depth,
             max_queue_depth,
-            request_queue_time,
-            slow_start_exited: false,
         }
     }
 
-    /// Current number of concurrent requests to maintain.
+    /// Current number of concurrent request slots available.
     pub fn queue_depth(&self) -> usize {
         self.queue_depth
     }
 
-    /// Whether we are still in slow-start phase.
+    /// Whether we are in slow-start phase (always false — no slow-start).
     pub fn in_slow_start(&self) -> bool {
-        self.in_slow_start
+        false
     }
 
-    /// Current EWMA throughput estimate in bytes/sec.
+    /// Current EWMA throughput estimate in bytes/sec (for stats/reporting).
     pub fn ewma_rate(&self) -> f64 {
         self.ewma_rate_bytes_sec
     }
@@ -95,9 +78,10 @@ impl PeerPipelineState {
         self.request_times.insert((piece, begin), now);
     }
 
-    /// Record that a block was received, returning the RTT if the request was tracked.
+    /// Record that a block was received, returning the RTT if tracked.
     ///
-    /// In slow-start, each received block grows the queue depth by one (up to max).
+    /// Unlike the old EWMA model, queue depth is NOT adjusted here — it
+    /// stays fixed. Throughput bytes are accumulated for EWMA stats.
     pub fn block_received(
         &mut self,
         piece: u32,
@@ -110,69 +94,31 @@ impl PeerPipelineState {
             .remove(&(piece, begin))
             .map(|sent| now.duration_since(sent));
 
-        if self.in_slow_start {
-            self.queue_depth = (self.queue_depth + 1).min(self.max_queue_depth);
-        }
-
         self.last_second_bytes += length as u64;
 
         rtt
     }
 
-    /// Called once per second to update EWMA and check for slow-start exit.
+    /// Called once per second to update throughput stats.
+    ///
+    /// No longer drives queue depth decisions — kept for EWMA reporting
+    /// and snub detection integration.
     pub fn tick(&mut self) {
         const ALPHA: f64 = 0.3;
-
-        // EWMA update
         self.ewma_rate_bytes_sec =
             ALPHA * self.last_second_bytes as f64 + (1.0 - ALPHA) * self.ewma_rate_bytes_sec;
-
-        // Slow-start exit check: throughput plateau (delta < 10 KB/s between seconds)
-        if self.in_slow_start {
-            let delta =
-                (self.last_second_bytes as i64 - self.prev_second_bytes as i64).unsigned_abs();
-            if delta < 10_240 && self.prev_second_bytes > 0 {
-                self.in_slow_start = false;
-                self.slow_start_exited = true;
-            }
-        }
-
-        // In steady state, recompute queue depth from EWMA
-        if !self.in_slow_start && self.slow_start_exited {
-            self.recompute_queue_depth();
-        }
-
-        // Shift the per-second counters
-        self.prev_second_bytes = self.last_second_bytes;
         self.last_second_bytes = 0;
         self.last_tick = Instant::now();
     }
 
-    /// Recompute queue depth from EWMA rate and target queue time.
-    ///
-    /// `depth = ewma_rate * request_queue_time / chunk_size`, clamped to
-    /// [`MIN_QUEUE_DEPTH`, `max_queue_depth`].
-    fn recompute_queue_depth(&mut self) {
-        let depth = (self.ewma_rate_bytes_sec * self.request_queue_time / DEFAULT_CHUNK_SIZE as f64)
-            as usize;
-        let floor = MIN_QUEUE_DEPTH.min(self.max_queue_depth);
-        self.queue_depth = depth.clamp(floor, self.max_queue_depth);
-    }
-
     /// Override the queue depth directly (e.g. for snubbed peers).
-    ///
-    /// Exits slow-start and marks it as having been exited.
     pub fn set_queue_depth_override(&mut self, depth: usize) {
         self.queue_depth = depth;
-        self.in_slow_start = false;
-        self.slow_start_exited = true;
     }
 
-    /// Reset to slow-start state (e.g. after unchoke or reconnect).
+    /// Reset to default queue depth (e.g. after un-snub or reconnect).
     pub fn reset_to_slow_start(&mut self) {
-        self.queue_depth = INITIAL_QUEUE_DEPTH.min(self.max_queue_depth);
-        self.in_slow_start = true;
-        self.slow_start_exited = false;
+        self.queue_depth = DEFAULT_QUEUE_DEPTH.min(self.max_queue_depth);
         self.ewma_rate_bytes_sec = 0.0;
     }
 
@@ -209,77 +155,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slow_start_grows_and_exits_on_plateau() {
-        let mut state = PeerPipelineState::new(250, 3.0, 128);
-        assert!(state.in_slow_start());
+    fn fixed_queue_depth() {
+        let state = PeerPipelineState::new(250, 3.0, 128);
         assert_eq!(state.queue_depth(), 128);
-
-        let now = Instant::now();
-
-        // Simulate receiving several blocks — each should increment queue_depth by 1
-        for i in 0..10 {
-            state.request_sent(0, i * DEFAULT_CHUNK_SIZE, now);
-            state.block_received(0, i * DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_SIZE, now);
-        }
-        // Started at 128, received 10 blocks -> 128 + 10 = 138
-        assert_eq!(state.queue_depth(), 138);
-        assert!(state.in_slow_start());
-
-        // Simulate two ticks with plateaued throughput (same bytes, delta < 10KB)
-        // First tick: set a baseline
-        state.last_second_bytes = 100_000;
-        state.prev_second_bytes = 0; // first tick, prev is 0 so won't trigger exit yet
-        state.tick();
-        // After first tick, prev_second_bytes was 0, so the plateau check requires prev > 0.
-        // Now prev_second_bytes = 100_000, last_second_bytes = 0 (reset by tick).
-
-        // Second tick: same throughput — delta = 0, should exit slow-start
-        state.last_second_bytes = 100_000;
-        state.tick();
-
         assert!(!state.in_slow_start());
     }
 
     #[test]
-    fn steady_state_formula() {
-        let mut state = PeerPipelineState::new(500, 3.0, 128);
+    fn block_received_does_not_change_depth() {
+        let mut state = PeerPipelineState::new(250, 3.0, 128);
+        let now = Instant::now();
 
-        // Force out of slow-start
-        state.in_slow_start = false;
-        state.slow_start_exited = true;
-
-        // Set EWMA to 1 MB/s — produces depth = 1048576 * 3.0 / 16384 = 192
-        state.ewma_rate_bytes_sec = 1024.0 * 1024.0;
-
-        state.recompute_queue_depth();
-
-        let expected = (1024.0 * 1024.0 * 3.0 / DEFAULT_CHUNK_SIZE as f64) as usize;
-        assert_eq!(expected, 192);
-        assert_eq!(state.queue_depth(), expected);
+        for i in 0..20 {
+            state.request_sent(0, i * 16384, now);
+            state.block_received(0, i * 16384, 16384, now);
+        }
+        // Depth stays fixed at 128 — no slow-start growth
+        assert_eq!(state.queue_depth(), 128);
     }
 
     #[test]
-    fn queue_depth_clamped() {
-        // Very low EWMA -> floor of MIN_QUEUE_DEPTH (64)
+    fn tick_updates_ewma_only() {
         let mut state = PeerPipelineState::new(250, 3.0, 128);
-        state.in_slow_start = false;
-        state.slow_start_exited = true;
-        state.ewma_rate_bytes_sec = 100.0; // ~100 B/s -> depth ≈ 0 -> clamped to 64
-        state.recompute_queue_depth();
-        assert_eq!(state.queue_depth(), 64);
 
-        // Very high EWMA -> ceiling of max_queue_depth
-        state.ewma_rate_bytes_sec = 10.0 * 1024.0 * 1024.0; // 10 MB/s
-        state.recompute_queue_depth();
-        assert_eq!(state.queue_depth(), 250);
+        // Simulate 1 MB/s throughput for two ticks
+        state.last_second_bytes = 1_048_576;
+        state.tick();
+        assert!(state.ewma_rate() > 0.0);
+        // Depth unchanged
+        assert_eq!(state.queue_depth(), 128);
 
-        // Small max_queue_depth is respected
-        let mut state2 = PeerPipelineState::new(5, 3.0, 5);
-        state2.in_slow_start = false;
-        state2.slow_start_exited = true;
-        state2.ewma_rate_bytes_sec = 10.0 * 1024.0 * 1024.0; // 10 MB/s
-        state2.recompute_queue_depth();
-        assert_eq!(state2.queue_depth(), 5);
+        state.last_second_bytes = 1_048_576;
+        state.tick();
+        // Still 128 — no formula recomputation
+        assert_eq!(state.queue_depth(), 128);
+    }
+
+    #[test]
+    fn snub_override_and_reset() {
+        let mut state = PeerPipelineState::new(250, 3.0, 128);
+
+        // Snub: force depth to 1
+        state.set_queue_depth_override(1);
+        assert_eq!(state.queue_depth(), 1);
+
+        // Un-snub: reset to default
+        state.reset_to_slow_start();
+        assert_eq!(state.queue_depth(), 128);
+    }
+
+    #[test]
+    fn queue_depth_clamped_to_max() {
+        let state = PeerPipelineState::new(5, 3.0, 128);
+        // initial_queue_depth clamped to max
+        assert_eq!(state.queue_depth(), 5);
     }
 
     #[test]
@@ -290,45 +219,25 @@ mod tests {
         let t1 = t0 + Duration::from_millis(100);
         let t2 = t0 + Duration::from_millis(200);
 
-        // Send 3 requests at different times
         state.request_sent(0, 0, t0);
         state.request_sent(1, 0, t1);
         state.request_sent(2, 0, t2);
 
-        // most_recent_request should return the t2 one
         let (piece, begin, instant) = state.most_recent_request().unwrap();
         assert_eq!(piece, 2);
         assert_eq!(begin, 0);
         assert_eq!(instant, t2);
 
-        // At t0+150ms with timeout=100ms -> only request at t0 has timed out
         let check_time = t0 + Duration::from_millis(150);
         let timed_out = state.timed_out_blocks(Duration::from_millis(100), check_time);
         assert_eq!(timed_out.len(), 1);
         assert!(timed_out.contains(&(0, 0)));
 
-        // At t0+300ms with timeout=100ms -> requests at t0 and t1 have timed out
         let check_time2 = t0 + Duration::from_millis(300);
         let mut timed_out2 = state.timed_out_blocks(Duration::from_millis(100), check_time2);
         timed_out2.sort();
         assert_eq!(timed_out2.len(), 2);
         assert!(timed_out2.contains(&(0, 0)));
         assert!(timed_out2.contains(&(1, 0)));
-    }
-
-    #[test]
-    fn queue_depth_floor_prevents_ewma_spiral() {
-        let mut p = PeerPipelineState::new(250, 3.0, 128);
-        // Simulate near-zero EWMA rate
-        p.in_slow_start = false;
-        p.slow_start_exited = true;
-        p.ewma_rate_bytes_sec = 100.0; // ~100 bytes/sec, would compute depth ~0
-        p.recompute_queue_depth();
-        // Floor should prevent depth from dropping below MIN_QUEUE_DEPTH (64)
-        assert!(
-            p.queue_depth() >= 64,
-            "depth {} should be >= 64",
-            p.queue_depth()
-        );
     }
 }
