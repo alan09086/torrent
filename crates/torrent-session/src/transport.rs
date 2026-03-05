@@ -23,11 +23,14 @@ use tokio::net::TcpStream;
 // ---------------------------------------------------------------------------
 
 /// Boxed future returned by [`TransportListener::accept`].
-type AcceptFuture<'a> = Pin<Box<dyn Future<Output = io::Result<(BoxedStream, SocketAddr)>> + Send + 'a>>;
+type AcceptFuture<'a> =
+    Pin<Box<dyn Future<Output = io::Result<(BoxedStream, SocketAddr)>> + Send + 'a>>;
 
 /// Closure type for [`NetworkFactory`]'s bind operation.
 type BindFn = Box<
-    dyn Fn(SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn TransportListener>>> + Send>>
+    dyn Fn(
+            SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = io::Result<Box<dyn TransportListener>>> + Send>>
         + Send
         + Sync,
 >;
@@ -65,7 +68,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> StreamRw for T {}
 impl BoxedStream {
     /// Wrap any async read/write stream into a [`BoxedStream`].
     pub fn new<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S) -> Self {
-        Self { inner: Box::pin(stream) }
+        Self {
+            inner: Box::pin(stream),
+        }
     }
 }
 
@@ -158,7 +163,11 @@ impl NetworkFactory {
     ///
     /// This is the primary constructor for simulation backends.
     pub fn new(bind_tcp: BindFn, connect_tcp: ConnectFn, is_simulated: bool) -> Self {
-        Self { bind_tcp, connect_tcp, is_simulated }
+        Self {
+            bind_tcp,
+            connect_tcp,
+            is_simulated,
+        }
     }
 
     /// Create a factory that uses real tokio TCP networking.
@@ -232,15 +241,16 @@ mod tests {
         let mut listener = factory.bind_tcp(addr).await.unwrap();
         let local = listener.local_addr().unwrap();
 
-        let accept_handle = tokio::spawn(async move {
-            listener.accept().await.unwrap()
-        });
+        let accept_handle = tokio::spawn(async move { listener.accept().await.unwrap() });
 
         let mut client = factory.connect_tcp(local).await.unwrap();
         client.write_all(b"hello").await.unwrap();
 
         let (mut server_stream, peer_addr) = accept_handle.await.unwrap();
-        assert_eq!(peer_addr.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(
+            peer_addr.ip(),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
 
         let mut buf = [0u8; 5];
         server_stream.read_exact(&mut buf).await.unwrap();
@@ -251,14 +261,10 @@ mod tests {
     fn custom_factory_is_simulated() {
         let factory = NetworkFactory::new(
             Box::new(|_addr| {
-                Box::pin(async move {
-                    Err(io::Error::new(io::ErrorKind::Unsupported, "stub"))
-                })
+                Box::pin(async move { Err(io::Error::new(io::ErrorKind::Unsupported, "stub")) })
             }),
             Box::new(|_addr| {
-                Box::pin(async move {
-                    Err(io::Error::new(io::ErrorKind::Unsupported, "stub"))
-                })
+                Box::pin(async move { Err(io::Error::new(io::ErrorKind::Unsupported, "stub")) })
             }),
             true,
         );

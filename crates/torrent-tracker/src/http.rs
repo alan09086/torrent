@@ -73,8 +73,7 @@ impl HttpTracker {
     /// When `proxy_url` is provided (e.g. `"socks5://host:port"`), all
     /// HTTP requests are routed through it.
     pub fn with_proxy(proxy_url: Option<&str>) -> Self {
-        let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.60.0");
+        let mut builder = reqwest::Client::builder().user_agent("Ferrite/0.60.0");
         if let Some(url) = proxy_url
             && let Ok(proxy) = reqwest::Proxy::all(url)
         {
@@ -95,8 +94,7 @@ impl HttpTracker {
         validate_tls: bool,
         ssrf_mitigation: bool,
     ) -> Self {
-        let mut builder = reqwest::Client::builder()
-            .user_agent("Ferrite/0.60.0");
+        let mut builder = reqwest::Client::builder().user_agent("Ferrite/0.60.0");
 
         if ssrf_mitigation {
             let policy = reqwest::redirect::Policy::custom(|attempt| {
@@ -153,10 +151,7 @@ impl HttpTracker {
     }
 
     /// Build the announce URL with query parameters.
-    pub fn build_announce_url(
-        base_url: &str,
-        req: &AnnounceRequest,
-    ) -> Result<String> {
+    pub fn build_announce_url(base_url: &str, req: &AnnounceRequest) -> Result<String> {
         let mut url = base_url.to_string();
 
         // URL-encode the info_hash and peer_id as raw bytes
@@ -193,13 +188,7 @@ impl HttpTracker {
     ) -> Result<HttpAnnounceResponse> {
         let url = Self::build_announce_url(base_url, req)?;
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await?
-            .bytes()
-            .await?;
+        let response = self.client.get(&url).send().await?.bytes().await?;
 
         let raw: RawHttpResponse = torrent_bencode::from_bytes(&response)?;
 
@@ -257,20 +246,16 @@ impl HttpTracker {
     ) -> Result<HttpScrapeResponse> {
         let url = Self::build_scrape_url(announce_url, info_hashes)?;
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await?
-            .bytes()
-            .await?;
+        let response = self.client.get(&url).send().await?.bytes().await?;
 
         // Parse using BencodeValue since keys are raw 20-byte hashes
         let value: torrent_bencode::BencodeValue = torrent_bencode::from_bytes(&response)?;
-        let root = value.as_dict()
+        let root = value
+            .as_dict()
             .ok_or_else(|| Error::InvalidResponse("scrape response is not a dict".into()))?;
 
-        let files_val = root.get(b"files".as_slice())
+        let files_val = root
+            .get(b"files".as_slice())
             .and_then(|v| v.as_dict())
             .ok_or_else(|| Error::InvalidResponse("scrape response missing 'files' dict".into()))?;
 
@@ -279,22 +264,34 @@ impl HttpTracker {
             if key.len() != 20 {
                 continue;
             }
-            let hash = Id20::from_bytes(key)
-                .map_err(|_| Error::InvalidResponse("invalid info_hash in scrape response".into()))?;
-            let entry = val.as_dict()
+            let hash = Id20::from_bytes(key).map_err(|_| {
+                Error::InvalidResponse("invalid info_hash in scrape response".into())
+            })?;
+            let entry = val
+                .as_dict()
                 .ok_or_else(|| Error::InvalidResponse("scrape file entry is not a dict".into()))?;
 
-            let complete = entry.get(b"complete".as_slice())
+            let complete = entry
+                .get(b"complete".as_slice())
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as u32;
-            let incomplete = entry.get(b"incomplete".as_slice())
+            let incomplete = entry
+                .get(b"incomplete".as_slice())
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as u32;
-            let downloaded = entry.get(b"downloaded".as_slice())
+            let downloaded = entry
+                .get(b"downloaded".as_slice())
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as u32;
 
-            files.insert(hash, ScrapeInfo { complete, incomplete, downloaded });
+            files.insert(
+                hash,
+                ScrapeInfo {
+                    complete,
+                    incomplete,
+                    downloaded,
+                },
+            );
         }
 
         Ok(HttpScrapeResponse { files })
@@ -347,11 +344,8 @@ mod tests {
             compact: true,
         };
 
-        let url = HttpTracker::build_announce_url(
-            "http://tracker.example.com/announce",
-            &req,
-        )
-        .unwrap();
+        let url =
+            HttpTracker::build_announce_url("http://tracker.example.com/announce", &req).unwrap();
 
         assert!(url.starts_with("http://tracker.example.com/announce?"));
         assert!(url.contains("info_hash="));
@@ -364,20 +358,15 @@ mod tests {
     #[test]
     fn build_scrape_url_basic() {
         let hash = Id20::ZERO;
-        let url = HttpTracker::build_scrape_url(
-            "http://tracker.example.com/announce",
-            &[hash],
-        ).unwrap();
+        let url =
+            HttpTracker::build_scrape_url("http://tracker.example.com/announce", &[hash]).unwrap();
         assert!(url.starts_with("http://tracker.example.com/scrape?info_hash="));
     }
 
     #[test]
     fn build_scrape_url_no_announce_in_url() {
         let hash = Id20::ZERO;
-        let result = HttpTracker::build_scrape_url(
-            "http://tracker.example.com/track",
-            &[hash],
-        );
+        let result = HttpTracker::build_scrape_url("http://tracker.example.com/track", &[hash]);
         assert!(result.is_err());
     }
 
@@ -430,7 +419,9 @@ mod tests {
         assert_eq!(result[0].to_string(), "192.168.1.1:6881");
         assert_eq!(
             result[1],
-            "[2001:db8::1]:8080".parse::<std::net::SocketAddr>().unwrap()
+            "[2001:db8::1]:8080"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
         );
     }
 

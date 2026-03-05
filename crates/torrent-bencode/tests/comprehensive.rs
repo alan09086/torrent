@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use torrent_bencode::{from_bytes, to_bytes, find_dict_key_span, BencodeValue};
 use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
+use torrent_bencode::{BencodeValue, find_dict_key_span, from_bytes, to_bytes};
 
 // ============================================================
 // Round-trip tests
@@ -103,7 +103,14 @@ fn round_trip_struct() {
     let as_value: BencodeValue = from_bytes(&encoded).unwrap();
     if let BencodeValue::Dict(map) = &as_value {
         let keys: Vec<&[u8]> = map.keys().map(|k| k.as_slice()).collect();
-        assert_eq!(keys, vec![b"length".as_slice(), b"name".as_slice(), b"piece length".as_slice()]);
+        assert_eq!(
+            keys,
+            vec![
+                b"length".as_slice(),
+                b"name".as_slice(),
+                b"piece length".as_slice()
+            ]
+        );
     } else {
         panic!("expected dict");
     }
@@ -296,9 +303,9 @@ fn deeply_nested_lists() {
     let val: BencodeValue = from_bytes(encoded).unwrap();
     assert_eq!(
         val,
-        BencodeValue::List(vec![BencodeValue::List(vec![BencodeValue::List(
-            vec![BencodeValue::Integer(1)]
-        )])])
+        BencodeValue::List(vec![BencodeValue::List(vec![BencodeValue::List(vec![
+            BencodeValue::Integer(1)
+        ])])])
     );
 
     // Round-trip
@@ -357,7 +364,12 @@ fn unknown_fields_ignored() {
 
     let data = b"d5:extrai99e4:name4:teste";
     let val: Minimal = from_bytes(data).unwrap();
-    assert_eq!(val, Minimal { name: "test".into() });
+    assert_eq!(
+        val,
+        Minimal {
+            name: "test".into()
+        }
+    );
 }
 
 // ============================================================

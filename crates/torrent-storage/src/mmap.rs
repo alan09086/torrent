@@ -6,10 +6,10 @@ use memmap2::MmapMut;
 
 use torrent_core::Lengths;
 
+use crate::Result;
 use crate::error::Error;
 use crate::file_map::FileMap;
 use crate::storage::TorrentStorage;
-use crate::Result;
 
 /// Memory-mapped file storage backend.
 ///
@@ -79,7 +79,9 @@ impl MmapStorage {
 
 impl TorrentStorage for MmapStorage {
     fn write_chunk(&self, piece: u32, begin: u32, data: &[u8]) -> Result<()> {
-        let segments = self.file_map.chunk_segments(piece, begin, data.len() as u32);
+        let segments = self
+            .file_map
+            .chunk_segments(piece, begin, data.len() as u32);
         let mut written = 0usize;
 
         for seg in &segments {
@@ -124,8 +126,8 @@ impl TorrentStorage for MmapStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torrent_core::{Id20, Lengths};
     use std::path::PathBuf;
+    use torrent_core::{Id20, Lengths};
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()

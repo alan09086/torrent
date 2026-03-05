@@ -110,7 +110,9 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
-        Err(Error::Custom("bencode does not support unit structs".into()))
+        Err(Error::Custom(
+            "bencode does not support unit structs".into(),
+        ))
     }
 
     fn serialize_unit_variant(
@@ -447,10 +449,7 @@ mod tests {
             zebra: i64,
             alpha: i64,
         }
-        let val = Test {
-            zebra: 2,
-            alpha: 1,
-        };
+        let val = Test { zebra: 2, alpha: 1 };
         // Keys must be sorted: alpha before zebra
         assert_eq!(to_bytes(&val), b"d5:alphai1e5:zebrai2ee");
     }

@@ -492,7 +492,10 @@ impl ClientBuilder {
     }
 
     /// Set the seed-mode choking algorithm.
-    pub fn seed_choking_algorithm(mut self, algorithm: torrent_session::SeedChokingAlgorithm) -> Self {
+    pub fn seed_choking_algorithm(
+        mut self,
+        algorithm: torrent_session::SeedChokingAlgorithm,
+    ) -> Self {
         self.settings.seed_choking_algorithm = algorithm;
         self
     }
@@ -651,8 +654,11 @@ impl ClientBuilder {
         match self.backend {
             Some(backend) => {
                 torrent_session::SessionHandle::start_with_plugins_and_backend(
-                    self.settings, plugins, backend,
-                ).await
+                    self.settings,
+                    plugins,
+                    backend,
+                )
+                .await
             }
             None => {
                 torrent_session::SessionHandle::start_with_plugins(self.settings, plugins).await
@@ -752,12 +758,8 @@ impl AddTorrentParams {
         session: &torrent_session::SessionHandle,
     ) -> crate::Result<torrent_core::Id20> {
         match self.source {
-            TorrentSource::Meta(meta) => {
-                Ok(session.add_torrent(*meta, self.storage).await?)
-            }
-            TorrentSource::Magnet(magnet) => {
-                Ok(session.add_magnet(magnet).await?)
-            }
+            TorrentSource::Meta(meta) => Ok(session.add_torrent(*meta, self.storage).await?),
+            TorrentSource::Magnet(magnet) => Ok(session.add_magnet(magnet).await?),
             TorrentSource::File(path) => {
                 let data = std::fs::read(&path)?;
                 let meta = torrent_core::torrent_from_bytes_any(&data)?;
@@ -865,7 +867,10 @@ mod tests {
             .apply_ip_filter_to_trackers(false)
             .into_settings();
 
-        assert_eq!(config.proxy.proxy_type, torrent_session::ProxyType::Socks5Password);
+        assert_eq!(
+            config.proxy.proxy_type,
+            torrent_session::ProxyType::Socks5Password
+        );
         assert_eq!(config.proxy.hostname, "localhost");
         assert_eq!(config.proxy.port, 9050);
         assert!(config.force_proxy);
@@ -1006,8 +1011,7 @@ mod tests {
     fn client_builder_disk_io_backend() {
         let backend: Arc<dyn torrent_session::DiskIoBackend> =
             Arc::new(torrent_session::DisabledDiskIo);
-        let builder = ClientBuilder::new()
-            .disk_io_backend(backend);
+        let builder = ClientBuilder::new().disk_io_backend(backend);
         assert!(builder.backend.is_some());
     }
 
@@ -1053,7 +1057,9 @@ mod tests {
 
     #[test]
     fn add_torrent_params_from_magnet() {
-        let magnet = Magnet::parse("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test").unwrap();
+        let magnet =
+            Magnet::parse("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+                .unwrap();
         let params = AddTorrentParams::from_magnet(magnet);
         assert!(matches!(params.source, TorrentSource::Magnet(_)));
         assert!(params.download_dir.is_none());
@@ -1062,10 +1068,13 @@ mod tests {
 
     #[test]
     fn add_torrent_params_from_file() {
-        let params = AddTorrentParams::from_file("/tmp/test.torrent")
-            .download_dir("/tmp/downloads");
+        let params =
+            AddTorrentParams::from_file("/tmp/test.torrent").download_dir("/tmp/downloads");
         assert!(matches!(params.source, TorrentSource::File(_)));
-        assert_eq!(params.download_dir.as_deref(), Some(std::path::Path::new("/tmp/downloads")));
+        assert_eq!(
+            params.download_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/downloads"))
+        );
     }
 
     #[test]
@@ -1084,13 +1093,18 @@ mod tests {
             .await
             .unwrap();
 
-        let magnet = Magnet::parse("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test").unwrap();
+        let magnet =
+            Magnet::parse("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+                .unwrap();
         let info_hash = AddTorrentParams::from_magnet(magnet)
             .add_to(&session)
             .await
             .unwrap();
 
-        assert_eq!(info_hash.to_hex(), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(
+            info_hash.to_hex(),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
         session.shutdown().await.unwrap();
     }
 

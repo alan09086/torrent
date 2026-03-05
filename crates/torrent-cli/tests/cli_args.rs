@@ -60,7 +60,10 @@ fn test_info_help() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lower = stdout.to_lowercase();
-    assert!(lower.contains("path"), "expected 'path' in info help, got: {stdout}");
+    assert!(
+        lower.contains("path"),
+        "expected 'path' in info help, got: {stdout}"
+    );
 }
 
 #[test]
@@ -99,7 +102,11 @@ fn test_create_and_info_roundtrip() {
         ])
         .output()
         .expect("failed to run torrent create");
-    assert!(output.status.success(), "create failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(torrent_path.exists());
 
     // Info on created torrent
@@ -107,10 +114,20 @@ fn test_create_and_info_roundtrip() {
         .args(["info", torrent_path.to_str().unwrap()])
         .output()
         .expect("failed to run torrent info");
-    assert!(output.status.success(), "info failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("test.txt"), "expected filename in info output, got: {stdout}");
-    assert!(stdout.contains("tracker.example.com"), "expected tracker in info output, got: {stdout}");
+    assert!(
+        stdout.contains("test.txt"),
+        "expected filename in info output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("tracker.example.com"),
+        "expected tracker in info output, got: {stdout}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

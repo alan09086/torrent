@@ -114,9 +114,8 @@ mod tests {
     #[test]
     fn hybrid_construction() {
         let v1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
-        let v2 =
-            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-                .unwrap();
+        let v2 = Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap();
         let ih = InfoHashes::hybrid(v1, v2);
         assert!(ih.has_v1());
         assert!(ih.has_v2());
@@ -126,12 +125,14 @@ mod tests {
 
     #[test]
     fn best_v1_truncation_from_v2() {
-        let v2 =
-            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-                .unwrap();
+        let v2 = Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap();
         let ih = InfoHashes::v2_only(v2);
         let truncated = ih.best_v1();
         // First 20 bytes of the SHA-256 hash
-        assert_eq!(truncated.to_hex(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4");
+        assert_eq!(
+            truncated.to_hex(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4"
+        );
     }
 }

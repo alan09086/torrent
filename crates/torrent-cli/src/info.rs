@@ -73,7 +73,11 @@ fn print_v1_details(t: &torrent::core::TorrentMetaV1) {
 
     println!(
         "Private:      {}",
-        if t.info.private == Some(1) { "yes" } else { "no" }
+        if t.info.private == Some(1) {
+            "yes"
+        } else {
+            "no"
+        }
     );
 
     if let Some(ts) = t.creation_date {

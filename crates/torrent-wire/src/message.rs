@@ -215,9 +215,11 @@ impl Message {
             }
             Message::HaveAll => fixed_msg(ID_HAVE_ALL),
             Message::HaveNone => fixed_msg(ID_HAVE_NONE),
-            Message::RejectRequest { index, begin, length } => {
-                triple_msg(ID_REJECT_REQUEST, *index, *begin, *length)
-            }
+            Message::RejectRequest {
+                index,
+                begin,
+                length,
+            } => triple_msg(ID_REJECT_REQUEST, *index, *begin, *length),
             Message::AllowedFast(index) => {
                 let mut buf = BytesMut::with_capacity(9);
                 buf.put_u32(5);
@@ -225,8 +227,20 @@ impl Message {
                 buf.put_u32(*index);
                 buf.freeze()
             }
-            Message::HashRequest { pieces_root, base, index, count, proof_layers }
-            | Message::HashReject { pieces_root, base, index, count, proof_layers } => {
+            Message::HashRequest {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            }
+            | Message::HashReject {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            } => {
                 let id = match self {
                     Message::HashRequest { .. } => ID_HASH_REQUEST,
                     _ => ID_HASH_REJECT,
@@ -241,7 +255,14 @@ impl Message {
                 buf.put_u32(*proof_layers);
                 buf.freeze()
             }
-            Message::Hashes { pieces_root, base, index, count, proof_layers, hashes } => {
+            Message::Hashes {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+                hashes,
+            } => {
                 let hash_bytes = hashes.len() * 32;
                 let payload_len = 1 + 32 + 16 + hash_bytes;
                 let mut buf = BytesMut::with_capacity(4 + payload_len);
@@ -345,9 +366,21 @@ impl Message {
                 let count = read_u32(&body[40..]);
                 let proof_layers = read_u32(&body[44..]);
                 if id == ID_HASH_REQUEST {
-                    Ok(Message::HashRequest { pieces_root, base, index, count, proof_layers })
+                    Ok(Message::HashRequest {
+                        pieces_root,
+                        base,
+                        index,
+                        count,
+                        proof_layers,
+                    })
                 } else {
-                    Ok(Message::HashReject { pieces_root, base, index, count, proof_layers })
+                    Ok(Message::HashReject {
+                        pieces_root,
+                        base,
+                        index,
+                        count,
+                        proof_layers,
+                    })
                 }
             }
             ID_HASHES => {
@@ -374,7 +407,14 @@ impl Message {
                         torrent_core::Id32(h)
                     })
                     .collect();
-                Ok(Message::Hashes { pieces_root, base, index, count, proof_layers, hashes })
+                Ok(Message::Hashes {
+                    pieces_root,
+                    base,
+                    index,
+                    count,
+                    proof_layers,
+                    hashes,
+                })
             }
             _ => Err(Error::InvalidMessageId(id)),
         }

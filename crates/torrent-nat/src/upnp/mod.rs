@@ -1,7 +1,7 @@
 //! UPnP IGD port mapping — SSDP discovery + SOAP control.
 
-pub mod ssdp;
 pub mod soap;
+pub mod ssdp;
 
 use crate::error::{Error, Result};
 

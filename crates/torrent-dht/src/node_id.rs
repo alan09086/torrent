@@ -159,13 +159,13 @@ pub fn is_bep42_exempt(ip: IpAddr) -> bool {
                 || (o[0] == 172 && (o[1] & 0xF0) == 16)        // 172.16.0.0/12
                 || (o[0] == 192 && o[1] == 168)                 // 192.168.0.0/16
                 || (o[0] == 169 && o[1] == 254)                 // 169.254.0.0/16
-                || o[0] == 127                                   // 127.0.0.0/8
+                || o[0] == 127 // 127.0.0.0/8
         }
         IpAddr::V6(v6) => {
             let seg = v6.segments();
             v6.is_loopback()                                    // ::1
                 || (seg[0] & 0xFFC0) == 0xFE80                 // fe80::/10
-                || (seg[0] & 0xFE00) == 0xFC00                 // fc00::/7
+                || (seg[0] & 0xFE00) == 0xFC00 // fc00::/7
         }
     }
 }
@@ -447,7 +447,10 @@ mod tests {
             }
         }
         // With 100 trials and 1/2M chance each, probability of any passing is ~0.005%
-        assert!(all_fail, "random IDs should almost never pass BEP 42 verification");
+        assert!(
+            all_fail,
+            "random IDs should almost never pass BEP 42 verification"
+        );
     }
 
     // ── Exempt IPs ──────────────────────────────────────────────────

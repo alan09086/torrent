@@ -282,7 +282,13 @@ impl TrackerManager {
     }
 
     /// Create an empty TrackerManager (for magnet links before metadata arrives).
-    pub fn empty(info_hash: Id20, peer_id: Id20, port: u16, dscp: u8, anonymous_mode: bool) -> Self {
+    pub fn empty(
+        info_hash: Id20,
+        peer_id: Id20,
+        port: u16,
+        dscp: u8,
+        anonymous_mode: bool,
+    ) -> Self {
         TrackerManager {
             trackers: Vec::new(),
             info_hash,
@@ -314,7 +320,12 @@ impl TrackerManager {
         security: &crate::url_guard::UrlSecurityConfig,
     ) {
         let fresh = Self::from_torrent_filtered(
-            meta, self.peer_id, self.port, security, self.dscp, self.anonymous_mode,
+            meta,
+            self.peer_id,
+            self.port,
+            security,
+            self.dscp,
+            self.anonymous_mode,
         );
         self.trackers = fresh.trackers;
     }
@@ -356,7 +367,9 @@ impl TrackerManager {
         let mut all_outcomes = Vec::new();
 
         // Always announce with the primary (v1) info hash
-        let result = self.announce_with_hash(self.info_hash, event, uploaded, downloaded, left).await;
+        let result = self
+            .announce_with_hash(self.info_hash, event, uploaded, downloaded, left)
+            .await;
         for peer in result.peers {
             if seen_peers.insert(peer) {
                 all_peers.push(peer);
@@ -371,7 +384,9 @@ impl TrackerManager {
             let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
             // Only announce the v2 hash if it differs from the v1 hash
             if v2_as_v1 != self.info_hash {
-                let result = self.announce_with_hash(v2_as_v1, event, uploaded, downloaded, left).await;
+                let result = self
+                    .announce_with_hash(v2_as_v1, event, uploaded, downloaded, left)
+                    .await;
                 for peer in result.peers {
                     if seen_peers.insert(peer) {
                         all_peers.push(peer);
@@ -381,7 +396,10 @@ impl TrackerManager {
             }
         }
 
-        AnnounceResult { peers: all_peers, outcomes: all_outcomes }
+        AnnounceResult {
+            peers: all_peers,
+            outcomes: all_outcomes,
+        }
     }
 
     /// Returns the port to announce (0 when anonymous mode is active).
@@ -451,7 +469,8 @@ impl TrackerManager {
                             tracker.tracker_id = Some(id);
                         }
                         if seeders.is_some() || leechers.is_some() {
-                            let prev_downloaded = tracker.scrape_info.map(|s| s.downloaded).unwrap_or(0);
+                            let prev_downloaded =
+                                tracker.scrape_info.map(|s| s.downloaded).unwrap_or(0);
                             tracker.scrape_info = Some(torrent_tracker::ScrapeInfo {
                                 complete: seeders.unwrap_or(0),
                                 incomplete: leechers.unwrap_or(0),
@@ -494,7 +513,10 @@ impl TrackerManager {
             }
         }
 
-        AnnounceResult { peers: all_peers, outcomes }
+        AnnounceResult {
+            peers: all_peers,
+            outcomes,
+        }
     }
 
     /// Convenience: announce with Started event.
@@ -510,11 +532,7 @@ impl TrackerManager {
     }
 
     /// Convenience: announce with Completed event.
-    pub async fn announce_completed(
-        &mut self,
-        uploaded: u64,
-        downloaded: u64,
-    ) -> AnnounceResult {
+    pub async fn announce_completed(&mut self, uploaded: u64, downloaded: u64) -> AnnounceResult {
         self.announce(AnnounceEvent::Completed, uploaded, downloaded, 0)
             .await
     }
@@ -532,7 +550,16 @@ impl TrackerManager {
         client: &HttpTracker,
         url: &str,
         req: &AnnounceRequest,
-    ) -> std::result::Result<(Vec<SocketAddr>, u32, Option<String>, Option<u32>, Option<u32>), torrent_tracker::Error> {
+    ) -> std::result::Result<
+        (
+            Vec<SocketAddr>,
+            u32,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+        ),
+        torrent_tracker::Error,
+    > {
         let resp = client.announce(url, req).await?;
         Ok((
             resp.response.peers,
@@ -547,7 +574,16 @@ impl TrackerManager {
         client: &UdpTracker,
         url: &str,
         req: &AnnounceRequest,
-    ) -> std::result::Result<(Vec<SocketAddr>, u32, Option<String>, Option<u32>, Option<u32>), torrent_tracker::Error> {
+    ) -> std::result::Result<
+        (
+            Vec<SocketAddr>,
+            u32,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+        ),
+        torrent_tracker::Error,
+    > {
         // UDP tracker URLs are like "udp://tracker.example.com:6969/announce"
         // UdpTracker::announce expects "host:port"
         let addr = parse_udp_addr(url);
@@ -580,7 +616,10 @@ impl TrackerManager {
                     seeders: t.scrape_info.map(|s| s.complete),
                     leechers: t.scrape_info.map(|s| s.incomplete),
                     downloaded: t.scrape_info.map(|s| s.downloaded),
-                    next_announce_secs: t.next_announce.saturating_duration_since(Instant::now()).as_secs(),
+                    next_announce_secs: t
+                        .next_announce
+                        .saturating_duration_since(Instant::now())
+                        .as_secs(),
                     consecutive_failures: t.consecutive_failures,
                 }
             })
@@ -664,13 +703,12 @@ impl TrackerManager {
     pub async fn scrape(&self) -> Option<(String, torrent_tracker::ScrapeInfo)> {
         for tracker in &self.trackers {
             let result = match tracker.protocol {
-                TrackerProtocol::Http => {
-                    self.http_client
-                        .scrape(&tracker.url, &[self.info_hash])
-                        .await
-                        .ok()
-                        .and_then(|resp| resp.files.get(&self.info_hash).copied())
-                }
+                TrackerProtocol::Http => self
+                    .http_client
+                    .scrape(&tracker.url, &[self.info_hash])
+                    .await
+                    .ok()
+                    .and_then(|resp| resp.files.get(&self.info_hash).copied()),
                 TrackerProtocol::Udp => {
                     let addr = parse_udp_addr(&tracker.url);
                     self.udp_client
@@ -886,10 +924,7 @@ mod tests {
             parse_udp_addr("udp://tracker.example.com:6969/announce"),
             "tracker.example.com:6969"
         );
-        assert_eq!(
-            parse_udp_addr("udp://example.com:1234"),
-            "example.com:1234"
-        );
+        assert_eq!(parse_udp_addr("udp://example.com:1234"), "example.com:1234");
     }
 
     #[test]
@@ -994,12 +1029,10 @@ mod tests {
     #[test]
     fn localhost_tracker_announce_path_accepted() {
         // A localhost URL with /announce path should be accepted by the filter.
-        let meta = torrent_with_trackers(
-            Some("http://127.0.0.1:8080/announce"),
-            None,
-        );
+        let meta = torrent_with_trackers(Some("http://127.0.0.1:8080/announce"), None);
         let cfg = ssrf_config();
-        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
+        let mgr =
+            TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
         assert_eq!(mgr.tracker_count(), 1);
         assert_eq!(mgr.trackers[0].url, "http://127.0.0.1:8080/announce");
     }
@@ -1016,7 +1049,8 @@ mod tests {
             ]]),
         );
         let cfg = ssrf_config();
-        let mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
+        let mgr =
+            TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
         assert_eq!(mgr.tracker_count(), 1);
         assert_eq!(mgr.trackers[0].url, "http://tracker.example.com/announce");
     }
@@ -1025,7 +1059,8 @@ mod tests {
     fn add_tracker_url_validates() {
         let meta = torrent_with_trackers(Some("http://tracker.example.com/announce"), None);
         let cfg = ssrf_config();
-        let mut mgr = TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
+        let mut mgr =
+            TrackerManager::from_torrent_filtered(&meta, test_peer_id(), 6881, &cfg, 0, false);
         assert_eq!(mgr.tracker_count(), 1);
 
         // Valid URL should be added.

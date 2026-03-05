@@ -14,7 +14,9 @@ use tracing::{debug, warn};
 
 use torrent_core::Id20;
 use torrent_storage::Bitfield;
-use torrent_wire::{ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType};
+use torrent_wire::{
+    ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType,
+};
 
 use crate::pex::PexMessage;
 use crate::types::{PeerCommand, PeerEvent};
@@ -61,10 +63,12 @@ pub(crate) async fn run_peer(
             match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 mse::handshake::negotiate_outbound(stream, &info_hash, crypto_provide),
-            ).await {
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(_) => Err(torrent_wire::Error::EncryptionHandshakeFailed(
-                    "MSE handshake timed out".into()
+                    "MSE handshake timed out".into(),
                 )),
             }
         } else {
@@ -125,10 +129,7 @@ pub(crate) async fn run_peer(
         }
         let payload = ext_hs.to_bytes().map_err(crate::Error::Wire)?;
         framed_write
-            .send(Message::Extended {
-                ext_id: 0,
-                payload,
-            })
+            .send(Message::Extended { ext_id: 0, payload })
             .await
             .map_err(crate::Error::Wire)?;
     }
@@ -165,8 +166,7 @@ pub(crate) async fn run_peer(
 
     // --- Phase 4b: Send AllowedFast set (BEP 6) ---
     if both_support_fast && num_pieces > 0 {
-        let fast_set =
-            torrent_wire::allowed_fast_set_for_ip(&info_hash, addr.ip(), num_pieces, 10);
+        let fast_set = torrent_wire::allowed_fast_set_for_ip(&info_hash, addr.ip(), num_pieces, 10);
         for index in fast_set {
             framed_write
                 .send(Message::AllowedFast(index))
@@ -487,8 +487,13 @@ async fn handle_message(
             // Routed extension message: the remote sends using OUR assigned IDs
             if Some(ext_id) == our_ut_metadata {
                 let response = handle_metadata_message(
-                    addr, &payload, event_tx, info_bytes, *peer_ut_metadata,
-                ).await?;
+                    addr,
+                    &payload,
+                    event_tx,
+                    info_bytes,
+                    *peer_ut_metadata,
+                )
+                .await?;
                 if let Some(msg) = response {
                     return Ok(Some(msg));
                 }
@@ -521,7 +526,11 @@ async fn handle_message(
                 }
             }
         }
-        Message::Request { index, begin, length } => {
+        Message::Request {
+            index,
+            begin,
+            length,
+        } => {
             event_tx
                 .send(PeerEvent::IncomingRequest {
                     peer_addr: addr,
@@ -571,7 +580,11 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        Message::RejectRequest { index, begin, length } => {
+        Message::RejectRequest {
+            index,
+            begin,
+            length,
+        } => {
             event_tx
                 .send(PeerEvent::RejectRequest {
                     peer_addr: addr,
@@ -591,7 +604,13 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        Message::HashRequest { pieces_root, base, index, count, proof_layers } => {
+        Message::HashRequest {
+            pieces_root,
+            base,
+            index,
+            count,
+            proof_layers,
+        } => {
             let request = torrent_core::HashRequest {
                 file_root: pieces_root,
                 base,
@@ -607,7 +626,14 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        Message::Hashes { pieces_root, base, index, count, proof_layers, hashes } => {
+        Message::Hashes {
+            pieces_root,
+            base,
+            index,
+            count,
+            proof_layers,
+            hashes,
+        } => {
             let request = torrent_core::HashRequest {
                 file_root: pieces_root,
                 base,
@@ -624,7 +650,13 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        Message::HashReject { pieces_root, base, index, count, proof_layers } => {
+        Message::HashReject {
+            pieces_root,
+            base,
+            index,
+            count,
+            proof_layers,
+        } => {
             let request = torrent_core::HashRequest {
                 file_root: pieces_root,
                 base,
@@ -682,7 +714,10 @@ async fn handle_metadata_message(
             if let Some(remote_id) = peer_ut_metadata {
                 let response = build_metadata_response(meta_msg.piece, info_bytes);
                 let payload = response.to_bytes().map_err(crate::Error::Wire)?;
-                return Ok(Some(Message::Extended { ext_id: remote_id, payload }));
+                return Ok(Some(Message::Extended {
+                    ext_id: remote_id,
+                    payload,
+                }));
             }
         }
     }
@@ -832,13 +867,17 @@ async fn handle_command(
                 .map_err(crate::Error::Wire)?;
             Message::Extended { ext_id, payload }
         }
-        PeerCommand::RejectRequest { index, begin, length } => {
-            Message::RejectRequest { index, begin, length }
-        }
+        PeerCommand::RejectRequest {
+            index,
+            begin,
+            length,
+        } => Message::RejectRequest {
+            index,
+            begin,
+            length,
+        },
         PeerCommand::AllowedFast(index) => Message::AllowedFast(index),
-        PeerCommand::SendPiece { index, begin, data } => {
-            Message::Piece { index, begin, data }
-        }
+        PeerCommand::SendPiece { index, begin, data } => Message::Piece { index, begin, data },
         PeerCommand::SendExtHandshake(hs) => {
             let payload = hs.to_bytes().map_err(crate::Error::Wire)?;
             Message::Extended { ext_id: 0, payload }
@@ -882,10 +921,7 @@ async fn handle_command(
             return Ok(());
         }
     };
-    framed_write
-        .send(msg)
-        .await
-        .map_err(crate::Error::Wire)?;
+    framed_write.send(msg).await.map_err(crate::Error::Wire)?;
     Ok(())
 }
 
@@ -955,9 +991,7 @@ mod tests {
     ) -> ExtHandshake {
         let msg = read_framed_message(stream).await;
         let our_ext_hs = match msg {
-            Message::Extended { ext_id: 0, payload } => {
-                ExtHandshake::from_bytes(&payload).unwrap()
-            }
+            Message::Extended { ext_id: 0, payload } => ExtHandshake::from_bytes(&payload).unwrap(),
             other => panic!("expected ext handshake, got: {other:?}"),
         };
 
@@ -968,14 +1002,7 @@ mod tests {
         remote_ext.v = Some("TestPeer 1.0".into());
 
         let payload = remote_ext.to_bytes().unwrap();
-        write_framed_message(
-            stream,
-            &Message::Extended {
-                ext_id: 0,
-                payload,
-            },
-        )
-        .await;
+        write_framed_message(stream, &Message::Extended { ext_id: 0, payload }).await;
 
         our_ext_hs
     }
@@ -1006,11 +1033,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1057,11 +1084,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1108,11 +1135,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1129,10 +1156,7 @@ mod tests {
                     ext_hs.ext_id("ut_metadata").is_some(),
                     "should advertise ut_metadata"
                 );
-                assert!(
-                    ext_hs.ext_id("ut_pex").is_some(),
-                    "should advertise ut_pex"
-                );
+                assert!(ext_hs.ext_id("ut_pex").is_some(), "should advertise ut_pex");
             }
             other => panic!("expected Extended handshake, got: {other:?}"),
         }
@@ -1171,11 +1195,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1222,11 +1246,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1282,11 +1306,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1297,10 +1321,7 @@ mod tests {
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
 
         // Send SetInterested command
-        cmd_tx
-            .send(PeerCommand::SetInterested(true))
-            .await
-            .unwrap();
+        cmd_tx.send(PeerCommand::SetInterested(true)).await.unwrap();
 
         let msg = read_framed_message(&mut server_stream).await;
         assert_eq!(msg, Message::Interested);
@@ -1342,11 +1363,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1389,11 +1410,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1475,11 +1496,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1493,10 +1514,7 @@ mod tests {
         write_framed_message(&mut server_stream, &Message::KeepAlive).await;
 
         // Verify the peer is still alive by sending a command
-        cmd_tx
-            .send(PeerCommand::SetInterested(true))
-            .await
-            .unwrap();
+        cmd_tx.send(PeerCommand::SetInterested(true)).await.unwrap();
 
         let msg = read_framed_message(&mut server_stream).await;
         assert_eq!(msg, Message::Interested);
@@ -1529,11 +1547,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1582,11 +1600,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1648,11 +1666,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1745,17 +1763,21 @@ mod tests {
                 false,
                 true, // enable_fast
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
 
-        let our_hs = do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
-        assert!(our_hs.supports_fast(), "our handshake should advertise fast");
+        let our_hs =
+            do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
+        assert!(
+            our_hs.supports_fast(),
+            "our handshake should advertise fast"
+        );
 
         // Read ext handshake
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
@@ -1793,16 +1815,17 @@ mod tests {
                 false,
                 true, // enable_fast
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
 
-        let our_hs = do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
+        let our_hs =
+            do_remote_handshake_fast(&mut server_stream, info_hash, remote_peer_id()).await;
         assert!(our_hs.supports_fast());
 
         // Read ext handshake
@@ -1841,11 +1864,11 @@ mod tests {
                 false,
                 true, // enable_fast
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1872,7 +1895,11 @@ mod tests {
                 other => panic!("expected AllowedFast, got: {other:?}"),
             }
         }
-        assert_eq!(fast_indices.len(), 10, "should have 10 unique AllowedFast indices");
+        assert_eq!(
+            fast_indices.len(),
+            10,
+            "should have 10 unique AllowedFast indices"
+        );
 
         cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
         let _ = handle.await;
@@ -1903,11 +1930,11 @@ mod tests {
                 false,
                 false, // fast disabled
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -1948,11 +1975,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -2016,7 +2043,7 @@ mod tests {
                 false, // anonymous_mode
                 Some(info_bytes),
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -2039,7 +2066,10 @@ mod tests {
         let ext_payload = remote_ext.to_bytes().unwrap();
         write_framed_message(
             &mut server_stream,
-            &Message::Extended { ext_id: 0, payload: ext_payload },
+            &Message::Extended {
+                ext_id: 0,
+                payload: ext_payload,
+            },
         )
         .await;
 
@@ -2121,7 +2151,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 plugins,
-                true,  // enable_holepunch
+                true, // enable_holepunch
             )
             .await
         });
@@ -2133,7 +2163,11 @@ mod tests {
         match msg {
             Message::Extended { ext_id: 0, payload } => {
                 let ext_hs = ExtHandshake::from_bytes(&payload).unwrap();
-                assert_eq!(ext_hs.ext_id("ut_echo"), Some(10), "plugin should be at ID 10");
+                assert_eq!(
+                    ext_hs.ext_id("ut_echo"),
+                    Some(10),
+                    "plugin should be at ID 10"
+                );
                 assert_eq!(ext_hs.ext_id("ut_metadata"), Some(1), "built-in unchanged");
             }
             other => panic!("expected ext handshake, got: {other:?}"),
@@ -2171,7 +2205,7 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 plugins,
-                true,  // enable_holepunch
+                true, // enable_holepunch
             )
             .await
         });
@@ -2181,9 +2215,7 @@ mod tests {
         // Read our ext handshake
         let msg = read_framed_message(&mut server_stream).await;
         let our_ext_hs = match msg {
-            Message::Extended { ext_id: 0, payload } => {
-                ExtHandshake::from_bytes(&payload).unwrap()
-            }
+            Message::Extended { ext_id: 0, payload } => ExtHandshake::from_bytes(&payload).unwrap(),
             other => panic!("expected ext handshake, got: {other:?}"),
         };
         let our_ut_echo_id = our_ext_hs.ext_id("ut_echo").unwrap();
@@ -2197,7 +2229,10 @@ mod tests {
         let ext_payload = remote_ext.to_bytes().unwrap();
         write_framed_message(
             &mut server_stream,
-            &Message::Extended { ext_id: 0, payload: ext_payload },
+            &Message::Extended {
+                ext_id: 0,
+                payload: ext_payload,
+            },
         )
         .await;
 
@@ -2317,11 +2352,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                false, // enable_holepunch = DISABLED
+                false,                           // enable_holepunch = DISABLED
             )
             .await
         });
@@ -2370,11 +2405,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch = ENABLED
+                true,                            // enable_holepunch = ENABLED
             )
             .await
         });
@@ -2423,11 +2458,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });
@@ -2437,9 +2472,7 @@ mod tests {
         // Do extension handshake — remote advertises ut_holepunch=7
         let ext_hs_msg = read_framed_message(&mut server_stream).await;
         let _our_ext_hs = match &ext_hs_msg {
-            Message::Extended { ext_id: 0, payload } => {
-                ExtHandshake::from_bytes(payload).unwrap()
-            }
+            Message::Extended { ext_id: 0, payload } => ExtHandshake::from_bytes(payload).unwrap(),
             other => panic!("expected ext handshake, got: {other:?}"),
         };
 
@@ -2508,11 +2541,11 @@ mod tests {
                 false,
                 false,
                 torrent_wire::mse::EncryptionMode::Disabled,
-                false, // outbound
-                false, // anonymous_mode
-                None,  // info_bytes
+                false,                           // outbound
+                false,                           // anonymous_mode
+                None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
-                true,  // enable_holepunch
+                true,                            // enable_holepunch
             )
             .await
         });

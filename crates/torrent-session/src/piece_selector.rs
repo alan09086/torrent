@@ -64,7 +64,8 @@ impl InFlightPiece {
     }
 
     pub fn unassigned_count(&self) -> u32 {
-        self.total_blocks.saturating_sub(self.assigned_blocks.len() as u32)
+        self.total_blocks
+            .saturating_sub(self.assigned_blocks.len() as u32)
     }
 
     pub fn peer_set(&self) -> HashSet<SocketAddr> {
@@ -161,8 +162,7 @@ impl PieceSelector {
     #[allow(dead_code)]
     pub fn decrement(&mut self, index: u32) {
         if (index as usize) < self.availability.len() {
-            self.availability[index as usize] =
-                self.availability[index as usize].saturating_sub(1);
+            self.availability[index as usize] = self.availability[index as usize].saturating_sub(1);
         }
     }
 
@@ -240,11 +240,7 @@ impl PieceSelector {
     /// 3. Suggested pieces (BEP 6)
     /// 4. Partial pieces with unassigned blocks (speed affinity)
     /// 5. New piece selection (sequential/random/rarest-first)
-    pub fn pick_blocks<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: F,
-    ) -> Option<PickResult>
+    pub fn pick_blocks<F>(&self, ctx: &PickContext<'_>, missing_chunks: F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -256,7 +252,11 @@ impl PieceSelector {
                 }
                 let blocks = self.unassigned_blocks(piece, ctx, &missing_chunks);
                 if !blocks.is_empty() {
-                    return Some(PickResult { piece, blocks, exclusive: false });
+                    return Some(PickResult {
+                        piece,
+                        blocks,
+                        exclusive: false,
+                    });
                 }
             }
         }
@@ -272,7 +272,11 @@ impl PieceSelector {
                 }
                 let blocks = self.unassigned_blocks(piece, ctx, &missing_chunks);
                 if !blocks.is_empty() {
-                    return Some(PickResult { piece, blocks, exclusive: false });
+                    return Some(PickResult {
+                        piece,
+                        blocks,
+                        exclusive: false,
+                    });
                 }
             }
         }
@@ -292,7 +296,11 @@ impl PieceSelector {
             let blocks = missing_chunks(piece);
             if !blocks.is_empty() {
                 let exclusive = self.should_whole_piece(ctx, &blocks);
-                return Some(PickResult { piece, blocks, exclusive });
+                return Some(PickResult {
+                    piece,
+                    blocks,
+                    exclusive,
+                });
             }
         }
 
@@ -327,11 +335,7 @@ impl PieceSelector {
     }
 
     /// Pick a partial piece (already in-flight) with speed affinity.
-    fn pick_partial<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: &F,
-    ) -> Option<PickResult>
+    fn pick_partial<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -368,8 +372,11 @@ impl PieceSelector {
         }
 
         if best_piece.is_some() {
-            return best_piece
-                .map(|piece| PickResult { piece, blocks: best_blocks, exclusive: false });
+            return best_piece.map(|piece| PickResult {
+                piece,
+                blocks: best_blocks,
+                exclusive: false,
+            });
         }
 
         // Steal phase: if no unassigned blocks found, steal from slow peers
@@ -379,9 +386,7 @@ impl PieceSelector {
                 let steal_threshold = my_rate / ctx.steal_threshold_ratio;
 
                 for (&piece, ifp) in ctx.in_flight_pieces {
-                    if !ctx.peer_has.get(piece)
-                        || ctx.we_have.get(piece)
-                        || !ctx.wanted.get(piece)
+                    if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece)
                     {
                         continue;
                     }
@@ -393,9 +398,7 @@ impl PieceSelector {
                     let stealable: Vec<(u32, u32)> = all_missing
                         .into_iter()
                         .filter(|&(begin, _len)| {
-                            if let Some(&assigned_peer) =
-                                ifp.assigned_blocks.get(&(piece, begin))
-                            {
+                            if let Some(&assigned_peer) = ifp.assigned_blocks.get(&(piece, begin)) {
                                 if assigned_peer == ctx.peer_addr {
                                     return false;
                                 }
@@ -424,11 +427,7 @@ impl PieceSelector {
     }
 
     /// Pick a new piece (not yet in-flight).
-    fn pick_new_piece<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: &F,
-    ) -> Option<PickResult>
+    fn pick_new_piece<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -479,11 +478,7 @@ impl PieceSelector {
     ///
     /// When extent affinity is enabled, tries the preferred extent first,
     /// then falls back to any extent if no candidates remain in that extent.
-    fn pick_rarest_new<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: &F,
-    ) -> Option<PickResult>
+    fn pick_rarest_new<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -497,11 +492,7 @@ impl PieceSelector {
     }
 
     /// Standard rarest-first picking with no extent filter.
-    fn pick_rarest_any<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: &F,
-    ) -> Option<PickResult>
+    fn pick_rarest_any<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -528,7 +519,11 @@ impl PieceSelector {
         best_index.map(|piece| {
             let blocks = missing_chunks(piece);
             let exclusive = self.should_whole_piece(ctx, &blocks);
-            PickResult { piece, blocks, exclusive }
+            PickResult {
+                piece,
+                blocks,
+                exclusive,
+            }
         })
     }
 
@@ -568,16 +563,16 @@ impl PieceSelector {
         best_index.map(|piece| {
             let blocks = missing_chunks(piece);
             let exclusive = self.should_whole_piece(ctx, &blocks);
-            PickResult { piece, blocks, exclusive }
+            PickResult {
+                piece,
+                blocks,
+                exclusive,
+            }
         })
     }
 
     /// Sequential: pick lowest-index available piece not in-flight.
-    fn pick_sequential<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: &F,
-    ) -> Option<PickResult>
+    fn pick_sequential<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -595,18 +590,18 @@ impl PieceSelector {
             let blocks = missing_chunks(i);
             if !blocks.is_empty() {
                 let exclusive = self.should_whole_piece(ctx, &blocks);
-                return Some(PickResult { piece: i, blocks, exclusive });
+                return Some(PickResult {
+                    piece: i,
+                    blocks,
+                    exclusive,
+                });
             }
         }
         None
     }
 
     /// Random selection for initial diversity.
-    fn pick_random<F>(
-        &self,
-        ctx: &PickContext<'_>,
-        missing_chunks: &F,
-    ) -> Option<PickResult>
+    fn pick_random<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
     where
         F: Fn(u32) -> Vec<(u32, u32)>,
     {
@@ -633,7 +628,11 @@ impl PieceSelector {
         let piece = candidates[idx];
         let blocks = missing_chunks(piece);
         let exclusive = self.should_whole_piece(ctx, &blocks);
-        Some(PickResult { piece, blocks, exclusive })
+        Some(PickResult {
+            piece,
+            blocks,
+            exclusive,
+        })
     }
 
     /// Snubbed peer: highest-availability piece (reverse rarest-first).
@@ -667,7 +666,11 @@ impl PieceSelector {
 
         best_index.map(|piece| {
             let blocks = missing_chunks(piece);
-            PickResult { piece, blocks, exclusive: false }
+            PickResult {
+                piece,
+                blocks,
+                exclusive: false,
+            }
         })
     }
 
@@ -1091,8 +1094,14 @@ mod tests {
 
         // Peer A picks first — gets both blocks
         let ctx_a = default_pick_context(
-            addr(1000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(1000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         let chunks = |_piece: u32| vec![(0, 16384), (16384, 16384)];
         let result_a = sel.pick_blocks(&ctx_a, chunks).unwrap();
@@ -1108,8 +1117,14 @@ mod tests {
 
         // Peer B picks — all blocks assigned, so unassigned_blocks is empty
         let ctx_b = default_pick_context(
-            addr(2000), &peer_has, &we_have, &wanted,
-            &in_flight2, &streaming, &time_critical, &suggested,
+            addr(2000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight2,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         let result_b = sel.pick_blocks(&ctx_b, chunks);
         // No unassigned blocks remain, so no pick possible (only 1 piece)
@@ -1137,8 +1152,14 @@ mod tests {
         let in_flight = HashMap::new();
 
         let ctx = default_pick_context(
-            addr(3000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(3000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         let chunks = |_piece: u32| vec![(0, 16384)];
         let result = sel.pick_blocks(&ctx, chunks).unwrap();
@@ -1168,8 +1189,14 @@ mod tests {
 
         // Fast peer should get streaming blocks
         let mut ctx_fast = default_pick_context(
-            addr(4000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(4000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx_fast.peer_speed = PeerSpeed::Fast;
         ctx_fast.peer_rate = 102_400.0;
@@ -1181,8 +1208,14 @@ mod tests {
 
         // Slow, snubbed peer should NOT get streaming blocks (layer 1 skips snubbed)
         let mut ctx_slow = default_pick_context(
-            addr(4001), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(4001),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx_slow.peer_speed = PeerSpeed::Slow;
         ctx_slow.peer_rate = 1_024.0;
@@ -1223,8 +1256,14 @@ mod tests {
         let in_flight = HashMap::new();
 
         let ctx = default_pick_context(
-            addr(5000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(5000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         let chunks = |_piece: u32| vec![(0, 16384)];
         let result = sel.pick_blocks(&ctx, chunks).unwrap();
@@ -1257,8 +1296,14 @@ mod tests {
         let in_flight = HashMap::new();
 
         let mut ctx = default_pick_context(
-            addr(6000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(6000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.sequential_download = true;
         ctx.completed_count = 100; // past initial threshold
@@ -1291,8 +1336,14 @@ mod tests {
         let in_flight = HashMap::new();
 
         let mut ctx = default_pick_context(
-            addr(7000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(7000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.completed_count = 0; // below threshold
         ctx.initial_picker_threshold = 4;
@@ -1321,8 +1372,14 @@ mod tests {
         let in_flight = HashMap::new();
 
         let mut ctx = default_pick_context(
-            addr(8000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(8000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.peer_speed = PeerSpeed::Fast;
         ctx.peer_rate = 1_048_576.0; // 1 MB/s
@@ -1334,7 +1391,10 @@ mod tests {
         let chunks = |_piece: u32| vec![(0, 131_072), (131_072, 131_072)];
         let result = sel.pick_blocks(&ctx, chunks).unwrap();
         assert_eq!(result.piece, 0);
-        assert!(result.exclusive, "fast peer should get exclusive=true for small piece");
+        assert!(
+            result.exclusive,
+            "fast peer should get exclusive=true for small piece"
+        );
     }
 
     #[test]
@@ -1367,8 +1427,14 @@ mod tests {
         in_flight.insert(0u32, ifp0);
 
         let mut ctx = default_pick_context(
-            addr(9001), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(9001),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.peer_speed = PeerSpeed::Slow;
         ctx.peer_rate = 5_000.0;
@@ -1409,8 +1475,14 @@ mod tests {
         let in_flight = HashMap::new();
 
         let mut ctx = default_pick_context(
-            addr(10000), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(10000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.peer_is_snubbed = true;
 
@@ -1455,8 +1527,14 @@ mod tests {
         }
 
         let mut ctx = default_pick_context(
-            addr(11001), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(11001),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.connected_peer_count = 4;
         ctx.completed_count = 100; // past initial threshold
@@ -1516,7 +1594,10 @@ mod tests {
 
     #[test]
     fn peer_speed_custom_classifier() {
-        let classifier = PeerSpeedClassifier { slow_threshold: 1_000.0, fast_threshold: 50_000.0 };
+        let classifier = PeerSpeedClassifier {
+            slow_threshold: 1_000.0,
+            fast_threshold: 50_000.0,
+        };
         assert_eq!(classifier.classify(500.0), PeerSpeed::Slow);
         assert_eq!(classifier.classify(1_000.0), PeerSpeed::Medium);
         assert_eq!(classifier.classify(50_000.0), PeerSpeed::Fast);
@@ -1543,15 +1624,21 @@ mod tests {
         // Set up 32 pieces across 2 extents. Make piece 20 globally rarest (extent 1),
         // but have in-flight activity in extent 0. With affinity, should pick from extent 0.
         let mut sel = PieceSelector::new(32);
-        for i in 0..32 { sel.availability[i] = 2; }
+        for i in 0..32 {
+            sel.availability[i] = 2;
+        }
         sel.availability[20] = 1; // globally rarest, extent 1
-        sel.availability[5] = 1;  // rarest in extent 0
+        sel.availability[5] = 1; // rarest in extent 0
 
         let mut peer_has = Bitfield::new(32);
-        for i in 0..32 { peer_has.set(i); }
+        for i in 0..32 {
+            peer_has.set(i);
+        }
         let we_have = Bitfield::new(32);
         let mut wanted = Bitfield::new(32);
-        for i in 0..32 { wanted.set(i); }
+        for i in 0..32 {
+            wanted.set(i);
+        }
 
         // Piece 10 in-flight in extent 0
         let mut ifp = InFlightPiece::new(2);
@@ -1564,8 +1651,14 @@ mod tests {
         let suggested = HashSet::new();
 
         let mut ctx = default_pick_context(
-            addr(5555), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(5555),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.extent_affinity = true;
         ctx.piece_size = 262_144;
@@ -1580,15 +1673,21 @@ mod tests {
     fn extent_affinity_disabled_picks_global_rarest() {
         // Same setup but with affinity disabled — should pick lowest-index rarest
         let mut sel = PieceSelector::new(32);
-        for i in 0..32 { sel.availability[i] = 2; }
+        for i in 0..32 {
+            sel.availability[i] = 2;
+        }
         sel.availability[20] = 1;
         sel.availability[5] = 1;
 
         let mut peer_has = Bitfield::new(32);
-        for i in 0..32 { peer_has.set(i); }
+        for i in 0..32 {
+            peer_has.set(i);
+        }
         let we_have = Bitfield::new(32);
         let mut wanted = Bitfield::new(32);
-        for i in 0..32 { wanted.set(i); }
+        for i in 0..32 {
+            wanted.set(i);
+        }
 
         let mut ifp = InFlightPiece::new(2);
         ifp.assigned_blocks.insert((10, 0), addr(9999));
@@ -1600,8 +1699,14 @@ mod tests {
         let suggested = HashSet::new();
 
         let mut ctx = default_pick_context(
-            addr(5555), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(5555),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.extent_affinity = false;
         ctx.piece_size = 262_144;
@@ -1616,14 +1721,22 @@ mod tests {
     fn extent_affinity_fallback_when_extent_exhausted() {
         // All pieces in active extent already downloaded — falls back to other extents
         let mut sel = PieceSelector::new(32);
-        for i in 0..32 { sel.availability[i] = 2; }
+        for i in 0..32 {
+            sel.availability[i] = 2;
+        }
 
         let mut peer_has = Bitfield::new(32);
-        for i in 0..32 { peer_has.set(i); }
+        for i in 0..32 {
+            peer_has.set(i);
+        }
         let mut we_have = Bitfield::new(32);
-        for i in 0..16 { we_have.set(i); } // have all extent 0
+        for i in 0..16 {
+            we_have.set(i);
+        } // have all extent 0
         let mut wanted = Bitfield::new(32);
-        for i in 0..32 { wanted.set(i); }
+        for i in 0..32 {
+            wanted.set(i);
+        }
 
         let mut ifp = InFlightPiece::new(2);
         ifp.assigned_blocks.insert((10, 0), addr(9999));
@@ -1635,8 +1748,14 @@ mod tests {
         let suggested = HashSet::new();
 
         let mut ctx = default_pick_context(
-            addr(5555), &peer_has, &we_have, &wanted,
-            &in_flight, &streaming, &time_critical, &suggested,
+            addr(5555),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
         );
         ctx.extent_affinity = true;
         ctx.piece_size = 262_144;
@@ -1650,15 +1769,15 @@ mod tests {
     #[test]
     fn auto_sequential_hysteresis_activation() {
         // 4 peers, need > 1.6 * 4 = 6.4 in-flight to activate
-        assert!(!evaluate_auto_sequential(6, 4, false));  // 6/4 = 1.5 < 1.6
-        assert!(evaluate_auto_sequential(7, 4, false));   // 7/4 = 1.75 > 1.6
+        assert!(!evaluate_auto_sequential(6, 4, false)); // 6/4 = 1.5 < 1.6
+        assert!(evaluate_auto_sequential(7, 4, false)); // 7/4 = 1.75 > 1.6
     }
 
     #[test]
     fn auto_sequential_hysteresis_deactivation() {
         // 4 peers, need < 1.3 * 4 = 5.2 in-flight to deactivate
-        assert!(evaluate_auto_sequential(6, 4, true));    // 6/4 = 1.5 >= 1.3, stays active
-        assert!(!evaluate_auto_sequential(5, 4, true));   // 5/4 = 1.25 < 1.3, deactivates
+        assert!(evaluate_auto_sequential(6, 4, true)); // 6/4 = 1.5 >= 1.3, stays active
+        assert!(!evaluate_auto_sequential(5, 4, true)); // 5/4 = 1.25 < 1.3, deactivates
     }
 
     #[test]
@@ -1667,7 +1786,7 @@ mod tests {
         // 10 peers: activate > 16, deactivate < 13
         // At 14 in-flight (ratio 1.4): in the band
         assert!(!evaluate_auto_sequential(14, 10, false)); // inactive stays inactive
-        assert!(evaluate_auto_sequential(14, 10, true));   // active stays active
+        assert!(evaluate_auto_sequential(14, 10, true)); // active stays active
     }
 
     #[test]

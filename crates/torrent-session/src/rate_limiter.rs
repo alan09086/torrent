@@ -249,8 +249,10 @@ impl RateLimiterSet {
                 let total = tcp_peers + utp_peers;
                 let tcp_rate = global_upload_rate * tcp_peers as u64 / total as u64;
                 let utp_rate = global_upload_rate * utp_peers as u64 / total as u64;
-                self.tcp_upload.set_rate(if tcp_peers > 0 { tcp_rate.max(1) } else { 0 });
-                self.utp_upload.set_rate(if utp_peers > 0 { utp_rate.max(1) } else { 0 });
+                self.tcp_upload
+                    .set_rate(if tcp_peers > 0 { tcp_rate.max(1) } else { 0 });
+                self.utp_upload
+                    .set_rate(if utp_peers > 0 { utp_rate.max(1) } else { 0 });
             }
         }
     }
@@ -361,7 +363,9 @@ mod tests {
         assert!(is_local_network("fd12:3456:789a::1".parse().unwrap()));
         // Global unicast — not local
         assert!(!is_local_network("2001:db8::1".parse().unwrap()));
-        assert!(!is_local_network("2607:f8b0:4004:800::200e".parse().unwrap()));
+        assert!(!is_local_network(
+            "2607:f8b0:4004:800::200e".parse().unwrap()
+        ));
     }
 
     #[test]

@@ -137,9 +137,7 @@ impl<K: Hash + Eq + Clone, V> ArcCache<K, V> {
 
     /// ARC replacement: evict from T1 or T2 based on p.
     fn replace(&mut self, b2_hit: bool) {
-        if !self.t1.is_empty()
-            && (self.t1.len() > self.p || (b2_hit && self.t1.len() == self.p))
-        {
+        if !self.t1.is_empty() && (self.t1.len() > self.p || (b2_hit && self.t1.len() == self.p)) {
             // Evict LRU from T1 → ghost to B1
             if let Some(evicted) = self.t1.pop_front() {
                 self.map.remove(&evicted);

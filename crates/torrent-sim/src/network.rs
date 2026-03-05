@@ -118,7 +118,9 @@ impl SimNetwork {
         let mut inner = self.inner.lock().unwrap();
         let octet = inner.next_ip;
         assert!(octet != 0, "node IP octet overflow: too many nodes");
-        inner.next_ip = octet.checked_add(1).expect("node IP octet overflow: too many nodes");
+        inner.next_ip = octet
+            .checked_add(1)
+            .expect("node IP octet overflow: too many nodes");
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))
     }
 
@@ -174,10 +176,7 @@ impl SimNetwork {
     /// Returns a receiver that will get incoming [`SimConnection`]s when
     /// remote nodes connect to this address.
     #[allow(dead_code)] // Used by SimTransport (Task 5)
-    pub(crate) fn register_listener(
-        &self,
-        addr: SocketAddr,
-    ) -> mpsc::Receiver<SimConnection> {
+    pub(crate) fn register_listener(&self, addr: SocketAddr) -> mpsc::Receiver<SimConnection> {
         let (tx, rx) = mpsc::channel(64);
         let mut inner = self.inner.lock().unwrap();
         inner.listeners.insert(addr, tx);
@@ -219,16 +218,12 @@ impl SimNetwork {
         // Look up listener and get a clone of the sender
         let sender = {
             let inner = self.inner.lock().unwrap();
-            inner
-                .listeners
-                .get(&to_addr)
-                .cloned()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::ConnectionRefused,
-                        format!("no listener at {to_addr}"),
-                    )
-                })?
+            inner.listeners.get(&to_addr).cloned().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("no listener at {to_addr}"),
+                )
+            })?
         };
 
         // Create duplex channel pair
@@ -286,9 +281,8 @@ mod tests {
         let from_addr = SocketAddr::new(ip1, 12345);
 
         // Spawn a task to accept the connection
-        let accept_handle = tokio::spawn(async move {
-            rx.recv().await.expect("should receive connection")
-        });
+        let accept_handle =
+            tokio::spawn(async move { rx.recv().await.expect("should receive connection") });
 
         // Connect from node 1 to node 2
         let mut client_stream = net.connect_tcp(from_addr, listener_addr).await.unwrap();
@@ -346,9 +340,8 @@ mod tests {
         // Connection should succeed after healing
         let from_addr = SocketAddr::new(ip1, 12345);
 
-        let accept_handle = tokio::spawn(async move {
-            rx.recv().await.expect("should receive connection")
-        });
+        let accept_handle =
+            tokio::spawn(async move { rx.recv().await.expect("should receive connection") });
 
         let _client = net.connect_tcp(from_addr, listener_addr).await.unwrap();
         let conn = accept_handle.await.unwrap();
@@ -391,8 +384,8 @@ mod tests {
         // Partition: {ip1, ip2} vs {ip3}
         net.partition(vec![ip1, ip2], vec![ip3]);
         assert!(!net.is_partitioned(ip1, ip2)); // same group
-        assert!(net.is_partitioned(ip1, ip3));   // across groups
-        assert!(net.is_partitioned(ip2, ip3));   // across groups
+        assert!(net.is_partitioned(ip1, ip3)); // across groups
+        assert!(net.is_partitioned(ip2, ip3)); // across groups
     }
 
     #[test]

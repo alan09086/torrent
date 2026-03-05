@@ -6,20 +6,20 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use tracing::{debug, info, warn};
 
-use torrent_core::{Id20, Lengths, Magnet, TorrentMetaV1, DEFAULT_CHUNK_SIZE};
+use torrent_core::{DEFAULT_CHUNK_SIZE, Id20, Lengths, Magnet, TorrentMetaV1};
 use torrent_dht::DhtHandle;
 use torrent_storage::TorrentStorage;
 
-use crate::alert::{post_alert, Alert, AlertCategory, AlertKind, AlertStream};
-use crate::torrent::TorrentHandle;
+use crate::alert::{Alert, AlertCategory, AlertKind, AlertStream, post_alert};
 use crate::settings::Settings;
+use crate::torrent::TorrentHandle;
 use crate::types::{
     FileInfo, SessionStats, TorrentConfig, TorrentInfo, TorrentState, TorrentStats,
 };
@@ -392,12 +392,7 @@ impl SessionHandle {
         settings: Settings,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> crate::Result<Self> {
-        Self::start_with_plugins_and_backend(
-            settings,
-            Arc::new(Vec::new()),
-            backend,
-        )
-        .await
+        Self::start_with_plugins_and_backend(settings, Arc::new(Vec::new()), backend).await
     }
 
     /// Start a new session with the given settings and extension plugins.
@@ -417,7 +412,13 @@ impl SessionHandle {
         plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> crate::Result<Self> {
-        Self::start_full(settings, plugins, backend, Arc::new(crate::transport::NetworkFactory::tokio())).await
+        Self::start_full(
+            settings,
+            plugins,
+            backend,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
     }
 
     /// Start a new session with the given settings and a custom transport factory.
@@ -507,7 +508,9 @@ impl SessionHandle {
 
         // IPv6 uTP socket (dual-stack)
         let (utp_socket_v6, utp_listener_v6) = if settings.enable_utp && settings.enable_ipv6 {
-            match torrent_utp::UtpSocket::bind(settings.to_utp_config_v6(settings.listen_port)).await {
+            match torrent_utp::UtpSocket::bind(settings.to_utp_config_v6(settings.listen_port))
+                .await
+            {
                 Ok((socket, listener)) => (Some(socket), Some(listener)),
                 Err(e) => {
                     debug!("uTP IPv6 bind failed (non-fatal): {e}");
@@ -571,9 +574,7 @@ impl SessionHandle {
         };
 
         // SSL manager (M42): create if ssl_listen_port != 0 or cert paths are provided
-        let ssl_manager = if settings.ssl_listen_port != 0
-            || settings.ssl_cert_path.is_some()
-        {
+        let ssl_manager = if settings.ssl_listen_port != 0 || settings.ssl_cert_path.is_some() {
             match crate::ssl_manager::SslManager::new(&settings) {
                 Ok(mgr) => {
                     info!("SSL manager initialized");
@@ -589,21 +590,29 @@ impl SessionHandle {
         };
 
         // TCP listener: bind on the main listen port for incoming peer connections.
-        let tcp_listener: Option<Box<dyn crate::transport::TransportListener>> =
-            match factory.bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.listen_port))).await {
-                Ok(l) => {
-                    info!(port = settings.listen_port, "TCP listener started");
-                    Some(l)
-                }
-                Err(e) => {
-                    warn!(port = settings.listen_port, error = %e, "TCP listener bind failed");
-                    None
-                }
-            };
+        let tcp_listener: Option<Box<dyn crate::transport::TransportListener>> = match factory
+            .bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.listen_port)))
+            .await
+        {
+            Ok(l) => {
+                info!(port = settings.listen_port, "TCP listener started");
+                Some(l)
+            }
+            Err(e) => {
+                warn!(port = settings.listen_port, error = %e, "TCP listener bind failed");
+                None
+            }
+        };
 
         // SSL listener (M42): bind if ssl_listen_port != 0
-        let ssl_listener: Option<Box<dyn crate::transport::TransportListener>> = if settings.ssl_listen_port != 0 {
-            match factory.bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.ssl_listen_port))).await {
+        let ssl_listener: Option<Box<dyn crate::transport::TransportListener>> = if settings
+            .ssl_listen_port
+            != 0
+        {
+            match factory
+                .bind_tcp(SocketAddr::from(([0, 0, 0, 0], settings.ssl_listen_port)))
+                .await
+            {
                 Ok(l) => {
                     info!(port = settings.ssl_listen_port, "SSL listener started");
                     Some(l)
@@ -649,13 +658,12 @@ impl SessionHandle {
         };
 
         let ban_config = crate::ban::BanConfig::from(&settings);
-        let ban_manager: SharedBanManager = Arc::new(
-            std::sync::RwLock::new(crate::ban::BanManager::new(ban_config)),
-        );
+        let ban_manager: SharedBanManager = Arc::new(std::sync::RwLock::new(
+            crate::ban::BanManager::new(ban_config),
+        ));
 
-        let ip_filter: SharedIpFilter = Arc::new(
-            std::sync::RwLock::new(crate::ip_filter::IpFilter::new()),
-        );
+        let ip_filter: SharedIpFilter =
+            Arc::new(std::sync::RwLock::new(crate::ip_filter::IpFilter::new()));
 
         let disk_config = crate::disk::DiskConfig::from(&settings);
         let (disk_manager, disk_actor_handle) =
@@ -699,7 +707,13 @@ impl SessionHandle {
         };
 
         tokio::spawn(actor.run());
-        Ok(SessionHandle { cmd_tx, alert_tx, alert_mask, counters, factory })
+        Ok(SessionHandle {
+            cmd_tx,
+            alert_tx,
+            alert_mask,
+            counters,
+            factory,
+        })
     }
 
     /// Add a torrent from parsed .torrent metadata (v1, v2, or hybrid).
@@ -891,9 +905,7 @@ impl SessionHandle {
     }
 
     /// Save full session state (all torrent resume data + DHT node cache).
-    pub async fn save_session_state(
-        &self,
-    ) -> crate::Result<crate::persistence::SessionState> {
+    pub async fn save_session_state(&self) -> crate::Result<crate::persistence::SessionState> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::SaveSessionState { reply: tx })
@@ -1040,7 +1052,10 @@ impl SessionHandle {
     pub async fn apply_settings(&self, settings: Settings) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(SessionCommand::ApplySettings { settings: Box::new(settings), reply: tx })
+            .send(SessionCommand::ApplySettings {
+                settings: Box::new(settings),
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
@@ -1196,11 +1211,7 @@ impl SessionHandle {
     }
 
     /// Set the per-torrent upload rate limit in bytes/sec (0 = unlimited).
-    pub async fn set_upload_limit(
-        &self,
-        info_hash: Id20,
-        bytes_per_sec: u64,
-    ) -> crate::Result<()> {
+    pub async fn set_upload_limit(&self, info_hash: Id20, bytes_per_sec: u64) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::SetUploadLimit {
@@ -1271,11 +1282,7 @@ impl SessionHandle {
     }
 
     /// Enable or disable BEP 16 super seeding mode for a torrent.
-    pub async fn set_super_seeding(
-        &self,
-        info_hash: Id20,
-        enabled: bool,
-    ) -> crate::Result<()> {
+    pub async fn set_super_seeding(&self, info_hash: Id20, enabled: bool) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::SetSuperSeeding {
@@ -1318,11 +1325,7 @@ impl SessionHandle {
     }
 
     /// Replace all tracker URLs for a torrent.
-    pub async fn replace_trackers(
-        &self,
-        info_hash: Id20,
-        urls: Vec<String>,
-    ) -> crate::Result<()> {
+    pub async fn replace_trackers(&self, info_hash: Id20, urls: Vec<String>) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::ReplaceTrackers {
@@ -1377,11 +1380,7 @@ impl SessionHandle {
     }
 
     /// Set the per-torrent maximum number of connections (0 = use global default).
-    pub async fn set_max_connections(
-        &self,
-        info_hash: Id20,
-        limit: usize,
-    ) -> crate::Result<()> {
+    pub async fn set_max_connections(&self, info_hash: Id20, limit: usize) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::SetMaxConnections {
@@ -1408,11 +1407,7 @@ impl SessionHandle {
     }
 
     /// Set the per-torrent maximum number of upload slots (unchoke slots).
-    pub async fn set_max_uploads(
-        &self,
-        info_hash: Id20,
-        limit: usize,
-    ) -> crate::Result<()> {
+    pub async fn set_max_uploads(&self, info_hash: Id20, limit: usize) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::SetMaxUploads {
@@ -1471,11 +1466,7 @@ impl SessionHandle {
     }
 
     /// Check whether a specific piece has been downloaded for a torrent.
-    pub async fn have_piece(
-        &self,
-        info_hash: Id20,
-        index: u32,
-    ) -> crate::Result<bool> {
+    pub async fn have_piece(&self, info_hash: Id20, index: u32) -> crate::Result<bool> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::HavePiece {
@@ -1489,10 +1480,7 @@ impl SessionHandle {
     }
 
     /// Get per-piece availability counts from connected peers for a torrent.
-    pub async fn piece_availability(
-        &self,
-        info_hash: Id20,
-    ) -> crate::Result<Vec<u32>> {
+    pub async fn piece_availability(&self, info_hash: Id20) -> crate::Result<Vec<u32>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::PieceAvailability {
@@ -1505,10 +1493,7 @@ impl SessionHandle {
     }
 
     /// Get per-file bytes-downloaded progress for a torrent.
-    pub async fn file_progress(
-        &self,
-        info_hash: Id20,
-    ) -> crate::Result<Vec<u64>> {
+    pub async fn file_progress(&self, info_hash: Id20) -> crate::Result<Vec<u64>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::FileProgress {
@@ -1521,10 +1506,7 @@ impl SessionHandle {
     }
 
     /// Get the torrent's identity hashes (v1 and/or v2).
-    pub async fn info_hashes(
-        &self,
-        info_hash: Id20,
-    ) -> crate::Result<torrent_core::InfoHashes> {
+    pub async fn info_hashes(&self, info_hash: Id20) -> crate::Result<torrent_core::InfoHashes> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::InfoHashesQuery {
@@ -1602,11 +1584,7 @@ impl SessionHandle {
     }
 
     /// Read all data for a specific piece from disk.
-    pub async fn read_piece(
-        &self,
-        info_hash: Id20,
-        index: u32,
-    ) -> crate::Result<bytes::Bytes> {
+    pub async fn read_piece(&self, info_hash: Id20, index: u32) -> crate::Result<bytes::Bytes> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::ReadPiece {
@@ -1679,10 +1657,7 @@ impl SessionHandle {
     }
 
     /// Read the current torrent flags as a [`crate::types::TorrentFlags`] bitflag set.
-    pub async fn flags(
-        &self,
-        info_hash: Id20,
-    ) -> crate::Result<crate::types::TorrentFlags> {
+    pub async fn flags(&self, info_hash: Id20) -> crate::Result<crate::types::TorrentFlags> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::Flags {
@@ -1731,11 +1706,7 @@ impl SessionHandle {
     }
 
     /// Immediately initiate a peer connection for a torrent.
-    pub async fn connect_peer(
-        &self,
-        info_hash: Id20,
-        addr: SocketAddr,
-    ) -> crate::Result<()> {
+    pub async fn connect_peer(&self, info_hash: Id20, addr: SocketAddr) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::ConnectPeer {
@@ -1804,15 +1775,16 @@ impl SessionActor {
         refill_interval.tick().await; // skip first immediate tick
 
         let auto_manage_secs = self.settings.auto_manage_interval.max(1);
-        let mut auto_manage_interval = tokio::time::interval(
-            std::time::Duration::from_secs(auto_manage_secs),
-        );
+        let mut auto_manage_interval =
+            tokio::time::interval(std::time::Duration::from_secs(auto_manage_secs));
         auto_manage_interval.tick().await; // skip first immediate tick
 
         // Periodic session stats timer (M50)
         let stats_interval_ms = self.settings.stats_report_interval;
         let mut stats_timer = if stats_interval_ms > 0 {
-            Some(tokio::time::interval(std::time::Duration::from_millis(stats_interval_ms)))
+            Some(tokio::time::interval(std::time::Duration::from_millis(
+                stats_interval_ms,
+            )))
         } else {
             None
         };
@@ -2404,12 +2376,7 @@ impl SessionActor {
     }
 
     /// Return clones of global buckets if they have a non-zero rate, else None.
-    fn global_buckets_if_limited(
-        &self,
-    ) -> (
-        Option<SharedBucket>,
-        Option<SharedBucket>,
-    ) {
+    fn global_buckets_if_limited(&self) -> (Option<SharedBucket>, Option<SharedBucket>) {
         let up = if self.settings.upload_rate_limit > 0 {
             Some(Arc::clone(&self.global_upload_bucket))
         } else {
@@ -2546,7 +2513,11 @@ impl SessionActor {
         }
 
         info!(%info_hash, "torrent added to session");
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentAdded { info_hash, name });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentAdded { info_hash, name },
+        );
         if let Some(ref lsd) = self.lsd {
             lsd.announce(vec![info_hash]).await;
         }
@@ -2608,7 +2579,14 @@ impl SessionActor {
         }
 
         info!(%info_hash, "magnet torrent added to session");
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentAdded { info_hash, name: display_name });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentAdded {
+                info_hash,
+                name: display_name,
+            },
+        );
         if let Some(ref lsd) = self.lsd {
             lsd.announce(vec![info_hash]).await;
         }
@@ -2633,7 +2611,11 @@ impl SessionActor {
         }
 
         info!(%info_hash, "torrent removed from session");
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentRemoved { info_hash });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentRemoved { info_hash },
+        );
         Ok(())
     }
 
@@ -2779,9 +2761,7 @@ impl SessionActor {
         Ok(resume)
     }
 
-    async fn handle_save_session_state(
-        &self,
-    ) -> crate::Result<crate::persistence::SessionState> {
+    async fn handle_save_session_state(&self) -> crate::Result<crate::persistence::SessionState> {
         use crate::persistence::SessionState;
 
         let mut torrents = Vec::new();
@@ -2797,11 +2777,13 @@ impl SessionActor {
         // Serialize smart ban state (scoped to drop RwLockReadGuard before awaits)
         let (banned_peers, peer_strikes) = {
             let ban_mgr = self.ban_manager.read().unwrap();
-            let banned_peers: Vec<String> = ban_mgr.banned_list()
+            let banned_peers: Vec<String> = ban_mgr
+                .banned_list()
                 .iter()
                 .map(|ip| ip.to_string())
                 .collect();
-            let peer_strikes: Vec<crate::persistence::PeerStrikeEntry> = ban_mgr.strikes_map()
+            let peer_strikes: Vec<crate::persistence::PeerStrikeEntry> = ban_mgr
+                .strikes_map()
                 .iter()
                 .map(|(ip, &count)| crate::persistence::PeerStrikeEntry {
                     ip: ip.to_string(),
@@ -2846,26 +2828,29 @@ impl SessionActor {
 
         // Update rate limiters if changed
         if new.upload_rate_limit != self.settings.upload_rate_limit {
-            self.global_upload_bucket.lock().unwrap().set_rate(new.upload_rate_limit);
+            self.global_upload_bucket
+                .lock()
+                .unwrap()
+                .set_rate(new.upload_rate_limit);
         }
         if new.download_rate_limit != self.settings.download_rate_limit {
-            self.global_download_bucket.lock().unwrap().set_rate(new.download_rate_limit);
+            self.global_download_bucket
+                .lock()
+                .unwrap()
+                .set_rate(new.download_rate_limit);
         }
 
         // Update alert mask if changed
         if new.alert_mask != self.settings.alert_mask {
-            self.alert_mask.store(new.alert_mask.bits(), Ordering::Relaxed);
+            self.alert_mask
+                .store(new.alert_mask.bits(), Ordering::Relaxed);
         }
 
         // Store new settings
         self.settings = new;
 
         // Fire alert
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::SettingsChanged,
-        );
+        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::SettingsChanged);
 
         Ok(())
     }
@@ -2892,11 +2877,7 @@ impl SessionActor {
         Ok(())
     }
 
-    fn handle_queue_move(
-        &mut self,
-        info_hash: Id20,
-        op: QueueMoveFn,
-    ) -> crate::Result<()> {
+    fn handle_queue_move(&mut self, info_hash: Id20, op: QueueMoveFn) -> crate::Result<()> {
         if !self.torrents.contains_key(&info_hash) {
             return Err(crate::Error::TorrentNotFound(info_hash));
         }
@@ -2963,9 +2944,9 @@ impl SessionActor {
             };
 
             let category = match stats.state {
-                TorrentState::Downloading | TorrentState::FetchingMetadata | TorrentState::Checking => {
-                    crate::queue::QueueCategory::Downloading
-                }
+                TorrentState::Downloading
+                | TorrentState::FetchingMetadata
+                | TorrentState::Checking => crate::queue::QueueCategory::Downloading,
                 TorrentState::Seeding | TorrentState::Complete => {
                     crate::queue::QueueCategory::Seeding
                 }
@@ -2983,10 +2964,8 @@ impl SessionActor {
             let is_active = stats.state != TorrentState::Paused;
 
             // Compute rate from delta since last tick
-            let download_rate =
-                stats.downloaded.saturating_sub(prev_downloaded) / auto_manage_secs;
-            let upload_rate =
-                stats.uploaded.saturating_sub(prev_uploaded) / auto_manage_secs;
+            let download_rate = stats.downloaded.saturating_sub(prev_downloaded) / auto_manage_secs;
+            let upload_rate = stats.uploaded.saturating_sub(prev_uploaded) / auto_manage_secs;
 
             let past_startup = started_at
                 .map(|t| now.duration_since(t) > startup_duration)
@@ -3068,14 +3047,22 @@ impl SessionActor {
     }
 
     /// Handle an incoming TCP connection from the main listen port.
-    fn handle_tcp_inbound(&self, stream: crate::transport::BoxedStream, addr: std::net::SocketAddr) {
+    fn handle_tcp_inbound(
+        &self,
+        stream: crate::transport::BoxedStream,
+        addr: std::net::SocketAddr,
+    ) {
         self.route_inbound_stream(stream, addr, "TCP");
     }
 
     /// Route an inbound stream (TCP or uTP) to the appropriate torrent by reading the
     /// BitTorrent handshake preamble.
-    fn route_inbound_stream<S>(&self, stream: S, addr: std::net::SocketAddr, transport: &'static str)
-    where
+    fn route_inbound_stream<S>(
+        &self,
+        stream: S,
+        addr: std::net::SocketAddr,
+        transport: &'static str,
+    ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         // Clone torrent handles so the routing task can look up by info_hash.
@@ -3119,10 +3106,7 @@ impl SessionActor {
     ) {
         use tokio_rustls::LazyConfigAcceptor;
 
-        let acceptor = LazyConfigAcceptor::new(
-            rustls::server::Acceptor::default(),
-            stream,
-        );
+        let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
 
         let start_handshake = match acceptor.await {
             Ok(sh) => sh,
@@ -3242,10 +3226,7 @@ async fn accept_utp(
     listener: &mut Option<torrent_utp::UtpListener>,
 ) -> std::io::Result<(torrent_utp::UtpStream, std::net::SocketAddr)> {
     match listener {
-        Some(l) => l
-            .accept()
-            .await
-            .map_err(std::io::Error::other),
+        Some(l) => l.accept().await.map_err(std::io::Error::other),
         None => std::future::pending().await,
     }
 }
@@ -3265,7 +3246,9 @@ async fn recv_nat_event(
 }
 
 /// Receive from an optional DHT IP consensus channel, pending forever if absent.
-async fn recv_dht_ip(rx: &mut Option<mpsc::Receiver<std::net::IpAddr>>) -> Option<std::net::IpAddr> {
+async fn recv_dht_ip(
+    rx: &mut Option<mpsc::Receiver<std::net::IpAddr>>,
+) -> Option<std::net::IpAddr> {
     match rx {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
@@ -3277,8 +3260,10 @@ async fn recv_dht_ip(rx: &mut Option<mpsc::Receiver<std::net::IpAddr>>) -> Optio
 /// The session engine uses v1 structures internally (info hash as Id20, InfoDict for
 /// piece hashing, etc.). For v2-only torrents, we create a "virtual" v1 representation
 /// with the truncated SHA-256 hash as the info_hash.
-fn synthesize_v1_from_v2(v2: &torrent_core::TorrentMetaV2) -> crate::Result<torrent_core::TorrentMetaV1> {
-    use torrent_core::{InfoDict, FileEntry};
+fn synthesize_v1_from_v2(
+    v2: &torrent_core::TorrentMetaV2,
+) -> crate::Result<torrent_core::TorrentMetaV1> {
+    use torrent_core::{FileEntry, InfoDict};
 
     let info_hash = v2.info_hashes.best_v1();
 
@@ -3337,10 +3322,10 @@ fn synthesize_v1_from_v2(v2: &torrent_core::TorrentMetaV2) -> crate::Result<torr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torrent_core::{torrent_from_bytes, Lengths, DEFAULT_CHUNK_SIZE};
-    use torrent_storage::MemoryStorage;
     use crate::types::TorrentState;
     use std::time::Duration;
+    use torrent_core::{DEFAULT_CHUNK_SIZE, Lengths, torrent_from_bytes};
+    use torrent_storage::MemoryStorage;
 
     fn make_test_torrent(data: &[u8], piece_length: u64) -> TorrentMetaV1 {
         use serde::Serialize;
@@ -3428,7 +3413,10 @@ mod tests {
         let expected_hash = meta.info_hash;
 
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
         assert_eq!(info_hash, expected_hash);
 
         let list = session.list_torrents().await.unwrap();
@@ -3447,7 +3435,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
         session.remove_torrent(info_hash).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3490,7 +3481,10 @@ mod tests {
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
         let storage1 = make_storage(&data1, 16384);
-        session.add_torrent(meta1.into(), Some(storage1)).await.unwrap();
+        session
+            .add_torrent(meta1.into(), Some(storage1))
+            .await
+            .unwrap();
 
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
@@ -3511,7 +3505,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
         let stats = session.torrent_stats(info_hash).await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
         assert_eq!(stats.pieces_total, 2);
@@ -3528,7 +3525,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
         let info = session.torrent_info(info_hash).await.unwrap();
         assert_eq!(info.info_hash, info_hash);
         assert_eq!(info.name, "test");
@@ -3550,7 +3550,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         session.pause_torrent(info_hash).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3590,12 +3593,18 @@ mod tests {
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
         let storage1 = make_storage(&data1, 16384);
-        session.add_torrent(meta1.into(), Some(storage1)).await.unwrap();
+        session
+            .add_torrent(meta1.into(), Some(storage1))
+            .await
+            .unwrap();
 
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        session.add_torrent(meta2.into(), Some(storage2)).await.unwrap();
+        session
+            .add_torrent(meta2.into(), Some(storage2))
+            .await
+            .unwrap();
 
         let stats = session.session_stats().await.unwrap();
         assert_eq!(stats.active_torrents, 2);
@@ -3676,7 +3685,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Add a magnet (also triggers LSD announce)
         let magnet = Magnet {
@@ -3743,7 +3755,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let info_hash = meta.info_hash;
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         let rd = session.save_torrent_resume_data(info_hash).await.unwrap();
         assert_eq!(rd.info_hash, info_hash.as_bytes().as_slice());
@@ -3765,12 +3780,18 @@ mod tests {
         let data1 = vec![0xAA; 16384];
         let meta1 = make_test_torrent(&data1, 16384);
         let storage1 = make_storage(&data1, 16384);
-        session.add_torrent(meta1.into(), Some(storage1)).await.unwrap();
+        session
+            .add_torrent(meta1.into(), Some(storage1))
+            .await
+            .unwrap();
 
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        session.add_torrent(meta2.into(), Some(storage2)).await.unwrap();
+        session
+            .add_torrent(meta2.into(), Some(storage2))
+            .await
+            .unwrap();
 
         let state = session.save_session_state().await.unwrap();
         assert_eq!(state.torrents.len(), 2);
@@ -3807,7 +3828,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let _info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let _info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
             .await
@@ -3830,11 +3854,20 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Drain TorrentAdded and any checking alerts
         while let Ok(Ok(a)) = tokio::time::timeout(Duration::from_secs(1), alerts.recv()).await {
-            if matches!(a.kind, AlertKind::StateChanged { new_state: TorrentState::Downloading, .. }) {
+            if matches!(
+                a.kind,
+                AlertKind::StateChanged {
+                    new_state: TorrentState::Downloading,
+                    ..
+                }
+            ) {
                 break;
             }
         }
@@ -3867,12 +3900,19 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         let a1 = tokio::time::timeout(Duration::from_secs(2), sub1.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         let a2 = tokio::time::timeout(Duration::from_secs(2), sub2.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(a1.kind, AlertKind::TorrentAdded { .. }));
         assert!(matches!(a2.kind, AlertKind::TorrentAdded { .. }));
@@ -3892,14 +3932,22 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
 
         // Drain any remaining alerts from the first torrent (StateChanged, CheckingProgress, etc.)
-        while tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await.is_ok() {}
+        while tokio::time::timeout(Duration::from_millis(200), alerts.recv())
+            .await
+            .is_ok()
+        {}
 
         // Change mask to empty — no alerts should pass
         session.set_alert_mask(AlertCategory::empty());
@@ -3907,7 +3955,10 @@ mod tests {
         let data2 = vec![0xBB; 16384];
         let meta2 = make_test_torrent(&data2, 16384);
         let storage2 = make_storage(&data2, 16384);
-        session.add_torrent(meta2.into(), Some(storage2)).await.unwrap();
+        session
+            .add_torrent(meta2.into(), Some(storage2))
+            .await
+            .unwrap();
 
         // Give a small window — nothing should arrive
         let result = tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await;
@@ -3919,10 +3970,15 @@ mod tests {
         let data3 = vec![0xCC; 16384];
         let meta3 = make_test_torrent(&data3, 16384);
         let storage3 = make_storage(&data3, 16384);
-        session.add_torrent(meta3.into(), Some(storage3)).await.unwrap();
+        session
+            .add_torrent(meta3.into(), Some(storage3))
+            .await
+            .unwrap();
 
         let alert = tokio::time::timeout(Duration::from_secs(2), alerts.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
 
         session.shutdown().await.unwrap();
@@ -3944,16 +4000,24 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // STATUS sub gets TorrentAdded
         let alert = tokio::time::timeout(Duration::from_secs(2), status_sub.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(alert.kind, AlertKind::TorrentAdded { .. }));
 
         // PEER sub should NOT receive TorrentAdded (it's STATUS category)
         let result = tokio::time::timeout(Duration::from_millis(200), peer_sub.recv()).await;
-        assert!(result.is_err(), "PEER subscriber should not get STATUS alerts");
+        assert!(
+            result.is_err(),
+            "PEER subscriber should not get STATUS alerts"
+        );
 
         session.shutdown().await.unwrap();
     }
@@ -3970,11 +4034,15 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Drain TorrentAdded
         let _ = tokio::time::timeout(Duration::from_secs(1), alerts.recv())
-            .await.unwrap();
+            .await
+            .unwrap();
 
         // Pause — should get StateChanged(Downloading → Paused) + TorrentPaused
         session.pause_torrent(info_hash).await.unwrap();
@@ -3986,7 +4054,11 @@ mod tests {
         loop {
             match tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await {
                 Ok(Ok(a)) => match &a.kind {
-                    AlertKind::StateChanged { prev_state, new_state, .. } => {
+                    AlertKind::StateChanged {
+                        prev_state,
+                        new_state,
+                        ..
+                    } => {
                         state_changes.push((*prev_state, *new_state));
                     }
                     AlertKind::TorrentPaused { .. } => {
@@ -4013,7 +4085,11 @@ mod tests {
         loop {
             match tokio::time::timeout(Duration::from_millis(200), alerts.recv()).await {
                 Ok(Ok(a)) => match &a.kind {
-                    AlertKind::StateChanged { prev_state, new_state, .. } => {
+                    AlertKind::StateChanged {
+                        prev_state,
+                        new_state,
+                        ..
+                    } => {
                         resume_state_changes.push((*prev_state, *new_state));
                     }
                     AlertKind::TorrentResumed { .. } => {
@@ -4125,7 +4201,10 @@ mod tests {
         let result = SessionHandle::start(config).await;
         assert!(result.is_err());
         match result {
-            Err(e) => assert!(e.to_string().contains("force_proxy"), "error should mention force_proxy: {e}"),
+            Err(e) => assert!(
+                e.to_string().contains("force_proxy"),
+                "error should mention force_proxy: {e}"
+            ),
             Ok(_) => panic!("expected error"),
         }
     }
@@ -4263,7 +4342,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         session.post_session_stats().await.unwrap();
 
@@ -4324,7 +4406,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // open_file should succeed for file_index 0 (single-file torrent)
         let stream = session.open_file(info_hash, 0).await;
@@ -4332,7 +4417,10 @@ mod tests {
 
         // open_file should fail for out-of-range file_index
         let result = session.open_file(info_hash, 999).await;
-        assert!(result.is_err(), "open_file should fail for invalid file_index");
+        assert!(
+            result.is_err(),
+            "open_file should fail for invalid file_index"
+        );
 
         session.shutdown().await.unwrap();
     }
@@ -4345,11 +4433,17 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should succeed for a known torrent.
         let result = session.force_reannounce(info_hash).await;
-        assert!(result.is_ok(), "force_reannounce should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "force_reannounce should succeed: {result:?}"
+        );
 
         // Should fail for unknown torrent.
         let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
@@ -4366,7 +4460,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should succeed (empty list since test torrent has no announce URL).
         let trackers = session.tracker_list(info_hash).await.unwrap();
@@ -4387,7 +4484,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should succeed (None since test torrent has no trackers to scrape).
         let scrape = session.scrape(info_hash).await.unwrap();
@@ -4408,20 +4508,28 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should succeed for file index 0 (single-file torrent).
         let result = session
             .set_file_priority(info_hash, 0, torrent_core::FilePriority::Normal)
             .await;
-        assert!(result.is_ok(), "set_file_priority should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "set_file_priority should succeed: {result:?}"
+        );
 
         // Should fail for unknown torrent.
         let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-        assert!(session
-            .set_file_priority(fake, 0, torrent_core::FilePriority::Normal)
-            .await
-            .is_err());
+        assert!(
+            session
+                .set_file_priority(fake, 0, torrent_core::FilePriority::Normal)
+                .await
+                .is_err()
+        );
 
         session.shutdown().await.unwrap();
     }
@@ -4434,11 +4542,18 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should return priorities for the single file.
         let priorities = session.file_priorities(info_hash).await.unwrap();
-        assert_eq!(priorities.len(), 1, "single-file torrent should have 1 file priority");
+        assert_eq!(
+            priorities.len(),
+            1,
+            "single-file torrent should have 1 file priority"
+        );
         assert_eq!(priorities[0], torrent_core::FilePriority::Normal);
 
         // Should fail for unknown torrent.
@@ -4456,7 +4571,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Set limit to non-zero, then back to zero (unlimited).
         session.set_download_limit(info_hash, 50_000).await.unwrap();
@@ -4475,7 +4593,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         session.set_upload_limit(info_hash, 100_000).await.unwrap();
         let limit = session.upload_limit(info_hash).await.unwrap();
@@ -4492,7 +4613,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Default config has download_rate_limit = 0.
         let limit = session.download_limit(info_hash).await.unwrap();
@@ -4509,10 +4633,16 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Set both limits.
-        session.set_download_limit(info_hash, 1_000_000).await.unwrap();
+        session
+            .set_download_limit(info_hash, 1_000_000)
+            .await
+            .unwrap();
         session.set_upload_limit(info_hash, 500_000).await.unwrap();
 
         // Read them back.
@@ -4522,7 +4652,10 @@ mod tests {
         assert_eq!(ul, 500_000);
 
         // Update and verify again.
-        session.set_download_limit(info_hash, 2_000_000).await.unwrap();
+        session
+            .set_download_limit(info_hash, 2_000_000)
+            .await
+            .unwrap();
         let dl = session.download_limit(info_hash).await.unwrap();
         assert_eq!(dl, 2_000_000);
 
@@ -4544,14 +4677,23 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Enable sequential download.
-        session.set_sequential_download(info_hash, true).await.unwrap();
+        session
+            .set_sequential_download(info_hash, true)
+            .await
+            .unwrap();
         assert!(session.is_sequential_download(info_hash).await.unwrap());
 
         // Disable it again.
-        session.set_sequential_download(info_hash, false).await.unwrap();
+        session
+            .set_sequential_download(info_hash, false)
+            .await
+            .unwrap();
         assert!(!session.is_sequential_download(info_hash).await.unwrap());
 
         session.shutdown().await.unwrap();
@@ -4565,7 +4707,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Enable super seeding.
         session.set_super_seeding(info_hash, true).await.unwrap();
@@ -4586,7 +4731,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Default config has sequential_download = false.
         assert!(!session.is_sequential_download(info_hash).await.unwrap());
@@ -4602,7 +4750,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Default config has super_seeding = false.
         assert!(!session.is_super_seeding(info_hash).await.unwrap());
@@ -4618,14 +4769,20 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Test torrent has no trackers initially.
         let before = session.tracker_list(info_hash).await.unwrap();
         assert!(before.is_empty());
 
         // Add a tracker.
-        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+        session
+            .add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into())
+            .await
+            .unwrap();
 
         let after = session.tracker_list(info_hash).await.unwrap();
         assert_eq!(after.len(), 1);
@@ -4642,17 +4799,30 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Add 2 trackers.
-        session.add_tracker(info_hash, "udp://tracker1.example.com:6969/announce".into()).await.unwrap();
-        session.add_tracker(info_hash, "http://tracker2.example.com/announce".into()).await.unwrap();
+        session
+            .add_tracker(info_hash, "udp://tracker1.example.com:6969/announce".into())
+            .await
+            .unwrap();
+        session
+            .add_tracker(info_hash, "http://tracker2.example.com/announce".into())
+            .await
+            .unwrap();
         assert_eq!(session.tracker_list(info_hash).await.unwrap().len(), 2);
 
         // Replace with 1 different tracker.
-        session.replace_trackers(info_hash, vec![
-            "http://replacement.example.com/announce".into(),
-        ]).await.unwrap();
+        session
+            .replace_trackers(
+                info_hash,
+                vec!["http://replacement.example.com/announce".into()],
+            )
+            .await
+            .unwrap();
 
         let after = session.tracker_list(info_hash).await.unwrap();
         assert_eq!(after.len(), 1);
@@ -4669,11 +4839,20 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Add the same tracker URL twice.
-        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
-        session.add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into()).await.unwrap();
+        session
+            .add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into())
+            .await
+            .unwrap();
+        session
+            .add_tracker(info_hash, "udp://tracker.example.com:6969/announce".into())
+            .await
+            .unwrap();
 
         // Should only have 1 tracker (deduplicated).
         let trackers = session.tracker_list(info_hash).await.unwrap();
@@ -4692,7 +4871,10 @@ mod tests {
         let expected_v1 = meta.info_hash;
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
         let hashes = session.info_hashes(info_hash).await.unwrap();
         assert_eq!(hashes.v1, Some(expected_v1));
         // v1-only torrent should not have v2 hash
@@ -4710,7 +4892,10 @@ mod tests {
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
 
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
         let torrent = session.torrent_file(info_hash).await.unwrap();
         assert!(torrent.is_some());
         let torrent = torrent.unwrap();
@@ -4727,8 +4912,9 @@ mod tests {
     async fn torrent_file_none_before_metadata() {
         let session = SessionHandle::start(test_settings()).await.unwrap();
         let magnet = torrent_core::Magnet::parse(
-            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test"
-        ).unwrap();
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test",
+        )
+        .unwrap();
 
         let info_hash = session.add_magnet(magnet).await.unwrap();
         let torrent = session.torrent_file(info_hash).await.unwrap();
@@ -4746,11 +4932,17 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should succeed even without DHT enabled (no-op, no error).
         let result = session.force_dht_announce(info_hash).await;
-        assert!(result.is_ok(), "force_dht_announce should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "force_dht_announce should succeed: {result:?}"
+        );
 
         // Should fail for unknown torrent.
         let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
@@ -4767,11 +4959,17 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Should succeed even without LSD enabled (no-op announce, no error).
         let result = session.force_lsd_announce(info_hash).await;
-        assert!(result.is_ok(), "force_lsd_announce should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "force_lsd_announce should succeed: {result:?}"
+        );
 
         // Should fail for unknown torrent.
         let fake = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
@@ -4793,7 +4991,10 @@ mod tests {
         storage.write_chunk(1, 0, &data[16384..]).unwrap();
 
         let session = SessionHandle::start(test_settings()).await.unwrap();
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // Read piece 0
         let piece_data = session.read_piece(info_hash, 0).await.unwrap();
@@ -4824,7 +5025,10 @@ mod tests {
         let data = vec![0xAB; 16384];
         let meta = make_test_torrent(&data, 16384);
         let storage = make_storage(&data, 16384);
-        let info_hash = session.add_torrent(meta.into(), Some(storage)).await.unwrap();
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
 
         // flush_cache should succeed.
         let result = session.flush_cache(info_hash).await;

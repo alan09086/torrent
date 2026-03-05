@@ -43,8 +43,8 @@ impl CompactNodeInfo {
                 data.len()
             )));
         }
-        let id = Id20::from_bytes(&data[..20])
-            .map_err(|e| Error::InvalidCompactNode(e.to_string()))?;
+        let id =
+            Id20::from_bytes(&data[..20]).map_err(|e| Error::InvalidCompactNode(e.to_string()))?;
         let ip = Ipv4Addr::new(data[20], data[21], data[22], data[23]);
         let port = u16::from_be_bytes([data[24], data[25]]);
         Ok(CompactNodeInfo {
@@ -117,8 +117,8 @@ impl CompactNodeInfo6 {
                 data.len()
             )));
         }
-        let id = Id20::from_bytes(&data[..20])
-            .map_err(|e| Error::InvalidCompactNode(e.to_string()))?;
+        let id =
+            Id20::from_bytes(&data[..20]).map_err(|e| Error::InvalidCompactNode(e.to_string()))?;
         let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&data[20..36]).unwrap());
         let port = u16::from_be_bytes([data[36], data[37]]);
         Ok(CompactNodeInfo6 {

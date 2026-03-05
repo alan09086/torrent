@@ -59,7 +59,8 @@ pub enum UrlGuardError {
     LocalNetworkQueryString,
 
     #[error("SSRF: redirect from global URL to private/local IP {0} blocked")]
-    #[allow(dead_code)] // Used by validate_redirect() which is called from reqwest redirect policies.
+    #[allow(dead_code)]
+    // Used by validate_redirect() which is called from reqwest redirect policies.
     RedirectToPrivateIp(IpAddr),
 
     #[error("internationalised domain name (IDNA) rejected: {0}")]
@@ -216,9 +217,7 @@ pub(crate) fn validate_redirect(
 ///
 /// If SSRF mitigation is enabled, redirects from public to private IPs are
 /// rejected. Otherwise a standard 10-hop redirect policy is used.
-pub(crate) fn build_redirect_policy(
-    config: &UrlSecurityConfig,
-) -> reqwest::redirect::Policy {
+pub(crate) fn build_redirect_policy(config: &UrlSecurityConfig) -> reqwest::redirect::Policy {
     if !config.ssrf_mitigation {
         return reqwest::redirect::Policy::limited(10);
     }
@@ -330,12 +329,22 @@ mod tests {
 
     #[test]
     fn localhost_detection() {
-        assert!(is_localhost(&Url::parse("http://127.0.0.1/announce").unwrap()));
-        assert!(is_localhost(&Url::parse("http://127.0.0.5:8080/announce").unwrap()));
+        assert!(is_localhost(
+            &Url::parse("http://127.0.0.1/announce").unwrap()
+        ));
+        assert!(is_localhost(
+            &Url::parse("http://127.0.0.5:8080/announce").unwrap()
+        ));
         assert!(is_localhost(&Url::parse("http://[::1]/announce").unwrap()));
-        assert!(is_localhost(&Url::parse("http://localhost/announce").unwrap()));
-        assert!(!is_localhost(&Url::parse("http://10.0.0.1/announce").unwrap()));
-        assert!(!is_localhost(&Url::parse("http://example.com/announce").unwrap()));
+        assert!(is_localhost(
+            &Url::parse("http://localhost/announce").unwrap()
+        ));
+        assert!(!is_localhost(
+            &Url::parse("http://10.0.0.1/announce").unwrap()
+        ));
+        assert!(!is_localhost(
+            &Url::parse("http://example.com/announce").unwrap()
+        ));
     }
 
     #[test]
@@ -562,7 +571,11 @@ mod tests {
     #[test]
     fn build_client_with_proxy() {
         let cfg = ssrf_config();
-        let client = build_http_client(&cfg, Some("http://proxy.example.com:8080"), "Ferrite/0.60.0");
+        let client = build_http_client(
+            &cfg,
+            Some("http://proxy.example.com:8080"),
+            "Ferrite/0.60.0",
+        );
         drop(client);
     }
 
@@ -599,8 +612,8 @@ mod tests {
     #[test]
     fn scenario_malicious_torrent_ssrf_via_tracker() {
         let cfg = ssrf_config();
-        let err = validate_tracker_url("http://127.0.0.1:9090/api/admin/delete-all", &cfg)
-            .unwrap_err();
+        let err =
+            validate_tracker_url("http://127.0.0.1:9090/api/admin/delete-all", &cfg).unwrap_err();
         assert!(matches!(err, UrlGuardError::LocalhostBadPath(_)));
         assert!(validate_tracker_url("http://127.0.0.1:9090/announce", &cfg).is_ok());
     }

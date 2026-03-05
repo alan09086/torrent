@@ -10,12 +10,11 @@ mod http;
 mod udp;
 
 pub use compact::{
-    parse_compact_peers, encode_compact_peers,
-    parse_compact_peers6, encode_compact_peers6,
+    encode_compact_peers, encode_compact_peers6, parse_compact_peers, parse_compact_peers6,
 };
 pub use error::{Error, Result};
-pub use http::{HttpTracker, HttpAnnounceResponse, HttpScrapeResponse};
-pub use udp::{UdpTracker, UdpAnnounceResponse, UdpScrapeResponse};
+pub use http::{HttpAnnounceResponse, HttpScrapeResponse, HttpTracker};
+pub use udp::{UdpAnnounceResponse, UdpScrapeResponse, UdpTracker};
 
 use std::net::SocketAddr;
 
@@ -100,8 +99,16 @@ mod tests {
 
     #[test]
     fn scrape_info_equality() {
-        let a = ScrapeInfo { complete: 5, incomplete: 3, downloaded: 50 };
-        let b = ScrapeInfo { complete: 5, incomplete: 3, downloaded: 50 };
+        let a = ScrapeInfo {
+            complete: 5,
+            incomplete: 3,
+            downloaded: 50,
+        };
+        let b = ScrapeInfo {
+            complete: 5,
+            incomplete: 3,
+            downloaded: 50,
+        };
         assert_eq!(a, b);
     }
 

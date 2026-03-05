@@ -87,7 +87,10 @@ impl fmt::Display for BencodeValue {
 }
 
 impl serde::Serialize for BencodeValue {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             BencodeValue::Integer(n) => serializer.serialize_i64(*n),
             BencodeValue::Bytes(b) => serializer.serialize_bytes(b),
@@ -112,7 +115,9 @@ impl serde::Serialize for BencodeValue {
 }
 
 impl<'de> serde::Deserialize<'de> for BencodeValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         deserializer.deserialize_any(BencodeValueVisitor)
     }
 }
@@ -138,7 +143,10 @@ impl<'de> serde::de::Visitor<'de> for BencodeValueVisitor {
         Ok(BencodeValue::Bytes(v.to_vec()))
     }
 
-    fn visit_borrowed_bytes<E: serde::de::Error>(self, v: &'de [u8]) -> std::result::Result<Self::Value, E> {
+    fn visit_borrowed_bytes<E: serde::de::Error>(
+        self,
+        v: &'de [u8],
+    ) -> std::result::Result<Self::Value, E> {
         Ok(BencodeValue::Bytes(v.to_vec()))
     }
 
@@ -146,7 +154,10 @@ impl<'de> serde::de::Visitor<'de> for BencodeValueVisitor {
         Ok(BencodeValue::Bytes(v.as_bytes().to_vec()))
     }
 
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
         let mut items = Vec::new();
         while let Some(item) = seq.next_element()? {
             items.push(item);
@@ -154,7 +165,10 @@ impl<'de> serde::de::Visitor<'de> for BencodeValueVisitor {
         Ok(BencodeValue::List(items))
     }
 
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
         let mut dict = BTreeMap::new();
         while let Some((key, val)) = map.next_entry::<serde_bytes::ByteBuf, BencodeValue>()? {
             dict.insert(key.into_vec(), val);

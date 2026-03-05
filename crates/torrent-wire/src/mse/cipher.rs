@@ -20,7 +20,9 @@ impl Rc4 {
         // Key-Scheduling Algorithm (KSA)
         let mut j: u8 = 0;
         for i in 0..256u16 {
-            j = j.wrapping_add(s[i as usize]).wrapping_add(key[i as usize % key.len()]);
+            j = j
+                .wrapping_add(s[i as usize])
+                .wrapping_add(key[i as usize % key.len()]);
             s.swap(i as usize, j as usize);
         }
 

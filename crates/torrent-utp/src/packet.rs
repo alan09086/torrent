@@ -171,7 +171,11 @@ impl Packet {
             Some(sack) => 2 + sack.len(), // next_ext(1) + len(1) + bitmask
             None => 0,
         };
-        let close_ext_len = if self.close_reason.is_some() { 2 + 4 } else { 0 };
+        let close_ext_len = if self.close_reason.is_some() {
+            2 + 4
+        } else {
+            0
+        };
         let total = HEADER_SIZE + sack_ext_len + close_ext_len + self.payload.len();
         let mut buf = BytesMut::with_capacity(total);
 

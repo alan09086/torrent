@@ -1,4 +1,4 @@
-use torrent_core::{torrent_from_bytes, sha1, Id20, Lengths, Magnet, PeerId};
+use torrent_core::{Id20, Lengths, Magnet, PeerId, sha1, torrent_from_bytes};
 
 /// Build a valid single-file torrent as raw bencode bytes.
 fn make_test_torrent() -> Vec<u8> {
@@ -36,7 +36,10 @@ fn parse_synthetic_torrent() {
     let data = make_test_torrent();
     let torrent = torrent_from_bytes(&data).unwrap();
 
-    assert_eq!(torrent.announce.as_deref(), Some("http://tracker.example.com/announce"));
+    assert_eq!(
+        torrent.announce.as_deref(),
+        Some("http://tracker.example.com/announce")
+    );
     assert_eq!(torrent.comment.as_deref(), Some("test torrent"));
     assert_eq!(torrent.info.name, "test.dat");
     assert_eq!(torrent.info.piece_length, 262144);

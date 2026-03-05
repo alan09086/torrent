@@ -2,8 +2,8 @@
 //!
 //! Usage: `cargo run --example create -- <path> [-o output.torrent]`
 
-use torrent::prelude::*;
 use std::env;
+use torrent::prelude::*;
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let path = env::args()

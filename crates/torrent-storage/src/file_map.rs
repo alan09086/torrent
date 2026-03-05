@@ -150,8 +150,22 @@ mod tests {
         // Chunk at begin=0, length=150 → first 100 in file 0, next 50 in file 1
         let segs = fm.chunk_segments(0, 0, 150);
         assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0], FileSegment { file_index: 0, file_offset: 0, len: 100 });
-        assert_eq!(segs[1], FileSegment { file_index: 1, file_offset: 0, len: 50 });
+        assert_eq!(
+            segs[0],
+            FileSegment {
+                file_index: 0,
+                file_offset: 0,
+                len: 100
+            }
+        );
+        assert_eq!(
+            segs[1],
+            FileSegment {
+                file_index: 1,
+                file_offset: 0,
+                len: 50
+            }
+        );
     }
 
     #[test]
@@ -162,9 +176,30 @@ mod tests {
 
         let segs = fm.piece_segments(0);
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0], FileSegment { file_index: 0, file_offset: 0, len: 100 });
-        assert_eq!(segs[1], FileSegment { file_index: 1, file_offset: 0, len: 50 });
-        assert_eq!(segs[2], FileSegment { file_index: 2, file_offset: 0, len: 150 });
+        assert_eq!(
+            segs[0],
+            FileSegment {
+                file_index: 0,
+                file_offset: 0,
+                len: 100
+            }
+        );
+        assert_eq!(
+            segs[1],
+            FileSegment {
+                file_index: 1,
+                file_offset: 0,
+                len: 50
+            }
+        );
+        assert_eq!(
+            segs[2],
+            FileSegment {
+                file_index: 2,
+                file_offset: 0,
+                len: 150
+            }
+        );
     }
 
     #[test]

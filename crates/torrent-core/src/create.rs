@@ -25,19 +25,19 @@ use crate::torrent_version::TorrentVersion;
 /// Auto-select piece size based on total content size (libtorrent-style).
 pub fn auto_piece_size(total: u64) -> u64 {
     if total <= 10_485_760 {
-        32 * 1024                              // ≤ 10 MiB → 32 KiB
+        32 * 1024 // ≤ 10 MiB → 32 KiB
     } else if total <= 104_857_600 {
-        64 * 1024                              // ≤ 100 MiB → 64 KiB
+        64 * 1024 // ≤ 100 MiB → 64 KiB
     } else if total <= 1_073_741_824 {
-        256 * 1024                             // ≤ 1 GiB → 256 KiB
+        256 * 1024 // ≤ 1 GiB → 256 KiB
     } else if total <= 10_737_418_240 {
-        512 * 1024                             // ≤ 10 GiB → 512 KiB
+        512 * 1024 // ≤ 10 GiB → 512 KiB
     } else if total <= 107_374_182_400 {
-        1024 * 1024                            // ≤ 100 GiB → 1 MiB
+        1024 * 1024 // ≤ 100 GiB → 1 MiB
     } else if total <= 1_099_511_627_776 {
-        2 * 1024 * 1024                        // ≤ 1 TiB → 2 MiB
+        2 * 1024 * 1024 // ≤ 1 TiB → 2 MiB
     } else {
-        4 * 1024 * 1024                        // > 1 TiB → 4 MiB
+        4 * 1024 * 1024 // > 1 TiB → 4 MiB
     }
 }
 
@@ -150,7 +150,9 @@ impl CreateTorrent {
                 .into_owned();
             let mtime = if self.include_mtime {
                 meta.modified().ok().and_then(|t| {
-                    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs() as i64)
+                    t.duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs() as i64)
                 })
             } else {
                 None
@@ -174,7 +176,13 @@ impl CreateTorrent {
         let path = path.as_ref();
         if let Ok(canonical) = fs::canonicalize(path) {
             let mut files = Vec::new();
-            walk_directory(&canonical, &[], &mut files, self.include_mtime, self.include_symlinks);
+            walk_directory(
+                &canonical,
+                &[],
+                &mut files,
+                self.include_mtime,
+                self.include_symlinks,
+            );
             files.sort_by(|a, b| a.torrent_path.cmp(&b.torrent_path));
             self.files.extend(files);
         }
@@ -335,7 +343,9 @@ impl CreateTorrent {
 
         // Compute total size and piece size
         let total_size: u64 = files_with_pads.iter().map(|f| f.length).sum();
-        let piece_size = self.piece_size.unwrap_or_else(|| auto_piece_size(total_size));
+        let piece_size = self
+            .piece_size
+            .unwrap_or_else(|| auto_piece_size(total_size));
         let num_pieces = if total_size == 0 {
             0
         } else {
@@ -460,7 +470,9 @@ impl CreateTorrent {
         };
 
         if self.version == TorrentVersion::V2Only {
-            return Err(Error::CreateTorrent("v2-only creation not yet supported".into()));
+            return Err(Error::CreateTorrent(
+                "v2-only creation not yet supported".into(),
+            ));
         }
 
         // Build announce / announce-list
@@ -487,10 +499,22 @@ impl CreateTorrent {
                     comment: self.comment.clone(),
                     created_by: self.creator.clone(),
                     creation_date,
-                    httpseeds: if self.http_seeds.is_empty() { None } else { Some(self.http_seeds.clone()) },
+                    httpseeds: if self.http_seeds.is_empty() {
+                        None
+                    } else {
+                        Some(self.http_seeds.clone())
+                    },
                     info,
-                    nodes: if self.dht_nodes.is_empty() { None } else { Some(self.dht_nodes.clone()) },
-                    url_list: if self.web_seeds.is_empty() { None } else { Some(self.web_seeds.clone()) },
+                    nodes: if self.dht_nodes.is_empty() {
+                        None
+                    } else {
+                        Some(self.dht_nodes.clone())
+                    },
+                    url_list: if self.web_seeds.is_empty() {
+                        None
+                    } else {
+                        Some(self.web_seeds.clone())
+                    },
                 };
 
                 let bytes = torrent_bencode::to_bytes(&output)
@@ -511,7 +535,10 @@ impl CreateTorrent {
                     ssl_cert,
                 };
 
-                Ok(CreateTorrentResult { meta: TorrentMeta::V1(meta_v1), bytes })
+                Ok(CreateTorrentResult {
+                    meta: TorrentMeta::V1(meta_v1),
+                    bytes,
+                })
             }
 
             TorrentVersion::Hybrid => {
@@ -523,69 +550,123 @@ impl CreateTorrent {
                 let file_tree = build_v2_file_tree(&v2_data);
 
                 // Build merged info dict as BencodeValue with both v1 and v2 keys
-                let mut merged = std::collections::BTreeMap::<Vec<u8>, torrent_bencode::BencodeValue>::new();
+                let mut merged =
+                    std::collections::BTreeMap::<Vec<u8>, torrent_bencode::BencodeValue>::new();
 
                 // v2: file tree
                 merged.insert(b"file tree".to_vec(), file_tree.to_bencode());
 
                 // v1: files list or single-file length
                 if is_single_file {
-                    merged.insert(b"length".to_vec(), torrent_bencode::BencodeValue::Integer(info.length.unwrap() as i64));
+                    merged.insert(
+                        b"length".to_vec(),
+                        torrent_bencode::BencodeValue::Integer(info.length.unwrap() as i64),
+                    );
                 } else {
-                    let file_list: Vec<torrent_bencode::BencodeValue> = info.files.as_ref().unwrap().iter().map(|f| {
-                        let mut d = std::collections::BTreeMap::new();
-                        d.insert(b"length".to_vec(), torrent_bencode::BencodeValue::Integer(f.length as i64));
-                        let path: Vec<torrent_bencode::BencodeValue> = f.path.iter()
-                            .map(|p| torrent_bencode::BencodeValue::Bytes(p.as_bytes().to_vec()))
-                            .collect();
-                        d.insert(b"path".to_vec(), torrent_bencode::BencodeValue::List(path));
-                        if let Some(ref attr) = f.attr {
-                            d.insert(b"attr".to_vec(), torrent_bencode::BencodeValue::Bytes(attr.as_bytes().to_vec()));
-                        }
-                        if let Some(mtime) = f.mtime {
-                            d.insert(b"mtime".to_vec(), torrent_bencode::BencodeValue::Integer(mtime));
-                        }
-                        if let Some(ref sl) = f.symlink_path {
-                            let sl_list: Vec<torrent_bencode::BencodeValue> = sl.iter()
-                                .map(|s| torrent_bencode::BencodeValue::Bytes(s.as_bytes().to_vec()))
+                    let file_list: Vec<torrent_bencode::BencodeValue> = info
+                        .files
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|f| {
+                            let mut d = std::collections::BTreeMap::new();
+                            d.insert(
+                                b"length".to_vec(),
+                                torrent_bencode::BencodeValue::Integer(f.length as i64),
+                            );
+                            let path: Vec<torrent_bencode::BencodeValue> = f
+                                .path
+                                .iter()
+                                .map(|p| {
+                                    torrent_bencode::BencodeValue::Bytes(p.as_bytes().to_vec())
+                                })
                                 .collect();
-                            d.insert(b"symlink path".to_vec(), torrent_bencode::BencodeValue::List(sl_list));
-                        }
-                        torrent_bencode::BencodeValue::Dict(d)
-                    }).collect();
-                    merged.insert(b"files".to_vec(), torrent_bencode::BencodeValue::List(file_list));
+                            d.insert(b"path".to_vec(), torrent_bencode::BencodeValue::List(path));
+                            if let Some(ref attr) = f.attr {
+                                d.insert(
+                                    b"attr".to_vec(),
+                                    torrent_bencode::BencodeValue::Bytes(attr.as_bytes().to_vec()),
+                                );
+                            }
+                            if let Some(mtime) = f.mtime {
+                                d.insert(
+                                    b"mtime".to_vec(),
+                                    torrent_bencode::BencodeValue::Integer(mtime),
+                                );
+                            }
+                            if let Some(ref sl) = f.symlink_path {
+                                let sl_list: Vec<torrent_bencode::BencodeValue> = sl
+                                    .iter()
+                                    .map(|s| {
+                                        torrent_bencode::BencodeValue::Bytes(s.as_bytes().to_vec())
+                                    })
+                                    .collect();
+                                d.insert(
+                                    b"symlink path".to_vec(),
+                                    torrent_bencode::BencodeValue::List(sl_list),
+                                );
+                            }
+                            torrent_bencode::BencodeValue::Dict(d)
+                        })
+                        .collect();
+                    merged.insert(
+                        b"files".to_vec(),
+                        torrent_bencode::BencodeValue::List(file_list),
+                    );
                 }
 
                 // v2: meta version
-                merged.insert(b"meta version".to_vec(), torrent_bencode::BencodeValue::Integer(2));
+                merged.insert(
+                    b"meta version".to_vec(),
+                    torrent_bencode::BencodeValue::Integer(2),
+                );
 
                 // shared: name
-                merged.insert(b"name".to_vec(), torrent_bencode::BencodeValue::Bytes(info.name.as_bytes().to_vec()));
+                merged.insert(
+                    b"name".to_vec(),
+                    torrent_bencode::BencodeValue::Bytes(info.name.as_bytes().to_vec()),
+                );
 
                 // shared: piece length
-                merged.insert(b"piece length".to_vec(), torrent_bencode::BencodeValue::Integer(piece_size as i64));
+                merged.insert(
+                    b"piece length".to_vec(),
+                    torrent_bencode::BencodeValue::Integer(piece_size as i64),
+                );
 
                 // v1: pieces (concatenated SHA-1 hashes)
-                merged.insert(b"pieces".to_vec(), torrent_bencode::BencodeValue::Bytes(pieces.clone()));
+                merged.insert(
+                    b"pieces".to_vec(),
+                    torrent_bencode::BencodeValue::Bytes(pieces.clone()),
+                );
 
                 // optional: private
                 if self.private {
-                    merged.insert(b"private".to_vec(), torrent_bencode::BencodeValue::Integer(1));
+                    merged.insert(
+                        b"private".to_vec(),
+                        torrent_bencode::BencodeValue::Integer(1),
+                    );
                 }
 
                 // optional: source
                 if let Some(ref source) = self.source {
-                    merged.insert(b"source".to_vec(), torrent_bencode::BencodeValue::Bytes(source.as_bytes().to_vec()));
+                    merged.insert(
+                        b"source".to_vec(),
+                        torrent_bencode::BencodeValue::Bytes(source.as_bytes().to_vec()),
+                    );
                 }
 
                 // optional: ssl-cert
                 if let Some(ref cert) = self.ssl_cert {
-                    merged.insert(b"ssl-cert".to_vec(), torrent_bencode::BencodeValue::Bytes(cert.clone()));
+                    merged.insert(
+                        b"ssl-cert".to_vec(),
+                        torrent_bencode::BencodeValue::Bytes(cert.clone()),
+                    );
                 }
 
                 // Serialize merged info dict → compute both hashes
-                let merged_info_bytes = torrent_bencode::to_bytes(&torrent_bencode::BencodeValue::Dict(merged))
-                    .map_err(|e| Error::CreateTorrent(format!("serialize hybrid info: {e}")))?;
+                let merged_info_bytes =
+                    torrent_bencode::to_bytes(&torrent_bencode::BencodeValue::Dict(merged))
+                        .map_err(|e| Error::CreateTorrent(format!("serialize hybrid info: {e}")))?;
                 let info_hash_v1 = crate::sha1(&merged_info_bytes);
                 let info_hash_v2 = crate::sha256(&merged_info_bytes);
 
@@ -595,7 +676,9 @@ impl CreateTorrent {
                     if let Some(root) = &fd.pieces_root
                         && !fd.piece_layer.is_empty()
                     {
-                        let concat: Vec<u8> = fd.piece_layer.iter()
+                        let concat: Vec<u8> = fd
+                            .piece_layer
+                            .iter()
                             .flat_map(|h| h.as_bytes())
                             .copied()
                             .collect();
@@ -604,59 +687,109 @@ impl CreateTorrent {
                 }
 
                 // Build outer torrent dict manually (to include piece layers)
-                let mut outer = std::collections::BTreeMap::<Vec<u8>, torrent_bencode::BencodeValue>::new();
+                let mut outer =
+                    std::collections::BTreeMap::<Vec<u8>, torrent_bencode::BencodeValue>::new();
                 if let Some(ref url) = announce {
-                    outer.insert(b"announce".to_vec(), torrent_bencode::BencodeValue::Bytes(url.as_bytes().to_vec()));
+                    outer.insert(
+                        b"announce".to_vec(),
+                        torrent_bencode::BencodeValue::Bytes(url.as_bytes().to_vec()),
+                    );
                 }
                 if let Some(ref al) = announce_list {
-                    let al_val: Vec<torrent_bencode::BencodeValue> = al.iter().map(|tier| {
-                        let t: Vec<torrent_bencode::BencodeValue> = tier.iter()
-                            .map(|u| torrent_bencode::BencodeValue::Bytes(u.as_bytes().to_vec()))
-                            .collect();
-                        torrent_bencode::BencodeValue::List(t)
-                    }).collect();
-                    outer.insert(b"announce-list".to_vec(), torrent_bencode::BencodeValue::List(al_val));
+                    let al_val: Vec<torrent_bencode::BencodeValue> = al
+                        .iter()
+                        .map(|tier| {
+                            let t: Vec<torrent_bencode::BencodeValue> = tier
+                                .iter()
+                                .map(|u| {
+                                    torrent_bencode::BencodeValue::Bytes(u.as_bytes().to_vec())
+                                })
+                                .collect();
+                            torrent_bencode::BencodeValue::List(t)
+                        })
+                        .collect();
+                    outer.insert(
+                        b"announce-list".to_vec(),
+                        torrent_bencode::BencodeValue::List(al_val),
+                    );
                 }
                 if let Some(ref comment) = self.comment {
-                    outer.insert(b"comment".to_vec(), torrent_bencode::BencodeValue::Bytes(comment.as_bytes().to_vec()));
+                    outer.insert(
+                        b"comment".to_vec(),
+                        torrent_bencode::BencodeValue::Bytes(comment.as_bytes().to_vec()),
+                    );
                 }
                 if let Some(ref creator) = self.creator {
-                    outer.insert(b"created by".to_vec(), torrent_bencode::BencodeValue::Bytes(creator.as_bytes().to_vec()));
+                    outer.insert(
+                        b"created by".to_vec(),
+                        torrent_bencode::BencodeValue::Bytes(creator.as_bytes().to_vec()),
+                    );
                 }
                 if let Some(cd) = creation_date {
-                    outer.insert(b"creation date".to_vec(), torrent_bencode::BencodeValue::Integer(cd));
+                    outer.insert(
+                        b"creation date".to_vec(),
+                        torrent_bencode::BencodeValue::Integer(cd),
+                    );
                 }
                 if !self.http_seeds.is_empty() {
-                    let seeds: Vec<torrent_bencode::BencodeValue> = self.http_seeds.iter()
+                    let seeds: Vec<torrent_bencode::BencodeValue> = self
+                        .http_seeds
+                        .iter()
                         .map(|s| torrent_bencode::BencodeValue::Bytes(s.as_bytes().to_vec()))
                         .collect();
-                    outer.insert(b"httpseeds".to_vec(), torrent_bencode::BencodeValue::List(seeds));
+                    outer.insert(
+                        b"httpseeds".to_vec(),
+                        torrent_bencode::BencodeValue::List(seeds),
+                    );
                 }
                 // Info dict as raw bytes (preserve exact serialization for hash consistency)
-                outer.insert(b"info".to_vec(), torrent_bencode::from_bytes::<torrent_bencode::BencodeValue>(&merged_info_bytes)
-                    .map_err(|e| Error::CreateTorrent(format!("re-parse info: {e}")))?);
+                outer.insert(
+                    b"info".to_vec(),
+                    torrent_bencode::from_bytes::<torrent_bencode::BencodeValue>(
+                        &merged_info_bytes,
+                    )
+                    .map_err(|e| Error::CreateTorrent(format!("re-parse info: {e}")))?,
+                );
                 if !self.dht_nodes.is_empty() {
-                    let nodes: Vec<torrent_bencode::BencodeValue> = self.dht_nodes.iter()
-                        .map(|(h, p)| torrent_bencode::BencodeValue::List(vec![
-                            torrent_bencode::BencodeValue::Bytes(h.as_bytes().to_vec()),
-                            torrent_bencode::BencodeValue::Integer(*p as i64),
-                        ]))
+                    let nodes: Vec<torrent_bencode::BencodeValue> = self
+                        .dht_nodes
+                        .iter()
+                        .map(|(h, p)| {
+                            torrent_bencode::BencodeValue::List(vec![
+                                torrent_bencode::BencodeValue::Bytes(h.as_bytes().to_vec()),
+                                torrent_bencode::BencodeValue::Integer(*p as i64),
+                            ])
+                        })
                         .collect();
-                    outer.insert(b"nodes".to_vec(), torrent_bencode::BencodeValue::List(nodes));
+                    outer.insert(
+                        b"nodes".to_vec(),
+                        torrent_bencode::BencodeValue::List(nodes),
+                    );
                 }
                 // piece layers
                 if !piece_layers_map.is_empty() {
                     let mut pl_dict = std::collections::BTreeMap::new();
                     for (root, layer) in &piece_layers_map {
-                        pl_dict.insert(root.clone(), torrent_bencode::BencodeValue::Bytes(layer.clone()));
+                        pl_dict.insert(
+                            root.clone(),
+                            torrent_bencode::BencodeValue::Bytes(layer.clone()),
+                        );
                     }
-                    outer.insert(b"piece layers".to_vec(), torrent_bencode::BencodeValue::Dict(pl_dict));
+                    outer.insert(
+                        b"piece layers".to_vec(),
+                        torrent_bencode::BencodeValue::Dict(pl_dict),
+                    );
                 }
                 if !self.web_seeds.is_empty() {
-                    let seeds: Vec<torrent_bencode::BencodeValue> = self.web_seeds.iter()
+                    let seeds: Vec<torrent_bencode::BencodeValue> = self
+                        .web_seeds
+                        .iter()
                         .map(|s| torrent_bencode::BencodeValue::Bytes(s.as_bytes().to_vec()))
                         .collect();
-                    outer.insert(b"url-list".to_vec(), torrent_bencode::BencodeValue::List(seeds));
+                    outer.insert(
+                        b"url-list".to_vec(),
+                        torrent_bencode::BencodeValue::List(seeds),
+                    );
                 }
 
                 let bytes = torrent_bencode::to_bytes(&torrent_bencode::BencodeValue::Dict(outer))
@@ -695,14 +828,21 @@ impl CreateTorrent {
                     created_by: self.creator,
                     creation_date,
                     info: info_v2,
-                    piece_layers: v2_data.iter()
+                    piece_layers: v2_data
+                        .iter()
                         .filter_map(|fd| {
                             let root = fd.pieces_root?;
-                            if fd.piece_layer.is_empty() { return None; }
-                            Some((root, fd.piece_layer.iter()
-                                .flat_map(|h| h.as_bytes())
-                                .copied()
-                                .collect()))
+                            if fd.piece_layer.is_empty() {
+                                return None;
+                            }
+                            Some((
+                                root,
+                                fd.piece_layer
+                                    .iter()
+                                    .flat_map(|h| h.as_bytes())
+                                    .copied()
+                                    .collect(),
+                            ))
                         })
                         .collect(),
                     ssl_cert,
@@ -796,7 +936,13 @@ fn walk_directory(
         };
 
         if file_type.is_dir() {
-            walk_directory(&entry_path, &path_components, out, include_mtime, include_symlinks);
+            walk_directory(
+                &entry_path,
+                &path_components,
+                out,
+                include_mtime,
+                include_symlinks,
+            );
         } else if file_type.is_symlink() && include_symlinks {
             // Follow symlink for size, record target
             if let Ok(meta) = fs::metadata(&entry_path) {
@@ -807,7 +953,9 @@ fn walk_directory(
                 });
                 let mtime = if include_mtime {
                     meta.modified().ok().and_then(|t| {
-                        t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs() as i64)
+                        t.duration_since(UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs() as i64)
                     })
                 } else {
                     None
@@ -827,7 +975,9 @@ fn walk_directory(
         {
             let mtime = if include_mtime {
                 meta.modified().ok().and_then(|t| {
-                    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs() as i64)
+                    t.duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs() as i64)
                 })
             } else {
                 None
@@ -847,7 +997,11 @@ fn walk_directory(
 }
 
 /// Insert pad files after eligible files to align to piece boundaries.
-fn insert_pad_files(files: Vec<InputFile>, limit: Option<u64>, piece_size: Option<u64>) -> Vec<InputFile> {
+fn insert_pad_files(
+    files: Vec<InputFile>,
+    limit: Option<u64>,
+    piece_size: Option<u64>,
+) -> Vec<InputFile> {
     let limit = match limit {
         Some(l) => l,
         None => return files,
@@ -1072,10 +1226,16 @@ mod tests {
         assert_eq!(auto_piece_size(10 * 1024 * 1024 * 1024 + 1), 1024 * 1024);
         assert_eq!(auto_piece_size(100 * 1024 * 1024 * 1024), 1024 * 1024);
         // ≤ 1 TiB → 2 MiB
-        assert_eq!(auto_piece_size(100 * 1024 * 1024 * 1024 + 1), 2 * 1024 * 1024);
+        assert_eq!(
+            auto_piece_size(100 * 1024 * 1024 * 1024 + 1),
+            2 * 1024 * 1024
+        );
         assert_eq!(auto_piece_size(1024 * 1024 * 1024 * 1024), 2 * 1024 * 1024);
         // > 1 TiB → 4 MiB
-        assert_eq!(auto_piece_size(1024 * 1024 * 1024 * 1024 + 1), 4 * 1024 * 1024);
+        assert_eq!(
+            auto_piece_size(1024 * 1024 * 1024 * 1024 + 1),
+            4 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -1138,7 +1298,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.meta.as_v1().unwrap().info.private, Some(1));
-        assert_eq!(result.meta.as_v1().unwrap().info.source.as_deref(), Some("MyTracker"));
+        assert_eq!(
+            result.meta.as_v1().unwrap().info.source.as_deref(),
+            Some("MyTracker")
+        );
 
         // Round-trip
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
@@ -1185,8 +1348,14 @@ mod tests {
             .generate()
             .unwrap();
 
-        assert_eq!(result.meta.as_v1().unwrap().url_list, vec!["http://web.example.com/files"]);
-        assert_eq!(result.meta.as_v1().unwrap().httpseeds, vec!["http://http.example.com/seed"]);
+        assert_eq!(
+            result.meta.as_v1().unwrap().url_list,
+            vec!["http://web.example.com/files"]
+        );
+        assert_eq!(
+            result.meta.as_v1().unwrap().httpseeds,
+            vec!["http://http.example.com/seed"]
+        );
 
         // Round-trip
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
@@ -1208,11 +1377,17 @@ mod tests {
 
         let files = result.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         // Should have pad files after all files except the last
-        let pad_count = files.iter().filter(|f| f.attr.as_deref() == Some("p")).count();
+        let pad_count = files
+            .iter()
+            .filter(|f| f.attr.as_deref() == Some("p"))
+            .count();
         // aaa.txt (12 bytes) → pad, subdir/bbb.bin (1000 bytes) → no pad (last)
         assert_eq!(pad_count, 1);
         // Verify pad file attributes
-        let pad = files.iter().find(|f| f.attr.as_deref() == Some("p")).unwrap();
+        let pad = files
+            .iter()
+            .find(|f| f.attr.as_deref() == Some("p"))
+            .unwrap();
         assert_eq!(pad.path[0], ".pad");
     }
 
@@ -1232,7 +1407,10 @@ mod tests {
 
         let files = result.meta.as_v1().unwrap().info.files.as_ref().unwrap();
         // aaa.txt (12 bytes, ≤ 500, no pad), subdir/bbb.bin (1000 bytes, last file, no pad)
-        let pad_count = files.iter().filter(|f| f.attr.as_deref() == Some("p")).count();
+        let pad_count = files
+            .iter()
+            .filter(|f| f.attr.as_deref() == Some("p"))
+            .count();
         assert_eq!(pad_count, 0);
 
         // Now with limit=5: aaa.txt (12 > 5) → pad, bbb.bin is last → no pad
@@ -1246,7 +1424,10 @@ mod tests {
             .unwrap();
 
         let files2 = result2.meta.as_v1().unwrap().info.files.as_ref().unwrap();
-        let pad_count2 = files2.iter().filter(|f| f.attr.as_deref() == Some("p")).count();
+        let pad_count2 = files2
+            .iter()
+            .filter(|f| f.attr.as_deref() == Some("p"))
+            .count();
         assert_eq!(pad_count2, 1);
     }
 
@@ -1370,8 +1551,14 @@ mod tests {
             .unwrap();
 
         // Should produce identical output
-        assert_eq!(result.meta.as_v1().unwrap().info_hash, normal.meta.as_v1().unwrap().info_hash);
-        assert_eq!(result.meta.as_v1().unwrap().info.piece_hash(0), normal.meta.as_v1().unwrap().info.piece_hash(0));
+        assert_eq!(
+            result.meta.as_v1().unwrap().info_hash,
+            normal.meta.as_v1().unwrap().info_hash
+        );
+        assert_eq!(
+            result.meta.as_v1().unwrap().info.piece_hash(0),
+            normal.meta.as_v1().unwrap().info.piece_hash(0)
+        );
     }
 
     // ── Hybrid torrent creation tests ────────────────────────────────────
@@ -1461,7 +1648,7 @@ mod tests {
 
         let result = CreateTorrent::new()
             .add_file(f.path())
-            .set_piece_size(16384)  // 4 pieces
+            .set_piece_size(16384) // 4 pieces
             .set_creation_date(1000000)
             .set_version(TorrentVersion::Hybrid)
             .generate()
@@ -1470,7 +1657,10 @@ mod tests {
         assert!(result.meta.is_hybrid());
         let v2 = result.meta.as_v2().unwrap();
         // piece_layers should have an entry for this file (larger than piece_size)
-        assert!(!v2.piece_layers.is_empty(), "piece_layers should not be empty for large file");
+        assert!(
+            !v2.piece_layers.is_empty(),
+            "piece_layers should not be empty for large file"
+        );
     }
 
     #[test]
@@ -1495,7 +1685,10 @@ mod tests {
         // Hybrid info dict has extra keys (file tree, meta version) so hashes differ
         let v1_hash = v1_result.meta.as_v1().unwrap().info_hash;
         let hybrid_v1_hash = hybrid_result.meta.as_v1().unwrap().info_hash;
-        assert_ne!(v1_hash, hybrid_v1_hash, "hybrid info dict should differ from v1-only");
+        assert_ne!(
+            v1_hash, hybrid_v1_hash,
+            "hybrid info dict should differ from v1-only"
+        );
     }
 
     #[test]
@@ -1528,6 +1721,9 @@ mod tests {
         // Parse back and verify ssl-cert round-trips
         let parsed = torrent_from_bytes(&result.bytes).unwrap();
         assert_eq!(parsed.ssl_cert.as_deref().unwrap(), cert_pem.as_slice());
-        assert_eq!(parsed.info.ssl_cert.as_deref().unwrap(), cert_pem.as_slice());
+        assert_eq!(
+            parsed.info.ssl_cert.as_deref().unwrap(),
+            cert_pem.as_slice()
+        );
     }
 }

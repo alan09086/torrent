@@ -109,10 +109,7 @@ impl UdpTracker {
     }
 
     /// Parse a UDP connect response, returning the connection_id.
-    pub fn parse_connect_response(
-        data: &[u8],
-        expected_transaction_id: u32,
-    ) -> Result<u64> {
+    pub fn parse_connect_response(data: &[u8], expected_transaction_id: u32) -> Result<u64> {
         if data.len() < 16 {
             return Err(Error::UdpProtocol(format!(
                 "connect response too short: {} bytes",
@@ -271,16 +268,20 @@ impl UdpTracker {
         // Resolve hostname:port — supports both "1.2.3.4:6969" and "tracker.example.com:6969"
         let addr: SocketAddr = match tracker_addr.parse() {
             Ok(sa) => sa,
-            Err(_) => {
-                tokio::net::lookup_host(tracker_addr)
-                    .await
-                    .map_err(|e| Error::InvalidUrl(format!("DNS lookup failed for {tracker_addr}: {e}")))?
-                    .next()
-                    .ok_or_else(|| Error::InvalidUrl(format!("no addresses for {tracker_addr}")))?
-            }
+            Err(_) => tokio::net::lookup_host(tracker_addr)
+                .await
+                .map_err(|e| {
+                    Error::InvalidUrl(format!("DNS lookup failed for {tracker_addr}: {e}"))
+                })?
+                .next()
+                .ok_or_else(|| Error::InvalidUrl(format!("no addresses for {tracker_addr}")))?,
         };
 
-        let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let bind_addr = if addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
         let socket = UdpSocket::bind(bind_addr).await?;
         apply_dscp_udp(&socket, self.dscp, addr.is_ipv6());
         socket.connect(addr).await?;
@@ -293,8 +294,7 @@ impl UdpTracker {
         let mut buf = [0u8; 2048];
         let n = tokio::time::timeout(self.timeout, socket.recv(&mut buf))
             .await
-            .map_err(|_| Error::Timeout)?
-            ?;
+            .map_err(|_| Error::Timeout)??;
 
         let connection_id = Self::parse_connect_response(&buf[..n], txn_id)?;
 
@@ -305,8 +305,7 @@ impl UdpTracker {
 
         let n = tokio::time::timeout(self.timeout, socket.recv(&mut buf))
             .await
-            .map_err(|_| Error::Timeout)?
-            ?;
+            .map_err(|_| Error::Timeout)??;
 
         if addr.is_ipv6() {
             Self::parse_announce_response_v6(&buf[..n], txn_id2)
@@ -378,7 +377,11 @@ impl UdpTracker {
             let complete = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             let downloaded = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
             let incomplete = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
-            results.push(ScrapeInfo { complete, incomplete, downloaded });
+            results.push(ScrapeInfo {
+                complete,
+                incomplete,
+                downloaded,
+            });
         }
 
         Ok(UdpScrapeResponse {
@@ -396,16 +399,20 @@ impl UdpTracker {
         // Resolve hostname:port — supports both "1.2.3.4:6969" and "tracker.example.com:6969"
         let addr: SocketAddr = match tracker_addr.parse() {
             Ok(sa) => sa,
-            Err(_) => {
-                tokio::net::lookup_host(tracker_addr)
-                    .await
-                    .map_err(|e| Error::InvalidUrl(format!("DNS lookup failed for {tracker_addr}: {e}")))?
-                    .next()
-                    .ok_or_else(|| Error::InvalidUrl(format!("no addresses for {tracker_addr}")))?
-            }
+            Err(_) => tokio::net::lookup_host(tracker_addr)
+                .await
+                .map_err(|e| {
+                    Error::InvalidUrl(format!("DNS lookup failed for {tracker_addr}: {e}"))
+                })?
+                .next()
+                .ok_or_else(|| Error::InvalidUrl(format!("no addresses for {tracker_addr}")))?,
         };
 
-        let bind_addr = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let bind_addr = if addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
         let socket = UdpSocket::bind(bind_addr).await?;
         apply_dscp_udp(&socket, self.dscp, addr.is_ipv6());
         socket.connect(addr).await?;
@@ -418,8 +425,7 @@ impl UdpTracker {
         let mut buf = [0u8; 2048];
         let n = tokio::time::timeout(self.timeout, socket.recv(&mut buf))
             .await
-            .map_err(|_| Error::Timeout)?
-            ?;
+            .map_err(|_| Error::Timeout)??;
 
         let connection_id = Self::parse_connect_response(&buf[..n], txn_id)?;
 
@@ -430,8 +436,7 @@ impl UdpTracker {
 
         let n = tokio::time::timeout(self.timeout, socket.recv(&mut buf))
             .await
-            .map_err(|_| Error::Timeout)?
-            ?;
+            .map_err(|_| Error::Timeout)??;
 
         Self::parse_scrape_response(&buf[..n], txn_id2)
     }

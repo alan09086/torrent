@@ -130,12 +130,10 @@ enum DetectedVersion {
 /// - Otherwise -> V1
 pub fn torrent_from_bytes_any(data: &[u8]) -> Result<TorrentMeta, Error> {
     match detect_version(data)? {
-        DetectedVersion::V1Only => {
-            Ok(TorrentMeta::V1(crate::metainfo::torrent_from_bytes(data)?))
-        }
-        DetectedVersion::V2Only => Ok(TorrentMeta::V2(
-            crate::metainfo_v2::torrent_v2_from_bytes(data)?,
-        )),
+        DetectedVersion::V1Only => Ok(TorrentMeta::V1(crate::metainfo::torrent_from_bytes(data)?)),
+        DetectedVersion::V2Only => Ok(TorrentMeta::V2(crate::metainfo_v2::torrent_v2_from_bytes(
+            data,
+        )?)),
         DetectedVersion::Hybrid => {
             let v1 = crate::metainfo::torrent_from_bytes(data)?;
             let mut v2 = crate::metainfo_v2::torrent_v2_from_bytes(data)?;
@@ -159,10 +157,7 @@ fn detect_version(data: &[u8]) -> Result<DetectedVersion, Error> {
         .and_then(|v| v.as_dict())
         .ok_or_else(|| Error::InvalidTorrent("missing or invalid 'info' dict".into()))?;
 
-    let has_v2 = info
-        .get(b"meta version".as_ref())
-        .and_then(|v| v.as_int())
-        == Some(2);
+    let has_v2 = info.get(b"meta version".as_ref()).and_then(|v| v.as_int()) == Some(2);
 
     let has_v1_pieces = info.get(b"pieces".as_ref()).is_some();
 
@@ -203,10 +198,7 @@ mod tests {
         info_map.insert(b"file tree".to_vec(), BencodeValue::Dict(ft_map));
         info_map.insert(b"meta version".to_vec(), BencodeValue::Integer(2));
         info_map.insert(b"name".to_vec(), BencodeValue::Bytes(b"test".to_vec()));
-        info_map.insert(
-            b"piece length".to_vec(),
-            BencodeValue::Integer(16384),
-        );
+        info_map.insert(b"piece length".to_vec(), BencodeValue::Integer(16384));
 
         let mut root_map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
         root_map.insert(b"info".to_vec(), BencodeValue::Dict(info_map));
@@ -238,10 +230,7 @@ mod tests {
 
         // v1 keys
         info_map.insert(b"name".to_vec(), BencodeValue::Bytes(b"test".to_vec()));
-        info_map.insert(
-            b"piece length".to_vec(),
-            BencodeValue::Integer(16384),
-        );
+        info_map.insert(b"piece length".to_vec(), BencodeValue::Integer(16384));
         info_map.insert(b"length".to_vec(), BencodeValue::Integer(16384));
         // 1 piece = 20 bytes of SHA-1 hash
         info_map.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0xAA; 20]));

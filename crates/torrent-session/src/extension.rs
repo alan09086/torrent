@@ -125,9 +125,7 @@ mod tests {
     #[test]
     fn plugin_vec_in_arc() {
         use std::sync::Arc;
-        let plugins: Arc<Vec<Box<dyn ExtensionPlugin>>> = Arc::new(vec![
-            Box::new(EchoPlugin),
-        ]);
+        let plugins: Arc<Vec<Box<dyn ExtensionPlugin>>> = Arc::new(vec![Box::new(EchoPlugin)]);
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].name(), "ut_echo");
     }

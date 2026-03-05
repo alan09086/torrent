@@ -210,11 +210,9 @@ impl WebSeedTask {
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 WebSeedCommand::FetchPiece(piece) => {
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(60),
-                        self.download_piece(piece),
-                    )
-                    .await;
+                    let result =
+                        tokio::time::timeout(Duration::from_secs(60), self.download_piece(piece))
+                            .await;
 
                     match result {
                         Ok(Ok(data)) => {
@@ -269,7 +267,9 @@ impl WebSeedTask {
     /// BEP 19: download piece via standard HTTP Range requests.
     async fn download_piece_bep19(&self, piece: u32) -> Result<Vec<u8>, WebSeedError> {
         let piece_size = self.lengths.piece_size(piece) as usize;
-        let requests = self.url_builder.requests_for_piece(piece, &self.lengths, &self.file_map);
+        let requests = self
+            .url_builder
+            .requests_for_piece(piece, &self.lengths, &self.file_map);
 
         let mut buf = vec![0u8; piece_size];
 
@@ -383,10 +383,8 @@ mod tests {
 
     #[test]
     fn url_builder_single_file_piece() {
-        let builder = WebSeedUrlBuilder::single(
-            "http://example.com/files".into(),
-            "movie.mkv".into(),
-        );
+        let builder =
+            WebSeedUrlBuilder::single("http://example.com/files".into(), "movie.mkv".into());
         let lengths = Lengths::new(1048576, 262144, 16384);
         let fm = FileMap::new(vec![1048576], lengths.clone());
 
@@ -401,10 +399,8 @@ mod tests {
 
     #[test]
     fn url_builder_single_file_last_piece() {
-        let builder = WebSeedUrlBuilder::single(
-            "http://example.com/files".into(),
-            "movie.mkv".into(),
-        );
+        let builder =
+            WebSeedUrlBuilder::single("http://example.com/files".into(), "movie.mkv".into());
         // 500000 total, 262144 pieces → piece 0 = 262144, piece 1 = 237856
         let lengths = Lengths::new(500000, 262144, 16384);
         let fm = FileMap::new(vec![500000], lengths.clone());
@@ -467,10 +463,8 @@ mod tests {
 
     #[test]
     fn url_builder_trailing_slash() {
-        let builder = WebSeedUrlBuilder::single(
-            "http://example.com/files/".into(),
-            "test.bin".into(),
-        );
+        let builder =
+            WebSeedUrlBuilder::single("http://example.com/files/".into(), "test.bin".into());
         let lengths = Lengths::new(100, 100, 16384);
         let fm = FileMap::new(vec![100], lengths.clone());
 
@@ -481,8 +475,8 @@ mod tests {
     #[test]
     fn url_encode_info_hash_format() {
         let hash = Id20::from([
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x00, 0xFF,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x00, 0xFF,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x00, 0xFF, 0x01, 0x23, 0x45, 0x67,
+            0x89, 0xAB, 0xCD, 0xEF, 0x00, 0xFF,
         ]);
         let encoded = url_encode_info_hash(&hash);
         assert_eq!(
@@ -513,11 +507,10 @@ mod tests {
             allow_idna: false,
             validate_https_trackers: true,
         };
-        assert!(crate::url_guard::validate_web_seed_url(
-            "http://cdn.example.com/files/torrent/",
-            &cfg,
-        )
-        .is_ok());
+        assert!(
+            crate::url_guard::validate_web_seed_url("http://cdn.example.com/files/torrent/", &cfg,)
+                .is_ok()
+        );
     }
 
     #[test]

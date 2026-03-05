@@ -8,8 +8,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, Ordering};
 
-use torrent_session::transport::{BoxedStream, NetworkFactory, TransportListener};
 use tokio::sync::mpsc;
+use torrent_session::transport::{BoxedStream, NetworkFactory, TransportListener};
 
 use crate::network::{SimConnection, SimNetwork};
 
@@ -95,7 +95,12 @@ pub fn sim_transport_factory(network: &SimNetwork, node_ip: IpAddr) -> NetworkFa
                 rx,
             };
             Ok(Box::new(listener) as Box<dyn TransportListener>)
-        }) as Pin<Box<dyn std::future::Future<Output = io::Result<Box<dyn TransportListener>>> + Send>>
+        })
+            as Pin<
+                Box<
+                    dyn std::future::Future<Output = io::Result<Box<dyn TransportListener>>> + Send,
+                >,
+            >
     });
 
     let connect_fn = Box::new(move |to_addr: SocketAddr| {

@@ -117,7 +117,11 @@ impl PeerState {
             upload_only: false,
             super_seed_assigned: None,
             cmd_tx,
-            pipeline: PeerPipelineState::new(max_queue_depth, request_queue_time, initial_queue_depth),
+            pipeline: PeerPipelineState::new(
+                max_queue_depth,
+                request_queue_time,
+                initial_queue_depth,
+            ),
             snubbed: false,
             last_data_received: None,
             connected_at: std::time::Instant::now(),

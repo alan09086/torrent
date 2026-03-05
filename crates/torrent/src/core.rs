@@ -3,28 +3,28 @@
 //! Re-exports from [`torrent_core`].
 
 pub use torrent_core::{
+    DEFAULT_CHUNK_SIZE,
+    // Error types
+    Error,
     // Hash types
     Id20,
     Id32,
-    // Peer identity
-    PeerId,
-    // Magnet links (BEP 9)
-    Magnet,
-    // Torrent metainfo (BEP 3)
-    TorrentMetaV1,
-    torrent_from_bytes,
     // Piece/chunk arithmetic
     Lengths,
-    DEFAULT_CHUNK_SIZE,
+    // Magnet links (BEP 9)
+    Magnet,
+    // Peer identity
+    PeerId,
+    Result,
+    // Torrent metainfo (BEP 3)
+    TorrentMetaV1,
     // SHA1 utility
     sha1,
-    // Error types
-    Error,
-    Result,
+    torrent_from_bytes,
 };
 
 // Re-export info dict sub-types (needed to access TorrentMetaV1 fields)
-pub use torrent_core::{FileInfo, InfoDict, FileEntry};
+pub use torrent_core::{FileEntry, FileInfo, InfoDict};
 
 // Resume data (M11)
 pub use torrent_core::{FastResumeData, UnfinishedPiece};
@@ -46,19 +46,23 @@ pub use torrent_core::{CreateTorrent, CreateTorrentResult};
 
 // BitTorrent v2 (M33, BEP 52)
 pub use torrent_core::{
+    FileTreeNode,
+    InfoDictV2,
     InfoHashes,
-    InfoDictV2, TorrentMetaV2, torrent_v2_from_bytes,
     MerkleTree,
-    FileTreeNode, V2FileAttr, V2FileInfo,
-    TorrentMeta, torrent_from_bytes_any,
-    sha256,
+    TorrentMeta,
+    TorrentMetaV2,
     // Hybrid v1+v2 (M35)
     TorrentVersion,
+    V2FileAttr,
+    V2FileInfo,
+    sha256,
+    torrent_from_bytes_any,
+    torrent_v2_from_bytes,
 };
 
 // BEP 52 Wire + Hash Picker (M34a)
 pub use torrent_core::{
-    HashRequest, validate_hash_request,
-    MerkleTreeState, SetBlockResult,
-    HashPicker, FileHashInfo, AddHashesResult,
+    AddHashesResult, FileHashInfo, HashPicker, HashRequest, MerkleTreeState, SetBlockResult,
+    validate_hash_request,
 };

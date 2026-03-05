@@ -9,12 +9,12 @@
 pub mod clock;
 /// Virtual network with configurable link parameters.
 pub mod network;
-/// Transport factory bridging simulated network to session I/O.
-pub mod transport;
 /// Multi-node simulated swarm builder.
 pub mod swarm;
+/// Transport factory bridging simulated network to session I/O.
+pub mod transport;
 
 pub use clock::SimClock;
-pub use network::{SimNetwork, LinkConfig};
+pub use network::{LinkConfig, SimNetwork};
+pub use swarm::{SimSwarm, SimSwarmBuilder, make_seeded_storage, make_test_torrent};
 pub use transport::sim_transport_factory;
-pub use swarm::{SimSwarm, SimSwarmBuilder, make_test_torrent, make_seeded_storage};

@@ -3,17 +3,17 @@
 //! Re-exports from [`torrent_bencode`].
 
 pub use torrent_bencode::{
-    // Codec functions
-    to_bytes,
-    from_bytes,
-    // Span utility
-    find_dict_key_span,
     // Dynamic value type
     BencodeValue,
-    // Serde impls (for advanced use)
-    Serializer,
     Deserializer,
     // Error types
     Error,
     Result,
+    // Serde impls (for advanced use)
+    Serializer,
+    // Span utility
+    find_dict_key_span,
+    from_bytes,
+    // Codec functions
+    to_bytes,
 };

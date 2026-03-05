@@ -253,11 +253,8 @@ mod tests {
 
     #[test]
     fn fast_resume_data_bencode_round_trip() {
-        let mut resume = FastResumeData::new(
-            vec![0xAA; 20],
-            "test-torrent".into(),
-            "/downloads".into(),
-        );
+        let mut resume =
+            FastResumeData::new(vec![0xAA; 20], "test-torrent".into(), "/downloads".into());
         resume.total_uploaded = 1024 * 1024;
         resume.total_downloaded = 2048 * 1024;
         resume.active_time = 3600;
@@ -313,11 +310,7 @@ mod tests {
 
     #[test]
     fn default_fields_serialize_correctly() {
-        let resume = FastResumeData::new(
-            vec![0x00; 20],
-            "minimal".into(),
-            "/tmp".into(),
-        );
+        let resume = FastResumeData::new(vec![0x00; 20], "minimal".into(), "/tmp".into());
 
         let encoded = torrent_bencode::to_bytes(&resume).unwrap();
         let decoded: FastResumeData = torrent_bencode::from_bytes(&encoded).unwrap();
@@ -339,13 +332,12 @@ mod tests {
 
     #[test]
     fn info_dict_embedding_round_trip() {
-        let mut resume = FastResumeData::new(
-            vec![0xCC; 20],
-            "with-info".into(),
-            "/downloads".into(),
-        );
+        let mut resume =
+            FastResumeData::new(vec![0xCC; 20], "with-info".into(), "/downloads".into());
         // Simulate a raw bencoded info dict.
-        resume.info = Some(b"d4:name10:test-torte12:piece lengthi262144e6:pieces20:AAAAAAAAAAAAAAAAAAAAe".to_vec());
+        resume.info = Some(
+            b"d4:name10:test-torte12:piece lengthi262144e6:pieces20:AAAAAAAAAAAAAAAAAAAAe".to_vec(),
+        );
 
         let encoded = torrent_bencode::to_bytes(&resume).unwrap();
         let decoded: FastResumeData = torrent_bencode::from_bytes(&encoded).unwrap();
@@ -362,22 +354,15 @@ mod tests {
 
     #[test]
     fn format_markers_correct() {
-        let resume = FastResumeData::new(
-            vec![0x00; 20],
-            "test".into(),
-            "/tmp".into(),
-        );
+        let resume = FastResumeData::new(vec![0x00; 20], "test".into(), "/tmp".into());
         assert_eq!(resume.file_format, "libtorrent resume file");
         assert_eq!(resume.file_version, 1);
     }
 
     #[test]
     fn resume_data_url_seeds_round_trip() {
-        let mut resume = FastResumeData::new(
-            vec![0xDD; 20],
-            "web-seed-test".into(),
-            "/downloads".into(),
-        );
+        let mut resume =
+            FastResumeData::new(vec![0xDD; 20], "web-seed-test".into(), "/downloads".into());
         resume.url_seeds = vec![
             "http://example.com/files".into(),
             "http://mirror.example.com/".into(),
@@ -390,11 +375,8 @@ mod tests {
 
     #[test]
     fn resume_data_http_seeds_round_trip() {
-        let mut resume = FastResumeData::new(
-            vec![0xEE; 20],
-            "http-seed-test".into(),
-            "/downloads".into(),
-        );
+        let mut resume =
+            FastResumeData::new(vec![0xEE; 20], "http-seed-test".into(), "/downloads".into());
         resume.http_seeds = vec!["http://seed.example.com/seed".into()];
 
         let encoded = torrent_bencode::to_bytes(&resume).unwrap();
@@ -422,11 +404,8 @@ mod tests {
 
     #[test]
     fn resume_data_v2_fields_round_trip() {
-        let mut resume = FastResumeData::new(
-            vec![0xAA; 20],
-            "v2-torrent".into(),
-            "/downloads".into(),
-        );
+        let mut resume =
+            FastResumeData::new(vec![0xAA; 20], "v2-torrent".into(), "/downloads".into());
         resume.info_hash2 = Some(vec![0xBB; 32]);
         resume.trees.insert(
             hex::encode([0xCC; 32]),
@@ -441,11 +420,7 @@ mod tests {
 
     #[test]
     fn resume_data_v1_backward_compat() {
-        let resume = FastResumeData::new(
-            vec![0x00; 20],
-            "v1-torrent".into(),
-            "/tmp".into(),
-        );
+        let resume = FastResumeData::new(vec![0x00; 20], "v1-torrent".into(), "/tmp".into());
         assert!(resume.info_hash2.is_none());
         assert!(resume.trees.is_empty());
 
@@ -457,11 +432,7 @@ mod tests {
 
     #[test]
     fn resume_data_v2_empty_trees_not_serialized() {
-        let resume = FastResumeData::new(
-            vec![0x00; 20],
-            "minimal".into(),
-            "/tmp".into(),
-        );
+        let resume = FastResumeData::new(vec![0x00; 20], "minimal".into(), "/tmp".into());
         let encoded = torrent_bencode::to_bytes(&resume).unwrap();
         // "5:trees" (bencode key) should not appear in output when empty
         let encoded_str = String::from_utf8_lossy(&encoded);
@@ -470,11 +441,7 @@ mod tests {
 
     #[test]
     fn resume_data_empty_seeds_not_serialized() {
-        let resume = FastResumeData::new(
-            vec![0x00; 20],
-            "no-seeds".into(),
-            "/tmp".into(),
-        );
+        let resume = FastResumeData::new(vec![0x00; 20], "no-seeds".into(), "/tmp".into());
         assert!(resume.url_seeds.is_empty());
         assert!(resume.http_seeds.is_empty());
 
@@ -487,11 +454,8 @@ mod tests {
     #[test]
     fn resume_data_hybrid_both_hashes() {
         // Hybrid torrents store both v1 (SHA-1, 20 bytes) and v2 (SHA-256, 32 bytes)
-        let mut resume = FastResumeData::new(
-            vec![0x11; 20],
-            "hybrid-torrent".into(),
-            "/downloads".into(),
-        );
+        let mut resume =
+            FastResumeData::new(vec![0x11; 20], "hybrid-torrent".into(), "/downloads".into());
         resume.info_hash2 = Some(vec![0x22; 32]);
         resume.trees.insert(
             hex::encode([0x33; 32]),

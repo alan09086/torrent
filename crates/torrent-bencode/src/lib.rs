@@ -32,15 +32,15 @@
 //! assert_eq!(torrent, decoded);
 //! ```
 
+mod de;
 mod error;
 mod ser;
-mod de;
 mod span;
 mod value;
 
+pub use de::Deserializer;
 pub use error::{Error, Result};
 pub use ser::Serializer;
-pub use de::Deserializer;
 pub use span::find_dict_key_span;
 pub use value::BencodeValue;
 

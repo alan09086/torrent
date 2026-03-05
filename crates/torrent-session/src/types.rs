@@ -278,7 +278,6 @@ pub enum TorrentState {
 #[derive(Debug, Clone)]
 pub struct TorrentStats {
     // ── Original fields (unchanged) ──
-
     /// Current torrent state.
     pub state: TorrentState,
     /// Total bytes downloaded (payload only).
@@ -299,14 +298,12 @@ pub struct TorrentStats {
     pub peers_by_source: HashMap<crate::peer_state::PeerSource, usize>,
 
     // ── Identity ──
-
     /// Info hashes (v1 SHA-1 and/or v2 SHA-256) for this torrent.
     pub info_hashes: torrent_core::InfoHashes,
     /// Display name from the torrent metadata.
     pub name: String,
 
     // ── State flags ──
-
     /// Whether metadata has been received (always true for .torrent adds).
     pub has_metadata: bool,
     /// Whether we have all pieces and are seeding.
@@ -329,7 +326,6 @@ pub struct TorrentStats {
     pub moving_storage: bool,
 
     // ── Progress ──
-
     /// Download progress as a fraction (0.0–1.0).
     pub progress: f32,
     /// Download progress in parts per million (0–1_000_000).
@@ -346,7 +342,6 @@ pub struct TorrentStats {
     pub block_size: u32,
 
     // ── Transfer (session counters) ──
-
     /// Total bytes downloaded this session (including protocol overhead).
     pub total_download: u64,
     /// Total bytes uploaded this session (including protocol overhead).
@@ -361,14 +356,12 @@ pub struct TorrentStats {
     pub total_redundant_bytes: u64,
 
     // ── Transfer (all-time, persisted) ──
-
     /// All-time total bytes downloaded (persisted across sessions via resume data).
     pub all_time_download: u64,
     /// All-time total bytes uploaded (persisted across sessions via resume data).
     pub all_time_upload: u64,
 
     // ── Rates ──
-
     /// Current download rate in bytes/sec (including protocol overhead).
     pub download_rate: u64,
     /// Current upload rate in bytes/sec (including protocol overhead).
@@ -379,7 +372,6 @@ pub struct TorrentStats {
     pub upload_payload_rate: u64,
 
     // ── Connection details ──
-
     /// Number of peers connected (including half-open).
     pub num_peers: usize,
     /// Number of connected peers that are seeds.
@@ -400,14 +392,12 @@ pub struct TorrentStats {
     pub num_uploads: usize,
 
     // ── Limits ──
-
     /// Maximum number of connections for this torrent.
     pub connections_limit: usize,
     /// Maximum number of unchoke slots for this torrent.
     pub uploads_limit: usize,
 
     // ── Distributed copies ──
-
     /// Number of full distributed copies available in the swarm.
     pub distributed_full_copies: u32,
     /// Fractional part of distributed copies (0–999).
@@ -416,7 +406,6 @@ pub struct TorrentStats {
     pub distributed_copies: f32,
 
     // ── Tracker ──
-
     /// URL of the tracker we most recently announced to.
     pub current_tracker: String,
     /// Whether we are currently announcing to any tracker.
@@ -427,7 +416,6 @@ pub struct TorrentStats {
     pub announcing_to_dht: bool,
 
     // ── Timestamps (POSIX seconds) ──
-
     /// Time when the torrent was added to the session.
     pub added_time: i64,
     /// Time when the torrent completed downloading (0 = not completed).
@@ -440,7 +428,6 @@ pub struct TorrentStats {
     pub last_download: i64,
 
     // ── Durations (cumulative seconds) ──
-
     /// Total seconds the torrent has been active (downloading or seeding).
     pub active_duration: i64,
     /// Total seconds the torrent has been in finished state.
@@ -449,17 +436,14 @@ pub struct TorrentStats {
     pub seeding_duration: i64,
 
     // ── Storage ──
-
     /// Current save path for the torrent data.
     pub save_path: String,
 
     // ── Queue ──
-
     /// Position in the session queue (-1 = not queued).
     pub queue_position: i32,
 
     // ── Error ──
-
     /// Human-readable error message (empty = no error).
     pub error: String,
     /// Index of the file that caused the error (-1 = not file-specific).
@@ -704,15 +688,33 @@ pub(crate) enum PeerEvent {
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by peer/torrent modules (not yet implemented)
 pub(crate) enum PeerCommand {
-    Request { index: u32, begin: u32, length: u32 },
-    Cancel { index: u32, begin: u32, length: u32 },
+    Request {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Cancel {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
     SetChoking(bool),
     SetInterested(bool),
     Have(u32),
-    RequestMetadata { piece: u32 },
-    RejectRequest { index: u32, begin: u32, length: u32 },
+    RequestMetadata {
+        piece: u32,
+    },
+    RejectRequest {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
     AllowedFast(u32),
-    SendPiece { index: u32, begin: u32, data: Bytes },
+    SendPiece {
+        index: u32,
+        begin: u32,
+        data: Bytes,
+    },
     /// Send an updated extension handshake (e.g. BEP 21 upload-only).
     SendExtHandshake(torrent_wire::ExtHandshake),
     /// Send a full bitfield mid-connection (batched Have fallback).
@@ -761,8 +763,13 @@ impl std::fmt::Debug for BoxedAsyncStream {
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by torrent module (not yet implemented)
 pub(crate) enum TorrentCommand {
-    AddPeers { peers: Vec<SocketAddr>, source: crate::peer_state::PeerSource },
-    Stats { reply: oneshot::Sender<TorrentStats> },
+    AddPeers {
+        peers: Vec<SocketAddr>,
+        source: crate::peer_state::PeerSource,
+    },
+    Stats {
+        reply: oneshot::Sender<TorrentStats>,
+    },
     Pause,
     Resume,
     Shutdown,
@@ -1084,7 +1091,10 @@ bitflags! {
 
 /// Type alias for a factory that creates per-torrent storage.
 pub type StorageFactory = Box<
-    dyn Fn(&torrent_core::TorrentMetaV1, &std::path::Path) -> std::sync::Arc<dyn torrent_storage::TorrentStorage>
+    dyn Fn(
+            &torrent_core::TorrentMetaV1,
+            &std::path::Path,
+        ) -> std::sync::Arc<dyn torrent_storage::TorrentStorage>
         + Send
         + Sync,
 >;
@@ -1109,7 +1119,10 @@ mod tests {
     #[test]
     fn torrent_config_encryption_default() {
         let cfg = TorrentConfig::default();
-        assert_eq!(cfg.encryption_mode, torrent_wire::mse::EncryptionMode::Enabled);
+        assert_eq!(
+            cfg.encryption_mode,
+            torrent_wire::mse::EncryptionMode::Enabled
+        );
     }
 
     #[test]
@@ -1151,8 +1164,8 @@ mod tests {
 
     #[test]
     fn torrent_stats_has_peers_by_source() {
-        use std::collections::HashMap;
         use crate::peer_state::PeerSource;
+        use std::collections::HashMap;
 
         let stats = TorrentStats {
             state: TorrentState::Downloading,
@@ -1298,7 +1311,10 @@ mod tests {
     #[test]
     fn torrent_config_choking_defaults() {
         let cfg = TorrentConfig::default();
-        assert_eq!(cfg.seed_choking_algorithm, SeedChokingAlgorithm::FastestUpload);
+        assert_eq!(
+            cfg.seed_choking_algorithm,
+            SeedChokingAlgorithm::FastestUpload
+        );
         assert_eq!(cfg.choking_algorithm, ChokingAlgorithm::FixedSlots);
     }
 

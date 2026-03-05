@@ -106,12 +106,12 @@ impl Handshake {
         reserved.copy_from_slice(&data[..8]);
         data.advance(8);
 
-        let info_hash = Id20::from_bytes(&data[..20])
-            .map_err(|e| Error::InvalidHandshake(e.to_string()))?;
+        let info_hash =
+            Id20::from_bytes(&data[..20]).map_err(|e| Error::InvalidHandshake(e.to_string()))?;
         data.advance(20);
 
-        let peer_id = Id20::from_bytes(&data[..20])
-            .map_err(|e| Error::InvalidHandshake(e.to_string()))?;
+        let peer_id =
+            Id20::from_bytes(&data[..20]).map_err(|e| Error::InvalidHandshake(e.to_string()))?;
 
         Ok(Handshake {
             reserved,

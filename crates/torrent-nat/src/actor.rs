@@ -217,9 +217,16 @@ impl NatActor {
         match crate::pcp::send_pcp_request(gateway, &pcp_req).await {
             Ok(resp_bytes) => match crate::pcp::decode_map_response(&resp_bytes) {
                 Ok(resp) if resp.result_code == 0 => {
-                    info!(port = tcp_port, protocol = "TCP", "PCP port mapping succeeded");
+                    info!(
+                        port = tcp_port,
+                        protocol = "TCP",
+                        "PCP port mapping succeeded"
+                    );
                     self.granted_lifetime = Some(resp.lifetime);
-                    self.emit(NatEvent::ExternalIpDiscovered { ip: resp.external_ip }).await;
+                    self.emit(NatEvent::ExternalIpDiscovered {
+                        ip: resp.external_ip,
+                    })
+                    .await;
                     self.emit(NatEvent::MappingSucceeded {
                         port: tcp_port,
                         protocol: "TCP".into(),
@@ -233,7 +240,10 @@ impl NatActor {
                     return true;
                 }
                 Ok(resp) => {
-                    debug!(result_code = resp.result_code, "PCP returned non-zero result, trying NAT-PMP");
+                    debug!(
+                        result_code = resp.result_code,
+                        "PCP returned non-zero result, trying NAT-PMP"
+                    );
                 }
                 Err(e) => {
                     debug!(error = %e, "PCP decode failed, trying NAT-PMP");
@@ -258,7 +268,10 @@ impl NatActor {
                 self.granted_lifetime = Some(resp.lifetime);
                 // Query external IP via NAT-PMP opcode 0.
                 if let Ok(ext_ip) = crate::natpmp::query_external_ip(gateway).await {
-                    self.emit(NatEvent::ExternalIpDiscovered { ip: IpAddr::V4(ext_ip) }).await;
+                    self.emit(NatEvent::ExternalIpDiscovered {
+                        ip: IpAddr::V4(ext_ip),
+                    })
+                    .await;
                 }
                 self.emit(NatEvent::MappingSucceeded {
                     port: tcp_port,
@@ -329,7 +342,11 @@ impl NatActor {
                     .await;
                 }
                 Ok(resp) => {
-                    warn!(port = udp_port, result_code = resp.result_code, "PCP UDP mapping refused");
+                    warn!(
+                        port = udp_port,
+                        result_code = resp.result_code,
+                        "PCP UDP mapping refused"
+                    );
                     self.emit(NatEvent::MappingFailed {
                         port: udp_port,
                         message: format!("PCP refused (code {})", resp.result_code),
@@ -410,11 +427,14 @@ impl NatActor {
                     // Query external IP via UPnP GetExternalIPAddress.
                     let ext_body = crate::upnp::soap::format_get_external_ip();
                     if let Ok(ext_resp) = crate::upnp::soap::soap_request(
-                        control_url, service_type, "GetExternalIPAddress", &ext_body,
-                    ).await
-                        && let Some(ip_str) = crate::upnp::soap::extract_xml_value(
-                            &ext_resp, "NewExternalIPAddress",
-                        )
+                        control_url,
+                        service_type,
+                        "GetExternalIPAddress",
+                        &ext_body,
+                    )
+                    .await
+                        && let Some(ip_str) =
+                            crate::upnp::soap::extract_xml_value(&ext_resp, "NewExternalIPAddress")
                         && let Ok(ip) = ip_str.parse::<IpAddr>()
                     {
                         self.emit(NatEvent::ExternalIpDiscovered { ip }).await;
@@ -490,8 +510,7 @@ impl NatActor {
 
             // Try UPnP deletion.
             if let Some((ref control_url, ref service_type)) = self.upnp_control {
-                let body =
-                    crate::upnp::soap::format_delete_port_mapping(tcp_port, "TCP");
+                let body = crate::upnp::soap::format_delete_port_mapping(tcp_port, "TCP");
                 let _ = crate::upnp::soap::soap_request(
                     control_url,
                     service_type,
@@ -501,9 +520,7 @@ impl NatActor {
                 .await;
 
                 if let Some(udp_port) = self.active_udp_port {
-                    let body = crate::upnp::soap::format_delete_port_mapping(
-                        udp_port, "UDP",
-                    );
+                    let body = crate::upnp::soap::format_delete_port_mapping(udp_port, "UDP");
                     let _ = crate::upnp::soap::soap_request(
                         control_url,
                         service_type,

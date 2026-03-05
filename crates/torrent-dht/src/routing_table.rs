@@ -247,9 +247,7 @@ impl RoutingTable {
         self.buckets
             .iter()
             .enumerate()
-            .filter(|(_, b)| {
-                b.nodes.is_empty() || b.nodes.iter().all(|n| n.last_seen < cutoff)
-            })
+            .filter(|(_, b)| b.nodes.is_empty() || b.nodes.iter().all(|n| n.last_seen < cutoff))
             .map(|(i, _)| i)
             .collect()
     }

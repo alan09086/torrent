@@ -5,10 +5,10 @@ use std::sync::Mutex;
 
 use torrent_core::Lengths;
 
+use crate::Result;
 use crate::error::Error;
 use crate::file_map::FileMap;
 use crate::storage::TorrentStorage;
-use crate::Result;
 
 /// Disk-backed storage using one file handle per torrent file.
 ///
@@ -59,9 +59,7 @@ impl FilesystemStorage {
             }
         }
 
-        let files = (0..file_paths.len())
-            .map(|_| Mutex::new(None))
-            .collect();
+        let files = (0..file_paths.len()).map(|_| Mutex::new(None)).collect();
 
         Ok(FilesystemStorage {
             base_dir: base_dir.to_owned(),
@@ -79,9 +77,7 @@ impl FilesystemStorage {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::io::AsRawFd;
-            let ret = unsafe {
-                libc::fallocate(f.as_raw_fd(), 0, 0, length as libc::off_t)
-            };
+            let ret = unsafe { libc::fallocate(f.as_raw_fd(), 0, 0, length as libc::off_t) };
             if ret == 0 {
                 return Ok(());
             }
@@ -120,7 +116,9 @@ impl FilesystemStorage {
 
 impl TorrentStorage for FilesystemStorage {
     fn write_chunk(&self, piece: u32, begin: u32, data: &[u8]) -> Result<()> {
-        let segments = self.file_map.chunk_segments(piece, begin, data.len() as u32);
+        let segments = self
+            .file_map
+            .chunk_segments(piece, begin, data.len() as u32);
         let mut written = 0usize;
 
         for seg in &segments {

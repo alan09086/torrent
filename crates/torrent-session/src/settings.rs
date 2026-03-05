@@ -831,10 +831,7 @@ impl Settings {
             ));
         }
 
-        if self.active_seeds > 0
-            && self.active_limit > 0
-            && self.active_seeds > self.active_limit
-        {
+        if self.active_seeds > 0 && self.active_limit > 0 && self.active_seeds > self.active_limit {
             return Err(crate::Error::InvalidSettings(
                 "active_seeds exceeds active_limit".into(),
             ));
@@ -1294,7 +1291,10 @@ mod tests {
         assert_eq!(tc.enable_utp, s.enable_utp);
         assert_eq!(tc.enable_web_seed, s.enable_web_seed);
         assert_eq!(tc.hashing_threads, s.hashing_threads);
-        assert_eq!(tc.max_concurrent_stream_reads, s.max_concurrent_stream_reads);
+        assert_eq!(
+            tc.max_concurrent_stream_reads,
+            s.max_concurrent_stream_reads
+        );
         assert_eq!(tc.anonymous_mode, s.anonymous_mode);
         assert_eq!(tc.enable_i2p, s.enable_i2p);
         assert_eq!(tc.allow_i2p_mixed, s.allow_i2p_mixed);
@@ -1307,7 +1307,10 @@ mod tests {
         assert_eq!(tc.whole_pieces_threshold, s.whole_pieces_threshold);
         assert_eq!(tc.snub_timeout_secs, s.snub_timeout_secs);
         assert_eq!(tc.readahead_pieces, s.readahead_pieces);
-        assert_eq!(tc.streaming_timeout_escalation, s.streaming_timeout_escalation);
+        assert_eq!(
+            tc.streaming_timeout_escalation,
+            s.streaming_timeout_escalation
+        );
         // New fields
         assert_eq!(tc.storage_mode, s.storage_mode);
         assert_eq!(tc.block_request_timeout_secs, s.block_request_timeout_secs);
@@ -1360,7 +1363,9 @@ mod tests {
         let decoded: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(
             decoded.external_ip,
-            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)))
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                203, 0, 113, 5
+            )))
         );
 
         // Round-trip preserves external_ip
@@ -1592,7 +1597,10 @@ mod tests {
     #[test]
     fn default_choking_algorithms() {
         let s = Settings::default();
-        assert_eq!(s.seed_choking_algorithm, SeedChokingAlgorithm::FastestUpload);
+        assert_eq!(
+            s.seed_choking_algorithm,
+            SeedChokingAlgorithm::FastestUpload
+        );
         assert_eq!(s.choking_algorithm, ChokingAlgorithm::FixedSlots);
     }
 
@@ -1603,7 +1611,10 @@ mod tests {
         s.choking_algorithm = ChokingAlgorithm::RateBased;
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.seed_choking_algorithm, SeedChokingAlgorithm::AntiLeech);
+        assert_eq!(
+            decoded.seed_choking_algorithm,
+            SeedChokingAlgorithm::AntiLeech
+        );
         assert_eq!(decoded.choking_algorithm, ChokingAlgorithm::RateBased);
     }
 

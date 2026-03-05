@@ -26,8 +26,10 @@ pub enum Error {
 
     /// Peer connection failed.
     #[error("connection: {0}")]
-    Connection(/// Error description.
-        String),
+    Connection(
+        /// Error description.
+        String,
+    ),
 
     /// Received metadata whose info hash does not match the expected value.
     #[error("metadata info_hash mismatch")]
@@ -42,28 +44,38 @@ pub enum Error {
 
     /// Received invalid peer data from a tracker or PEX message.
     #[error("invalid peer data: {0}")]
-    InvalidPeerData(/// Description of the invalid data.
-        String),
+    InvalidPeerData(
+        /// Description of the invalid data.
+        String,
+    ),
 
     /// The requested torrent is not in the session.
     #[error("torrent not found: {0}")]
-    TorrentNotFound(/// Info hash of the missing torrent.
-        torrent_core::Id20),
+    TorrentNotFound(
+        /// Info hash of the missing torrent.
+        torrent_core::Id20,
+    ),
 
     /// Attempted to add a torrent that already exists in the session.
     #[error("duplicate torrent: {0}")]
-    DuplicateTorrent(/// Info hash of the duplicate torrent.
-        torrent_core::Id20),
+    DuplicateTorrent(
+        /// Info hash of the duplicate torrent.
+        torrent_core::Id20,
+    ),
 
     /// The session has reached its maximum torrent capacity.
     #[error("session at capacity ({0} torrents)")]
-    SessionAtCapacity(/// Current number of torrents in the session.
-        usize),
+    SessionAtCapacity(
+        /// Current number of torrents in the session.
+        usize,
+    ),
 
     /// Torrent metadata has not been received yet (magnet link still resolving).
     #[error("metadata not yet available for {0}")]
-    MetadataNotReady(/// Info hash of the torrent awaiting metadata.
-        torrent_core::Id20),
+    MetadataNotReady(
+        /// Info hash of the torrent awaiting metadata.
+        torrent_core::Id20,
+    ),
 
     /// File index is out of range for the torrent.
     #[error("file index {index} out of range (torrent has {count} files)")]
@@ -92,13 +104,17 @@ pub enum Error {
 
     /// Configuration error (e.g. invalid proxy settings).
     #[error("configuration error: {0}")]
-    Config(/// Error description.
-        String),
+    Config(
+        /// Error description.
+        String,
+    ),
 
     /// Settings validation failed.
     #[error("invalid settings: {0}")]
-    InvalidSettings(/// Description of the invalid setting.
-        String),
+    InvalidSettings(
+        /// Description of the invalid setting.
+        String,
+    ),
 
     /// The session is shutting down and cannot accept new commands.
     #[error("session shutting down")]

@@ -178,7 +178,8 @@ impl EndGame {
         // Then merge pending requests (may add peers not yet in InFlightPiece)
         for (addr, requests) in pending {
             for &(index, begin, length) in requests {
-                let entry = self.blocks
+                let entry = self
+                    .blocks
                     .entry((index, begin))
                     .or_insert_with(|| BlockEntry {
                         length,
@@ -267,9 +268,7 @@ mod tests {
         let mut eg = EndGame::new();
         let peer_a = addr(1);
         let peer_b = addr(2);
-        let pending = vec![
-            (peer_a, vec![(0, 0, 16384), (0, 16384, 16384)]),
-        ];
+        let pending = vec![(peer_a, vec![(0, 0, 16384), (0, 16384, 16384)])];
         eg.activate(&pending);
 
         // peer_b has piece 0 — should get one of the blocks already assigned to peer_a
@@ -371,10 +370,7 @@ mod tests {
         let mut eg = EndGame::new();
         let peer_a = addr(1);
         let peer_b = addr(2);
-        let pending = vec![
-            (peer_a, vec![(0, 0, 16384)]),
-            (peer_b, vec![(0, 0, 16384)]),
-        ];
+        let pending = vec![(peer_a, vec![(0, 0, 16384)]), (peer_b, vec![(0, 0, 16384)])];
         eg.activate(&pending);
         assert_eq!(eg.block_requesters(0, 0).len(), 2);
 
@@ -387,9 +383,10 @@ mod tests {
     fn remove_piece_clears_all_blocks_for_piece() {
         let mut eg = EndGame::new();
         let peer_a = addr(1);
-        let pending = vec![
-            (peer_a, vec![(0, 0, 16384), (0, 16384, 16384), (1, 0, 16384)]),
-        ];
+        let pending = vec![(
+            peer_a,
+            vec![(0, 0, 16384), (0, 16384, 16384), (1, 0, 16384)],
+        )];
         eg.activate(&pending);
         assert_eq!(eg.block_requesters(0, 0).len(), 1);
         assert_eq!(eg.block_requesters(1, 0).len(), 1);

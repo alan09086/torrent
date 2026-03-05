@@ -147,8 +147,14 @@ mod tests {
             torrents: vec![],
             banned_peers: vec!["10.0.0.1".into(), "192.168.1.5".into()],
             peer_strikes: vec![
-                PeerStrikeEntry { ip: "10.0.0.1".into(), count: 3 },
-                PeerStrikeEntry { ip: "10.0.0.2".into(), count: 1 },
+                PeerStrikeEntry {
+                    ip: "10.0.0.1".into(),
+                    count: 3,
+                },
+                PeerStrikeEntry {
+                    ip: "10.0.0.2".into(),
+                    count: 1,
+                },
             ],
         };
 
@@ -163,7 +169,10 @@ mod tests {
     fn session_state_backward_compatible() {
         // Old format without ban fields — should deserialize cleanly with defaults
         let old_state = SessionState {
-            dht_nodes: vec![DhtNodeEntry { host: "example.com".into(), port: 6881 }],
+            dht_nodes: vec![DhtNodeEntry {
+                host: "example.com".into(),
+                port: 6881,
+            }],
             torrents: vec![],
             banned_peers: vec![],
             peer_strikes: vec![],

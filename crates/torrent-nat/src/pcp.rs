@@ -3,7 +3,7 @@
 //! Successor to NAT-PMP, supports IPv6 and more features. Uses the same
 //! port 5351 but sends 60-byte MAP opcode packets with a 12-byte nonce.
 
-use std::net::{Ipv4Addr, IpAddr};
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::error::{Error, Result};
 

@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 
-use crate::conn::{build_reset, ConnAction, ConnState, Connection, ConnectionKey};
+use crate::conn::{ConnAction, ConnState, Connection, ConnectionKey, build_reset};
 use crate::error::{Error, Result};
 use crate::listener::UtpListener;
 use crate::packet::{Packet, PacketType};
@@ -437,7 +437,11 @@ impl SocketActor {
                     }
                     if closed {
                         let removed = self.connections.remove(&key);
-                        if let Some(ConnectionSlot { pending_connect: Some(pending), .. }) = removed {
+                        if let Some(ConnectionSlot {
+                            pending_connect: Some(pending),
+                            ..
+                        }) = removed
+                        {
                             let _ = pending.reply.send(Err(Error::Timeout));
                         }
                     }
@@ -694,11 +698,8 @@ mod tests {
 
         // Should receive a RESET back
         let mut buf = vec![0u8; 1024];
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            raw.recv_from(&mut buf),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), raw.recv_from(&mut buf)).await;
 
         if let Ok(Ok((n, from))) = result {
             assert_eq!(from, socket_a.local_addr());

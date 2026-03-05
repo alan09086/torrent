@@ -4,44 +4,44 @@
 mod create;
 mod detect;
 mod error;
+mod file_priority;
+mod file_selection;
 mod file_tree;
 mod hash;
+mod hash_picker;
+mod hash_request;
 mod info_hashes;
 mod lengths;
-mod merkle;
 mod magnet;
+mod merkle;
+mod merkle_state;
 mod metainfo;
 mod metainfo_v2;
 mod peer_id;
 mod resume_data;
-mod file_priority;
-mod file_selection;
-mod hash_picker;
-mod hash_request;
-mod merkle_state;
 mod storage_mode;
 mod torrent_version;
 
 pub use create::{CreateTorrent, CreateTorrentResult};
 pub use detect::{TorrentMeta, torrent_from_bytes_any};
-pub use torrent_version::TorrentVersion;
 pub use error::{Error, Result};
-pub use file_tree::{FileTreeNode, V2FileAttr, V2FileInfo};
 pub use file_priority::FilePriority;
 pub use file_selection::FileSelection;
+pub use file_tree::{FileTreeNode, V2FileAttr, V2FileInfo};
 pub use hash::{Id20, Id32};
+pub use hash_picker::{AddHashesResult, FileHashInfo, HashPicker};
+pub use hash_request::{HashRequest, validate_hash_request};
 pub use info_hashes::InfoHashes;
-pub use merkle::MerkleTree;
-pub use lengths::{Lengths, DEFAULT_CHUNK_SIZE};
+pub use lengths::{DEFAULT_CHUNK_SIZE, Lengths};
 pub use magnet::Magnet;
+pub use merkle::MerkleTree;
+pub use merkle_state::{MerkleTreeState, SetBlockResult};
 pub use metainfo::{FileEntry, FileInfo, InfoDict, TorrentMetaV1, torrent_from_bytes};
 pub use metainfo_v2::{InfoDictV2, TorrentMetaV2, torrent_v2_from_bytes};
 pub use peer_id::PeerId;
 pub use resume_data::{FastResumeData, UnfinishedPiece};
-pub use hash_picker::{AddHashesResult, FileHashInfo, HashPicker};
-pub use hash_request::{HashRequest, validate_hash_request};
-pub use merkle_state::{MerkleTreeState, SetBlockResult};
 pub use storage_mode::StorageMode;
+pub use torrent_version::TorrentVersion;
 
 /// Network address family for dual-stack support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

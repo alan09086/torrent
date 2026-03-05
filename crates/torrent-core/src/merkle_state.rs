@@ -96,8 +96,8 @@ impl MerkleTreeState {
             let last_block = ((piece + 1) * blocks_per_piece).min(self.num_blocks);
 
             // Check if all blocks in this piece have stored hashes
-            let all_stored = (first_block..last_block)
-                .all(|b| self.block_hashes[b as usize].is_some());
+            let all_stored =
+                (first_block..last_block).all(|b| self.block_hashes[b as usize].is_some());
 
             if !all_stored {
                 continue;
@@ -159,8 +159,8 @@ impl MerkleTreeState {
         let first_block = piece_index * blocks_per_piece;
         let last_block = ((piece_index + 1) * blocks_per_piece).min(self.num_blocks);
 
-        let all_present = (first_block..last_block)
-            .all(|b| self.block_hashes[b as usize].is_some());
+        let all_present =
+            (first_block..last_block).all(|b| self.block_hashes[b as usize].is_some());
 
         if !all_present {
             // Gap 3 fix: return Unknown, not Ok — block hash stored but can't
@@ -208,7 +208,7 @@ impl MerkleTreeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{sha256, Id32, MerkleTree};
+    use crate::{Id32, MerkleTree, sha256};
 
     fn make_block_hashes(n: usize) -> Vec<Id32> {
         (0..n).map(|i| sha256(&[i as u8])).collect()
@@ -292,7 +292,10 @@ mod tests {
         state.set_piece_hashes(pieces);
 
         // Verify blocks 0,1 (piece 0)
-        assert_eq!(state.set_block_hash(0, block_hashes[0]), SetBlockResult::Unknown);
+        assert_eq!(
+            state.set_block_hash(0, block_hashes[0]),
+            SetBlockResult::Unknown
+        );
         assert!(!state.piece_verified(0, 2)); // only 1 of 2 blocks
         assert_eq!(state.set_block_hash(1, block_hashes[1]), SetBlockResult::Ok);
         assert!(state.piece_verified(0, 2)); // both blocks done
@@ -308,8 +311,14 @@ mod tests {
         let mut state = MerkleTreeState::new(tree.root(), 4, 2);
 
         // Blocks arrive → Unknown (no piece hashes yet)
-        assert_eq!(state.set_block_hash(0, block_hashes[0]), SetBlockResult::Unknown);
-        assert_eq!(state.set_block_hash(1, block_hashes[1]), SetBlockResult::Unknown);
+        assert_eq!(
+            state.set_block_hash(0, block_hashes[0]),
+            SetBlockResult::Unknown
+        );
+        assert_eq!(
+            state.set_block_hash(1, block_hashes[1]),
+            SetBlockResult::Unknown
+        );
 
         // Piece hashes arrive → retroactively verify stored blocks
         let verified = state.set_piece_hashes_and_verify(pieces, 2);

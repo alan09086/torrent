@@ -4,7 +4,6 @@
 //! Provides [`connect_through_proxy`] for TCP tunneling and
 //! [`socks5_udp_associate`] + [`ProxiedUdpSocket`] for UDP relay.
 
-
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -61,7 +60,9 @@ pub struct ProxyConfig {
     pub socks5_udp_send_local_ep: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for ProxyConfig {
     fn default() -> Self {
@@ -90,8 +91,9 @@ impl ProxyConfig {
         };
 
         match (&self.username, &self.password) {
-            (Some(u), Some(p)) if self.proxy_type == ProxyType::Socks5Password
-                || self.proxy_type == ProxyType::HttpPassword =>
+            (Some(u), Some(p))
+                if self.proxy_type == ProxyType::Socks5Password
+                    || self.proxy_type == ProxyType::HttpPassword =>
             {
                 format!("{}://{}:{}@{}:{}", scheme, u, p, self.hostname, self.port)
             }
@@ -132,7 +134,10 @@ pub(crate) async fn connect_through_proxy(
             http_connect(&mut stream, target, auth).await?;
         }
         ProxyType::None => {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no proxy configured"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no proxy configured",
+            ));
         }
     }
 
@@ -219,8 +224,8 @@ async fn socks5_negotiate_method(stream: &mut TcpStream, want_auth: bool) -> io:
     }
 
     match resp[1] {
-        0 => Ok(()),  // NO_AUTH accepted
-        2 if want_auth => Ok(()),  // USERNAME/PASSWORD accepted
+        0 => Ok(()),              // NO_AUTH accepted
+        2 if want_auth => Ok(()), // USERNAME/PASSWORD accepted
         0xFF => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "SOCKS5: no acceptable methods",
@@ -406,10 +411,7 @@ async fn http_connect(
 ) -> io::Result<()> {
     let host_port = format!("{}:{}", target.ip(), target.port());
 
-    let mut request = format!(
-        "CONNECT {} HTTP/1.1\r\nHost: {}\r\n",
-        host_port, host_port,
-    );
+    let mut request = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", host_port, host_port,);
 
     if let Some((user, pass)) = auth {
         use std::fmt::Write;

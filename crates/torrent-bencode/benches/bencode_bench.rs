@@ -59,5 +59,10 @@ fn bench_value_parse(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_serialize, bench_deserialize, bench_value_parse);
+criterion_group!(
+    benches,
+    bench_serialize,
+    bench_deserialize,
+    bench_value_parse
+);
 criterion_main!(benches);

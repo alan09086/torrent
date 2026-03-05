@@ -51,7 +51,11 @@ impl PeerPipelineState {
     ///
     /// `initial_queue_depth` sets the starting queue depth (default: [`INITIAL_QUEUE_DEPTH`]).
     /// The value is clamped to `[1, max_queue_depth]`.
-    pub fn new(max_queue_depth: usize, request_queue_time: f64, initial_queue_depth: usize) -> Self {
+    pub fn new(
+        max_queue_depth: usize,
+        request_queue_time: f64,
+        initial_queue_depth: usize,
+    ) -> Self {
         let depth = initial_queue_depth.clamp(1, max_queue_depth);
         Self {
             ewma_rate_bytes_sec: 0.0,
@@ -97,7 +101,10 @@ impl PeerPipelineState {
         length: u32,
         now: Instant,
     ) -> Option<Duration> {
-        let rtt = self.request_times.remove(&(piece, begin)).map(|sent| now.duration_since(sent));
+        let rtt = self
+            .request_times
+            .remove(&(piece, begin))
+            .map(|sent| now.duration_since(sent));
 
         if self.in_slow_start {
             self.queue_depth = (self.queue_depth + 1).min(self.max_queue_depth);
@@ -141,8 +148,8 @@ impl PeerPipelineState {
     ///
     /// `depth = ewma_rate * request_queue_time / chunk_size`, clamped to [2, max].
     fn recompute_queue_depth(&mut self) {
-        let depth = (self.ewma_rate_bytes_sec * self.request_queue_time
-            / DEFAULT_CHUNK_SIZE as f64) as usize;
+        let depth = (self.ewma_rate_bytes_sec * self.request_queue_time / DEFAULT_CHUNK_SIZE as f64)
+            as usize;
         self.queue_depth = depth.clamp(2, self.max_queue_depth);
     }
 

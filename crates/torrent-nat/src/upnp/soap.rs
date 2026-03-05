@@ -178,8 +178,7 @@ mod tests {
 
     #[test]
     fn format_add_port_mapping_contains_fields() {
-        let body =
-            format_add_port_mapping(6881, "TCP", 6881, "192.168.1.100", "torrent", 3600);
+        let body = format_add_port_mapping(6881, "TCP", 6881, "192.168.1.100", "torrent", 3600);
         assert!(body.contains("<NewExternalPort>6881</NewExternalPort>"));
         assert!(body.contains("<NewProtocol>TCP</NewProtocol>"));
         assert!(body.contains("<NewInternalPort>6881</NewInternalPort>"));
@@ -190,8 +189,7 @@ mod tests {
 
     #[test]
     fn parse_url_with_port_and_path() {
-        let (host, port, path) =
-            parse_url("http://192.168.1.1:5000/ctl/IPConn").unwrap();
+        let (host, port, path) = parse_url("http://192.168.1.1:5000/ctl/IPConn").unwrap();
         assert_eq!(host, "192.168.1.1");
         assert_eq!(port, 5000);
         assert_eq!(path, "/ctl/IPConn");

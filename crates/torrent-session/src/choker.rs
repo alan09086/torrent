@@ -152,20 +152,16 @@ impl FixedSlotsStrategy {
                 if !interested.is_empty() {
                     let offset = self.round_robin_offset % interested.len();
                     interested.rotate_left(offset);
-                    self.round_robin_offset = self
-                        .round_robin_offset
-                        .wrapping_add(unchoke_slots)
-                        % interested.len();
+                    self.round_robin_offset =
+                        self.round_robin_offset.wrapping_add(unchoke_slots) % interested.len();
                 }
             }
             SeedChokingAlgorithm::AntiLeech => {
                 // Non-seed peers first (sorted by upload rate desc), then seeds.
-                interested.sort_by(|a, b| {
-                    match (a.is_seed, b.is_seed) {
-                        (false, true) => std::cmp::Ordering::Less,
-                        (true, false) => std::cmp::Ordering::Greater,
-                        _ => b.upload_rate.cmp(&a.upload_rate),
-                    }
+                interested.sort_by(|a, b| match (a.is_seed, b.is_seed) {
+                    (false, true) => std::cmp::Ordering::Less,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    _ => b.upload_rate.cmp(&a.upload_rate),
                 });
             }
         }
@@ -287,8 +283,8 @@ impl RateBasedStrategy {
         if throughput > self.prev_throughput {
             // Throughput increased — consider adding a slot.
             // But not if we're already at capacity (>90% of upload rate limit).
-            let at_capacity = self.upload_rate_limit > 0
-                && throughput > self.upload_rate_limit * 90 / 100;
+            let at_capacity =
+                self.upload_rate_limit > 0 && throughput > self.upload_rate_limit * 90 / 100;
 
             if !at_capacity && self.dynamic_slots < self.max_slots {
                 self.dynamic_slots += 1;
@@ -391,17 +387,13 @@ impl Choker {
         max_slots: usize,
     ) -> Self {
         let strategy: Box<dyn ChokerStrategy> = match choking_algorithm {
-            ChokingAlgorithm::FixedSlots => {
-                Box::new(FixedSlotsStrategy::new(seed_algorithm))
-            }
-            ChokingAlgorithm::RateBased => {
-                Box::new(RateBasedStrategy::new(
-                    seed_algorithm,
-                    upload_rate_limit,
-                    min_slots,
-                    max_slots,
-                ))
-            }
+            ChokingAlgorithm::FixedSlots => Box::new(FixedSlotsStrategy::new(seed_algorithm)),
+            ChokingAlgorithm::RateBased => Box::new(RateBasedStrategy::new(
+                seed_algorithm,
+                upload_rate_limit,
+                min_slots,
+                max_slots,
+            )),
         };
 
         Self {
@@ -440,7 +432,8 @@ impl Choker {
 
     /// Decide which peers to unchoke and choke.
     pub fn decide(&mut self, peers: &[PeerInfo]) -> ChokeDecision {
-        self.strategy.decide(peers, self.unchoke_slots, self.seed_mode)
+        self.strategy
+            .decide(peers, self.unchoke_slots, self.seed_mode)
     }
 
     /// Pick a new optimistic peer from interested peers.
@@ -558,10 +551,7 @@ mod tests {
     #[test]
     fn fewer_peers_than_slots() {
         let mut choker = Choker::new(4);
-        let peers = vec![
-            peer(6881, 100, true),
-            peer(6882, 200, true),
-        ];
+        let peers = vec![peer(6881, 100, true), peer(6882, 200, true)];
 
         let decision = choker.decide(&peers);
 
@@ -733,7 +723,10 @@ mod tests {
 
     #[test]
     fn seed_choking_algorithm_default() {
-        assert_eq!(SeedChokingAlgorithm::default(), SeedChokingAlgorithm::FastestUpload);
+        assert_eq!(
+            SeedChokingAlgorithm::default(),
+            SeedChokingAlgorithm::FastestUpload
+        );
     }
 
     #[test]
@@ -889,7 +882,7 @@ mod tests {
         let strategy2 = RateBasedStrategy::new(
             SeedChokingAlgorithm::FastestUpload,
             0,
-            1,  // min_slots=1
+            1, // min_slots=1
             10,
         );
         assert_eq!(strategy2.current_slots(), 2);
@@ -939,9 +932,9 @@ mod tests {
     fn rate_based_respects_min_max() {
         let mut strategy = RateBasedStrategy::new(
             SeedChokingAlgorithm::FastestUpload,
-            0,  // unlimited
-            2,  // min_slots
-            3,  // max_slots = 3
+            0, // unlimited
+            2, // min_slots
+            3, // max_slots = 3
         );
 
         // Build up.
@@ -986,12 +979,7 @@ mod tests {
 
     #[test]
     fn rate_based_ignores_external_unchoke_slots() {
-        let mut strategy = RateBasedStrategy::new(
-            SeedChokingAlgorithm::FastestUpload,
-            0,
-            2,
-            10,
-        );
+        let mut strategy = RateBasedStrategy::new(SeedChokingAlgorithm::FastestUpload, 0, 2, 10);
 
         let peers = vec![
             peer(6881, 500, true),

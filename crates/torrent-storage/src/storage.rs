@@ -48,7 +48,7 @@ pub trait TorrentStorage: Send + Sync {
 mod tests {
     use super::*;
     use crate::memory::MemoryStorage;
-    use torrent_core::{sha256, Lengths};
+    use torrent_core::{Lengths, sha256};
 
     #[test]
     fn verify_piece_v2_correct_hash() {

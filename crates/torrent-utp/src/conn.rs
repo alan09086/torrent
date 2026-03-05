@@ -6,7 +6,7 @@ use bytes::Bytes;
 use tracing::{debug, trace};
 
 use crate::congestion::LedbatController;
-use crate::packet::{ExtensionType, Header, Packet, PacketType, HEADER_SIZE};
+use crate::packet::{ExtensionType, HEADER_SIZE, Header, Packet, PacketType};
 use crate::seq::SeqNr;
 
 /// Maximum payload per packet (conservative, fits in most MTUs).
@@ -253,9 +253,7 @@ impl Connection {
         if packet.header.packet_type == PacketType::Fin {
             self.fin_seq_nr = Some(packet.header.seq_nr);
             // Insert empty entry so drain logic detects FIN position
-            self.recv_buf
-                .entry(packet.header.seq_nr)
-                .or_default();
+            self.recv_buf.entry(packet.header.seq_nr).or_default();
             self.drain_recv_buf(&mut actions);
         }
 
@@ -328,7 +326,11 @@ impl Connection {
         }
 
         // Find oldest unACKed packet
-        let oldest = self.in_flight.values().next().map(|p| (p.sent_at, p.seq_nr));
+        let oldest = self
+            .in_flight
+            .values()
+            .next()
+            .map(|p| (p.sent_at, p.seq_nr));
 
         if let Some((sent_at, seq)) = oldest
             && now.duration_since(sent_at) >= rto

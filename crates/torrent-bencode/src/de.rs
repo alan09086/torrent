@@ -30,10 +30,13 @@ impl<'de> Deserializer<'de> {
     }
 
     fn peek(&self) -> Result<u8> {
-        self.input.get(self.pos).copied().ok_or(Error::UnexpectedEof {
-            position: self.pos,
-            context: "expected more data".into(),
-        })
+        self.input
+            .get(self.pos)
+            .copied()
+            .ok_or(Error::UnexpectedEof {
+                position: self.pos,
+                context: "expected more data".into(),
+            })
     }
 
     fn next(&mut self) -> Result<u8> {
@@ -160,19 +163,23 @@ impl<'de> Deserializer<'de> {
             detail: "non-ASCII length".into(),
         })?;
 
-        let len: usize = len_str.parse().map_err(|e: std::num::ParseIntError| {
-            Error::InvalidByteString {
-                position: start,
-                detail: e.to_string(),
-            }
-        })?;
+        let len: usize =
+            len_str
+                .parse()
+                .map_err(|e: std::num::ParseIntError| Error::InvalidByteString {
+                    position: start,
+                    detail: e.to_string(),
+                })?;
 
         self.pos += colon + 1; // skip past ':'
 
         if self.pos + len > self.input.len() {
             return Err(Error::UnexpectedEof {
                 position: self.pos,
-                context: format!("byte string needs {len} bytes, only {} available", self.input.len() - self.pos),
+                context: format!(
+                    "byte string needs {len} bytes, only {} available",
+                    self.input.len() - self.pos
+                ),
             });
         }
 
@@ -308,7 +315,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         _name: &'static str,
         _visitor: V,
     ) -> Result<V::Value> {
-        Err(Error::Custom("bencode does not support unit structs".into()))
+        Err(Error::Custom(
+            "bencode does not support unit structs".into(),
+        ))
     }
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
@@ -481,10 +490,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
         seed.deserialize(key_de).map(Some)
     }
 
-    fn next_value_seed<V: de::DeserializeSeed<'de>>(
-        &mut self,
-        seed: V,
-    ) -> Result<V::Value> {
+    fn next_value_seed<V: de::DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value> {
         seed.deserialize(&mut *self.de)
     }
 }
@@ -614,11 +620,15 @@ impl<'de> de::VariantAccess<'de> for UnitVariantAccess<'_, 'de> {
     }
 
     fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(self, _seed: T) -> Result<T::Value> {
-        Err(Error::Custom("expected unit variant for string enum".into()))
+        Err(Error::Custom(
+            "expected unit variant for string enum".into(),
+        ))
     }
 
     fn tuple_variant<V: Visitor<'de>>(self, _len: usize, _visitor: V) -> Result<V::Value> {
-        Err(Error::Custom("expected unit variant for string enum".into()))
+        Err(Error::Custom(
+            "expected unit variant for string enum".into(),
+        ))
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -626,7 +636,9 @@ impl<'de> de::VariantAccess<'de> for UnitVariantAccess<'_, 'de> {
         _fields: &'static [&'static str],
         _visitor: V,
     ) -> Result<V::Value> {
-        Err(Error::Custom("expected unit variant for string enum".into()))
+        Err(Error::Custom(
+            "expected unit variant for string enum".into(),
+        ))
     }
 }
 

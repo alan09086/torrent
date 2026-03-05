@@ -46,7 +46,7 @@ pub mod error;
 pub mod prelude;
 
 // Top-level convenience re-exports
-pub use client::{ClientBuilder, AddTorrentParams};
+pub use client::{AddTorrentParams, ClientBuilder};
 pub use error::{Error, Result};
 
 #[cfg(test)]
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn bencode_round_trip_through_facade() {
-        use serde::{Serialize, Deserialize};
+        use serde::{Deserialize, Serialize};
 
         #[derive(Serialize, Deserialize, PartialEq, Debug)]
         struct Demo {
@@ -63,7 +63,10 @@ mod tests {
             value: i64,
         }
 
-        let original = Demo { name: "torrent".into(), value: 42 };
+        let original = Demo {
+            name: "torrent".into(),
+            value: 42,
+        };
         let encoded = bencode::to_bytes(&original).unwrap();
         let decoded: Demo = bencode::from_bytes(&encoded).unwrap();
         assert_eq!(original, decoded);
@@ -87,7 +90,7 @@ mod tests {
 
         // Verify PeerId generation
         let peer_id = core::PeerId::generate();
-        assert_eq!(peer_id.0 .0.len(), 20);
+        assert_eq!(peer_id.0.0.len(), 20);
     }
 
     #[test]
@@ -99,7 +102,10 @@ mod tests {
 
         assert_eq!(magnet.display_name.as_deref(), Some("test file"));
         assert_eq!(magnet.trackers.len(), 1);
-        assert_eq!(magnet.info_hash().to_hex(), "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
+        assert_eq!(
+            magnet.info_hash().to_hex(),
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        );
 
         // Round-trip back to URI
         let rebuilt = magnet.to_uri();
@@ -209,11 +215,11 @@ mod tests {
     #[test]
     fn add_torrent_params_from_magnet() {
         let magnet = core::Magnet::parse(
-            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test"
-        ).unwrap();
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test",
+        )
+        .unwrap();
 
-        let params = crate::AddTorrentParams::from_magnet(magnet)
-            .download_dir("/tmp/downloads");
+        let params = crate::AddTorrentParams::from_magnet(magnet).download_dir("/tmp/downloads");
 
         // Verify the builder pattern works (we can't inspect private fields,
         // but we can verify it compiles and chains correctly)
@@ -245,9 +251,8 @@ mod tests {
 
         // Verify key types are in scope from prelude
         let _builder = ClientBuilder::new();
-        let _magnet = Magnet::parse(
-            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
-        ).unwrap();
+        let _magnet =
+            Magnet::parse("magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
         let _hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
 
         // Verify TorrentState variants accessible
@@ -261,33 +266,28 @@ mod tests {
 
         // Parse magnet → create AddTorrentParams → verify types compose
         let magnet = Magnet::parse(
-            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test%20file"
-        ).unwrap();
+            "magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test%20file",
+        )
+        .unwrap();
 
         assert_eq!(magnet.display_name.as_deref(), Some("test file"));
 
-        let _params = AddTorrentParams::from_magnet(magnet)
-            .download_dir("/tmp/test");
+        let _params = AddTorrentParams::from_magnet(magnet).download_dir("/tmp/test");
 
         // Verify unified Result type works
         let ok_result: Result<i32> = Ok(42);
         assert_eq!(ok_result.unwrap(), 42);
 
         // Verify error conversion chain: bencode → unified
-        let err_result: Result<()> = Err(
-            Error::Bencode(crate::bencode::Error::Custom("test".into()))
-        );
+        let err_result: Result<()> =
+            Err(Error::Bencode(crate::bencode::Error::Custom("test".into())));
         assert!(err_result.is_err());
     }
 
     #[test]
     fn resume_data_accessible_through_facade() {
         // Create resume data through facade
-        let rd = core::FastResumeData::new(
-            vec![0xAA; 20],
-            "test".into(),
-            "/tmp".into(),
-        );
+        let rd = core::FastResumeData::new(vec![0xAA; 20], "test".into(), "/tmp".into());
         assert_eq!(rd.file_format, "libtorrent resume file");
         assert_eq!(rd.file_version, 1);
         assert_eq!(rd.info_hash.len(), 20);
@@ -356,11 +356,7 @@ mod tests {
     #[test]
     fn resume_data_in_prelude() {
         use crate::prelude::*;
-        let _rd = FastResumeData::new(
-            vec![0xCC; 20],
-            "prelude-test".into(),
-            "/tmp".into(),
-        );
+        let _rd = FastResumeData::new(vec![0xCC; 20], "prelude-test".into(), "/tmp".into());
         let _state = SessionState {
             dht_nodes: Vec::new(),
             torrents: Vec::new(),
@@ -373,25 +369,23 @@ mod tests {
     async fn utp_outbound_and_accept() {
         // Create two UtpSocket instances on loopback, connect one to the other,
         // and verify data flows through the connection.
-        let (socket_a, mut listener_a) =
-            utp::UtpSocket::bind(utp::UtpConfig {
-                bind_addr: "127.0.0.1:0".parse().unwrap(),
-                max_connections: 8,
-                dscp: 0,
-            })
-            .await
-            .unwrap();
+        let (socket_a, mut listener_a) = utp::UtpSocket::bind(utp::UtpConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            max_connections: 8,
+            dscp: 0,
+        })
+        .await
+        .unwrap();
 
         let addr_a = socket_a.local_addr();
 
-        let (socket_b, _listener_b) =
-            utp::UtpSocket::bind(utp::UtpConfig {
-                bind_addr: "127.0.0.1:0".parse().unwrap(),
-                max_connections: 8,
-                dscp: 0,
-            })
-            .await
-            .unwrap();
+        let (socket_b, _listener_b) = utp::UtpSocket::bind(utp::UtpConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            max_connections: 8,
+            dscp: 0,
+        })
+        .await
+        .unwrap();
 
         // B connects to A (keep socket_b alive so the stream isn't dropped)
         let connect_handle = tokio::spawn({
@@ -524,9 +518,12 @@ mod tests {
         assert_eq!(decoded[0].addr, node.addr);
 
         // Compact peers6 round-trip
-        let peers = vec![
-            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 6881, 0, 0)),
-        ];
+        let peers = vec![SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            6881,
+            0,
+            0,
+        ))];
         let encoded = tracker::encode_compact_peers6(&peers);
         assert_eq!(encoded.len(), 18);
         let decoded = tracker::parse_compact_peers6(&encoded).unwrap();
@@ -541,7 +538,9 @@ mod tests {
         assert!(config.enable_ipv6);
 
         // Explicitly disabled
-        let config = crate::ClientBuilder::new().enable_ipv6(false).into_settings();
+        let config = crate::ClientBuilder::new()
+            .enable_ipv6(false)
+            .into_settings();
         assert!(!config.enable_ipv6);
     }
 

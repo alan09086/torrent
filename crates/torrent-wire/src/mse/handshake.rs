@@ -4,11 +4,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use torrent_core::Id20;
 
-use crate::error::{Error, Result};
 use super::cipher::Rc4;
 use super::crypto;
-use super::dh::{DhKeypair, DH_KEY_SIZE};
+use super::dh::{DH_KEY_SIZE, DhKeypair};
 use super::stream::MseStream;
+use crate::error::{Error, Result};
 
 /// Result of a successful MSE/PE negotiation.
 pub struct NegotiationResult<S> {
@@ -113,7 +113,8 @@ where
     stream.read_exact(&mut select_buf).await?;
     scan_cipher.apply(&mut select_buf);
 
-    let crypto_select = u32::from_be_bytes([select_buf[0], select_buf[1], select_buf[2], select_buf[3]]);
+    let crypto_select =
+        u32::from_be_bytes([select_buf[0], select_buf[1], select_buf[2], select_buf[3]]);
     let pad_len = u16::from_be_bytes([select_buf[4], select_buf[5]]) as usize;
 
     // Validate crypto_select
@@ -223,7 +224,8 @@ where
         return Err(Error::EncryptionHandshakeFailed("VC mismatch".into()));
     }
 
-    let crypto_provide = u32::from_be_bytes([enc_header[8], enc_header[9], enc_header[10], enc_header[11]]);
+    let crypto_provide =
+        u32::from_be_bytes([enc_header[8], enc_header[9], enc_header[10], enc_header[11]]);
     let pad_c_len = u16::from_be_bytes([enc_header[12], enc_header[13]]) as usize;
 
     // Read PadC
@@ -282,8 +284,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::crypto;
+    use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -293,11 +295,7 @@ mod tests {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
 
         let client_handle = tokio::spawn(async move {
-            negotiate_outbound(
-                client_stream,
-                &info_hash,
-                crypto::CRYPTO_RC4,
-            ).await
+            negotiate_outbound(client_stream, &info_hash, crypto::CRYPTO_RC4).await
         });
 
         let server_handle = tokio::spawn(async move {
@@ -305,7 +303,8 @@ mod tests {
                 server_stream,
                 &info_hash,
                 true, // prefer RC4
-            ).await
+            )
+            .await
         });
 
         let client_result = client_handle.await.unwrap().unwrap();
@@ -340,11 +339,7 @@ mod tests {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
 
         let client_handle = tokio::spawn(async move {
-            negotiate_outbound(
-                client_stream,
-                &info_hash,
-                crypto::CRYPTO_PLAINTEXT,
-            ).await
+            negotiate_outbound(client_stream, &info_hash, crypto::CRYPTO_PLAINTEXT).await
         });
 
         let server_handle = tokio::spawn(async move {
@@ -352,7 +347,8 @@ mod tests {
                 server_stream,
                 &info_hash,
                 false, // don't prefer RC4
-            ).await
+            )
+            .await
         });
 
         let client_result = client_handle.await.unwrap().unwrap();
@@ -377,7 +373,8 @@ mod tests {
                 client_stream,
                 &info_hash,
                 crypto::CRYPTO_RC4 | crypto::CRYPTO_PLAINTEXT,
-            ).await
+            )
+            .await
         });
 
         // Server manually implements the responder with PadB
@@ -478,9 +475,8 @@ mod tests {
             negotiate_outbound(client_stream, &client_hash, crypto::CRYPTO_RC4).await
         });
 
-        let server_handle = tokio::spawn(async move {
-            negotiate_inbound(server_stream, &server_hash, true).await
-        });
+        let server_handle =
+            tokio::spawn(async move { negotiate_inbound(server_stream, &server_hash, true).await });
 
         // At least one side should fail
         let client_result = client_handle.await.unwrap();

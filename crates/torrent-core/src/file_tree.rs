@@ -59,9 +59,8 @@ impl FileTreeNode {
         // Otherwise it's a directory — each key is a child name
         let mut children = BTreeMap::new();
         for (key, child_value) in dict {
-            let name = String::from_utf8(key.clone()).map_err(|_| {
-                Error::InvalidTorrent("file tree key is not valid UTF-8".into())
-            })?;
+            let name = String::from_utf8(key.clone())
+                .map_err(|_| Error::InvalidTorrent("file tree key is not valid UTF-8".into()))?;
             let child = FileTreeNode::from_bencode(child_value)?;
             children.insert(name, child);
         }
@@ -249,7 +248,10 @@ mod tests {
         // File attr without "length" key
         let tree = bdict(vec![(
             b"bad.txt",
-            bdict(vec![(b"", bdict(vec![(b"pieces root", bbytes(&[0u8; 32]))]))]),
+            bdict(vec![(
+                b"",
+                bdict(vec![(b"pieces root", bbytes(&[0u8; 32]))]),
+            )]),
         )]);
 
         assert!(FileTreeNode::from_bencode(&tree).is_err());

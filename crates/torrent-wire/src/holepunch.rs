@@ -134,9 +134,7 @@ impl HolepunchMessage {
     /// Parse from binary payload (after BEP 10 extension header is stripped).
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < 2 {
-            return Err(Error::InvalidExtended(
-                "holepunch message too short".into(),
-            ));
+            return Err(Error::InvalidExtended("holepunch message too short".into()));
         }
 
         let msg_type = match data[0] {
@@ -324,9 +322,18 @@ mod tests {
     #[test]
     fn error_display() {
         assert_eq!(HolepunchError::NoSuchPeer.to_string(), "no such peer");
-        assert_eq!(HolepunchError::NotConnected.to_string(), "not connected to target");
-        assert_eq!(HolepunchError::NoSupport.to_string(), "target does not support holepunch");
-        assert_eq!(HolepunchError::NoSelf.to_string(), "cannot holepunch to self");
+        assert_eq!(
+            HolepunchError::NotConnected.to_string(),
+            "not connected to target"
+        );
+        assert_eq!(
+            HolepunchError::NoSupport.to_string(),
+            "target does not support holepunch"
+        );
+        assert_eq!(
+            HolepunchError::NoSelf.to_string(),
+            "cannot holepunch to self"
+        );
     }
 
     #[test]
@@ -351,7 +358,10 @@ mod tests {
         assert_eq!(bytes[1], 0x00); // addr_type = IPv4
         assert_eq!(&bytes[2..6], &[192, 168, 1, 100]); // addr
         assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 6881); // port
-        assert_eq!(u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0); // err_code
+        assert_eq!(
+            u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            0
+        ); // err_code
     }
 
     #[test]

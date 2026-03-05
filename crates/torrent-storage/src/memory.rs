@@ -2,9 +2,9 @@ use std::sync::RwLock;
 
 use torrent_core::Lengths;
 
+use crate::Result;
 use crate::error::Error;
 use crate::storage::TorrentStorage;
-use crate::Result;
 
 /// In-memory storage backend.
 ///

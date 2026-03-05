@@ -271,11 +271,7 @@ impl DiskIoBackend for PosixDiskIo {
             let mut wb = self.write_buffer.lock().unwrap();
             wb.write(info_hash, piece, begin, Bytes::from(data.to_vec()));
             needs_flush = wb.needs_flush();
-            oldest = if needs_flush {
-                wb.oldest_piece()
-            } else {
-                None
-            };
+            oldest = if needs_flush { wb.oldest_piece() } else { None };
         }
         self.stats.lock().unwrap().write_bytes += len as u64;
 

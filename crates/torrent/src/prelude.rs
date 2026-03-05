@@ -4,21 +4,20 @@
 //! applications with torrent.
 
 // Builder types
-pub use crate::client::{ClientBuilder, AddTorrentParams};
+pub use crate::client::{AddTorrentParams, ClientBuilder};
 
 // Session management
 pub use crate::session::{
-    SessionHandle, TorrentHandle,
-    TorrentState, TorrentStats, TorrentInfo,
-    Alert, AlertKind, AlertCategory, AlertStream,
+    Alert, AlertCategory, AlertKind, AlertStream, SessionHandle, TorrentHandle, TorrentInfo,
+    TorrentState, TorrentStats,
 };
 
 // Core types
 pub use crate::core::{Id20, Magnet, TorrentMetaV1};
 
 // Storage
-pub use crate::storage::{TorrentStorage, FilesystemStorage, MmapStorage};
 pub use crate::core::StorageMode;
+pub use crate::storage::{FilesystemStorage, MmapStorage, TorrentStorage};
 
 // Unified error
 pub use crate::error::{Error, Result};
@@ -58,7 +57,7 @@ pub use crate::session::ExtensionPlugin;
 pub use crate::core::CreateTorrent;
 
 // BitTorrent v2 (M33, BEP 52)
-pub use crate::core::{InfoHashes, TorrentMetaV2, TorrentMeta, Id32};
+pub use crate::core::{Id32, InfoHashes, TorrentMeta, TorrentMetaV2};
 
 // Hybrid v1+v2 torrents (M35, BEP 52)
 pub use crate::core::TorrentVersion;
@@ -70,13 +69,13 @@ pub use crate::core::{HashPicker, SetBlockResult};
 pub use crate::session::{I2pDestination, I2pDestinationError};
 
 // Choking algorithms (M43)
-pub use crate::session::{SeedChokingAlgorithm, ChokingAlgorithm};
+pub use crate::session::{ChokingAlgorithm, SeedChokingAlgorithm};
 
 // Mixed-mode bandwidth allocation (M45)
 pub use crate::session::MixedModeAlgorithm;
 
 // Pluggable disk I/O (M49)
-pub use crate::session::{DiskIoBackend, DisabledDiskIo};
+pub use crate::session::{DisabledDiskIo, DiskIoBackend};
 
 // Session stats (M50)
 pub use crate::session::SessionCounters;

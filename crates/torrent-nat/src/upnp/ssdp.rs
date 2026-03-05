@@ -147,10 +147,7 @@ mod tests {
             USN: uuid:test-device\r\n\
             \r\n";
         let parsed = parse_msearch_response(response).unwrap();
-        assert_eq!(
-            parsed.location,
-            "http://192.168.1.1:5000/rootDesc.xml"
-        );
+        assert_eq!(parsed.location, "http://192.168.1.1:5000/rootDesc.xml");
         assert_eq!(
             parsed.search_target,
             "urn:schemas-upnp-org:device:InternetGatewayDevice:1"

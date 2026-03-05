@@ -22,10 +22,7 @@ pub(crate) fn append_position(entries: &[QueueEntry]) -> i32 {
 
 /// Removes a position and shifts all positions above it down by 1.
 /// Returns the list of (info_hash, old_pos, new_pos) that changed.
-pub(crate) fn remove_position(
-    entries: &mut Vec<QueueEntry>,
-    pos: i32,
-) -> Vec<(Id20, i32, i32)> {
+pub(crate) fn remove_position(entries: &mut Vec<QueueEntry>, pos: i32) -> Vec<(Id20, i32, i32)> {
     entries.retain(|e| e.position != pos);
     let mut changed = Vec::new();
     for entry in entries.iter_mut() {
@@ -86,10 +83,7 @@ pub(crate) fn set_position(
 }
 
 /// Move one position up (lower number = higher priority). Returns changes.
-pub(crate) fn move_up(
-    entries: &mut [QueueEntry],
-    info_hash: Id20,
-) -> Vec<(Id20, i32, i32)> {
+pub(crate) fn move_up(entries: &mut [QueueEntry], info_hash: Id20) -> Vec<(Id20, i32, i32)> {
     let pos = match entries.iter().find(|e| e.info_hash == info_hash) {
         Some(e) if e.position > 0 => e.position,
         _ => return Vec::new(),
@@ -98,10 +92,7 @@ pub(crate) fn move_up(
 }
 
 /// Move one position down. Returns changes.
-pub(crate) fn move_down(
-    entries: &mut [QueueEntry],
-    info_hash: Id20,
-) -> Vec<(Id20, i32, i32)> {
+pub(crate) fn move_down(entries: &mut [QueueEntry], info_hash: Id20) -> Vec<(Id20, i32, i32)> {
     let max_pos = entries.iter().map(|e| e.position).max().unwrap_or(0);
     let pos = match entries.iter().find(|e| e.info_hash == info_hash) {
         Some(e) if e.position < max_pos => e.position,
@@ -111,18 +102,12 @@ pub(crate) fn move_down(
 }
 
 /// Move to position 0 (highest priority). Returns changes.
-pub(crate) fn move_top(
-    entries: &mut [QueueEntry],
-    info_hash: Id20,
-) -> Vec<(Id20, i32, i32)> {
+pub(crate) fn move_top(entries: &mut [QueueEntry], info_hash: Id20) -> Vec<(Id20, i32, i32)> {
     set_position(entries, info_hash, 0)
 }
 
 /// Move to last position (lowest priority). Returns changes.
-pub(crate) fn move_bottom(
-    entries: &mut [QueueEntry],
-    info_hash: Id20,
-) -> Vec<(Id20, i32, i32)> {
+pub(crate) fn move_bottom(entries: &mut [QueueEntry], info_hash: Id20) -> Vec<(Id20, i32, i32)> {
     let max_pos = entries.len().saturating_sub(1) as i32;
     set_position(entries, info_hash, max_pos)
 }

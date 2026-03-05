@@ -121,12 +121,10 @@ impl AsyncWrite for UtpStream {
         match this.write_tx.try_send(req) {
             Ok(()) => Poll::Ready(Ok(buf.len())),
             Err(mpsc::error::TrySendError::Full(_)) => Poll::Pending,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "connection closed",
-                )))
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "connection closed",
+            ))),
         }
     }
 

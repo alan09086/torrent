@@ -11,16 +11,16 @@ use tracing::{debug, trace, warn};
 
 use torrent_core::{AddressFamily, Id20};
 
-use crate::bep44::{self, ImmutableItem, MutableItem, MAX_SALT_SIZE, MAX_VALUE_SIZE};
+use crate::bep44::{self, ImmutableItem, MAX_SALT_SIZE, MAX_VALUE_SIZE, MutableItem};
 use crate::compact::CompactNodeInfo;
 use crate::error::{Error, Result};
 use crate::krpc::{
-    GetPeersResponse, KrpcBody, KrpcMessage, KrpcQuery, KrpcResponse,
-    SampleInfohashesResponse, TransactionId,
+    GetPeersResponse, KrpcBody, KrpcMessage, KrpcQuery, KrpcResponse, SampleInfohashesResponse,
+    TransactionId,
 };
 use crate::node_id::{self, ExternalIpVoter, IpVoteSource};
 use crate::peer_store::PeerStore;
-use crate::routing_table::{RoutingTable, K};
+use crate::routing_table::{K, RoutingTable};
 use crate::storage::{DhtStorage, InMemoryDhtStorage};
 
 #[allow(unused_imports)]
@@ -203,7 +203,11 @@ impl DhtHandle {
     }
 
     /// Notify the DHT of our external IP (from NAT/tracker discovery).
-    pub async fn update_external_ip(&self, ip: std::net::IpAddr, source: IpVoteSource) -> Result<()> {
+    pub async fn update_external_ip(
+        &self,
+        ip: std::net::IpAddr,
+        source: IpVoteSource,
+    ) -> Result<()> {
         self.tx
             .send(DhtCommand::UpdateExternalIp { ip, source })
             .await
@@ -357,7 +361,10 @@ impl DhtHandle {
     /// Return all nodes currently in the DHT routing table.
     pub async fn get_routing_nodes(&self) -> Vec<(Id20, SocketAddr)> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self.tx.send(DhtCommand::GetRoutingNodes { reply: reply_tx }).await;
+        let _ = self
+            .tx
+            .send(DhtCommand::GetRoutingNodes { reply: reply_tx })
+            .await;
         reply_rx.await.unwrap_or_default()
     }
 }
@@ -406,16 +413,24 @@ enum PendingQueryKind {
     #[allow(dead_code)]
     Ping,
     #[allow(dead_code)]
-    FindNode { target: Id20 },
-    GetPeers { info_hash: Id20 },
+    FindNode {
+        target: Id20,
+    },
+    GetPeers {
+        info_hash: Id20,
+    },
     AnnouncePeer,
     /// BEP 44: outgoing get item query.
-    GetItem { target: Id20 },
+    GetItem {
+        target: Id20,
+    },
     /// BEP 44: outgoing put item query.
     PutItem,
     /// BEP 51: outgoing sample_infohashes query.
     #[allow(dead_code)]
-    SampleInfohashes { target: Id20 },
+    SampleInfohashes {
+        target: Id20,
+    },
 }
 
 struct LookupState {
@@ -748,7 +763,11 @@ impl DhtActor {
                 }
             }
             // BEP 44: get item from DHT storage
-            KrpcQuery::Get { id: _, target, seq: requested_seq } => {
+            KrpcQuery::Get {
+                id: _,
+                target,
+                seq: requested_seq,
+            } => {
                 let ip = addr.ip();
                 let token = self.peer_store.generate_token(&ip);
 
@@ -772,7 +791,10 @@ impl DhtActor {
                             let closest = self.routing_table.closest(target, K);
                             let nodes: Vec<CompactNodeInfo> = closest
                                 .into_iter()
-                                .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+                                .map(|n| CompactNodeInfo {
+                                    id: n.id,
+                                    addr: n.addr,
+                                })
                                 .collect();
                             KrpcResponse::GetItem {
                                 id: *self.routing_table.own_id(),
@@ -813,7 +835,10 @@ impl DhtActor {
                     let closest = self.routing_table.closest(target, K);
                     let nodes: Vec<CompactNodeInfo> = closest
                         .into_iter()
-                        .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+                        .map(|n| CompactNodeInfo {
+                            id: n.id,
+                            addr: n.addr,
+                        })
                         .collect();
                     KrpcResponse::GetItem {
                         id: *self.routing_table.own_id(),
@@ -1052,7 +1077,10 @@ impl DhtActor {
         };
 
         match (&pending.kind, resp) {
-            (PendingQueryKind::FindNode { target: _ }, KrpcResponse::FindNode { nodes, nodes6, .. }) => {
+            (
+                PendingQueryKind::FindNode { target: _ },
+                KrpcResponse::FindNode { nodes, nodes6, .. },
+            ) => {
                 for node in nodes {
                     if self.matches_family(&node.addr) {
                         self.checked_insert(node.id, node.addr);
@@ -1064,10 +1092,7 @@ impl DhtActor {
                     }
                 }
             }
-            (
-                PendingQueryKind::GetPeers { info_hash },
-                KrpcResponse::GetPeers(gp),
-            ) => {
+            (PendingQueryKind::GetPeers { info_hash }, KrpcResponse::GetPeers(gp)) => {
                 // Add discovered nodes to routing table (filter by address family)
                 for node in &gp.nodes {
                     if self.matches_family(&node.addr) {
@@ -1084,9 +1109,7 @@ impl DhtActor {
                 if let Some(lookup) = self.lookups.get_mut(info_hash) {
                     // Store token for later announce
                     if let Some(token) = &gp.token {
-                        lookup
-                            .tokens
-                            .insert(sender_id, (addr, token.clone()));
+                        lookup.tokens.insert(sender_id, (addr, token.clone()));
                     }
 
                     // Send discovered peers to caller
@@ -1105,12 +1128,12 @@ impl DhtActor {
                         .iter()
                         .filter(|n| family_match(&n.addr))
                         .copied()
-                        .chain(
-                            gp.nodes6
-                                .iter()
-                                .filter(|n| family_match(&n.addr))
-                                .map(|n| CompactNodeInfo { id: n.id, addr: n.addr }),
-                        )
+                        .chain(gp.nodes6.iter().filter(|n| family_match(&n.addr)).map(|n| {
+                            CompactNodeInfo {
+                                id: n.id,
+                                addr: n.addr,
+                            }
+                        }))
                         .collect();
 
                     // Continue iterative lookup with new closer nodes
@@ -1125,9 +1148,7 @@ impl DhtActor {
                     }
 
                     // Sort by distance and keep closest
-                    lookup
-                        .closest
-                        .sort_by_key(|n| n.id.xor_distance(info_hash));
+                    lookup.closest.sort_by_key(|n| n.id.xor_distance(info_hash));
                     lookup.closest.truncate(K * 2);
 
                     // Query new closest unqueried nodes
@@ -1203,9 +1224,7 @@ impl DhtActor {
                 let target = *target;
 
                 // If we have a put operation waiting for tokens, collect this token
-                if let (Some(token), Some(put_op)) =
-                    (token, self.item_put_ops.get_mut(&target))
-                {
+                if let (Some(token), Some(put_op)) = (token, self.item_put_ops.get_mut(&target)) {
                     match put_op {
                         ItemPutState::Immutable { tokens, .. }
                         | ItemPutState::Mutable { tokens, .. } => {
@@ -1241,14 +1260,11 @@ impl DhtActor {
                             // Validate: SHA-1(v) should equal target
                             if torrent_core::sha1(v) == target {
                                 // Store locally
-                                if let Ok(item) =
-                                    crate::bep44::ImmutableItem::new(v.clone())
-                                {
+                                if let Ok(item) = crate::bep44::ImmutableItem::new(v.clone()) {
                                     self.item_store.put_immutable(item);
                                 }
-                                if let Some(ItemLookupState::Immutable {
-                                    reply, ..
-                                }) = self.item_lookups.get_mut(&target)
+                                if let Some(ItemLookupState::Immutable { reply, .. }) =
+                                    self.item_lookups.get_mut(&target)
                                     && let Some(r) = reply.take()
                                 {
                                     let _ = r.send(Ok(Some(v.clone())));
@@ -1259,9 +1275,8 @@ impl DhtActor {
                             // to avoid borrow checker violation
                             let family = self.address_family;
                             let to_query: Vec<SocketAddr> = {
-                                if let Some(ItemLookupState::Immutable {
-                                    queried, ..
-                                }) = self.item_lookups.get_mut(&target)
+                                if let Some(ItemLookupState::Immutable { queried, .. }) =
+                                    self.item_lookups.get_mut(&target)
                                 {
                                     nodes
                                         .iter()
@@ -1283,13 +1298,11 @@ impl DhtActor {
                         }
                     } else {
                         // Mutable lookup
-                        if let (Some(v), Some(k), Some(sig), Some(s)) =
-                            (value, key, signature, seq)
+                        if let (Some(v), Some(k), Some(sig), Some(s)) = (value, key, signature, seq)
                         {
                             // Get the salt from the lookup state
-                            let salt = if let Some(ItemLookupState::Mutable {
-                                salt, ..
-                            }) = self.item_lookups.get(&target)
+                            let salt = if let Some(ItemLookupState::Mutable { salt, .. }) =
+                                self.item_lookups.get(&target)
                             {
                                 salt.clone()
                             } else {
@@ -1323,9 +1336,8 @@ impl DhtActor {
                         // Gap 7: Collect nodes to query into local Vec first
                         let family = self.address_family;
                         let to_query: Vec<SocketAddr> = {
-                            if let Some(ItemLookupState::Mutable {
-                                queried, ..
-                            }) = self.item_lookups.get_mut(&target)
+                            if let Some(ItemLookupState::Mutable { queried, .. }) =
+                                self.item_lookups.get_mut(&target)
                             {
                                 nodes
                                     .iter()
@@ -1533,10 +1545,7 @@ impl DhtActor {
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
             transaction_id: TransactionId::from_u16(txn),
-            body: KrpcBody::Query(KrpcQuery::FindNode {
-                id: own_id,
-                target,
-            }),
+            body: KrpcBody::Query(KrpcQuery::FindNode { id: own_id, target }),
             sender_ip: None,
         };
         if let Ok(bytes) = msg.to_bytes() {
@@ -1619,11 +1628,7 @@ impl DhtActor {
         );
     }
 
-    async fn handle_put_immutable(
-        &mut self,
-        value: Vec<u8>,
-        reply: oneshot::Sender<Result<Id20>>,
-    ) {
+    async fn handle_put_immutable(&mut self, value: Vec<u8>, reply: oneshot::Sender<Result<Id20>>) {
         let item = match crate::bep44::ImmutableItem::new(value) {
             Ok(item) => item,
             Err(e) => {
@@ -1811,46 +1816,46 @@ impl DhtActor {
 
     // Gap 8: Extract data into local variables before calling self.send_put_item
     async fn send_pending_puts(&mut self, target: Id20) {
-        let puts_to_send: Vec<PutItemParams> =
-            if let Some(put_op) = self.item_put_ops.get(&target) {
-                match put_op {
-                    ItemPutState::Immutable { item, tokens, .. } => tokens
+        let puts_to_send: Vec<PutItemParams> = if let Some(put_op) = self.item_put_ops.get(&target)
+        {
+            match put_op {
+                ItemPutState::Immutable { item, tokens, .. } => tokens
+                    .values()
+                    .take(K)
+                    .map(|(addr, token)| PutItemParams {
+                        addr: *addr,
+                        token: token.clone(),
+                        value: item.value.clone(),
+                        key: None,
+                        signature: None,
+                        seq: None,
+                        salt: None,
+                    })
+                    .collect(),
+                ItemPutState::Mutable { item, tokens, .. } => {
+                    let salt = if item.salt.is_empty() {
+                        None
+                    } else {
+                        Some(item.salt.clone())
+                    };
+                    tokens
                         .values()
                         .take(K)
                         .map(|(addr, token)| PutItemParams {
                             addr: *addr,
                             token: token.clone(),
                             value: item.value.clone(),
-                            key: None,
-                            signature: None,
-                            seq: None,
-                            salt: None,
+                            key: Some(item.public_key),
+                            signature: Some(item.signature),
+                            seq: Some(item.seq),
+                            salt: salt.clone(),
                         })
-                        .collect(),
-                    ItemPutState::Mutable { item, tokens, .. } => {
-                        let salt = if item.salt.is_empty() {
-                            None
-                        } else {
-                            Some(item.salt.clone())
-                        };
-                        tokens
-                            .values()
-                            .take(K)
-                            .map(|(addr, token)| PutItemParams {
-                                addr: *addr,
-                                token: token.clone(),
-                                value: item.value.clone(),
-                                key: Some(item.public_key),
-                                signature: Some(item.signature),
-                                seq: Some(item.seq),
-                                salt: salt.clone(),
-                            })
-                            .collect()
-                    }
+                        .collect()
                 }
-            } else {
-                return;
-            };
+            }
+        } else {
+            return;
+        };
 
         let num_puts = puts_to_send.len();
         for params in puts_to_send {
@@ -1909,10 +1914,7 @@ impl DhtActor {
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
             transaction_id: TransactionId::from_u16(txn),
-            body: KrpcBody::Query(KrpcQuery::SampleInfohashes {
-                id: own_id,
-                target,
-            }),
+            body: KrpcBody::Query(KrpcQuery::SampleInfohashes { id: own_id, target }),
             sender_ip: None, // Gap 2: outgoing queries use None
         };
         if let Ok(bytes) = msg.to_bytes() {

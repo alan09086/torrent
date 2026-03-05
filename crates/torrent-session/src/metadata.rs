@@ -49,21 +49,20 @@ impl MetadataDownloader {
     ///
     /// Returns the assembled metadata bytes on success.
     pub fn assemble_and_verify(&self) -> crate::Result<Vec<u8>> {
-        let num_pieces = self.num_pieces.ok_or_else(|| {
-            crate::Error::Connection("metadata incomplete".to_string())
-        })?;
+        let num_pieces = self
+            .num_pieces
+            .ok_or_else(|| crate::Error::Connection("metadata incomplete".to_string()))?;
 
         if self.pieces.len() != num_pieces as usize {
             return Err(crate::Error::Connection("metadata incomplete".to_string()));
         }
 
-        let mut assembled = Vec::with_capacity(
-            self.total_size.unwrap_or(0) as usize,
-        );
+        let mut assembled = Vec::with_capacity(self.total_size.unwrap_or(0) as usize);
         for i in 0..num_pieces {
-            let piece = self.pieces.get(&i).ok_or_else(|| {
-                crate::Error::Connection("metadata incomplete".to_string())
-            })?;
+            let piece = self
+                .pieces
+                .get(&i)
+                .ok_or_else(|| crate::Error::Connection("metadata incomplete".to_string()))?;
             assembled.extend_from_slice(piece);
         }
 
@@ -81,9 +80,7 @@ impl MetadataDownloader {
     pub fn missing_pieces(&self) -> Vec<u32> {
         match self.num_pieces {
             None => Vec::new(),
-            Some(n) => {
-                (0..n).filter(|i| !self.pieces.contains_key(i)).collect()
-            }
+            Some(n) => (0..n).filter(|i| !self.pieces.contains_key(i)).collect(),
         }
     }
 }

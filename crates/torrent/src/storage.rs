@@ -3,22 +3,22 @@
 //! Re-exports from [`torrent_storage`].
 
 pub use torrent_storage::{
-    // Storage trait
-    TorrentStorage,
+    // ARC disk cache
+    ArcCache,
     // Bit-vector for piece completion
     Bitfield,
     // Per-piece chunk tracking
     ChunkTracker,
+    // Error types
+    Error,
     // Piece-to-file mapping
     FileMap,
     FileSegment,
+    FilesystemStorage,
     // Storage backends
     MemoryStorage,
-    FilesystemStorage,
     MmapStorage,
-    // ARC disk cache
-    ArcCache,
-    // Error types
-    Error,
     Result,
+    // Storage trait
+    TorrentStorage,
 };

@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use bitflags::bitflags;
 use bytes::Bytes;
+use tokio::sync::{mpsc, oneshot};
 use torrent_core::{Id20, Id32};
 use torrent_storage::TorrentStorage;
-use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 bitflags! {
@@ -306,9 +306,11 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Read a chunk from disk (may hit cache or write buffer).
@@ -331,9 +333,11 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Verify a piece hash against an expected value.
@@ -354,9 +358,11 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Verify a piece hash against an expected SHA-256 value (v2).
@@ -377,9 +383,11 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Hash a single block with SHA-256 for Merkle verification (v2).
@@ -402,9 +410,11 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Clear a piece from cache and write buffer (e.g. on hash failure).
@@ -429,33 +439,35 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Query which pieces are currently in the read cache for this torrent.
     pub async fn cached_pieces(&self) -> Vec<u32> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.tx.send(DiskJob::CachedPieces {
-            info_hash: self.info_hash,
-            reply: tx,
-        }).await;
+        let _ = self
+            .tx
+            .send(DiskJob::CachedPieces {
+                info_hash: self.info_hash,
+                reply: tx,
+            })
+            .await;
         rx.await.unwrap_or_default()
     }
 
     /// Flush all buffered writes to persistent storage.
     pub async fn flush_cache(&self) -> torrent_storage::Result<()> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(DiskJob::FlushAll {
-                reply: tx,
-            })
-            .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        let _ = self.tx.send(DiskJob::FlushAll { reply: tx }).await;
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Move a torrent's storage to a new directory.
@@ -469,9 +481,11 @@ impl DiskHandle {
                 reply: tx,
             })
             .await;
-        rx.await.unwrap_or(Err(torrent_storage::Error::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
-        )))
+        rx.await
+            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "disk actor gone",
+            ))))
     }
 
     /// Enqueue a non-blocking write. Returns `Err(data)` if the channel is full
@@ -579,9 +593,8 @@ impl DiskActor {
                 if let DiskJob::Shutdown { reply } = job {
                     // Flush on blocking thread to avoid stalling tokio runtime.
                     let backend = Arc::clone(&self.backend);
-                    let flush_result = tokio::task::spawn_blocking(move || {
-                        backend.flush_all()
-                    }).await;
+                    let flush_result =
+                        tokio::task::spawn_blocking(move || backend.flush_all()).await;
                     if let Ok(Err(e)) = flush_result {
                         warn!("flush_all on shutdown failed: {e}");
                     }
@@ -643,8 +656,11 @@ impl DiskActor {
                 .unwrap();
                 drop(permit);
                 if let Err(e) = to_storage_result(result) {
-                    let _ = error_tx
-                        .try_send(DiskWriteError { piece, begin, error: e });
+                    let _ = error_tx.try_send(DiskWriteError {
+                        piece,
+                        begin,
+                        error: e,
+                    });
                 }
             }
             DiskJob::Read {
@@ -764,11 +780,10 @@ impl DiskActor {
             } => {
                 let backend = Arc::clone(&self.backend);
                 let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let result = tokio::task::spawn_blocking(move || {
-                    backend.flush_piece(info_hash, piece)
-                })
-                .await
-                .unwrap();
+                let result =
+                    tokio::task::spawn_blocking(move || backend.flush_piece(info_hash, piece))
+                        .await
+                        .unwrap();
                 drop(permit);
                 let _ = reply.send(to_storage_result(result));
             }
@@ -779,11 +794,10 @@ impl DiskActor {
             } => {
                 let backend = Arc::clone(&self.backend);
                 let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let result = tokio::task::spawn_blocking(move || {
-                    backend.move_storage(info_hash, &new_path)
-                })
-                .await
-                .unwrap();
+                let result =
+                    tokio::task::spawn_blocking(move || backend.move_storage(info_hash, &new_path))
+                        .await
+                        .unwrap();
                 drop(permit);
                 let _ = reply.send(to_storage_result(result));
             }
@@ -794,11 +808,9 @@ impl DiskActor {
             DiskJob::FlushAll { reply } => {
                 let backend = Arc::clone(&self.backend);
                 let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let result = tokio::task::spawn_blocking(move || {
-                    backend.flush_all()
-                })
-                .await
-                .unwrap();
+                let result = tokio::task::spawn_blocking(move || backend.flush_all())
+                    .await
+                    .unwrap();
                 drop(permit);
                 let _ = reply.send(to_storage_result(result));
             }
@@ -865,17 +877,17 @@ mod tests {
         let disk = mgr.register_torrent(ih, storage).await;
 
         let piece_data = vec![9u8; 50];
-        disk.write_chunk(0, 0, Bytes::from(piece_data.clone()), DiskJobFlags::FLUSH_PIECE)
-            .await
-            .unwrap();
         disk.write_chunk(
             0,
-            25,
-            Bytes::from(vec![9u8; 25]),
+            0,
+            Bytes::from(piece_data.clone()),
             DiskJobFlags::FLUSH_PIECE,
         )
         .await
         .unwrap();
+        disk.write_chunk(0, 25, Bytes::from(vec![9u8; 25]), DiskJobFlags::FLUSH_PIECE)
+            .await
+            .unwrap();
 
         let expected = torrent_core::sha1(&piece_data);
         assert!(
@@ -1030,9 +1042,7 @@ mod tests {
         storage.write_chunk(0, 0, &data).unwrap();
 
         let disk = mgr.register_torrent(ih, storage).await;
-        let hash = disk
-            .hash_block(0, 0, 16384, DiskJobFlags::empty())
-            .await;
+        let hash = disk.hash_block(0, 0, 16384, DiskJobFlags::empty()).await;
         assert_eq!(hash.unwrap(), torrent_core::sha256(&data));
         mgr.shutdown().await;
     }

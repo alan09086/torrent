@@ -161,8 +161,7 @@ impl LsdHandle {
     pub async fn start(
         listen_port: u16,
     ) -> std::io::Result<(Self, mpsc::Receiver<(Id20, SocketAddr)>)> {
-        let socket =
-            UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, LSD_PORT)).await?;
+        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, LSD_PORT)).await?;
         socket.set_broadcast(true)?;
         socket.join_multicast_v4(LSD_MULTICAST, Ipv4Addr::UNSPECIFIED)?;
 
@@ -182,10 +181,7 @@ impl LsdHandle {
     }
 
     pub async fn announce(&self, info_hashes: Vec<Id20>) {
-        let _ = self
-            .cmd_tx
-            .send(LsdCommand::Announce { info_hashes })
-            .await;
+        let _ = self.cmd_tx.send(LsdCommand::Announce { info_hashes }).await;
     }
 
     pub async fn shutdown(&self) {
@@ -309,7 +305,8 @@ mod tests {
     fn parse_multiple_infohashes() {
         let msg = format!(
             "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 9999\r\nInfohash: {}\r\nInfohash: {}\r\n\r\n",
-            test_hash().to_hex(), test_hash2().to_hex()
+            test_hash().to_hex(),
+            test_hash2().to_hex()
         );
         let parsed = parse_announce(msg.as_bytes()).unwrap();
         assert_eq!(parsed.port, 9999);

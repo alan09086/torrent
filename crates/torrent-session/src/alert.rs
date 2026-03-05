@@ -54,7 +54,6 @@ bitflags::bitflags! {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertKind {
     // ── Torrent lifecycle (STATUS) ──
-
     /// A torrent was added to the session.
     TorrentAdded {
         /// Info hash of the added torrent.
@@ -105,7 +104,6 @@ pub enum AlertKind {
     },
 
     // ── Checking (STATUS) ──
-
     /// A torrent finished checking (verifying existing data on disk).
     TorrentChecked {
         /// Info hash of the checked torrent.
@@ -124,7 +122,6 @@ pub enum AlertKind {
     },
 
     // ── Transfer (PIECE / BLOCK) ──
-
     /// A piece passed hash verification and is now complete.
     PieceFinished {
         /// Info hash of the affected torrent.
@@ -152,7 +149,6 @@ pub enum AlertKind {
     },
 
     // ── Peers (PEER) ──
-
     /// A new peer connection was established.
     PeerConnected {
         /// Info hash of the torrent swarm.
@@ -178,7 +174,6 @@ pub enum AlertKind {
     },
 
     // ── Tracker (TRACKER) ──
-
     /// A tracker announce completed successfully.
     TrackerReply {
         /// Info hash announced to the tracker.
@@ -230,7 +225,6 @@ pub enum AlertKind {
     },
 
     // ── DHT ──
-
     /// DHT routing table bootstrapping finished.
     DhtBootstrapComplete,
     /// DHT get_peers query returned peers for a torrent.
@@ -256,7 +250,6 @@ pub enum AlertKind {
     },
 
     // ── Session (STATUS) ──
-
     /// The session successfully started listening on a port.
     ListenSucceeded {
         /// The port number now being listened on.
@@ -273,7 +266,6 @@ pub enum AlertKind {
     SessionStatsUpdate(crate::types::SessionStats),
 
     // ── Storage / Disk ──
-
     /// A file within a torrent was renamed.
     FileRenamed {
         /// Info hash of the affected torrent.
@@ -310,7 +302,6 @@ pub enum AlertKind {
     DiskStatsUpdate(crate::disk::DiskStats),
 
     // ── Resume (STATUS) ──
-
     /// Fast resume data was saved for a torrent.
     ResumeDataSaved {
         /// Info hash of the torrent whose resume data was saved.
@@ -318,7 +309,6 @@ pub enum AlertKind {
     },
 
     // ── Error ──
-
     /// A torrent encountered a fatal error.
     TorrentError {
         /// Info hash of the affected torrent.
@@ -328,7 +318,6 @@ pub enum AlertKind {
     },
 
     // ── Performance ──
-
     /// A performance warning was detected (e.g. too many hash failures).
     PerformanceWarning {
         /// Info hash of the affected torrent.
@@ -356,7 +345,6 @@ pub enum AlertKind {
     },
 
     // ── IP filtering (PEER) ──
-
     /// An incoming connection was blocked by the IP filter.
     PeerBlocked {
         /// Socket address that was blocked.
@@ -374,7 +362,6 @@ pub enum AlertKind {
     },
 
     // ── Web seeding (STATUS) ──
-
     /// A web seed was banned (e.g. for serving corrupt data).
     WebSeedBanned {
         /// Info hash of the affected torrent.
@@ -384,7 +371,6 @@ pub enum AlertKind {
     },
 
     // ── Port mapping ──
-
     /// A UPnP/NAT-PMP port mapping succeeded.
     PortMappingSucceeded {
         /// The mapped external port.
@@ -491,7 +477,6 @@ pub enum AlertKind {
     },
 
     // ── Session Stats (M50) ──
-
     /// Session-level statistics counters snapshot (one value per metric).
     SessionStatsAlert {
         /// Counter values indexed by [`MetricKind`](crate::MetricKind) ordinal.
@@ -499,7 +484,6 @@ pub enum AlertKind {
     },
 
     // ── Network (STATUS) ──
-
     /// An external IP address was detected or updated (e.g. from tracker/NAT/DHT).
     ExternalIpDetected {
         /// The detected external IP address.
@@ -507,7 +491,6 @@ pub enum AlertKind {
     },
 
     // ── Settings (M31) ──
-
     /// Session settings were changed via `apply_settings()`.
     SettingsChanged,
 }
@@ -543,9 +526,9 @@ impl AlertKind {
             BlockFinished { .. } => AlertCategory::BLOCK,
 
             // PEER
-            PeerConnected { .. }
-            | PeerDisconnected { .. }
-            | PeerBanned { .. } => AlertCategory::PEER,
+            PeerConnected { .. } | PeerDisconnected { .. } | PeerBanned { .. } => {
+                AlertCategory::PEER
+            }
 
             // TRACKER
             TrackerReply { .. } => AlertCategory::TRACKER,
@@ -555,7 +538,9 @@ impl AlertKind {
             ScrapeError { .. } => AlertCategory::TRACKER | AlertCategory::ERROR,
 
             // DHT
-            DhtBootstrapComplete | DhtGetPeers { .. } | DhtSampleInfohashes { .. } => AlertCategory::DHT,
+            DhtBootstrapComplete | DhtGetPeers { .. } | DhtSampleInfohashes { .. } => {
+                AlertCategory::DHT
+            }
             DhtNodeIdViolation { .. } => AlertCategory::DHT | AlertCategory::ERROR,
             DhtPutComplete { .. }
             | DhtMutablePutComplete { .. }
@@ -564,9 +549,9 @@ impl AlertKind {
             DhtItemError { .. } => AlertCategory::DHT | AlertCategory::ERROR,
 
             // STORAGE
-            FileRenamed { .. }
-            | StorageMoved { .. }
-            | FileCompleted { .. } => AlertCategory::STORAGE,
+            FileRenamed { .. } | StorageMoved { .. } | FileCompleted { .. } => {
+                AlertCategory::STORAGE
+            }
             FileError { .. } => AlertCategory::STORAGE | AlertCategory::ERROR,
             DiskStatsUpdate(_) => AlertCategory::STATS | AlertCategory::STORAGE,
 
@@ -676,11 +661,7 @@ impl AlertStream {
 ///
 /// Called by both `SessionActor` and `TorrentActor`. The mask is an
 /// `AtomicU32` shared between the handle and actors — no command roundtrip.
-pub(crate) fn post_alert(
-    tx: &broadcast::Sender<Alert>,
-    mask: &AtomicU32,
-    kind: AlertKind,
-) {
+pub(crate) fn post_alert(tx: &broadcast::Sender<Alert>, mask: &AtomicU32, kind: AlertKind) {
     let alert = Alert::new(kind);
     let m = AlertCategory::from_bits_truncate(mask.load(Ordering::Relaxed));
     if alert.category().intersects(m) {
@@ -716,10 +697,16 @@ mod tests {
         use AlertKind::*;
         let info_hash = Id20::from_bytes(&[0u8; 20]).unwrap();
 
-        let a = Alert::new(TorrentAdded { info_hash, name: String::new() });
+        let a = Alert::new(TorrentAdded {
+            info_hash,
+            name: String::new(),
+        });
         assert!(a.category().contains(AlertCategory::STATUS));
 
-        let a = Alert::new(PieceFinished { info_hash, piece: 0 });
+        let a = Alert::new(PieceFinished {
+            info_hash,
+            piece: 0,
+        });
         assert!(a.category().contains(AlertCategory::PIECE));
 
         let a = Alert::new(PeerConnected {
@@ -757,17 +744,25 @@ mod tests {
         let mask = AtomicU32::new(AlertCategory::STATUS.bits());
 
         // STATUS alert should pass
-        post_alert(&tx, &mask, AlertKind::TorrentAdded {
-            info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
-            name: "test".into(),
-        });
+        post_alert(
+            &tx,
+            &mask,
+            AlertKind::TorrentAdded {
+                info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
+                name: "test".into(),
+            },
+        );
         assert!(rx.try_recv().is_ok());
 
         // PIECE alert should be filtered out
-        post_alert(&tx, &mask, AlertKind::PieceFinished {
-            info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
-            piece: 0,
-        });
+        post_alert(
+            &tx,
+            &mask,
+            AlertKind::PieceFinished {
+                info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
+                piece: 0,
+            },
+        );
         assert!(rx.try_recv().is_err());
     }
 
@@ -776,10 +771,14 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let mask = AtomicU32::new(AlertCategory::empty().bits());
 
-        post_alert(&tx, &mask, AlertKind::TorrentAdded {
-            info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
-            name: "test".into(),
-        });
+        post_alert(
+            &tx,
+            &mask,
+            AlertKind::TorrentAdded {
+                info_hash: Id20::from_bytes(&[0u8; 20]).unwrap(),
+                name: "test".into(),
+            },
+        );
         assert!(rx.try_recv().is_err());
     }
 

@@ -3,8 +3,8 @@
 //! Defines item types, signature construction, and validation for both
 //! immutable (SHA-1-keyed) and mutable (ed25519-signed) DHT items.
 
-use ed25519_dalek::{Signature, VerifyingKey, SigningKey, Signer, Verifier};
-use torrent_core::{sha1, Id20};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use torrent_core::{Id20, sha1};
 
 use crate::error::{Error, Result};
 
@@ -68,12 +68,7 @@ impl MutableItem {
     /// - `value`: raw bencoded value (max 1000 bytes)
     /// - `seq`: sequence number (must increase with each update)
     /// - `salt`: optional salt (max 64 bytes, empty vec for none)
-    pub fn create(
-        keypair: &SigningKey,
-        value: Vec<u8>,
-        seq: i64,
-        salt: Vec<u8>,
-    ) -> Result<Self> {
+    pub fn create(keypair: &SigningKey, value: Vec<u8>, seq: i64, salt: Vec<u8>) -> Result<Self> {
         if value.len() > MAX_VALUE_SIZE {
             return Err(Error::Bep44ValueTooLarge {
                 size: value.len(),

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Matches libtorrent's priority scale. `Skip` means "do not download".
 /// `PartialOrd`/`Ord` ordering: Skip < Low < Normal < High.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[repr(u8)]
 pub enum FilePriority {
     /// Do not download this file.

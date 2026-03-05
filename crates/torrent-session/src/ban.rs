@@ -99,7 +99,11 @@ impl BanManager {
 
     /// Rebuild a BanManager from persisted state.
     #[allow(dead_code)] // Used when restoring session state from disk
-    pub fn restore(config: BanConfig, banned: HashSet<IpAddr>, strikes: HashMap<IpAddr, u32>) -> Self {
+    pub fn restore(
+        config: BanConfig,
+        banned: HashSet<IpAddr>,
+        strikes: HashMap<IpAddr, u32>,
+    ) -> Self {
         Self {
             config,
             banned,
@@ -135,7 +139,10 @@ mod tests {
 
     #[test]
     fn record_strike_below_threshold() {
-        let mut mgr = BanManager::new(BanConfig { max_failures: 3, use_parole: true });
+        let mut mgr = BanManager::new(BanConfig {
+            max_failures: 3,
+            use_parole: true,
+        });
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
 
         assert!(!mgr.record_strike(ip)); // strike 1
@@ -146,12 +153,15 @@ mod tests {
 
     #[test]
     fn record_strike_hits_threshold() {
-        let mut mgr = BanManager::new(BanConfig { max_failures: 3, use_parole: true });
+        let mut mgr = BanManager::new(BanConfig {
+            max_failures: 3,
+            use_parole: true,
+        });
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
 
         assert!(!mgr.record_strike(ip)); // 1
         assert!(!mgr.record_strike(ip)); // 2
-        assert!(mgr.record_strike(ip));  // 3 → banned
+        assert!(mgr.record_strike(ip)); // 3 → banned
         assert!(mgr.is_banned(&ip));
 
         // Further strikes don't re-trigger
@@ -175,7 +185,10 @@ mod tests {
 
     #[test]
     fn unban_clears_strikes() {
-        let mut mgr = BanManager::new(BanConfig { max_failures: 3, use_parole: true });
+        let mut mgr = BanManager::new(BanConfig {
+            max_failures: 3,
+            use_parole: true,
+        });
         let ip: IpAddr = "10.0.0.5".parse().unwrap();
 
         mgr.record_strike(ip);

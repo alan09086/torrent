@@ -2,8 +2,8 @@
 //!
 //! Usage: `cargo run --example download -- "magnet:?xt=urn:btih:..."`
 
-use torrent::prelude::*;
 use std::env;
+use torrent::prelude::*;
 
 #[tokio::main]
 async fn main() -> torrent::Result<()> {

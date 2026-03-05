@@ -7,6 +7,6 @@ pub mod destination;
 pub mod sam;
 
 pub use destination::{I2pDestination, I2pDestinationError};
-pub use sam::{SamError, SamSession, SamStream, SamTunnelConfig};
 #[allow(unused_imports)]
 pub(crate) use destination::{i2p_base64_decode, i2p_base64_encode};
+pub use sam::{SamError, SamSession, SamStream, SamTunnelConfig};

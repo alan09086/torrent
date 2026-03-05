@@ -130,9 +130,7 @@ mod tests {
                 || mgr
                     .key_pem()
                     .starts_with(b"-----BEGIN RSA PRIVATE KEY-----")
-                || mgr
-                    .key_pem()
-                    .starts_with(b"-----BEGIN EC PRIVATE KEY-----")
+                || mgr.key_pem().starts_with(b"-----BEGIN EC PRIVATE KEY-----")
         );
     }
 
@@ -164,10 +162,8 @@ mod tests {
         let settings = Settings::default();
         let original = SslManager::new(&settings).unwrap();
 
-        let restored = SslManager::from_pem(
-            original.cert_pem().to_vec(),
-            original.key_pem().to_vec(),
-        );
+        let restored =
+            SslManager::from_pem(original.cert_pem().to_vec(), original.key_pem().to_vec());
 
         assert_eq!(restored.cert_pem(), original.cert_pem());
         assert_eq!(restored.key_pem(), original.key_pem());

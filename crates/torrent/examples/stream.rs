@@ -2,19 +2,16 @@
 //!
 //! Usage: `cargo run --example stream -- "magnet:?xt=urn:btih:..."`
 
-use torrent::prelude::*;
 use std::env;
 use tokio::io::AsyncReadExt;
+use torrent::prelude::*;
 
 #[tokio::main]
 async fn main() -> torrent::Result<()> {
     let magnet_uri = env::args().nth(1).expect("usage: stream <magnet-uri>");
     let magnet = Magnet::parse(&magnet_uri)?;
 
-    let session = ClientBuilder::new()
-        .download_dir(".")
-        .start()
-        .await?;
+    let session = ClientBuilder::new().download_dir(".").start().await?;
 
     let info_hash = session.add_magnet(magnet).await?;
 

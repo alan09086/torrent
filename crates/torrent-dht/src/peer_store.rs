@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use torrent_core::{sha1, Id20};
+use torrent_core::{Id20, sha1};
 
 /// How long peers are kept before expiry.
 const PEER_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 minutes
@@ -186,8 +186,8 @@ fn xorshift_next() -> u64 {
 }
 
 fn generate_secret() -> [u8; 20] {
-    use std::time::SystemTime;
     use std::cell::Cell;
+    use std::time::SystemTime;
 
     thread_local! {
         static STATE: Cell<u64> = Cell::new(
@@ -286,7 +286,10 @@ mod tests {
         for i in 0..5u8 {
             let mut hash_bytes = [0u8; 20];
             hash_bytes[0] = i;
-            store.add_peer(Id20(hash_bytes), format!("10.0.0.{}:6881", i).parse().unwrap());
+            store.add_peer(
+                Id20(hash_bytes),
+                format!("10.0.0.{}:6881", i).parse().unwrap(),
+            );
         }
         // Ask for fewer than total
         let samples = store.random_info_hashes(3);

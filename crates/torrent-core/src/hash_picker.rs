@@ -328,16 +328,16 @@ impl HashPicker {
 
     /// Tree depth for a file (number of layers from root to block leaves).
     pub fn tree_depth(&self, file_index: usize) -> Option<u32> {
-        self.trees.get(file_index).map(|t| {
-            t.num_blocks().next_power_of_two().trailing_zeros()
-        })
+        self.trees
+            .get(file_index)
+            .map(|t| t.num_blocks().next_power_of_two().trailing_zeros())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{sha256, Id32, MerkleTree};
+    use crate::{Id32, MerkleTree, sha256};
 
     fn make_file_info(root: Id32, num_blocks: u32, num_pieces: u32) -> FileHashInfo {
         FileHashInfo {

@@ -400,14 +400,8 @@ mod tests {
             ft_map.insert(fname.as_bytes().to_vec(), BencodeValue::Dict(file_node));
         }
 
-        info_map.insert(
-            b"file tree".to_vec(),
-            BencodeValue::Dict(ft_map),
-        );
-        info_map.insert(
-            b"meta version".to_vec(),
-            BencodeValue::Integer(2),
-        );
+        info_map.insert(b"file tree".to_vec(), BencodeValue::Dict(ft_map));
+        info_map.insert(b"meta version".to_vec(), BencodeValue::Integer(2));
         info_map.insert(
             b"name".to_vec(),
             BencodeValue::Bytes(name.as_bytes().to_vec()),
@@ -423,10 +417,7 @@ mod tests {
         if !piece_layers.is_empty() {
             let mut pl_map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
             for (root_hash, hashes) in piece_layers {
-                pl_map.insert(
-                    root_hash.to_vec(),
-                    BencodeValue::Bytes(hashes.clone()),
-                );
+                pl_map.insert(root_hash.to_vec(), BencodeValue::Bytes(hashes.clone()));
             }
             root_map.insert(b"piece layers".to_vec(), BencodeValue::Dict(pl_map));
         }

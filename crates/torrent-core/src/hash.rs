@@ -263,10 +263,7 @@ mod tests {
     #[test]
     fn id20_display() {
         let id = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
-        assert_eq!(
-            format!("{id}"),
-            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
-        );
+        assert_eq!(format!("{id}"), "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
     }
 
     #[test]
@@ -278,9 +275,8 @@ mod tests {
 
     #[test]
     fn id32_base32_round_trip() {
-        let id =
-            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-                .unwrap();
+        let id = Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap();
         let b32 = id.to_base32();
         let id2 = Id32::from_base32(&b32).unwrap();
         assert_eq!(id, id2);
@@ -288,9 +284,8 @@ mod tests {
 
     #[test]
     fn id32_multihash_round_trip() {
-        let id =
-            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-                .unwrap();
+        let id = Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap();
         let mh = id.to_multihash_hex();
         // Must start with "1220" (SHA-256 function code + 32-byte length)
         assert!(mh.starts_with("1220"));

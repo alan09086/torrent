@@ -65,16 +65,16 @@ mod tests {
 
     #[test]
     fn parse_hex_ip_zeros() {
-        assert_eq!(
-            parse_hex_ip("00000000"),
-            Some(Ipv4Addr::UNSPECIFIED)
-        );
+        assert_eq!(parse_hex_ip("00000000"), Some(Ipv4Addr::UNSPECIFIED));
     }
 
     #[test]
     fn local_ip_for_gateway_loopback() {
         // Connecting to loopback should return a local address.
         let ip = local_ip_for_gateway(Ipv4Addr::LOCALHOST);
-        assert!(ip.is_some(), "expected a local address for loopback gateway");
+        assert!(
+            ip.is_some(),
+            "expected a local address for loopback gateway"
+        );
     }
 }

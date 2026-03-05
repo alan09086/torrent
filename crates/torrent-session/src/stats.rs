@@ -213,82 +213,292 @@ pub fn session_stats_metrics() -> &'static [SessionStatsMetric] {
     use MetricKind::*;
     static METRICS: [SessionStatsMetric; NUM_METRICS] = [
         // Network (0..11)
-        SessionStatsMetric { name: "net.bytes_sent", kind: Counter },
-        SessionStatsMetric { name: "net.bytes_recv", kind: Counter },
-        SessionStatsMetric { name: "net.num_connections", kind: Gauge },
-        SessionStatsMetric { name: "net.num_half_open", kind: Gauge },
-        SessionStatsMetric { name: "net.num_tcp_peers", kind: Gauge },
-        SessionStatsMetric { name: "net.num_utp_peers", kind: Gauge },
-        SessionStatsMetric { name: "net.num_tcp_connections", kind: Gauge },
-        SessionStatsMetric { name: "net.num_utp_connections", kind: Gauge },
-        SessionStatsMetric { name: "net.tcp_bytes_sent", kind: Counter },
-        SessionStatsMetric { name: "net.tcp_bytes_recv", kind: Counter },
-        SessionStatsMetric { name: "net.utp_bytes_sent", kind: Counter },
-        SessionStatsMetric { name: "net.utp_bytes_recv", kind: Counter },
+        SessionStatsMetric {
+            name: "net.bytes_sent",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "net.bytes_recv",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "net.num_connections",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "net.num_half_open",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "net.num_tcp_peers",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "net.num_utp_peers",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "net.num_tcp_connections",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "net.num_utp_connections",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "net.tcp_bytes_sent",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "net.tcp_bytes_recv",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "net.utp_bytes_sent",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "net.utp_bytes_recv",
+            kind: Counter,
+        },
         // Disk (12..21)
-        SessionStatsMetric { name: "disk.read_count", kind: Counter },
-        SessionStatsMetric { name: "disk.write_count", kind: Counter },
-        SessionStatsMetric { name: "disk.read_bytes", kind: Counter },
-        SessionStatsMetric { name: "disk.write_bytes", kind: Counter },
-        SessionStatsMetric { name: "disk.cache_hits", kind: Counter },
-        SessionStatsMetric { name: "disk.cache_misses", kind: Counter },
-        SessionStatsMetric { name: "disk.queue_depth", kind: Gauge },
-        SessionStatsMetric { name: "disk.job_time_us", kind: Counter },
-        SessionStatsMetric { name: "disk.write_buffer_bytes", kind: Gauge },
-        SessionStatsMetric { name: "disk.hash_count", kind: Counter },
+        SessionStatsMetric {
+            name: "disk.read_count",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.write_count",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.read_bytes",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.write_bytes",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.cache_hits",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.cache_misses",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.queue_depth",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "disk.job_time_us",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "disk.write_buffer_bytes",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "disk.hash_count",
+            kind: Counter,
+        },
         // DHT (22..28)
-        SessionStatsMetric { name: "dht.nodes", kind: Gauge },
-        SessionStatsMetric { name: "dht.lookups", kind: Counter },
-        SessionStatsMetric { name: "dht.bytes_in", kind: Counter },
-        SessionStatsMetric { name: "dht.bytes_out", kind: Counter },
-        SessionStatsMetric { name: "dht.nodes_v4", kind: Gauge },
-        SessionStatsMetric { name: "dht.nodes_v6", kind: Gauge },
-        SessionStatsMetric { name: "dht.announce_count", kind: Counter },
+        SessionStatsMetric {
+            name: "dht.nodes",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "dht.lookups",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "dht.bytes_in",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "dht.bytes_out",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "dht.nodes_v4",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "dht.nodes_v6",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "dht.announce_count",
+            kind: Counter,
+        },
         // Peers (29..40)
-        SessionStatsMetric { name: "peer.num_unchoked", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_interested", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_uploading", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_downloading", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_seeding_torrents", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_downloading_torrents", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_checking_torrents", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_paused_torrents", kind: Gauge },
-        SessionStatsMetric { name: "peer.peers_connected", kind: Gauge },
-        SessionStatsMetric { name: "peer.peers_available", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_web_seeds", kind: Gauge },
-        SessionStatsMetric { name: "peer.num_banned", kind: Gauge },
+        SessionStatsMetric {
+            name: "peer.num_unchoked",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_interested",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_uploading",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_downloading",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_seeding_torrents",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_downloading_torrents",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_checking_torrents",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_paused_torrents",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.peers_connected",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.peers_available",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_web_seeds",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "peer.num_banned",
+            kind: Gauge,
+        },
         // Protocol (41..54)
-        SessionStatsMetric { name: "proto.pieces_downloaded", kind: Counter },
-        SessionStatsMetric { name: "proto.pieces_uploaded", kind: Counter },
-        SessionStatsMetric { name: "proto.hashfails", kind: Counter },
-        SessionStatsMetric { name: "proto.waste_bytes", kind: Counter },
-        SessionStatsMetric { name: "proto.piece_requests", kind: Counter },
-        SessionStatsMetric { name: "proto.piece_rejects", kind: Counter },
-        SessionStatsMetric { name: "proto.handshakes_in", kind: Counter },
-        SessionStatsMetric { name: "proto.handshakes_out", kind: Counter },
-        SessionStatsMetric { name: "proto.pex_messages_in", kind: Counter },
-        SessionStatsMetric { name: "proto.pex_messages_out", kind: Counter },
-        SessionStatsMetric { name: "proto.tracker_announces", kind: Counter },
-        SessionStatsMetric { name: "proto.tracker_errors", kind: Counter },
-        SessionStatsMetric { name: "proto.metadata_requests", kind: Counter },
-        SessionStatsMetric { name: "proto.metadata_receives", kind: Counter },
+        SessionStatsMetric {
+            name: "proto.pieces_downloaded",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.pieces_uploaded",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.hashfails",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.waste_bytes",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.piece_requests",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.piece_rejects",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.handshakes_in",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.handshakes_out",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.pex_messages_in",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.pex_messages_out",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.tracker_announces",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.tracker_errors",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.metadata_requests",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "proto.metadata_receives",
+            kind: Counter,
+        },
         // Bandwidth (55..64)
-        SessionStatsMetric { name: "bw.upload_rate", kind: Gauge },
-        SessionStatsMetric { name: "bw.download_rate", kind: Gauge },
-        SessionStatsMetric { name: "bw.upload_rate_tcp", kind: Gauge },
-        SessionStatsMetric { name: "bw.download_rate_tcp", kind: Gauge },
-        SessionStatsMetric { name: "bw.upload_rate_utp", kind: Gauge },
-        SessionStatsMetric { name: "bw.download_rate_utp", kind: Gauge },
-        SessionStatsMetric { name: "bw.payload_upload_rate", kind: Gauge },
-        SessionStatsMetric { name: "bw.payload_download_rate", kind: Gauge },
-        SessionStatsMetric { name: "bw.total_uploaded", kind: Counter },
-        SessionStatsMetric { name: "bw.total_downloaded", kind: Counter },
+        SessionStatsMetric {
+            name: "bw.upload_rate",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.download_rate",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.upload_rate_tcp",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.download_rate_tcp",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.upload_rate_utp",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.download_rate_utp",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.payload_upload_rate",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.payload_download_rate",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "bw.total_uploaded",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "bw.total_downloaded",
+            kind: Counter,
+        },
         // Session (65..69)
-        SessionStatsMetric { name: "ses.active_torrents", kind: Gauge },
-        SessionStatsMetric { name: "ses.num_torrents", kind: Gauge },
-        SessionStatsMetric { name: "ses.uptime_secs", kind: Gauge },
-        SessionStatsMetric { name: "ses.ip_filter_blocked", kind: Counter },
-        SessionStatsMetric { name: "ses.queue_paused_by_auto", kind: Counter },
+        SessionStatsMetric {
+            name: "ses.active_torrents",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "ses.num_torrents",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "ses.uptime_secs",
+            kind: Gauge,
+        },
+        SessionStatsMetric {
+            name: "ses.ip_filter_blocked",
+            kind: Counter,
+        },
+        SessionStatsMetric {
+            name: "ses.queue_paused_by_auto",
+            kind: Counter,
+        },
     ];
     &METRICS
 }

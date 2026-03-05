@@ -360,7 +360,10 @@ mod tests {
         assert!(!ct.has_piece(0), "have bitfield should be cleared");
         assert_eq!(ct.bitfield().count_ones(), 0, "no pieces should be marked");
         assert!(!ct.has_chunk(1, 0), "in_progress should be cleared");
-        assert!(!ct.is_block_verified(1, 0), "block_verified should be cleared");
+        assert!(
+            !ct.is_block_verified(1, 0),
+            "block_verified should be cleared"
+        );
 
         // missing_chunks should report all chunks again
         assert_eq!(ct.missing_chunks(0).len(), 4);

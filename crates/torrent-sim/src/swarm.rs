@@ -8,9 +8,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use torrent_core::{Id20, TorrentMeta, TorrentMetaV1, StorageMode, Lengths, DEFAULT_CHUNK_SIZE};
-use torrent_session::{SessionHandle, Settings, TorrentStats, PeerSource};
+use torrent_core::{DEFAULT_CHUNK_SIZE, Id20, Lengths, StorageMode, TorrentMeta, TorrentMetaV1};
 use torrent_session::transport::NetworkFactory;
+use torrent_session::{PeerSource, SessionHandle, Settings, TorrentStats};
 use torrent_storage::{MemoryStorage, TorrentStorage};
 
 use crate::network::{LinkConfig, SimNetwork};

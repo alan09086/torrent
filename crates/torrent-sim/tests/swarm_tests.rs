@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use torrent_sim::{SimSwarmBuilder, make_test_torrent, make_seeded_storage};
+use torrent_sim::{SimSwarmBuilder, make_seeded_storage, make_test_torrent};
 
 /// Build a swarm, add a torrent to one node as seed, add as leecher to another,
 /// introduce peers, and verify the leecher eventually learns about peers.
@@ -15,7 +15,9 @@ async fn test_seed_leecher_peer_discovery() {
     let seeded_storage = make_seeded_storage(&data, 16384);
 
     // Node 0 is the seed (with pre-populated storage)
-    let info_hash = swarm.add_torrent(0, meta.clone().into(), Some(seeded_storage)).await;
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
 
     // Node 1 is the leecher (empty storage)
     let _ih2 = swarm.add_torrent(1, meta.into(), None).await;
@@ -63,7 +65,9 @@ async fn test_partition_blocks_connection() {
     let (meta, _bytes) = make_test_torrent(&data, 16384);
     let seeded_storage = make_seeded_storage(&data, 16384);
 
-    let info_hash = swarm.add_torrent(0, meta.clone().into(), Some(seeded_storage)).await;
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
     let _ih2 = swarm.add_torrent(1, meta.into(), None).await;
 
     // Partition the network BEFORE introducing peers
@@ -94,7 +98,9 @@ async fn test_swarm_three_nodes_all_register_torrent() {
     let seeded_storage = make_seeded_storage(&data, 16384);
 
     // Node 0 is seed
-    let info_hash = swarm.add_torrent(0, meta.clone().into(), Some(seeded_storage)).await;
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
     // Nodes 1 and 2 are leechers
     let _ih1 = swarm.add_torrent(1, meta.clone().into(), None).await;
     let _ih2 = swarm.add_torrent(2, meta.into(), None).await;

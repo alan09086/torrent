@@ -41,15 +41,15 @@ impl PeerId {
 
     /// Return the client prefix (e.g., "-FE0100-").
     pub fn prefix(&self) -> &[u8] {
-        &self.0 .0[..8]
+        &self.0.0[..8]
     }
 }
 
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Show prefix as ASCII, rest as hex
-        let prefix = std::str::from_utf8(&self.0 .0[..8]).unwrap_or("????????");
-        let suffix = hex::encode(&self.0 .0[8..]);
+        let prefix = std::str::from_utf8(&self.0.0[..8]).unwrap_or("????????");
+        let suffix = hex::encode(&self.0.0[8..]);
         write!(f, "{prefix}{suffix}")
     }
 }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use torrent_core::Id20;
 
-use crate::bep44::{compute_mutable_target, ImmutableItem, MutableItem};
+use crate::bep44::{ImmutableItem, MutableItem, compute_mutable_target};
 
 /// Pluggable storage backend for BEP 44 DHT items.
 pub trait DhtStorage: Send + Sync + 'static {

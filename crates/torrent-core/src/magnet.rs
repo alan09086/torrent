@@ -120,11 +120,7 @@ impl Magnet {
         // Emit v2 hash if present
         if let Some(v2) = self.info_hashes.v2 {
             let prefix = if parts.is_empty() { "magnet:?" } else { "" };
-            parts.push(format!(
-                "{}xt=urn:btmh:{}",
-                prefix,
-                v2.to_multihash_hex()
-            ));
+            parts.push(format!("{}xt=urn:btmh:{}", prefix, v2.to_multihash_hex()));
         }
 
         if let Some(ref name) = self.display_name {
@@ -234,9 +230,8 @@ mod tests {
     #[test]
     fn parse_hybrid_magnet() {
         let v1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
-        let v2 =
-            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-                .unwrap();
+        let v2 = Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap();
         let uri = format!(
             "magnet:?xt=urn:btih:{}&xt=urn:btmh:{}",
             v1.to_hex(),
@@ -266,9 +261,8 @@ mod tests {
     #[test]
     fn hybrid_round_trip() {
         let v1 = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
-        let v2 =
-            Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-                .unwrap();
+        let v2 = Id32::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .unwrap();
         let uri = format!(
             "magnet:?xt=urn:btih:{}&xt=urn:btmh:{}",
             v1.to_hex(),

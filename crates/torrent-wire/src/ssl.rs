@@ -43,11 +43,11 @@ struct SslTorrentServerVerifier {
 impl SslTorrentServerVerifier {
     fn new(root_store: Arc<rustls::RootCertStore>) -> Result<Self> {
         let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
-                root_store,
-                Arc::new(rustls::crypto::ring::default_provider()),
-            )
-            .build()
-            .map_err(|e| Error::Ssl(format!("server verifier error: {e}")))?;
+            root_store,
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|e| Error::Ssl(format!("server verifier error: {e}")))?;
         Ok(Self { inner })
     }
 }
@@ -161,11 +161,11 @@ pub fn build_server_config(config: &SslConfig) -> Result<Arc<rustls::ServerConfi
     }
 
     let client_verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(root_store),
-            Arc::new(rustls::crypto::ring::default_provider()),
-        )
-        .build()
-        .map_err(|e| Error::Ssl(format!("client verifier error: {e}")))?;
+        Arc::new(root_store),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .map_err(|e| Error::Ssl(format!("client verifier error: {e}")))?;
 
     let provider = rustls::crypto::ring::default_provider();
     let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
@@ -185,8 +185,8 @@ pub async fn connect_tls<S: AsyncRead + AsyncWrite + Unpin>(
     client_config: Arc<rustls::ClientConfig>,
 ) -> Result<ClientTlsStream<S>> {
     let sni = info_hash.to_hex();
-    let server_name = ServerName::try_from(sni.as_str())
-        .map_err(|e| Error::Ssl(format!("invalid SNI: {e}")))?;
+    let server_name =
+        ServerName::try_from(sni.as_str()).map_err(|e| Error::Ssl(format!("invalid SNI: {e}")))?;
 
     let connector = TlsConnector::from(client_config);
     connector
@@ -328,8 +328,7 @@ mod tests {
 
         // Leaf
         let leaf_key = KeyPair::generate().unwrap();
-        let mut leaf_params =
-            CertificateParams::new(vec!["torrent-peer".to_string()]).unwrap();
+        let mut leaf_params = CertificateParams::new(vec!["torrent-peer".to_string()]).unwrap();
         leaf_params.distinguished_name.push(
             rcgen::DnType::CommonName,
             rcgen::DnValue::Utf8String("torrent-peer".into()),
@@ -357,8 +356,7 @@ mod tests {
         let client_tls_config = build_client_config(&ssl_config).unwrap();
         let server_tls_config = build_server_config(&ssl_config).unwrap();
 
-        let info_hash =
-            Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
         let (client_raw, server_raw) = tokio::io::duplex(16384);
 
         let server_handle = tokio::spawn(async move {
@@ -390,12 +388,12 @@ mod tests {
         let (ca2_pem, leaf2_cert_pem, leaf2_key_pem) = generate_ca_and_leaf();
 
         let client_config_data = SslConfig {
-            ca_cert_pem: ca1_pem,  // client trusts CA1
+            ca_cert_pem: ca1_pem, // client trusts CA1
             our_cert_pem: leaf1_cert_pem,
             our_key_pem: leaf1_key_pem,
         };
         let server_config_data = SslConfig {
-            ca_cert_pem: ca2_pem,  // server has CA2 cert
+            ca_cert_pem: ca2_pem, // server has CA2 cert
             our_cert_pem: leaf2_cert_pem,
             our_key_pem: leaf2_key_pem,
         };
@@ -403,8 +401,7 @@ mod tests {
         let client_tls_config = build_client_config(&client_config_data).unwrap();
         let server_tls_config = build_server_config(&server_config_data).unwrap();
 
-        let info_hash =
-            Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let info_hash = Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
         let (client_raw, server_raw) = tokio::io::duplex(16384);
 
         let server_handle = tokio::spawn(async move {

@@ -190,7 +190,7 @@ impl MetadataMessage {
             n => {
                 return Err(Error::InvalidExtended(format!(
                     "unknown metadata msg_type {n}"
-                )))
+                )));
             }
         };
 
@@ -360,7 +360,10 @@ mod tests {
         assert_eq!(parsed.msg_type, MetadataMessageType::Data);
         assert_eq!(parsed.piece, 0);
         assert_eq!(parsed.total_size, Some(31415));
-        assert_eq!(parsed.data.as_deref(), Some(b"raw metadata bytes here".as_ref()));
+        assert_eq!(
+            parsed.data.as_deref(),
+            Some(b"raw metadata bytes here".as_ref())
+        );
     }
 
     #[test]

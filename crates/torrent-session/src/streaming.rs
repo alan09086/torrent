@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
-use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 
 use torrent_core::Lengths;
 use torrent_storage::Bitfield;
@@ -79,7 +79,8 @@ pub struct FileStream {
     /// Watch receiver for the have-bitfield.
     have: watch::Receiver<Bitfield>,
     /// In-progress read future (piece, begin, length).
-    pending_read: Option<Pin<Box<dyn std::future::Future<Output = torrent_storage::Result<Bytes>> + Send>>>,
+    pending_read:
+        Option<Pin<Box<dyn std::future::Future<Output = torrent_storage::Result<Bytes>> + Send>>>,
     /// Buffered data from the last disk read (partially consumed).
     buffer: Bytes,
     /// Pending seek result (set by start_seek, consumed by poll_complete).
@@ -207,7 +208,8 @@ impl AsyncRead for FileStream {
 
         let disk = self.disk.clone();
         let fut = Box::pin(async move {
-            disk.read_chunk(piece, offset_in_piece, read_len, DiskJobFlags::SEQUENTIAL).await
+            disk.read_chunk(piece, offset_in_piece, read_len, DiskJobFlags::SEQUENTIAL)
+                .await
         });
         self.pending_read = Some(fut);
 
@@ -324,7 +326,9 @@ mod tests {
 
         // Seek to position 100000
         use tokio::io::AsyncSeek;
-        Pin::new(&mut stream).start_seek(io::SeekFrom::Start(100000)).unwrap();
+        Pin::new(&mut stream)
+            .start_seek(io::SeekFrom::Start(100000))
+            .unwrap();
 
         // Cursor should have been updated
         assert!(cursor_rx.has_changed().unwrap());
@@ -360,7 +364,9 @@ mod tests {
 
         // Seek to 1024 bytes before end
         use tokio::io::AsyncSeek;
-        Pin::new(&mut stream).start_seek(io::SeekFrom::End(-1024)).unwrap();
+        Pin::new(&mut stream)
+            .start_seek(io::SeekFrom::End(-1024))
+            .unwrap();
         assert_eq!(stream.position(), 262144 - 1024);
     }
 
@@ -392,11 +398,17 @@ mod tests {
 
         // Seek to negative position
         use tokio::io::AsyncSeek;
-        Pin::new(&mut stream).start_seek(io::SeekFrom::Start(0)).unwrap();
-        Pin::new(&mut stream).start_seek(io::SeekFrom::Current(-1)).unwrap();
+        Pin::new(&mut stream)
+            .start_seek(io::SeekFrom::Start(0))
+            .unwrap();
+        Pin::new(&mut stream)
+            .start_seek(io::SeekFrom::Current(-1))
+            .unwrap();
 
         // poll_complete should return error
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let result = rt.block_on(async {
             use futures::FutureExt;
             std::future::poll_fn(|cx| Pin::new(&mut stream).poll_complete(cx)).await
@@ -434,9 +446,8 @@ mod tests {
 
         let mut buf = [0u8; 1024];
         let mut read_buf = ReadBuf::new(&mut buf);
-        let result = std::future::poll_fn(|cx| {
-            Pin::new(&mut stream).poll_read(cx, &mut read_buf)
-        }).await;
+        let result =
+            std::future::poll_fn(|cx| Pin::new(&mut stream).poll_read(cx, &mut read_buf)).await;
         assert!(result.is_ok());
         assert_eq!(read_buf.filled().len(), 0);
     }
@@ -477,7 +488,8 @@ mod tests {
                 Poll::Pending => Poll::Ready(true),
                 Poll::Ready(_) => Poll::Ready(false),
             }
-        }).await;
+        })
+        .await;
         assert!(is_pending, "should be Pending when piece is missing");
 
         // Now mark piece 0 as available and broadcast

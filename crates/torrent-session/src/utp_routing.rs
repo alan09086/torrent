@@ -205,7 +205,10 @@ mod tests {
     /// (since we can't easily construct a UtpStream in tests).
     async fn identify_from_duplex(
         mut stream: impl AsyncRead + AsyncWrite + Unpin,
-    ) -> Option<(torrent_core::Id20, PrefixedStream<impl AsyncRead + AsyncWrite + Unpin>)> {
+    ) -> Option<(
+        torrent_core::Id20,
+        PrefixedStream<impl AsyncRead + AsyncWrite + Unpin>,
+    )> {
         use tokio::io::AsyncReadExt;
 
         let mut first = [0u8; 1];

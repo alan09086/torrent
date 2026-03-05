@@ -1,13 +1,13 @@
 #![warn(missing_docs)]
 //! Torrent storage backends, piece verification, and chunk tracking.
 
-mod error;
 /// Compact bit array for tracking piece availability.
 pub mod bitfield;
 /// Adaptive Replacement Cache (ARC) for disk read caching.
 pub mod cache;
 /// Chunk-level download progress tracking.
 pub mod chunk_tracker;
+mod error;
 /// Piece-to-file segment mapping.
 pub mod file_map;
 /// Disk-backed torrent storage using regular file I/O.

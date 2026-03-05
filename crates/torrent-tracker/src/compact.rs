@@ -159,10 +159,7 @@ mod tests {
             peers[0],
             "[2001:db8::1]:8080".parse::<SocketAddr>().unwrap()
         );
-        assert_eq!(
-            peers[1],
-            "[fe80::42]:6881".parse::<SocketAddr>().unwrap()
-        );
+        assert_eq!(peers[1], "[fe80::42]:6881".parse::<SocketAddr>().unwrap());
     }
 
     #[test]

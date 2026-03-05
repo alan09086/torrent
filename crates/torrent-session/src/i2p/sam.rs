@@ -100,7 +100,11 @@ impl SamReply {
             parse_key_value_pairs(rest, &mut pairs);
         }
 
-        Ok(SamReply { major, minor, pairs })
+        Ok(SamReply {
+            major,
+            minor,
+            pairs,
+        })
     }
 
     /// Check if RESULT=OK.
@@ -110,7 +114,10 @@ impl SamReply {
 
     /// Get the RESULT value, defaulting to "UNKNOWN".
     pub fn result(&self) -> &str {
-        self.pairs.get("RESULT").map(|s| s.as_str()).unwrap_or("UNKNOWN")
+        self.pairs
+            .get("RESULT")
+            .map(|s| s.as_str())
+            .unwrap_or("UNKNOWN")
     }
 
     /// Get the MESSAGE value if present.
@@ -203,8 +210,10 @@ impl SamTunnelConfig {
     fn to_sam_options(&self) -> String {
         format!(
             "inbound.quantity={} outbound.quantity={} inbound.length={} outbound.length={}",
-            self.inbound_quantity, self.outbound_quantity,
-            self.inbound_length, self.outbound_length,
+            self.inbound_quantity,
+            self.outbound_quantity,
+            self.inbound_length,
+            self.outbound_length,
         )
     }
 }
@@ -340,9 +349,10 @@ impl SamSession {
         }
 
         // Extract our destination from the reply
-        let dest_b64 = reply.pairs.get("DESTINATION").ok_or_else(|| {
-            SamError::SessionCreateFailed("missing DESTINATION in reply".into())
-        })?;
+        let dest_b64 = reply
+            .pairs
+            .get("DESTINATION")
+            .ok_or_else(|| SamError::SessionCreateFailed("missing DESTINATION in reply".into()))?;
 
         let destination = I2pDestination::from_base64(dest_b64).map_err(|e| {
             SamError::InvalidDestination(format!("bad destination in SESSION STATUS: {e}"))
@@ -489,10 +499,8 @@ impl SamSession {
         reader.read_line(&mut line).await?;
         let remote_dest_b64 = line.trim();
 
-        let remote_destination =
-            I2pDestination::from_base64(remote_dest_b64).map_err(|e| {
-                SamError::InvalidDestination(format!("incoming destination: {e}"))
-            })?;
+        let remote_destination = I2pDestination::from_base64(remote_dest_b64)
+            .map_err(|e| SamError::InvalidDestination(format!("incoming destination: {e}")))?;
 
         debug!(remote = %remote_destination, "SAM stream accepted");
 
@@ -610,8 +618,7 @@ mod tests {
 
     #[test]
     fn sam_reply_parse_naming_error() {
-        let reply =
-            SamReply::parse("NAMING REPLY RESULT=KEY_NOT_FOUND NAME=unknown.i2p").unwrap();
+        let reply = SamReply::parse("NAMING REPLY RESULT=KEY_NOT_FOUND NAME=unknown.i2p").unwrap();
         assert!(!reply.is_ok());
         assert_eq!(reply.result(), "KEY_NOT_FOUND");
     }
@@ -631,7 +638,10 @@ mod tests {
     #[test]
     fn parse_key_value_quoted_message() {
         let mut pairs = HashMap::new();
-        parse_key_value_pairs("RESULT=I2P_ERROR MESSAGE=\"tunnel build failed\"", &mut pairs);
+        parse_key_value_pairs(
+            "RESULT=I2P_ERROR MESSAGE=\"tunnel build failed\"",
+            &mut pairs,
+        );
         assert_eq!(pairs.get("RESULT").unwrap(), "I2P_ERROR");
         assert_eq!(pairs.get("MESSAGE").unwrap(), "tunnel build failed");
     }

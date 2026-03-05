@@ -75,7 +75,12 @@ impl fmt::Debug for I2pDestination {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b64 = self.to_base64();
         if b64.len() > 16 {
-            write!(f, "I2pDestination({}...{} bytes)", &b64[..16], self.bytes.len())
+            write!(
+                f,
+                "I2pDestination({}...{} bytes)",
+                &b64[..16],
+                self.bytes.len()
+            )
         } else {
             write!(f, "I2pDestination({})", b64)
         }
@@ -93,8 +98,10 @@ impl fmt::Display for I2pDestination {
 pub enum I2pDestinationError {
     /// The input string contains an invalid Base64 character.
     #[error("invalid Base64 character at position {0}")]
-    InvalidBase64(/// Byte offset of the invalid character.
-        usize),
+    InvalidBase64(
+        /// Byte offset of the invalid character.
+        usize,
+    ),
     /// The destination was empty after decoding.
     #[error("empty destination")]
     Empty,
@@ -310,6 +317,9 @@ mod tests {
         base32_encode_lower(hash.as_bytes(), &mut out);
         assert_eq!(out.len(), 52); // 32 bytes -> 52 Base32 chars
         // All chars must be lowercase alphanumeric or 2-7
-        assert!(out.chars().all(|c| c.is_ascii_lowercase() || ('2'..='7').contains(&c)));
+        assert!(
+            out.chars()
+                .all(|c| c.is_ascii_lowercase() || ('2'..='7').contains(&c))
+        );
     }
 }

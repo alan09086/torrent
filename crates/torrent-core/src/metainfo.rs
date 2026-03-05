@@ -113,7 +113,11 @@ pub struct FileEntry {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mtime: Option<i64>,
     /// Symlink target path components.
-    #[serde(rename = "symlink path", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "symlink path",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub symlink_path: Option<Vec<String>>,
 }
 
@@ -283,10 +287,7 @@ mod tests {
     #[test]
     fn url_list_single_string() {
         // url-list sorts after info
-        let data = make_torrent_bytes_sorted(
-            b"",
-            b"8:url-list24:http://example.com/files",
-        );
+        let data = make_torrent_bytes_sorted(b"", b"8:url-list24:http://example.com/files");
         let meta = torrent_from_bytes(&data).unwrap();
         assert_eq!(meta.url_list, vec!["http://example.com/files"]);
     }
@@ -313,10 +314,7 @@ mod tests {
     #[test]
     fn httpseeds_present() {
         // httpseeds sorts before info
-        let data = make_torrent_bytes_sorted(
-            b"9:httpseedsl28:http://seed.example.com/seede",
-            b"",
-        );
+        let data = make_torrent_bytes_sorted(b"9:httpseedsl28:http://seed.example.com/seede", b"");
         let meta = torrent_from_bytes(&data).unwrap();
         assert_eq!(meta.httpseeds, vec!["http://seed.example.com/seed"]);
     }

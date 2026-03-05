@@ -14,8 +14,8 @@ use torrent_bencode::{self as bencode, BencodeValue};
 use torrent_core::Id20;
 
 use crate::compact::{
-    encode_compact_nodes, parse_compact_nodes, CompactNodeInfo,
-    encode_compact_nodes6, parse_compact_nodes6, CompactNodeInfo6,
+    CompactNodeInfo, CompactNodeInfo6, encode_compact_nodes, encode_compact_nodes6,
+    parse_compact_nodes, parse_compact_nodes6,
 };
 use crate::error::{Error, Result};
 
@@ -264,7 +264,10 @@ impl KrpcMessage {
     /// Encode this message to bencode bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut dict = BTreeMap::<Vec<u8>, BencodeValue>::new();
-        dict.insert(b"t".to_vec(), BencodeValue::Bytes(self.transaction_id.0.to_vec()));
+        dict.insert(
+            b"t".to_vec(),
+            BencodeValue::Bytes(self.transaction_id.0.to_vec()),
+        );
 
         if let Some(addr) = &self.sender_ip {
             let ip_bytes = encode_compact_addr(addr);
@@ -435,7 +438,10 @@ fn encode_query_args(query: &KrpcQuery) -> BencodeValue {
         }
         KrpcQuery::GetPeers { id, info_hash } => {
             args.insert(b"id".to_vec(), BencodeValue::Bytes(id.0.to_vec()));
-            args.insert(b"info_hash".to_vec(), BencodeValue::Bytes(info_hash.0.to_vec()));
+            args.insert(
+                b"info_hash".to_vec(),
+                BencodeValue::Bytes(info_hash.0.to_vec()),
+            );
         }
         KrpcQuery::AnnouncePeer {
             id,
@@ -448,7 +454,10 @@ fn encode_query_args(query: &KrpcQuery) -> BencodeValue {
             if *implied_port {
                 args.insert(b"implied_port".to_vec(), BencodeValue::Integer(1));
             }
-            args.insert(b"info_hash".to_vec(), BencodeValue::Bytes(info_hash.0.to_vec()));
+            args.insert(
+                b"info_hash".to_vec(),
+                BencodeValue::Bytes(info_hash.0.to_vec()),
+            );
             args.insert(b"port".to_vec(), BencodeValue::Integer(i64::from(*port)));
             args.insert(b"token".to_vec(), BencodeValue::Bytes(token.clone()));
         }
@@ -657,10 +666,7 @@ fn decode_compact_addr(data: &[u8]) -> Option<SocketAddr> {
 
 // ---- Internal decoding helpers ----
 
-fn decode_query(
-    method: &[u8],
-    args: &BTreeMap<Vec<u8>, BencodeValue>,
-) -> Result<KrpcQuery> {
+fn decode_query(method: &[u8], args: &BTreeMap<Vec<u8>, BencodeValue>) -> Result<KrpcQuery> {
     let id = args_id20(args, b"id")?;
     match method {
         b"ping" => Ok(KrpcQuery::Ping { id }),
@@ -791,11 +797,12 @@ fn decode_response(
             }
         }
 
-        let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
-            parse_compact_nodes(nodes_bytes)?
-        } else {
-            Vec::new()
-        };
+        let nodes =
+            if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+                parse_compact_nodes(nodes_bytes)?
+            } else {
+                Vec::new()
+            };
 
         return Ok(KrpcResponse::SampleInfohashes(SampleInfohashesResponse {
             id,
@@ -848,17 +855,19 @@ fn decode_response(
             }
         }
 
-        let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
-            parse_compact_nodes(nodes_bytes)?
-        } else {
-            Vec::new()
-        };
+        let nodes =
+            if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+                parse_compact_nodes(nodes_bytes)?
+            } else {
+                Vec::new()
+            };
 
-        let nodes6 = if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
-            parse_compact_nodes6(nodes6_bytes)?
-        } else {
-            Vec::new()
-        };
+        let nodes6 =
+            if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
+                parse_compact_nodes6(nodes6_bytes)?
+            } else {
+                Vec::new()
+            };
 
         return Ok(KrpcResponse::GetPeers(GetPeersResponse {
             id,
@@ -874,17 +883,19 @@ fn decode_response(
     let has_nodes6 = values.contains_key(&b"nodes6"[..]);
 
     if has_nodes || has_nodes6 {
-        let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
-            parse_compact_nodes(nodes_bytes)?
-        } else {
-            Vec::new()
-        };
+        let nodes =
+            if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+                parse_compact_nodes(nodes_bytes)?
+            } else {
+                Vec::new()
+            };
 
-        let nodes6 = if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
-            parse_compact_nodes6(nodes6_bytes)?
-        } else {
-            Vec::new()
-        };
+        let nodes6 =
+            if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
+                parse_compact_nodes6(nodes6_bytes)?
+            } else {
+                Vec::new()
+            };
 
         return Ok(KrpcResponse::FindNode { id, nodes, nodes6 });
     }
@@ -903,17 +914,19 @@ fn decode_get_item_response(
         .and_then(|v| v.as_bytes_raw())
         .map(|b| b.to_vec());
 
-    let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw()) {
+    let nodes = if let Some(nodes_bytes) = values.get(&b"nodes"[..]).and_then(|v| v.as_bytes_raw())
+    {
         parse_compact_nodes(nodes_bytes)?
     } else {
         Vec::new()
     };
 
-    let nodes6 = if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
-        parse_compact_nodes6(nodes6_bytes)?
-    } else {
-        Vec::new()
-    };
+    let nodes6 =
+        if let Some(nodes6_bytes) = values.get(&b"nodes6"[..]).and_then(|v| v.as_bytes_raw()) {
+            parse_compact_nodes6(nodes6_bytes)?
+        } else {
+            Vec::new()
+        };
 
     let value = values
         .get(&b"v"[..])
@@ -946,24 +959,16 @@ fn decode_get_item_response(
 
 // ---- Dict access helpers ----
 
-fn dict_bytes<'a>(
-    dict: &'a BTreeMap<Vec<u8>, BencodeValue>,
-    key: &[u8],
-) -> Result<&'a [u8]> {
-    dict.get(key)
-        .and_then(|v| v.as_bytes_raw())
-        .ok_or_else(|| {
-            Error::InvalidMessage(format!(
-                "missing or invalid key '{}'",
-                String::from_utf8_lossy(key)
-            ))
-        })
+fn dict_bytes<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<&'a [u8]> {
+    dict.get(key).and_then(|v| v.as_bytes_raw()).ok_or_else(|| {
+        Error::InvalidMessage(format!(
+            "missing or invalid key '{}'",
+            String::from_utf8_lossy(key)
+        ))
+    })
 }
 
-fn dict_str<'a>(
-    dict: &'a BTreeMap<Vec<u8>, BencodeValue>,
-    key: &[u8],
-) -> Result<&'a [u8]> {
+fn dict_str<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<&'a [u8]> {
     dict_bytes(dict, key)
 }
 
@@ -971,20 +976,15 @@ fn dict_dict<'a>(
     dict: &'a BTreeMap<Vec<u8>, BencodeValue>,
     key: &[u8],
 ) -> Result<&'a BTreeMap<Vec<u8>, BencodeValue>> {
-    dict.get(key)
-        .and_then(|v| v.as_dict())
-        .ok_or_else(|| {
-            Error::InvalidMessage(format!(
-                "missing or invalid dict key '{}'",
-                String::from_utf8_lossy(key)
-            ))
-        })
+    dict.get(key).and_then(|v| v.as_dict()).ok_or_else(|| {
+        Error::InvalidMessage(format!(
+            "missing or invalid dict key '{}'",
+            String::from_utf8_lossy(key)
+        ))
+    })
 }
 
-fn args_id20(
-    args: &BTreeMap<Vec<u8>, BencodeValue>,
-    key: &[u8],
-) -> Result<Id20> {
+fn args_id20(args: &BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<Id20> {
     let bytes = args
         .get(key)
         .and_then(|v| v.as_bytes_raw())
@@ -997,18 +997,13 @@ fn args_id20(
     Id20::from_bytes(bytes).map_err(|e| Error::InvalidMessage(e.to_string()))
 }
 
-fn args_int(
-    args: &BTreeMap<Vec<u8>, BencodeValue>,
-    key: &[u8],
-) -> Result<i64> {
-    args.get(key)
-        .and_then(|v| v.as_int())
-        .ok_or_else(|| {
-            Error::InvalidMessage(format!(
-                "missing '{}' integer in args",
-                String::from_utf8_lossy(key)
-            ))
-        })
+fn args_int(args: &BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<i64> {
+    args.get(key).and_then(|v| v.as_int()).ok_or_else(|| {
+        Error::InvalidMessage(format!(
+            "missing '{}' integer in args",
+            String::from_utf8_lossy(key)
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -1208,10 +1203,7 @@ mod tests {
 
     #[test]
     fn query_method_names() {
-        assert_eq!(
-            KrpcQuery::Ping { id: Id20::ZERO }.method_name(),
-            "ping"
-        );
+        assert_eq!(KrpcQuery::Ping { id: Id20::ZERO }.method_name(), "ping");
         assert_eq!(
             KrpcQuery::FindNode {
                 id: Id20::ZERO,
@@ -1314,7 +1306,10 @@ mod tests {
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.sender_ip, Some("[2001:db8::1]:6881".parse().unwrap()));
+        assert_eq!(
+            decoded.sender_ip,
+            Some("[2001:db8::1]:6881".parse().unwrap())
+        );
     }
 
     #[test]

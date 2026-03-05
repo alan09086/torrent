@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use torrent::core::{Lengths, DEFAULT_CHUNK_SIZE, TorrentMeta};
+use torrent::core::{DEFAULT_CHUNK_SIZE, Lengths, TorrentMeta};
 use torrent::session::SessionState;
 use torrent::storage::{FilesystemStorage, TorrentStorage};
 
@@ -20,7 +20,15 @@ pub struct DownloadOpts<'a> {
 }
 
 pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
-    let DownloadOpts { source, output, no_dht, config, seed, port, quiet } = opts;
+    let DownloadOpts {
+        source,
+        output,
+        no_dht,
+        config,
+        seed,
+        port,
+        quiet,
+    } = opts;
 
     // Global state file for DHT node persistence across sessions
     let state_path = state_file_path();
@@ -29,8 +37,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     let mut builder = if let Some(config_path) = config {
         let data = std::fs::read_to_string(config_path)
             .with_context(|| format!("failed to read config: {}", config_path.display()))?;
-        let settings: torrent::session::Settings = serde_json::from_str(&data)
-            .with_context(|| "failed to parse settings JSON")?;
+        let settings: torrent::session::Settings =
+            serde_json::from_str(&data).with_context(|| "failed to parse settings JSON")?;
         let mut b = torrent::ClientBuilder::new();
         b = b.listen_port(settings.listen_port);
         b
@@ -47,7 +55,10 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     // Load saved DHT nodes from previous session for instant peer discovery
     if let Some(saved_nodes) = load_dht_nodes(&state_path) {
         if !quiet {
-            eprintln!("Loaded {} saved DHT nodes from previous session", saved_nodes.len());
+            eprintln!(
+                "Loaded {} saved DHT nodes from previous session",
+                saved_nodes.len()
+            );
         }
         builder = builder.dht_saved_nodes(saved_nodes);
     }
@@ -90,11 +101,9 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     } else {
         let pb = ProgressBar::new(100);
         pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{bar:40.cyan/blue}] {msg}"
-            )
-            .unwrap()
-            .progress_chars("#>-"),
+            ProgressStyle::with_template("{spinner:.green} [{bar:40.cyan/blue}] {msg}")
+                .unwrap()
+                .progress_chars("#>-"),
         );
         Some(pb)
     };
@@ -194,12 +203,18 @@ fn make_filesystem_storage(
 ) -> anyhow::Result<Arc<dyn TorrentStorage>> {
     let (file_paths, file_lengths, total_length, piece_length) = if let Some(v1) = meta.as_v1() {
         let files = v1.info.files();
-        let paths: Vec<PathBuf> = files.iter().map(|f| f.path.iter().collect::<PathBuf>()).collect();
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|f| f.path.iter().collect::<PathBuf>())
+            .collect();
         let lengths: Vec<u64> = files.iter().map(|f| f.length).collect();
         (paths, lengths, v1.info.total_length(), v1.info.piece_length)
     } else if let Some(v2) = meta.as_v2() {
         let files = v2.info.files();
-        let paths: Vec<PathBuf> = files.iter().map(|f| f.path.iter().collect::<PathBuf>()).collect();
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|f| f.path.iter().collect::<PathBuf>())
+            .collect();
         let lengths: Vec<u64> = files.iter().map(|f| f.attr.length).collect();
         (paths, lengths, v2.info.total_length(), v2.info.piece_length)
     } else {
@@ -207,8 +222,9 @@ fn make_filesystem_storage(
     };
 
     let lengths_calc = Lengths::new(total_length, piece_length, DEFAULT_CHUNK_SIZE);
-    let storage = FilesystemStorage::new(output, file_paths, file_lengths, lengths_calc, None, false)
-        .map_err(|e| anyhow::anyhow!("failed to create storage: {e}"))?;
+    let storage =
+        FilesystemStorage::new(output, file_paths, file_lengths, lengths_calc, None, false)
+            .map_err(|e| anyhow::anyhow!("failed to create storage: {e}"))?;
     Ok(Arc::new(storage))
 }
 
@@ -265,7 +281,10 @@ async fn save_session_state(
     match session.save_session_state().await {
         Ok(state) => {
             if !quiet && !state.dht_nodes.is_empty() {
-                eprintln!("Saving {} DHT nodes for next session", state.dht_nodes.len());
+                eprintln!(
+                    "Saving {} DHT nodes for next session",
+                    state.dht_nodes.len()
+                );
             }
             match torrent::bencode::to_bytes(&state) {
                 Ok(bytes) => {

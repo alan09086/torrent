@@ -6,19 +6,20 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::alert::{post_alert, Alert, AlertKind};
+use crate::alert::{Alert, AlertKind, post_alert};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
 
 use torrent_core::{
-    torrent_from_bytes, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1, DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHUNK_SIZE, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1,
+    torrent_from_bytes,
 };
 use torrent_dht::DhtHandle;
 use torrent_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
@@ -31,7 +32,7 @@ use crate::peer_state::{PeerSource, PeerState};
 use crate::piece_selector::{InFlightPiece, PeerSpeed, PickContext, PieceSelector};
 use crate::tracker_manager::TrackerManager;
 use crate::types::{
-    PeerCommand, PeerEvent, PeerInfo, PartialPieceInfo, TorrentCommand, TorrentConfig,
+    PartialPieceInfo, PeerCommand, PeerEvent, PeerInfo, TorrentCommand, TorrentConfig,
     TorrentState, TorrentStats,
 };
 
@@ -157,9 +158,7 @@ impl TorrentHandle {
                     torrent_core::InfoHashes::v1_only(meta.info_hash)
                 }
             }
-            (torrent_core::TorrentVersion::V2Only, Some(v2_meta)) => {
-                v2_meta.info_hashes.clone()
-            }
+            (torrent_core::TorrentVersion::V2Only, Some(v2_meta)) => v2_meta.info_hashes.clone(),
             _ => torrent_core::InfoHashes::v1_only(meta.info_hash),
         };
 
@@ -173,9 +172,8 @@ impl TorrentHandle {
         let piece_selector = PieceSelector::new(num_pieces);
         let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
         let file_priorities = vec![FilePriority::Normal; file_lengths.len()];
-        let wanted_pieces = crate::piece_selector::build_wanted_pieces(
-            &file_priorities, &file_lengths, &lengths,
-        );
+        let wanted_pieces =
+            crate::piece_selector::build_wanted_pieces(&file_priorities, &file_lengths, &lengths);
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -190,7 +188,10 @@ impl TorrentHandle {
         // Bind listener for incoming connections
         // Try dual-stack [::]:port first, fall back to IPv4-only
         let listener: Option<Box<dyn crate::transport::TransportListener>> = match factory
-            .bind_tcp(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)))
+            .bind_tcp(SocketAddr::from((
+                std::net::Ipv6Addr::UNSPECIFIED,
+                config.listen_port,
+            )))
             .await
         {
             Ok(l) => Some(l),
@@ -201,11 +202,14 @@ impl TorrentHandle {
         };
         // Note: DSCP on listener is skipped for transport-abstracted sockets (no raw fd)
 
-        let mut tracker_manager =
-            TrackerManager::from_torrent_filtered(
-                &meta, our_peer_id, config.listen_port, &config.url_security,
-                config.peer_dscp, config.anonymous_mode,
-            );
+        let mut tracker_manager = TrackerManager::from_torrent_filtered(
+            &meta,
+            our_peer_id,
+            config.listen_port,
+            &config.url_security,
+            config.peer_dscp,
+            config.anonymous_mode,
+        );
         tracker_manager.set_info_hashes(info_hashes.clone());
 
         let enable_dht = config.enable_dht;
@@ -245,30 +249,36 @@ impl TorrentHandle {
 
         // Dual-swarm: also search for v2 hash peers if hybrid
         let v2_as_v1 = if info_hashes.is_hybrid() {
-            info_hashes.v2.map(|v2| Id20(v2.0[..20].try_into().unwrap()))
+            info_hashes
+                .v2
+                .map(|v2| Id20(v2.0[..20].try_into().unwrap()))
         } else {
             None
         };
-        let (dht_v2_peers_rx, dht_v6_v2_peers_rx) = if let (true, Some(v2_id)) = (enable_dht, v2_as_v1) {
-            let rx4 = if let Some(ref dht) = dht {
-                dht.get_peers(v2_id).await.ok()
+        let (dht_v2_peers_rx, dht_v6_v2_peers_rx) =
+            if let (true, Some(v2_id)) = (enable_dht, v2_as_v1) {
+                let rx4 = if let Some(ref dht) = dht {
+                    dht.get_peers(v2_id).await.ok()
+                } else {
+                    None
+                };
+                let rx6 = if let Some(ref dht6) = dht_v6 {
+                    dht6.get_peers(v2_id).await.ok()
+                } else {
+                    None
+                };
+                (rx4, rx6)
             } else {
-                None
+                (None, None)
             };
-            let rx6 = if let Some(ref dht6) = dht_v6 {
-                dht6.get_peers(v2_id).await.ok()
-            } else {
-                None
-            };
-            (rx4, rx6)
-        } else {
-            (None, None)
-        };
 
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
         let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
         let rate_limiter_set = crate::rate_limiter::RateLimiterSet::new(
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             config.upload_rate_limit,
             config.download_rate_limit,
         );
@@ -278,15 +288,15 @@ impl TorrentHandle {
         } else {
             None
         };
-        let have_buffer = crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
+        let have_buffer =
+            crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
         let is_share_mode = config.share_mode;
 
         let (piece_ready_tx, _) = broadcast::channel(64);
         let initial_have = chunk_tracker.bitfield().clone();
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(initial_have);
-        let stream_read_semaphore = crate::streaming::stream_read_semaphore(
-            config.max_concurrent_stream_reads,
-        );
+        let stream_read_semaphore =
+            crate::streaming::stream_read_semaphore(config.max_concurrent_stream_reads);
 
         let choker = Choker::with_algorithms(
             4,
@@ -444,7 +454,10 @@ impl TorrentHandle {
 
         // Try dual-stack [::]:port first, fall back to IPv4-only
         let listener: Option<Box<dyn crate::transport::TransportListener>> = match factory
-            .bind_tcp(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, config.listen_port)))
+            .bind_tcp(SocketAddr::from((
+                std::net::Ipv6Addr::UNSPECIFIED,
+                config.listen_port,
+            )))
             .await
         {
             Ok(l) => Some(l),
@@ -455,8 +468,13 @@ impl TorrentHandle {
         };
         // Note: DSCP on listener is skipped for transport-abstracted sockets (no raw fd)
 
-        let mut tracker_manager =
-            TrackerManager::empty(magnet.info_hash(), our_peer_id, config.listen_port, config.peer_dscp, config.anonymous_mode);
+        let mut tracker_manager = TrackerManager::empty(
+            magnet.info_hash(),
+            our_peer_id,
+            config.listen_port,
+            config.peer_dscp,
+            config.anonymous_mode,
+        );
         // Add tracker URLs from the magnet link (BEP 9 §3.1)
         for url in &magnet.trackers {
             tracker_manager.add_tracker_url(url);
@@ -500,7 +518,10 @@ impl TorrentHandle {
         let upload_bucket = crate::rate_limiter::TokenBucket::new(config.upload_rate_limit);
         let download_bucket = crate::rate_limiter::TokenBucket::new(config.download_rate_limit);
         let rate_limiter_set = crate::rate_limiter::RateLimiterSet::new(
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             config.upload_rate_limit,
             config.download_rate_limit,
         );
@@ -517,9 +538,8 @@ impl TorrentHandle {
 
         let (piece_ready_tx, _) = broadcast::channel(64);
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
-        let stream_read_semaphore = crate::streaming::stream_read_semaphore(
-            config.max_concurrent_stream_reads,
-        );
+        let stream_read_semaphore =
+            crate::streaming::stream_read_semaphore(config.max_concurrent_stream_reads);
 
         let choker = Choker::with_algorithms(
             4,
@@ -714,7 +734,11 @@ impl TorrentHandle {
     ) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(TorrentCommand::SetFilePriority { index, priority, reply: tx })
+            .send(TorrentCommand::SetFilePriority {
+                index,
+                priority,
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
@@ -759,10 +783,16 @@ impl TorrentHandle {
     }
 
     /// Open a streaming reader for a file within the torrent.
-    pub async fn open_file(&self, file_index: usize) -> crate::Result<crate::streaming::FileStream> {
+    pub async fn open_file(
+        &self,
+        file_index: usize,
+    ) -> crate::Result<crate::streaming::FileStream> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(TorrentCommand::OpenFile { file_index, reply: tx })
+            .send(TorrentCommand::OpenFile {
+                file_index,
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         let handle = rx.await.map_err(|_| crate::Error::Shutdown)??;
@@ -784,7 +814,10 @@ impl TorrentHandle {
     pub async fn move_storage(&self, new_path: std::path::PathBuf) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(TorrentCommand::MoveStorage { new_path, reply: tx })
+            .send(TorrentCommand::MoveStorage {
+                new_path,
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
@@ -794,7 +827,10 @@ impl TorrentHandle {
     pub async fn set_download_limit(&self, bytes_per_sec: u64) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(TorrentCommand::SetDownloadLimit { bytes_per_sec, reply: tx })
+            .send(TorrentCommand::SetDownloadLimit {
+                bytes_per_sec,
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
@@ -804,7 +840,10 @@ impl TorrentHandle {
     pub async fn set_upload_limit(&self, bytes_per_sec: u64) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(TorrentCommand::SetUploadLimit { bytes_per_sec, reply: tx })
+            .send(TorrentCommand::SetUploadLimit {
+                bytes_per_sec,
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)
@@ -913,7 +952,11 @@ impl TorrentHandle {
     pub async fn rename_file(&self, file_index: usize, new_name: String) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(TorrentCommand::RenameFile { file_index, new_name, reply: tx })
+            .send(TorrentCommand::RenameFile {
+                file_index,
+                new_name,
+                reply: tx,
+            })
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
@@ -1416,11 +1459,15 @@ impl TorrentActor {
         self.need_save_resume = true;
 
         self.state = new_state;
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::StateChanged {
-            info_hash: self.info_hash,
-            prev_state: prev,
-            new_state,
-        });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::StateChanged {
+                info_hash: self.info_hash,
+                prev_state: prev,
+                new_state,
+            },
+        );
     }
 
     /// Count connected peers by transport type.
@@ -1453,7 +1500,9 @@ impl TorrentActor {
         let mut connect_interval = tokio::time::interval(Duration::from_secs(5));
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
-            Some(tokio::time::interval(Duration::from_millis(self.config.have_send_delay_ms)))
+            Some(tokio::time::interval(Duration::from_millis(
+                self.config.have_send_delay_ms,
+            )))
         } else {
             None
         };
@@ -1463,7 +1512,9 @@ impl TorrentActor {
             None
         };
         let mut turnover_interval = if self.config.peer_turnover_interval > 0 {
-            Some(tokio::time::interval(Duration::from_secs(self.config.peer_turnover_interval)))
+            Some(tokio::time::interval(Duration::from_secs(
+                self.config.peer_turnover_interval,
+            )))
         } else {
             None
         };
@@ -2069,9 +2120,7 @@ impl TorrentActor {
                 if ip_flt.is_blocked(addr.ip()) {
                     continue;
                 }
-                if !self.peers.contains_key(&addr)
-                    && self.available_peers_set.insert(addr)
-                {
+                if !self.peers.contains_key(&addr) && self.available_peers_set.insert(addr) {
                     self.available_peers.push((addr, source));
                     added = true;
                 }
@@ -2103,7 +2152,9 @@ impl TorrentActor {
             Some(m) => m,
             None => {
                 self.moving_storage = false;
-                return Err(crate::Error::Config("cannot move storage: metadata not available".into()));
+                return Err(crate::Error::Config(
+                    "cannot move storage: metadata not available".into(),
+                ));
             }
         };
 
@@ -2160,16 +2211,24 @@ impl TorrentActor {
         };
 
         // Re-register with disk manager
-        self.disk = Some(self.disk_manager.register_torrent(self.info_hash, storage).await);
+        self.disk = Some(
+            self.disk_manager
+                .register_torrent(self.info_hash, storage)
+                .await,
+        );
 
         // Update download dir
         self.config.download_dir = new_path.clone();
 
         // Fire alert
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::StorageMoved {
-            info_hash: self.info_hash,
-            new_path,
-        });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::StorageMoved {
+                info_hash: self.info_hash,
+                new_path,
+            },
+        );
 
         self.moving_storage = false;
         Ok(())
@@ -2199,8 +2258,7 @@ impl TorrentActor {
         }
 
         // Compute the old relative path (files() includes torrent name as first component)
-        let old_rel: std::path::PathBuf =
-            files[file_index].path.iter().collect();
+        let old_rel: std::path::PathBuf = files[file_index].path.iter().collect();
         let old_path = self.config.download_dir.join(&old_rel);
 
         // Build new relative path: same parent directory, new filename
@@ -2318,10 +2376,7 @@ impl TorrentActor {
 
         let total = lengths.total_length();
 
-        let bitfield = self
-            .chunk_tracker
-            .as_ref()
-            .map(|ct| ct.bitfield());
+        let bitfield = self.chunk_tracker.as_ref().map(|ct| ct.bitfield());
 
         let mut total_done: u64 = 0;
         let mut total_wanted: u64 = 0;
@@ -2329,10 +2384,7 @@ impl TorrentActor {
 
         for idx in 0..self.num_pieces {
             let piece_bytes = lengths.piece_size(idx) as u64;
-            let have = bitfield
-                .as_ref()
-                .map(|bf| bf.get(idx))
-                .unwrap_or(false);
+            let have = bitfield.as_ref().map(|bf| bf.get(idx)).unwrap_or(false);
 
             if have {
                 total_done += piece_bytes;
@@ -2353,7 +2405,14 @@ impl TorrentActor {
         };
         let progress_ppm = (progress * 1_000_000.0) as u32;
 
-        (total, total_done, total_wanted, total_wanted_done, progress, progress_ppm)
+        (
+            total,
+            total_done,
+            total_wanted,
+            total_wanted_done,
+            progress,
+            progress_ppm,
+        )
     }
 
     /// Compute distributed copy availability across the swarm.
@@ -2384,40 +2443,45 @@ impl TorrentActor {
     }
 
     fn build_peer_info(&self) -> Vec<PeerInfo> {
-        self.peers.values().map(|peer| {
-            let client = peer.ext_handshake
-                .as_ref()
-                .and_then(|h| h.v.clone())
-                .unwrap_or_default();
-            PeerInfo {
-                addr: peer.addr,
-                client,
-                peer_choking: peer.peer_choking,
-                peer_interested: peer.peer_interested,
-                am_choking: peer.am_choking,
-                am_interested: peer.am_interested,
-                download_rate: peer.download_rate,
-                upload_rate: peer.upload_rate,
-                num_pieces: peer.bitfield.count_ones(),
-                source: peer.source,
-                supports_fast: peer.supports_fast,
-                upload_only: peer.upload_only,
-                snubbed: peer.snubbed,
-                connected_duration_secs: peer.connected_at.elapsed().as_secs(),
-                num_pending_requests: peer.pending_requests.len(),
-                num_incoming_requests: peer.incoming_requests.len(),
-            }
-        }).collect()
+        self.peers
+            .values()
+            .map(|peer| {
+                let client = peer
+                    .ext_handshake
+                    .as_ref()
+                    .and_then(|h| h.v.clone())
+                    .unwrap_or_default();
+                PeerInfo {
+                    addr: peer.addr,
+                    client,
+                    peer_choking: peer.peer_choking,
+                    peer_interested: peer.peer_interested,
+                    am_choking: peer.am_choking,
+                    am_interested: peer.am_interested,
+                    download_rate: peer.download_rate,
+                    upload_rate: peer.upload_rate,
+                    num_pieces: peer.bitfield.count_ones(),
+                    source: peer.source,
+                    supports_fast: peer.supports_fast,
+                    upload_only: peer.upload_only,
+                    snubbed: peer.snubbed,
+                    connected_duration_secs: peer.connected_at.elapsed().as_secs(),
+                    num_pending_requests: peer.pending_requests.len(),
+                    num_incoming_requests: peer.incoming_requests.len(),
+                }
+            })
+            .collect()
     }
 
     fn build_download_queue(&self) -> Vec<PartialPieceInfo> {
-        self.in_flight_pieces.iter().map(|(&piece_index, ifp)| {
-            PartialPieceInfo {
+        self.in_flight_pieces
+            .iter()
+            .map(|(&piece_index, ifp)| PartialPieceInfo {
                 piece_index,
                 blocks_in_piece: ifp.total_blocks,
                 blocks_assigned: ifp.assigned_blocks.len() as u32,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Compute per-file downloaded bytes.
@@ -2516,8 +2580,14 @@ impl TorrentActor {
 
     /// Read a complete piece from disk by reading all chunks and concatenating.
     async fn handle_read_piece(&self, index: u32) -> crate::Result<Bytes> {
-        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
-        let lengths = self.lengths.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let disk = self
+            .disk
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let lengths = self
+            .lengths
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
 
         let piece_size = lengths.piece_size(index);
         if piece_size == 0 {
@@ -2550,7 +2620,10 @@ impl TorrentActor {
 
     /// Flush the disk write cache.
     async fn handle_flush_cache(&self) -> crate::Result<()> {
-        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let disk = self
+            .disk
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
         disk.flush_cache().await.map_err(crate::Error::Storage)
     }
 
@@ -2570,12 +2643,12 @@ impl TorrentActor {
         let num_files = self.file_priorities.len();
         let (open, mode) = match self.state {
             TorrentState::Seeding => (true, crate::types::FileMode::ReadOnly),
-            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata | TorrentState::Complete | TorrentState::Sharing => {
-                (true, crate::types::FileMode::ReadWrite)
-            }
-            TorrentState::Paused | TorrentState::Stopped => {
-                (false, crate::types::FileMode::Closed)
-            }
+            TorrentState::Downloading
+            | TorrentState::Checking
+            | TorrentState::FetchingMetadata
+            | TorrentState::Complete
+            | TorrentState::Sharing => (true, crate::types::FileMode::ReadWrite),
+            TorrentState::Paused | TorrentState::Stopped => (false, crate::types::FileMode::Closed),
         };
         vec![crate::types::FileStatus { open, mode }; num_files]
     }
@@ -2594,9 +2667,7 @@ impl TorrentActor {
         if self.config.super_seeding {
             flags |= crate::types::TorrentFlags::SUPER_SEEDING;
         }
-        if self.state == TorrentState::Seeding
-            || matches!(self.state, TorrentState::Complete)
-        {
+        if self.state == TorrentState::Seeding || matches!(self.state, TorrentState::Complete) {
             flags |= crate::types::TorrentFlags::UPLOAD_ONLY;
         }
         flags
@@ -2604,7 +2675,8 @@ impl TorrentActor {
 
     /// Apply set_flags: enable the specified flags.
     async fn apply_set_flags(&mut self, flags: crate::types::TorrentFlags) {
-        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state != TorrentState::Paused {
+        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state != TorrentState::Paused
+        {
             self.handle_pause().await;
         }
         if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
@@ -2621,7 +2693,8 @@ impl TorrentActor {
 
     /// Apply unset_flags: disable the specified flags.
     async fn apply_unset_flags(&mut self, flags: crate::types::TorrentFlags) {
-        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state == TorrentState::Paused {
+        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state == TorrentState::Paused
+        {
             self.handle_resume().await;
         }
         if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
@@ -2851,18 +2924,26 @@ impl TorrentActor {
         for outcome in outcomes {
             match &outcome.result {
                 Ok(num_peers) => {
-                    post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TrackerReply {
-                        info_hash: self.info_hash,
-                        url: outcome.url.clone(),
-                        num_peers: *num_peers,
-                    });
+                    post_alert(
+                        &self.alert_tx,
+                        &self.alert_mask,
+                        AlertKind::TrackerReply {
+                            info_hash: self.info_hash,
+                            url: outcome.url.clone(),
+                            num_peers: *num_peers,
+                        },
+                    );
                 }
                 Err(msg) => {
-                    post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TrackerError {
-                        info_hash: self.info_hash,
-                        url: outcome.url.clone(),
-                        message: msg.clone(),
-                    });
+                    post_alert(
+                        &self.alert_tx,
+                        &self.alert_mask,
+                        AlertKind::TrackerError {
+                            info_hash: self.info_hash,
+                            url: outcome.url.clone(),
+                            message: msg.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -2903,7 +2984,13 @@ impl TorrentActor {
         }
         let prev_state = self.state;
         self.transition_state(TorrentState::Paused);
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentPaused { info_hash: self.info_hash });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentPaused {
+                info_hash: self.info_hash,
+            },
+        );
         // Disconnect all peers
         for peer in self.peers.values() {
             let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
@@ -2937,15 +3024,24 @@ impl TorrentActor {
             self.transition_state(TorrentState::Downloading);
             self.choker.set_seed_mode(false);
         }
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentResumed { info_hash: self.info_hash });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::TorrentResumed {
+                info_hash: self.info_hash,
+            },
+        );
         // Re-announce Started
         let left = self.calculate_left();
-        let result = self.tracker_manager.announce(
-            torrent_tracker::AnnounceEvent::Started,
-            self.uploaded,
-            self.downloaded,
-            left,
-        ).await;
+        let result = self
+            .tracker_manager
+            .announce(
+                torrent_tracker::AnnounceEvent::Started,
+                self.uploaded,
+                self.downloaded,
+                left,
+            )
+            .await;
         self.fire_tracker_alerts(&result.outcomes);
         if !result.peers.is_empty() {
             self.handle_add_peers(result.peers, PeerSource::Tracker);
@@ -2962,7 +3058,11 @@ impl TorrentActor {
                 bitfield,
             } => {
                 let ones = bitfield.count_ones();
-                let is_choking = self.peers.get(&peer_addr).map(|p| p.peer_choking).unwrap_or(true);
+                let is_choking = self
+                    .peers
+                    .get(&peer_addr)
+                    .map(|p| p.peer_choking)
+                    .unwrap_or(true);
                 debug!(%peer_addr, ones, is_choking, state = ?self.state, "bitfield event received");
                 self.piece_selector.add_peer_bitfield(&bitfield);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
@@ -2997,13 +3097,9 @@ impl TorrentActor {
                 begin,
                 data,
             } => {
-                self.handle_piece_data(peer_addr, index, begin, data)
-                    .await;
+                self.handle_piece_data(peer_addr, index, begin, data).await;
             }
-            PeerEvent::PeerChoking {
-                peer_addr,
-                choking,
-            } => {
+            PeerEvent::PeerChoking { peer_addr, choking } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.peer_choking = choking;
                 }
@@ -3077,7 +3173,10 @@ impl TorrentActor {
             }
             PeerEvent::TrackersReceived { tracker_urls } => {
                 for url in tracker_urls {
-                    if self.tracker_manager.add_tracker_url_validated(&url, &self.config.url_security) {
+                    if self
+                        .tracker_manager
+                        .add_tracker_url_validated(&url, &self.config.url_security)
+                    {
                         debug!(url = %url, "added tracker from lt_trackers");
                     }
                 }
@@ -3109,18 +3208,12 @@ impl TorrentActor {
                 }
                 debug!(index, %peer_addr, "request rejected by peer");
             }
-            PeerEvent::AllowedFast {
-                peer_addr,
-                index,
-            } => {
+            PeerEvent::AllowedFast { peer_addr, index } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.allowed_fast.insert(index);
                 }
             }
-            PeerEvent::SuggestPiece {
-                peer_addr,
-                index,
-            } => {
+            PeerEvent::SuggestPiece { peer_addr, index } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.suggested_pieces.insert(index);
                 }
@@ -3133,16 +3226,17 @@ impl TorrentActor {
                     peer.transport = Some(transport);
                 }
             }
-            PeerEvent::Disconnected {
-                peer_addr,
-                reason,
-            } => {
+            PeerEvent::Disconnected { peer_addr, reason } => {
                 debug!(%peer_addr, ?reason, "peer disconnected");
-                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerDisconnected {
-                    info_hash: self.info_hash,
-                    addr: peer_addr,
-                    reason: reason.clone(),
-                });
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::PeerDisconnected {
+                        info_hash: self.info_hash,
+                        addr: peer_addr,
+                        reason: reason.clone(),
+                    },
+                );
                 // BEP 16: clean up super-seed assignment
                 if let Some(ref mut ss) = self.super_seed {
                     ss.peer_disconnected(peer_addr);
@@ -3156,9 +3250,10 @@ impl TorrentActor {
                         .map(|&(idx, _, _)| idx)
                         .collect();
                     for piece_idx in peer_pieces {
-                        let other_has = self.peers.values().any(|p| {
-                            p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx)
-                        });
+                        let other_has = self
+                            .peers
+                            .values()
+                            .any(|p| p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx));
                         if !other_has {
                             self.in_flight_pieces.remove(&piece_idx);
                         }
@@ -3176,11 +3271,20 @@ impl TorrentActor {
             PeerEvent::WebSeedPieceData { url, index, data } => {
                 self.handle_web_seed_piece_data(url, index, data).await;
             }
-            PeerEvent::WebSeedError { url, piece, message } => {
+            PeerEvent::WebSeedError {
+                url,
+                piece,
+                message,
+            } => {
                 self.handle_web_seed_error(url, piece, message);
             }
-            PeerEvent::HashesReceived { peer_addr, request, hashes } => {
-                self.handle_hashes_received(peer_addr, request, hashes).await;
+            PeerEvent::HashesReceived {
+                peer_addr,
+                request,
+                hashes,
+            } => {
+                self.handle_hashes_received(peer_addr, request, hashes)
+                    .await;
             }
             PeerEvent::HashRequestRejected { peer_addr, request } => {
                 if let Some(ref mut picker) = self.hash_picker {
@@ -3196,22 +3300,33 @@ impl TorrentActor {
                     self.handle_holepunch_rendezvous(peer_addr, target).await;
                 }
             }
-            PeerEvent::HolepunchConnect { peer_addr: _, target } => {
+            PeerEvent::HolepunchConnect {
+                peer_addr: _,
+                target,
+            } => {
                 if self.config.enable_holepunch {
                     self.handle_holepunch_connect(target).await;
                 }
             }
-            PeerEvent::HolepunchError { peer_addr: _, target, error_code } => {
+            PeerEvent::HolepunchError {
+                peer_addr: _,
+                target,
+                error_code,
+            } => {
                 let message = torrent_wire::HolepunchError::from_u32(error_code)
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| format!("unknown error code {error_code}"));
                 debug!(%target, %error_code, %message, "holepunch rendezvous failed");
-                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HolepunchFailed {
-                    info_hash: self.info_hash,
-                    addr: target,
-                    error_code: Some(error_code),
-                    message,
-                });
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::HolepunchFailed {
+                        info_hash: self.info_hash,
+                        addr: target,
+                        error_code: Some(error_code),
+                        message,
+                    },
+                );
             }
             PeerEvent::MseRetry { peer_addr, cmd_tx } => {
                 // MSE handshake failed, peer is retrying with plaintext.
@@ -3235,12 +3350,21 @@ impl TorrentActor {
 
         // Fire-and-forget write (zero-copy: Bytes moved from wire codec -> disk)
         if let Some(ref disk) = self.disk {
-            match disk.enqueue_write(index, begin, data, DiskJobFlags::empty(), &self.write_error_tx) {
+            match disk.enqueue_write(
+                index,
+                begin,
+                data,
+                DiskJobFlags::empty(),
+                &self.write_error_tx,
+            ) {
                 Ok(()) => {}
                 Err(returned_data) => {
                     // Channel full — fall back to blocking write
                     warn!(index, begin, "disk channel full, blocking write");
-                    if let Err(e) = disk.write_chunk(index, begin, returned_data, DiskJobFlags::empty()).await {
+                    if let Err(e) = disk
+                        .write_chunk(index, begin, returned_data, DiskJobFlags::empty())
+                        .await
+                    {
                         warn!(index, begin, "failed to write chunk: {e}");
                         return;
                     }
@@ -3254,7 +3378,10 @@ impl TorrentActor {
         self.need_save_resume = true;
 
         // Smart banning: track which peers contribute to each piece
-        self.piece_contributors.entry(index).or_default().insert(peer_addr.ip());
+        self.piece_contributors
+            .entry(index)
+            .or_default()
+            .insert(peer_addr.ip());
 
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
             if let Some(pos) = peer
@@ -3265,7 +3392,8 @@ impl TorrentActor {
                 peer.pending_requests.swap_remove(pos);
             }
             peer.download_bytes_window += data_len as u64;
-            peer.pipeline.block_received(index, begin, data_len as u32, std::time::Instant::now());
+            peer.pipeline
+                .block_received(index, begin, data_len as u32, std::time::Instant::now());
             peer.last_data_received = Some(std::time::Instant::now());
             // Clear snub if snubbed
             if peer.snubbed {
@@ -3284,13 +3412,11 @@ impl TorrentActor {
             let cancels = self.end_game.block_received(index, begin, peer_addr);
             for (cancel_addr, ci, cb, cl) in cancels {
                 if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
-                    let _ = cancel_peer
-                        .cmd_tx
-                        .try_send(PeerCommand::Cancel {
-                            index: ci,
-                            begin: cb,
-                            length: cl,
-                        });
+                    let _ = cancel_peer.cmd_tx.try_send(PeerCommand::Cancel {
+                        index: ci,
+                        begin: cb,
+                        length: cl,
+                    });
                     if let Some(pos) = cancel_peer
                         .pending_requests
                         .iter()
@@ -3326,7 +3452,9 @@ impl TorrentActor {
                 torrent_core::TorrentVersion::V1Only => {
                     // Async: fire-and-forget, result via verify_result_rx
                     if let Some(ref disk) = self.disk
-                        && let Some(expected) = self.meta.as_ref()
+                        && let Some(expected) = self
+                            .meta
+                            .as_ref()
                             .and_then(|m| m.info.piece_hash(index as usize))
                     {
                         disk.enqueue_verify(index, expected, &self.verify_result_tx);
@@ -3546,19 +3674,24 @@ impl TorrentActor {
 
         let save_path = self.config.download_dir.to_string_lossy().into_owned();
 
-        let mut rd = torrent_core::FastResumeData::new(
-            self.info_hash.as_bytes().to_vec(),
-            name,
-            save_path,
-        );
+        let mut rd =
+            torrent_core::FastResumeData::new(self.info_hash.as_bytes().to_vec(), name, save_path);
 
         rd.pieces = pieces_bytes;
 
         rd.total_uploaded = self.uploaded as i64;
         rd.total_downloaded = self.downloaded as i64;
 
-        rd.paused = if self.state == TorrentState::Paused { 1 } else { 0 };
-        rd.seed_mode = if self.state == TorrentState::Seeding { 1 } else { 0 };
+        rd.paused = if self.state == TorrentState::Paused {
+            1
+        } else {
+            0
+        };
+        rd.seed_mode = if self.state == TorrentState::Seeding {
+            1
+        } else {
+            0
+        };
         rd.super_seeding = if self.super_seed.is_some() { 1 } else { 0 };
 
         // Collect tracker URLs from torrent metadata
@@ -3606,7 +3739,9 @@ impl TorrentActor {
             let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
             if let Some(ref lengths) = self.lengths {
                 self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
-                    &self.file_priorities, &file_lengths, lengths,
+                    &self.file_priorities,
+                    &file_lengths,
+                    lengths,
                 );
             }
         }
@@ -3618,7 +3753,10 @@ impl TorrentActor {
         &mut self,
         file_index: usize,
     ) -> crate::Result<crate::streaming::FileStreamHandle> {
-        let meta = self.meta.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let meta = self
+            .meta
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
         let files = meta.info.files();
         if file_index >= files.len() {
             return Err(crate::Error::InvalidFileIndex {
@@ -3630,8 +3768,14 @@ impl TorrentActor {
             return Err(crate::Error::FileSkipped { index: file_index });
         }
 
-        let lengths = self.lengths.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
-        let disk = self.disk.as_ref().ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let lengths = self
+            .lengths
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
+        let disk = self
+            .disk
+            .as_ref()
+            .ok_or(crate::Error::MetadataNotReady(self.info_hash))?;
 
         // Compute file offset within torrent data
         let mut file_offset = 0u64;
@@ -3642,20 +3786,21 @@ impl TorrentActor {
 
         let (cursor_tx, cursor_rx) = tokio::sync::watch::channel(0u64);
 
-        let permit = self.stream_read_semaphore.clone()
+        let permit = self
+            .stream_read_semaphore
+            .clone()
             .try_acquire_owned()
-            .map_err(|_| crate::Error::Connection(
-                "too many concurrent stream readers".into(),
-            ))?;
+            .map_err(|_| crate::Error::Connection("too many concurrent stream readers".into()))?;
 
         // Add streaming cursor for the actor to track
-        self.streaming_cursors.push(crate::streaming::StreamingCursor {
-            file_index,
-            file_offset,
-            cursor_piece: (file_offset / lengths.piece_length()) as u32,
-            readahead_pieces: self.config.readahead_pieces,
-            cursor_rx,
-        });
+        self.streaming_cursors
+            .push(crate::streaming::StreamingCursor {
+                file_index,
+                file_offset,
+                cursor_piece: (file_offset / lengths.piece_length()) as u32,
+                readahead_pieces: self.config.readahead_pieces,
+                cursor_rx,
+            });
 
         Ok(crate::streaming::FileStreamHandle {
             disk: disk.clone(),
@@ -3691,10 +3836,10 @@ impl TorrentActor {
             .as_ref()
             .and_then(|m| m.info.piece_hash(index as usize));
 
-        let verified = if let (Some(disk), Some(expected)) =
-            (&self.disk, expected_hash)
-        {
-            disk.verify_piece(index, expected, DiskJobFlags::empty()).await.unwrap_or(false)
+        let verified = if let (Some(disk), Some(expected)) = (&self.disk, expected_hash) {
+            disk.verify_piece(index, expected, DiskJobFlags::empty())
+                .await
+                .unwrap_or(false)
         } else {
             false
         };
@@ -3751,7 +3896,10 @@ impl TorrentActor {
                 None => continue,
             };
 
-            let block_hash = match disk.hash_block(index, begin, length, DiskJobFlags::empty()).await {
+            let block_hash = match disk
+                .hash_block(index, begin, length, DiskJobFlags::empty())
+                .await
+            {
                 Ok(h) => h,
                 Err(e) => {
                     warn!(index, chunk_idx, "failed to hash block: {e}");
@@ -3773,7 +3921,10 @@ impl TorrentActor {
                     }
                     torrent_core::SetBlockResult::Unknown => {
                         // Piece-layer hash not yet available — stored for deferred verification
-                        debug!(index, chunk_idx, "block hash stored, awaiting piece-layer hashes");
+                        debug!(
+                            index,
+                            chunk_idx, "block hash stored, awaiting piece-layer hashes"
+                        );
                     }
                     torrent_core::SetBlockResult::HashFailed => {
                         warn!(index, chunk_idx, "block hash failed Merkle verification");
@@ -3783,7 +3934,12 @@ impl TorrentActor {
             }
         }
 
-        if all_ok && self.chunk_tracker.as_ref().is_some_and(|ct| ct.all_blocks_verified(index)) {
+        if all_ok
+            && self
+                .chunk_tracker
+                .as_ref()
+                .is_some_and(|ct| ct.all_blocks_verified(index))
+        {
             HashResult::Passed
         } else {
             // Either a disk error (all_ok = false) or blocks stored awaiting piece-layer hashes
@@ -3808,7 +3964,10 @@ impl TorrentActor {
                 .and_then(|m| m.info.piece_hash(index as usize));
 
             if let (Some(disk), Some(expected)) = (&self.disk, expected_hash) {
-                match disk.verify_piece(index, expected, DiskJobFlags::empty()).await {
+                match disk
+                    .verify_piece(index, expected, DiskJobFlags::empty())
+                    .await
+                {
                     Ok(true) => HashResult::Passed,
                     Ok(false) => HashResult::Failed,
                     Err(_) => HashResult::NotApplicable,
@@ -3838,7 +3997,10 @@ impl TorrentActor {
             // v2 deferred (awaiting piece-layer hashes) but v1 passed: defer the whole thing.
             // When piece-layer hashes arrive, handle_hashes_received will re-verify.
             (HashResult::Passed, HashResult::NotApplicable) => {
-                debug!(index, "hybrid: v1 passed, v2 deferred — waiting for piece-layer hashes");
+                debug!(
+                    index,
+                    "hybrid: v1 passed, v2 deferred — waiting for piece-layer hashes"
+                );
             }
             // v2 deferred but v1 failed: fail immediately (no point waiting for v2).
             (HashResult::Failed, HashResult::NotApplicable) => {
@@ -3859,10 +4021,14 @@ impl TorrentActor {
         self.in_flight_pieces.remove(&index);
         self.piece_contributors.remove(&index);
         info!(index, "piece verified");
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PieceFinished {
-            info_hash: self.info_hash,
-            piece: index,
-        });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::PieceFinished {
+                info_hash: self.info_hash,
+                piece: index,
+            },
+        );
 
         // Notify FileStream consumers of piece completion
         let _ = self.piece_ready_tx.send(index);
@@ -3903,10 +4069,15 @@ impl TorrentActor {
             let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
             for peer_addr in peer_addrs {
                 let already = self.suggested_to_peers.entry(peer_addr).or_default();
-                if already.len() >= max_suggest { continue; }
-                let should_suggest = self.peers.get(&peer_addr)
+                if already.len() >= max_suggest {
+                    continue;
+                }
+                let should_suggest = self
+                    .peers
+                    .get(&peer_addr)
                     .is_some_and(|p| !p.bitfield.get(index));
-                if should_suggest && !already.contains(&index)
+                if should_suggest
+                    && !already.contains(&index)
                     && let Some(peer) = self.peers.get(&peer_addr)
                 {
                     let _ = peer.cmd_tx.try_send(PeerCommand::SuggestPiece(index));
@@ -3939,9 +4110,13 @@ impl TorrentActor {
             && ct.bitfield().count_ones() == self.num_pieces
         {
             info!("download complete, transitioning to seeding");
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::TorrentFinished {
-                info_hash: self.info_hash,
-            });
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::TorrentFinished {
+                    info_hash: self.info_hash,
+                },
+            );
             self.end_game.deactivate();
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
@@ -3949,7 +4124,9 @@ impl TorrentActor {
             if self.config.upload_only_announce {
                 let hs = torrent_wire::ExtHandshake::new_upload_only();
                 for peer in self.peers.values() {
-                    let _ = peer.cmd_tx.try_send(PeerCommand::SendExtHandshake(hs.clone()));
+                    let _ = peer
+                        .cmd_tx
+                        .try_send(PeerCommand::SendExtHandshake(hs.clone()));
                 }
             }
             // Announce completion to trackers
@@ -3963,15 +4140,22 @@ impl TorrentActor {
 
     /// Common failure path after a piece fails hash verification.
     async fn on_piece_hash_failed(&mut self, index: u32) {
-        let contributors: Vec<std::net::IpAddr> = self.piece_contributors
+        let contributors: Vec<std::net::IpAddr> = self
+            .piece_contributors
             .remove(&index)
             .unwrap_or_default()
             .into_iter()
             .collect();
 
-        warn!(index, contributors = contributors.len(), "piece hash verification failed");
+        warn!(
+            index,
+            contributors = contributors.len(),
+            "piece hash verification failed"
+        );
 
-        self.total_failed_bytes += self.lengths.as_ref()
+        self.total_failed_bytes += self
+            .lengths
+            .as_ref()
             .map(|l| l.piece_size(index) as u64)
             .unwrap_or(0);
 
@@ -3985,11 +4169,15 @@ impl TorrentActor {
             self.enter_parole(index, contributors.clone());
         }
 
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
-            info_hash: self.info_hash,
-            piece: index,
-            contributors,
-        });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::HashFailed {
+                info_hash: self.info_hash,
+                piece: index,
+                contributors,
+            },
+        );
         if let Some(ref mut ct) = self.chunk_tracker {
             ct.mark_failed(index);
         }
@@ -4028,9 +4216,7 @@ impl TorrentActor {
             &self.alert_mask,
             AlertKind::TorrentError {
                 info_hash,
-                message: format!(
-                    "v1 and v2 hashes do not describe the same data (piece {piece})"
-                ),
+                message: format!("v1 and v2 hashes do not describe the same data (piece {piece})"),
             },
         );
 
@@ -4063,11 +4249,15 @@ impl TorrentActor {
                 }
                 for piece in result.hash_failed {
                     warn!(piece, "piece failed after hash layer received");
-                    post_alert(&self.alert_tx, &self.alert_mask, AlertKind::HashFailed {
-                        info_hash: self.info_hash,
-                        piece,
-                        contributors: Vec::new(),
-                    });
+                    post_alert(
+                        &self.alert_tx,
+                        &self.alert_mask,
+                        AlertKind::HashFailed {
+                            info_hash: self.info_hash,
+                            piece,
+                            contributors: Vec::new(),
+                        },
+                    );
                 }
             }
             Err(e) => {
@@ -4109,11 +4299,18 @@ impl TorrentActor {
             return;
         }
 
-        info!(index, contributors = contributors.len(), "entering parole mode");
-        self.parole_pieces.insert(index, crate::ban::ParoleState {
-            original_contributors: contributors.into_iter().collect(),
-            parole_peer: None,
-        });
+        info!(
+            index,
+            contributors = contributors.len(),
+            "entering parole mode"
+        );
+        self.parole_pieces.insert(
+            index,
+            crate::ban::ParoleState {
+                original_contributors: contributors.into_iter().collect(),
+                parole_peer: None,
+            },
+        );
     }
 
     /// Parole piece verified successfully — the original contributors sent bad data.
@@ -4132,10 +4329,14 @@ impl TorrentActor {
         // Disconnect and fire alerts for newly banned peers
         for ip in banned_ips {
             self.disconnect_banned_ip(ip).await;
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerBanned {
-                info_hash: self.info_hash,
-                addr: std::net::SocketAddr::new(ip, 0),
-            });
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::PeerBanned {
+                    info_hash: self.info_hash,
+                    addr: std::net::SocketAddr::new(ip, 0),
+                },
+            );
         }
     }
 
@@ -4154,18 +4355,24 @@ impl TorrentActor {
     /// Disconnect all peers matching a banned IP and remove from available_peers.
     async fn disconnect_banned_ip(&mut self, ip: std::net::IpAddr) {
         // Remove from connected peers
-        let addrs_to_remove: Vec<SocketAddr> = self.peers.keys()
+        let addrs_to_remove: Vec<SocketAddr> = self
+            .peers
+            .keys()
             .filter(|a| a.ip() == ip)
             .copied()
             .collect();
         for addr in addrs_to_remove {
             if let Some(peer) = self.peers.remove(&addr) {
                 let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
-                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerDisconnected {
-                    info_hash: self.info_hash,
-                    addr,
-                    reason: Some("banned".into()),
-                });
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::PeerDisconnected {
+                        info_hash: self.info_hash,
+                        addr,
+                        reason: Some("banned".into()),
+                    },
+                );
             }
         }
         // Remove from available peers pool
@@ -4201,7 +4408,9 @@ impl TorrentActor {
             Some(crate::have_buffer::FlushResult::SendBitfield(bf)) => {
                 let data = Bytes::copy_from_slice(bf.as_bytes());
                 for peer in self.peers.values() {
-                    let _ = peer.cmd_tx.try_send(PeerCommand::SendBitfield(data.clone()));
+                    let _ = peer
+                        .cmd_tx
+                        .try_send(PeerCommand::SendBitfield(data.clone()));
                 }
             }
             None => {}
@@ -4226,13 +4435,21 @@ impl TorrentActor {
         for peer_addr in peer_addrs {
             let already_suggested = self.suggested_to_peers.entry(peer_addr).or_default();
             let peer_has_piece = |piece: u32| -> bool {
-                self.peers.get(&peer_addr).is_some_and(|p| p.bitfield.get(piece))
+                self.peers
+                    .get(&peer_addr)
+                    .is_some_and(|p| p.bitfield.get(piece))
             };
             let mut sent = 0;
             for &piece in &cached {
-                if sent >= max_suggest { break; }
-                if peer_has_piece(piece) { continue; }
-                if already_suggested.contains(&piece) { continue; }
+                if sent >= max_suggest {
+                    break;
+                }
+                if peer_has_piece(piece) {
+                    continue;
+                }
+                if already_suggested.contains(&piece) {
+                    continue;
+                }
                 if let Some(peer) = self.peers.get(&peer_addr) {
                     let _ = peer.cmd_tx.try_send(PeerCommand::SuggestPiece(piece));
                     already_suggested.insert(piece);
@@ -4271,28 +4488,34 @@ impl TorrentActor {
 
                         // Create filesystem storage now that we know the file layout
                         let files = meta.info.files();
-                        let file_paths: Vec<std::path::PathBuf> = files.iter()
+                        let file_paths: Vec<std::path::PathBuf> = files
+                            .iter()
                             .map(|f| f.path.iter().collect::<std::path::PathBuf>())
                             .collect();
                         let file_lengths_vec: Vec<u64> = files.iter().map(|f| f.length).collect();
-                        let preallocate = self.config.storage_mode == torrent_core::StorageMode::Full;
-                        let storage: Arc<dyn TorrentStorage> = match torrent_storage::FilesystemStorage::new(
-                            &self.config.download_dir,
-                            file_paths,
-                            file_lengths_vec,
-                            lengths.clone(),
-                            None,
-                            preallocate,
-                        ) {
-                            Ok(s) => Arc::new(s),
-                            Err(e) => {
-                                warn!("failed to create filesystem storage: {e}, falling back to memory");
-                                Arc::new(MemoryStorage::new(lengths.clone()))
-                            }
-                        };
-                        let disk_handle = self.disk_manager.register_torrent(
-                            self.info_hash, storage,
-                        ).await;
+                        let preallocate =
+                            self.config.storage_mode == torrent_core::StorageMode::Full;
+                        let storage: Arc<dyn TorrentStorage> =
+                            match torrent_storage::FilesystemStorage::new(
+                                &self.config.download_dir,
+                                file_paths,
+                                file_lengths_vec,
+                                lengths.clone(),
+                                None,
+                                preallocate,
+                            ) {
+                                Ok(s) => Arc::new(s),
+                                Err(e) => {
+                                    warn!(
+                                        "failed to create filesystem storage: {e}, falling back to memory"
+                                    );
+                                    Arc::new(MemoryStorage::new(lengths.clone()))
+                                }
+                            };
+                        let disk_handle = self
+                            .disk_manager
+                            .register_torrent(self.info_hash, storage)
+                            .await;
 
                         self.disk = Some(disk_handle);
                         self.chunk_tracker = Some(ChunkTracker::new(lengths.clone()));
@@ -4301,10 +4524,13 @@ impl TorrentActor {
                         // Update all connected peer tasks so they can validate
                         // incoming Bitfield messages with the correct piece count.
                         for peer in self.peers.values() {
-                            let _ = peer.cmd_tx.try_send(PeerCommand::UpdateNumPieces(num_pieces));
+                            let _ = peer
+                                .cmd_tx
+                                .try_send(PeerCommand::UpdateNumPieces(num_pieces));
                         }
                         self.piece_selector = PieceSelector::new(num_pieces);
-                        let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
+                        let file_lengths: Vec<u64> =
+                            meta.info.files().iter().map(|f| f.length).collect();
                         let mut meta = meta;
                         meta.info_bytes = Some(Bytes::from(info_bytes));
                         self.meta = Some(meta);
@@ -4320,7 +4546,9 @@ impl TorrentActor {
                         }
 
                         self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
-                            &self.file_priorities, &file_lengths, self.lengths.as_ref().unwrap(),
+                            &self.file_priorities,
+                            &file_lengths,
+                            self.lengths.as_ref().unwrap(),
                         );
                         if self.config.share_mode {
                             self.transition_state(TorrentState::Sharing);
@@ -4370,11 +4598,19 @@ impl TorrentActor {
                             }
                         }
 
-                        let name = self.meta.as_ref().map(|m| m.info.name.clone()).unwrap_or_default();
-                        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::MetadataReceived {
-                            info_hash: self.info_hash,
-                            name,
-                        });
+                        let name = self
+                            .meta
+                            .as_ref()
+                            .map(|m| m.info.name.clone())
+                            .unwrap_or_default();
+                        post_alert(
+                            &self.alert_tx,
+                            &self.alert_mask,
+                            AlertKind::MetadataReceived {
+                                info_hash: self.info_hash,
+                                name,
+                            },
+                        );
                         info!("metadata assembled, switching to Downloading");
 
                         // Start web seeds now that we have metadata
@@ -4387,10 +4623,21 @@ impl TorrentActor {
                         // early.  Now that we're Downloading, trigger requests for every
                         // unchoked peer that has pieces we want.
                         let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
-                        info!(connected_peers = peer_addrs.len(), "kick-starting piece requests for pre-connected peers");
+                        info!(
+                            connected_peers = peer_addrs.len(),
+                            "kick-starting piece requests for pre-connected peers"
+                        );
                         for addr in peer_addrs {
-                            let has_bitfield = self.peers.get(&addr).map(|p| p.bitfield.count_ones()).unwrap_or(0);
-                            let is_choking = self.peers.get(&addr).map(|p| p.peer_choking).unwrap_or(true);
+                            let has_bitfield = self
+                                .peers
+                                .get(&addr)
+                                .map(|p| p.bitfield.count_ones())
+                                .unwrap_or(0);
+                            let is_choking = self
+                                .peers
+                                .get(&addr)
+                                .map(|p| p.peer_choking)
+                                .unwrap_or(true);
                             debug!(%addr, has_bitfield, is_choking, "post-metadata peer state");
                             self.maybe_express_interest(addr).await;
                             self.request_pieces_from_peer(addr).await;
@@ -4449,7 +4696,8 @@ impl TorrentActor {
             }
 
             // Security validation
-            if let Err(e) = crate::url_guard::validate_web_seed_url(url, &self.config.url_security) {
+            if let Err(e) = crate::url_guard::validate_web_seed_url(url, &self.config.url_security)
+            {
                 warn!(%url, %e, "web seed URL rejected by security policy");
                 continue;
             }
@@ -4497,16 +4745,15 @@ impl TorrentActor {
             }
 
             // Security validation
-            if let Err(e) = crate::url_guard::validate_web_seed_url(url, &self.config.url_security) {
+            if let Err(e) = crate::url_guard::validate_web_seed_url(url, &self.config.url_security)
+            {
                 warn!(%url, %e, "web seed URL rejected by security policy");
                 continue;
             }
 
             // BEP 17 doesn't use URL builder for per-file paths; it sends parameterized URLs
-            let url_builder = crate::web_seed::WebSeedUrlBuilder::single(
-                url.clone(),
-                meta.info.name.clone(),
-            );
+            let url_builder =
+                crate::web_seed::WebSeedUrlBuilder::single(url.clone(), meta.info.name.clone());
 
             let (cmd_tx, cmd_rx) = mpsc::channel(16);
             let task = crate::web_seed::WebSeedTask::new(
@@ -4577,7 +4824,9 @@ impl TorrentActor {
 
         // Write entire piece to disk at offset 0
         if let Some(ref disk) = self.disk
-            && let Err(e) = disk.write_chunk(index, 0, data.clone(), DiskJobFlags::FLUSH_PIECE).await
+            && let Err(e) = disk
+                .write_chunk(index, 0, data.clone(), DiskJobFlags::FLUSH_PIECE)
+                .await
         {
             warn!(index, "web seed: failed to write piece: {e}");
             self.assign_pieces_to_web_seeds();
@@ -4660,7 +4909,10 @@ impl TorrentActor {
 
         let ct = match &self.chunk_tracker {
             Some(ct) => ct,
-            None => { debug!(%peer_addr, "request_pieces: no chunk_tracker"); return; },
+            None => {
+                debug!(%peer_addr, "request_pieces: no chunk_tracker");
+                return;
+            }
         };
         if self.meta.is_none() {
             debug!(%peer_addr, "request_pieces: no meta");
@@ -4686,7 +4938,11 @@ impl TorrentActor {
                     debug!(%peer_addr, "request_pieces: peer choking");
                     return;
                 }
-                let depth = if p.snubbed { 1 } else { p.pipeline.queue_depth() };
+                let depth = if p.snubbed {
+                    1
+                } else {
+                    p.pipeline.queue_depth()
+                };
                 let avail = depth.saturating_sub(p.pending_requests.len());
                 if avail == 0 {
                     debug!(%peer_addr, depth, pending = p.pending_requests.len(), "request_pieces: no pipeline slots");
@@ -4695,7 +4951,10 @@ impl TorrentActor {
                 let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
                 (avail, speed, p.pipeline.ewma_rate(), p.snubbed)
             }
-            None => { debug!(%peer_addr, "request_pieces: peer not found"); return; },
+            None => {
+                debug!(%peer_addr, "request_pieces: peer not found");
+                return;
+            }
         };
 
         // Parole piece assignment: check if any parole piece can be assigned
@@ -4709,7 +4968,9 @@ impl TorrentActor {
             if parole.original_contributors.contains(&peer_ip) {
                 continue; // this peer is a suspect
             }
-            let peer_has = self.peers.get(&peer_addr)
+            let peer_has = self
+                .peers
+                .get(&peer_addr)
                 .is_some_and(|p| p.bitfield.get(parole_idx));
             if !peer_has {
                 continue;
@@ -4728,11 +4989,15 @@ impl TorrentActor {
             Some(p) => p.bitfield.clone(),
             None => return,
         };
-        let suggested = self.peers.get(&peer_addr)
+        let suggested = self
+            .peers
+            .get(&peer_addr)
             .map(|p| p.suggested_pieces.clone())
             .unwrap_or_default();
 
-        let peer_rates: HashMap<SocketAddr, f64> = self.peers.iter()
+        let peer_rates: HashMap<SocketAddr, f64> = self
+            .peers
+            .iter()
             .map(|(&addr, p)| (addr, p.pipeline.ewma_rate()))
             .collect();
 
@@ -4753,7 +5018,11 @@ impl TorrentActor {
             initial_picker_threshold: self.config.initial_picker_threshold,
             connected_peer_count: self.peers.len(),
             whole_pieces_threshold: self.config.whole_pieces_threshold,
-            piece_size: self.lengths.as_ref().map(|l| l.piece_length() as u32).unwrap_or(262144),
+            piece_size: self
+                .lengths
+                .as_ref()
+                .map(|l| l.piece_length() as u32)
+                .unwrap_or(262144),
             extent_affinity: self.config.piece_extent_affinity,
             auto_sequential_active: self.config.auto_sequential && self.auto_sequential_active,
             peer_rates: &peer_rates,
@@ -4761,7 +5030,8 @@ impl TorrentActor {
         };
 
         let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
-            self.chunk_tracker.as_ref()
+            self.chunk_tracker
+                .as_ref()
                 .map(|ct| ct.missing_chunks(piece))
                 .unwrap_or_default()
         };
@@ -4769,10 +5039,13 @@ impl TorrentActor {
         if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
             debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots, "pick_blocks: sending requests");
             // Track in in_flight_pieces
-            let total_blocks = self.chunk_tracker.as_ref()
+            let total_blocks = self
+                .chunk_tracker
+                .as_ref()
                 .map(|ct| ct.missing_chunks(result.piece).len() as u32)
                 .unwrap_or(1);
-            let ifp = self.in_flight_pieces
+            let ifp = self
+                .in_flight_pieces
                 .entry(result.piece)
                 .or_insert_with(|| InFlightPiece::new(total_blocks));
 
@@ -4792,23 +5065,36 @@ impl TorrentActor {
                 }
 
                 if let Some(peer) = self.peers.get_mut(&peer_addr)
-                    && peer.cmd_tx.try_send(PeerCommand::Request {
-                        index: result.piece,
-                        begin: *begin,
-                        length: *length,
-                    }).is_ok()
+                    && peer
+                        .cmd_tx
+                        .try_send(PeerCommand::Request {
+                            index: result.piece,
+                            begin: *begin,
+                            length: *length,
+                        })
+                        .is_ok()
                 {
                     // Only mark as assigned AFTER successful send — phantom
                     // assignments block piece completion permanently.
-                    ifp.assigned_blocks.insert((result.piece, *begin), peer_addr);
-                    peer.pipeline.request_sent(result.piece, *begin, std::time::Instant::now());
+                    ifp.assigned_blocks
+                        .insert((result.piece, *begin), peer_addr);
+                    peer.pipeline
+                        .request_sent(result.piece, *begin, std::time::Instant::now());
                     peer.pending_requests.push((result.piece, *begin, *length));
                 }
                 // If channel full, skip — block will be re-requested next cycle
             }
         } else {
-            let bf_ones = self.peers.get(&peer_addr).map(|p| p.bitfield.count_ones()).unwrap_or(0);
-            let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
+            let bf_ones = self
+                .peers
+                .get(&peer_addr)
+                .map(|p| p.bitfield.count_ones())
+                .unwrap_or(0);
+            let have = self
+                .chunk_tracker
+                .as_ref()
+                .map(|ct| ct.bitfield().count_ones())
+                .unwrap_or(0);
             let in_flight = self.in_flight_pieces.len();
             debug!(%peer_addr, bf_ones, have, in_flight, "pick_blocks: no blocks available");
             self.check_end_game_activation();
@@ -4830,7 +5116,8 @@ impl TorrentActor {
                 .iter()
                 .map(|(addr, p)| (*addr, p.pending_requests.clone()))
                 .collect();
-            self.end_game.activate_with_inflight(&self.in_flight_pieces, &pending);
+            self.end_game
+                .activate_with_inflight(&self.in_flight_pieces, &pending);
             info!(
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
@@ -4853,20 +5140,25 @@ impl TorrentActor {
         };
 
         let block = if !self.streaming_pieces.is_empty() {
-            self.end_game.pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
+            self.end_game
+                .pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
         } else if self.config.strict_end_game {
-            self.end_game.pick_block_strict(peer_addr, &peer_bitfield, &[])
+            self.end_game
+                .pick_block_strict(peer_addr, &peer_bitfield, &[])
         } else {
             self.end_game.pick_block(peer_addr, &peer_bitfield)
         };
 
         if let Some((index, begin, length)) = block
             && let Some(peer) = self.peers.get_mut(&peer_addr)
-            && peer.cmd_tx.try_send(PeerCommand::Request {
-                index,
-                begin,
-                length,
-            }).is_ok()
+            && peer
+                .cmd_tx
+                .try_send(PeerCommand::Request {
+                    index,
+                    begin,
+                    length,
+                })
+                .is_ok()
         {
             self.end_game.register_request(index, begin, peer_addr);
             peer.pending_requests.push((index, begin, length));
@@ -4875,7 +5167,8 @@ impl TorrentActor {
 
     fn update_streaming_cursors(&mut self) {
         // Remove cursors whose receiver has been dropped (FileStream dropped)
-        self.streaming_cursors.retain(|c| c.cursor_rx.has_changed().is_ok());
+        self.streaming_cursors
+            .retain(|c| c.cursor_rx.has_changed().is_ok());
 
         self.streaming_pieces.clear();
         for cursor in &mut self.streaming_cursors {
@@ -4925,9 +5218,7 @@ impl TorrentActor {
             let we_have = ct.bitfield();
             if let Some(peer) = self.peers.get(&peer_addr) {
                 // Check if the peer has any piece we don't
-                peer.bitfield
-                    .ones()
-                    .any(|i| !we_have.get(i))
+                peer.bitfield.ones().any(|i| !we_have.get(i))
             } else {
                 false
             }
@@ -4941,7 +5232,11 @@ impl TorrentActor {
             peer.am_interested = true;
             let _ = peer.cmd_tx.try_send(PeerCommand::SetInterested(true));
         } else {
-            let bf_ones = self.peers.get(&peer_addr).map(|p| p.bitfield.count_ones()).unwrap_or(0);
+            let bf_ones = self
+                .peers
+                .get(&peer_addr)
+                .map(|p| p.bitfield.count_ones())
+                .unwrap_or(0);
             if bf_ones > 0 {
                 debug!(%peer_addr, ?dominated, bf_ones, "not interested despite bitfield");
             }
@@ -5055,9 +5350,10 @@ impl TorrentActor {
                     .map(|&(idx, _, _)| idx)
                     .collect();
                 for piece_idx in peer_pieces {
-                    let other_has = self.peers.values().any(|p| {
-                        p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx)
-                    });
+                    let other_has = self
+                        .peers
+                        .values()
+                        .any(|p| p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx));
                     if !other_has {
                         self.in_flight_pieces.remove(&piece_idx);
                     }
@@ -5072,11 +5368,15 @@ impl TorrentActor {
                 }
                 // Send shutdown command (peer is still connected, unlike normal disconnect)
                 let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
-                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerDisconnected {
-                    info_hash: self.info_hash,
-                    addr,
-                    reason: Some("peer turnover".into()),
-                });
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::PeerDisconnected {
+                        info_hash: self.info_hash,
+                        addr,
+                        reason: Some("peer turnover".into()),
+                    },
+                );
             }
             // Suggest tracking cleanup (outside if-let, matching disconnect handler)
             self.suggested_to_peers.remove(&addr);
@@ -5088,11 +5388,15 @@ impl TorrentActor {
         let replaced = self.peers.len().saturating_sub(peers_before);
 
         // Fire turnover alert
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerTurnover {
-            info_hash: self.info_hash,
-            disconnected: to_disconnect.len(),
-            replaced,
-        });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::PeerTurnover {
+                info_hash: self.info_hash,
+                disconnected: to_disconnect.len(),
+                replaced,
+            },
+        );
     }
 
     async fn run_choker(&mut self) {
@@ -5105,7 +5409,8 @@ impl TorrentActor {
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
                 upload_only: p.upload_only,
-                is_seed: p.upload_only || (self.num_pieces > 0 && p.bitfield.count_ones() == self.num_pieces),
+                is_seed: p.upload_only
+                    || (self.num_pieces > 0 && p.bitfield.count_ones() == self.num_pieces),
             })
             .collect();
 
@@ -5125,16 +5430,13 @@ impl TorrentActor {
                 && !peer.am_choking
             {
                 if peer.supports_fast {
-                    let pending: Vec<(u32, u32, u32)> =
-                        peer.incoming_requests.drain(..).collect();
+                    let pending: Vec<(u32, u32, u32)> = peer.incoming_requests.drain(..).collect();
                     for (index, begin, length) in pending {
-                        let _ = peer
-                            .cmd_tx
-                            .try_send(PeerCommand::RejectRequest {
-                                index,
-                                begin,
-                                length,
-                            });
+                        let _ = peer.cmd_tx.try_send(PeerCommand::RejectRequest {
+                            index,
+                            begin,
+                            length,
+                        });
                     }
                 }
                 peer.am_choking = true;
@@ -5179,9 +5481,11 @@ impl TorrentActor {
             if let Some(peer) = self.peers.get_mut(&addr) {
                 peer.incoming_requests
                     .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
-                let _ = peer
-                    .cmd_tx
-                    .try_send(PeerCommand::RejectRequest { index, begin, length });
+                let _ = peer.cmd_tx.try_send(PeerCommand::RejectRequest {
+                    index,
+                    begin,
+                    length,
+                });
             }
         }
 
@@ -5201,18 +5505,17 @@ impl TorrentActor {
                 break; // per-torrent budget exhausted this cycle
             }
 
-            match disk.read_chunk(index, begin, length, DiskJobFlags::empty()).await {
+            match disk
+                .read_chunk(index, begin, length, DiskJobFlags::empty())
+                .await
+            {
                 Ok(data) => {
                     if let Some(peer) = self.peers.get_mut(&addr) {
                         peer.incoming_requests
                             .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
                         let _ = peer
                             .cmd_tx
-                            .try_send(PeerCommand::SendPiece {
-                                index,
-                                begin,
-                                data,
-                            });
+                            .try_send(PeerCommand::SendPiece { index, begin, data });
                         self.uploaded += chunk_size;
                         self.total_upload += chunk_size + 13; // payload + message header
                         self.last_upload = now_unix();
@@ -5258,7 +5561,8 @@ impl TorrentActor {
                 upload_rate: p.upload_rate,
                 interested: p.peer_interested,
                 upload_only: p.upload_only,
-                is_seed: p.upload_only || (self.num_pieces > 0 && p.bitfield.count_ones() == self.num_pieces),
+                is_seed: p.upload_only
+                    || (self.num_pieces > 0 && p.bitfield.count_ones() == self.num_pieces),
             })
             .collect();
 
@@ -5312,7 +5616,11 @@ impl TorrentActor {
 
             // Skip IP-filtered peers
             if self.ip_filter.read().unwrap().is_blocked(addr.ip()) {
-                post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerBlocked { addr });
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::PeerBlocked { addr },
+                );
                 continue;
             }
 
@@ -5327,19 +5635,26 @@ impl TorrentActor {
                     .unwrap_or_else(|| Bitfield::new(self.num_pieces))
             };
 
-            self.peers.insert(addr, PeerState::new(
+            self.peers.insert(
                 addr,
-                self.num_pieces,
-                cmd_tx,
-                source,
-                self.config.max_request_queue_depth,
-                self.config.request_queue_time,
-                self.config.initial_queue_depth,
-            ));
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
-                info_hash: self.info_hash,
-                addr,
-            });
+                PeerState::new(
+                    addr,
+                    self.num_pieces,
+                    cmd_tx,
+                    source,
+                    self.config.max_request_queue_depth,
+                    self.config.request_queue_time,
+                    self.config.initial_queue_depth,
+                ),
+            );
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::PeerConnected {
+                    info_hash: self.info_hash,
+                    addr,
+                },
+            );
 
             let info_hash = self.info_hash;
             let peer_id = self.our_peer_id;
@@ -5368,38 +5683,38 @@ impl TorrentActor {
             // SSL torrent: pre-build client TLS config for outbound connections (M42).
             // If ssl_cert is present in the torrent metadata and we have an ssl_manager,
             // TCP connections will be wrapped in TLS.
-            let ssl_client_config = self.meta.as_ref()
+            let ssl_client_config = self
+                .meta
+                .as_ref()
                 .and_then(|m| m.ssl_cert.as_deref())
                 .and_then(|cert| {
-                    self.ssl_manager.as_ref().and_then(|mgr| {
-                        match mgr.client_config(cert) {
+                    self.ssl_manager
+                        .as_ref()
+                        .and_then(|mgr| match mgr.client_config(cert) {
                             Ok(cfg) => Some(cfg),
                             Err(e) => {
                                 warn!(%addr, error = %e, "failed to build SSL client config");
                                 None
                             }
-                        }
-                    })
+                        })
                 });
 
             tokio::spawn(async move {
                 // Try uTP first (5s timeout), fall back to TCP
                 // Note: uTP is not proxied — if proxy is active, skip uTP
-                if enable_utp && !use_proxy
+                if enable_utp
+                    && !use_proxy
                     && let Some(socket) = utp_socket
                 {
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        socket.connect(addr),
-                    )
-                    .await
-                    {
+                    match tokio::time::timeout(Duration::from_secs(5), socket.connect(addr)).await {
                         Ok(Ok(stream)) => {
                             debug!(%addr, "uTP connection established");
-                            let _ = event_tx.send(PeerEvent::TransportIdentified {
-                                peer_addr: addr,
-                                transport: crate::rate_limiter::PeerTransport::Utp,
-                            }).await;
+                            let _ = event_tx
+                                .send(PeerEvent::TransportIdentified {
+                                    peer_addr: addr,
+                                    transport: crate::rate_limiter::PeerTransport::Utp,
+                                })
+                                .await;
                             match run_peer(
                                 addr,
                                 stream,
@@ -5423,17 +5738,22 @@ impl TorrentActor {
                                 Ok(()) => debug!(%addr, "uTP peer session ended normally"),
                                 Err(e) => {
                                     // MSE fallback: reconnect with plaintext on failure
-                                    if encryption_mode == torrent_wire::mse::EncryptionMode::Enabled {
+                                    if encryption_mode == torrent_wire::mse::EncryptionMode::Enabled
+                                    {
                                         debug!(%addr, error = %e, "uTP MSE failed, retrying plaintext");
                                         if let Ok(Ok(stream2)) = tokio::time::timeout(
                                             Duration::from_secs(5),
                                             socket.connect(addr),
-                                        ).await {
+                                        )
+                                        .await
+                                        {
                                             let (retry_tx, retry_rx) = mpsc::channel(64);
-                                            let _ = event_tx.send(PeerEvent::MseRetry {
-                                                peer_addr: addr,
-                                                cmd_tx: retry_tx,
-                                            }).await;
+                                            let _ = event_tx
+                                                .send(PeerEvent::MseRetry {
+                                                    peer_addr: addr,
+                                                    cmd_tx: retry_tx,
+                                                })
+                                                .await;
                                             match run_peer(
                                                 addr,
                                                 stream2,
@@ -5451,29 +5771,39 @@ impl TorrentActor {
                                                 info_bytes.clone(),
                                                 Arc::clone(&plugins),
                                                 enable_holepunch,
-                                            ).await {
-                                                Ok(()) => debug!(%addr, "uTP plaintext session ended normally"),
+                                            )
+                                            .await
+                                            {
+                                                Ok(()) => {
+                                                    debug!(%addr, "uTP plaintext session ended normally")
+                                                }
                                                 Err(e2) => {
                                                     debug!(%addr, error = %e2, "uTP plaintext also failed");
-                                                    let _ = event_tx.send(PeerEvent::Disconnected {
-                                                        peer_addr: addr,
-                                                        reason: Some(e2.to_string()),
-                                                    }).await;
+                                                    let _ = event_tx
+                                                        .send(PeerEvent::Disconnected {
+                                                            peer_addr: addr,
+                                                            reason: Some(e2.to_string()),
+                                                        })
+                                                        .await;
                                                 }
                                             }
                                         } else {
                                             debug!(%addr, "uTP plaintext reconnect failed");
-                                            let _ = event_tx.send(PeerEvent::Disconnected {
-                                                peer_addr: addr,
-                                                reason: Some(e.to_string()),
-                                            }).await;
+                                            let _ = event_tx
+                                                .send(PeerEvent::Disconnected {
+                                                    peer_addr: addr,
+                                                    reason: Some(e.to_string()),
+                                                })
+                                                .await;
                                         }
                                     } else {
                                         debug!(%addr, error = %e, "uTP peer session failed");
-                                        let _ = event_tx.send(PeerEvent::Disconnected {
-                                            peer_addr: addr,
-                                            reason: Some(e.to_string()),
-                                        }).await;
+                                        let _ = event_tx
+                                            .send(PeerEvent::Disconnected {
+                                                peer_addr: addr,
+                                                reason: Some(e.to_string()),
+                                            })
+                                            .await;
                                     }
                                 }
                             }
@@ -5490,17 +5820,23 @@ impl TorrentActor {
 
                 // TCP connection — through proxy if configured, or via transport factory
                 let tcp_result = if use_proxy {
-                    crate::proxy::connect_through_proxy(&proxy_config, addr).await
+                    crate::proxy::connect_through_proxy(&proxy_config, addr)
+                        .await
                         .map(crate::transport::BoxedStream::new)
                 } else if peer_connect_timeout > 0 {
                     match tokio::time::timeout(
                         Duration::from_secs(peer_connect_timeout),
                         factory.connect_tcp(addr),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(result) => result,
                         Err(_) => {
                             debug!(%addr, timeout_secs = peer_connect_timeout, "TCP connect timed out");
-                            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "connect timeout",
+                            ))
                         }
                     }
                 } else {
@@ -5508,13 +5844,21 @@ impl TorrentActor {
                 };
                 match tcp_result {
                     Ok(stream) => {
-                        let _ = event_tx.send(PeerEvent::TransportIdentified {
-                            peer_addr: addr,
-                            transport: crate::rate_limiter::PeerTransport::Tcp,
-                        }).await;
+                        let _ = event_tx
+                            .send(PeerEvent::TransportIdentified {
+                                peer_addr: addr,
+                                transport: crate::rate_limiter::PeerTransport::Tcp,
+                            })
+                            .await;
                         // SSL torrent: wrap TCP stream in TLS (M42)
                         if let Some(ref client_config) = ssl_client_config {
-                            match torrent_wire::ssl::connect_tls(stream, info_hash, Arc::clone(client_config)).await {
+                            match torrent_wire::ssl::connect_tls(
+                                stream,
+                                info_hash,
+                                Arc::clone(client_config),
+                            )
+                            .await
+                            {
                                 Ok(tls_stream) => {
                                     debug!(%addr, "SSL/TLS connection established");
                                     // TLS provides encryption; disable MSE
@@ -5572,14 +5916,17 @@ impl TorrentActor {
                                 Ok(()) => debug!(%addr, "TCP peer session ended normally"),
                                 Err(e) => {
                                     // MSE fallback for TCP
-                                    if encryption_mode == torrent_wire::mse::EncryptionMode::Enabled {
+                                    if encryption_mode == torrent_wire::mse::EncryptionMode::Enabled
+                                    {
                                         debug!(%addr, error = %e, "TCP MSE failed, retrying plaintext");
                                         if let Ok(tcp2) = factory.connect_tcp(addr).await {
                                             let (retry_tx, retry_rx) = mpsc::channel(64);
-                                            let _ = event_tx.send(PeerEvent::MseRetry {
-                                                peer_addr: addr,
-                                                cmd_tx: retry_tx,
-                                            }).await;
+                                            let _ = event_tx
+                                                .send(PeerEvent::MseRetry {
+                                                    peer_addr: addr,
+                                                    cmd_tx: retry_tx,
+                                                })
+                                                .await;
                                             match run_peer(
                                                 addr,
                                                 tcp2,
@@ -5597,29 +5944,39 @@ impl TorrentActor {
                                                 info_bytes,
                                                 plugins,
                                                 enable_holepunch,
-                                            ).await {
-                                                Ok(()) => debug!(%addr, "TCP plaintext session ended normally"),
+                                            )
+                                            .await
+                                            {
+                                                Ok(()) => {
+                                                    debug!(%addr, "TCP plaintext session ended normally")
+                                                }
                                                 Err(e2) => {
                                                     debug!(%addr, error = %e2, "TCP plaintext also failed");
-                                                    let _ = event_tx.send(PeerEvent::Disconnected {
-                                                        peer_addr: addr,
-                                                        reason: Some(e2.to_string()),
-                                                    }).await;
+                                                    let _ = event_tx
+                                                        .send(PeerEvent::Disconnected {
+                                                            peer_addr: addr,
+                                                            reason: Some(e2.to_string()),
+                                                        })
+                                                        .await;
                                                 }
                                             }
                                         } else {
                                             debug!(%addr, "TCP plaintext reconnect failed");
-                                            let _ = event_tx.send(PeerEvent::Disconnected {
-                                                peer_addr: addr,
-                                                reason: Some(e.to_string()),
-                                            }).await;
+                                            let _ = event_tx
+                                                .send(PeerEvent::Disconnected {
+                                                    peer_addr: addr,
+                                                    reason: Some(e.to_string()),
+                                                })
+                                                .await;
                                         }
                                     } else {
                                         debug!(%addr, error = %e, "TCP peer session failed");
-                                        let _ = event_tx.send(PeerEvent::Disconnected {
-                                            peer_addr: addr,
-                                            reason: Some(e.to_string()),
-                                        }).await;
+                                        let _ = event_tx
+                                            .send(PeerEvent::Disconnected {
+                                                peer_addr: addr,
+                                                reason: Some(e.to_string()),
+                                            })
+                                            .await;
                                     }
                                 }
                             }
@@ -5652,7 +6009,11 @@ impl TorrentActor {
 
         let dest_preview = {
             let b64 = stream.remote_destination().to_base64();
-            if b64.len() >= 8 { b64[..8].to_string() } else { b64 }
+            if b64.len() >= 8 {
+                b64[..8].to_string()
+            } else {
+                b64
+            }
         };
         let tcp_stream = stream.into_inner();
 
@@ -5711,7 +6072,11 @@ impl TorrentActor {
         // Reject IP-filtered incoming peers
         if self.ip_filter.read().unwrap().is_blocked(addr.ip()) {
             debug!(%addr, "rejected IP-filtered incoming peer");
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerBlocked { addr });
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::PeerBlocked { addr },
+            );
             return;
         }
 
@@ -5726,15 +6091,18 @@ impl TorrentActor {
                 .unwrap_or_else(|| Bitfield::new(self.num_pieces))
         };
 
-        self.peers.insert(addr, PeerState::new(
+        self.peers.insert(
             addr,
-            self.num_pieces,
-            cmd_tx,
-            PeerSource::Incoming,
-            self.config.max_request_queue_depth,
-            self.config.request_queue_time,
-            self.config.initial_queue_depth,
-        ));
+            PeerState::new(
+                addr,
+                self.num_pieces,
+                cmd_tx,
+                PeerSource::Incoming,
+                self.config.max_request_queue_depth,
+                self.config.request_queue_time,
+                self.config.initial_queue_depth,
+            ),
+        );
         // Identify transport for incoming peers (M45)
         let transport = if mode_override.is_some() {
             crate::rate_limiter::PeerTransport::Utp
@@ -5744,10 +6112,14 @@ impl TorrentActor {
         if let Some(peer) = self.peers.get_mut(&addr) {
             peer.transport = Some(transport);
         }
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
-            info_hash: self.info_hash,
-            addr,
-        });
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::PeerConnected {
+                info_hash: self.info_hash,
+                addr,
+            },
+        );
 
         let info_hash = self.info_hash;
         let peer_id = self.our_peer_id;
@@ -5790,7 +6162,11 @@ impl TorrentActor {
     ///
     /// We act as relay: validate the request, then forward Connect messages to
     /// both the initiator and the target so they can perform simultaneous open.
-    async fn handle_holepunch_rendezvous(&mut self, initiator_addr: SocketAddr, target: SocketAddr) {
+    async fn handle_holepunch_rendezvous(
+        &mut self,
+        initiator_addr: SocketAddr,
+        target: SocketAddr,
+    ) {
         use torrent_wire::HolepunchMessage;
 
         debug!(%initiator_addr, %target, "holepunch: processing rendezvous request");
@@ -5799,9 +6175,13 @@ impl TorrentActor {
         if target == initiator_addr {
             debug!(%initiator_addr, "holepunch: rendezvous target == initiator (NoSelf)");
             if let Some(peer) = self.peers.get(&initiator_addr) {
-                let _ = peer.cmd_tx.send(PeerCommand::SendHolepunch(
-                    HolepunchMessage::error(target, torrent_wire::HolepunchError::NoSelf),
-                )).await;
+                let _ = peer
+                    .cmd_tx
+                    .send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                        target,
+                        torrent_wire::HolepunchError::NoSelf,
+                    )))
+                    .await;
             }
             return;
         }
@@ -5812,9 +6192,13 @@ impl TorrentActor {
             None => {
                 debug!(%initiator_addr, %target, "holepunch: target not connected (NotConnected)");
                 if let Some(peer) = self.peers.get(&initiator_addr) {
-                    let _ = peer.cmd_tx.send(PeerCommand::SendHolepunch(
-                        HolepunchMessage::error(target, torrent_wire::HolepunchError::NotConnected),
-                    )).await;
+                    let _ = peer
+                        .cmd_tx
+                        .send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                            target,
+                            torrent_wire::HolepunchError::NotConnected,
+                        )))
+                        .await;
                 }
                 return;
             }
@@ -5824,23 +6208,33 @@ impl TorrentActor {
         if !target_peer.supports_holepunch {
             debug!(%initiator_addr, %target, "holepunch: target doesn't support holepunch (NoSupport)");
             if let Some(peer) = self.peers.get(&initiator_addr) {
-                let _ = peer.cmd_tx.send(PeerCommand::SendHolepunch(
-                    HolepunchMessage::error(target, torrent_wire::HolepunchError::NoSupport),
-                )).await;
+                let _ = peer
+                    .cmd_tx
+                    .send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                        target,
+                        torrent_wire::HolepunchError::NoSupport,
+                    )))
+                    .await;
             }
             return;
         }
 
         // Forward Connect to target: "connect to the initiator"
-        let _ = target_peer.cmd_tx.send(PeerCommand::SendHolepunch(
-            HolepunchMessage::connect(initiator_addr),
-        )).await;
+        let _ = target_peer
+            .cmd_tx
+            .send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
+                initiator_addr,
+            )))
+            .await;
 
         // Forward Connect to initiator: "connect to the target"
         if let Some(initiator) = self.peers.get(&initiator_addr) {
-            let _ = initiator.cmd_tx.send(PeerCommand::SendHolepunch(
-                HolepunchMessage::connect(target),
-            )).await;
+            let _ = initiator
+                .cmd_tx
+                .send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
+                    target,
+                )))
+                .await;
         }
 
         debug!(%initiator_addr, %target, "holepunch: relayed connect to both peers");
@@ -5870,7 +6264,11 @@ impl TorrentActor {
         }
         if self.ip_filter.read().unwrap().is_blocked(target.ip()) {
             debug!(%target, "holepunch: target is IP-filtered");
-            post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerBlocked { addr: target });
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::PeerBlocked { addr: target },
+            );
             return;
         }
 
@@ -5885,19 +6283,26 @@ impl TorrentActor {
                 .unwrap_or_else(|| Bitfield::new(self.num_pieces))
         };
 
-        self.peers.insert(target, PeerState::new(
+        self.peers.insert(
             target,
-            self.num_pieces,
-            cmd_tx,
-            PeerSource::Pex,
-            self.config.max_request_queue_depth,
-            self.config.request_queue_time,
-            self.config.initial_queue_depth,
-        ));
-        post_alert(&self.alert_tx, &self.alert_mask, AlertKind::PeerConnected {
-            info_hash: self.info_hash,
-            addr: target,
-        });
+            PeerState::new(
+                target,
+                self.num_pieces,
+                cmd_tx,
+                PeerSource::Pex,
+                self.config.max_request_queue_depth,
+                self.config.request_queue_time,
+                self.config.initial_queue_depth,
+            ),
+        );
+        post_alert(
+            &self.alert_tx,
+            &self.alert_mask,
+            AlertKind::PeerConnected {
+                info_hash: self.info_hash,
+                addr: target,
+            },
+        );
 
         // Capture variables for the spawned task (mirrors try_connect_peers)
         let info_hash = self.info_hash;
@@ -5924,19 +6329,18 @@ impl TorrentActor {
         tokio::spawn(async move {
             // Try uTP first (5s timeout) — preferred for holepunch as NAT traversal
             // works better with UDP-based protocols
-            if enable_utp
-                && let Some(socket) = utp_socket
-            {
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    socket.connect(target),
-                ).await {
+            if enable_utp && let Some(socket) = utp_socket {
+                match tokio::time::timeout(Duration::from_secs(5), socket.connect(target)).await {
                     Ok(Ok(stream)) => {
                         debug!(%target, "holepunch: uTP connection established");
-                        post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
-                            info_hash,
-                            addr: target,
-                        });
+                        post_alert(
+                            &alert_tx,
+                            &alert_mask,
+                            AlertKind::HolepunchSucceeded {
+                                info_hash,
+                                addr: target,
+                            },
+                        );
                         let _ = run_peer(
                             target,
                             stream,
@@ -5954,7 +6358,8 @@ impl TorrentActor {
                             info_bytes,
                             plugins,
                             enable_holepunch,
-                        ).await;
+                        )
+                        .await;
                         return; // uTP succeeded — don't fall through to TCP
                     }
                     Ok(Err(e)) => {
@@ -5967,16 +6372,17 @@ impl TorrentActor {
             }
 
             // TCP fallback — only reached if uTP didn't succeed
-            match tokio::time::timeout(
-                Duration::from_secs(10),
-                factory.connect_tcp(target),
-            ).await {
+            match tokio::time::timeout(Duration::from_secs(10), factory.connect_tcp(target)).await {
                 Ok(Ok(stream)) => {
                     debug!(%target, "holepunch: TCP connection established");
-                    post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchSucceeded {
-                        info_hash,
-                        addr: target,
-                    });
+                    post_alert(
+                        &alert_tx,
+                        &alert_mask,
+                        AlertKind::HolepunchSucceeded {
+                            info_hash,
+                            addr: target,
+                        },
+                    );
                     let _ = run_peer(
                         target,
                         stream,
@@ -5994,35 +6400,48 @@ impl TorrentActor {
                         info_bytes,
                         plugins,
                         enable_holepunch,
-                    ).await;
+                    )
+                    .await;
                 }
                 Ok(Err(e)) => {
                     let message = format!("TCP connect failed: {e}");
                     debug!(%target, %message, "holepunch: connection failed");
-                    post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchFailed {
-                        info_hash,
-                        addr: target,
-                        error_code: None,
-                        message,
-                    });
-                    let _ = event_tx.send(PeerEvent::Disconnected {
-                        peer_addr: target,
-                        reason: Some(format!("holepunch TCP connect failed: {e}")),
-                    }).await;
+                    post_alert(
+                        &alert_tx,
+                        &alert_mask,
+                        AlertKind::HolepunchFailed {
+                            info_hash,
+                            addr: target,
+                            error_code: None,
+                            message,
+                        },
+                    );
+                    let _ = event_tx
+                        .send(PeerEvent::Disconnected {
+                            peer_addr: target,
+                            reason: Some(format!("holepunch TCP connect failed: {e}")),
+                        })
+                        .await;
                 }
                 Err(_) => {
                     let message = "TCP connect timed out".to_string();
                     debug!(%target, "holepunch: TCP connect timed out");
-                    post_alert(&alert_tx, &alert_mask, AlertKind::HolepunchFailed {
-                        info_hash,
-                        addr: target,
-                        error_code: None,
-                        message,
-                    });
-                    let _ = event_tx.send(PeerEvent::Disconnected {
-                        peer_addr: target,
-                        reason: Some("holepunch TCP connect timed out".to_string()),
-                    }).await;
+                    post_alert(
+                        &alert_tx,
+                        &alert_mask,
+                        AlertKind::HolepunchFailed {
+                            info_hash,
+                            addr: target,
+                            error_code: None,
+                            message,
+                        },
+                    );
+                    let _ = event_tx
+                        .send(PeerEvent::Disconnected {
+                            peer_addr: target,
+                            reason: Some("holepunch TCP connect timed out".to_string()),
+                        })
+                        .await;
                 }
             }
         });
@@ -6047,7 +6466,9 @@ impl TorrentActor {
 
         // Find a relay: a connected peer that supports holepunch and has completed
         // the extension handshake (and isn't the target itself)
-        let relay_addr = self.peers.iter()
+        let relay_addr = self
+            .peers
+            .iter()
             .find(|(addr, peer)| {
                 **addr != target && peer.supports_holepunch && peer.ext_handshake.is_some()
             })
@@ -6060,9 +6481,12 @@ impl TorrentActor {
 
         debug!(%target, %relay_addr, "holepunch: sending rendezvous via relay");
         if let Some(relay) = self.peers.get(&relay_addr) {
-            let _ = relay.cmd_tx.send(PeerCommand::SendHolepunch(
-                HolepunchMessage::rendezvous(target),
-            )).await;
+            let _ = relay
+                .cmd_tx
+                .send(PeerCommand::SendHolepunch(HolepunchMessage::rendezvous(
+                    target,
+                )))
+                .await;
         }
     }
 }
@@ -6096,13 +6520,13 @@ async fn accept_i2p(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use bytes::Bytes;
+    use futures::{SinkExt, StreamExt};
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use torrent_wire::{ExtHandshake, Handshake, Message, MessageCodec};
-    use futures::{SinkExt, StreamExt};
     use tokio_util::codec::{FramedRead, FramedWrite};
+    use torrent_wire::{ExtHandshake, Handshake, Message, MessageCodec};
 
     // -- Helpers --
 
@@ -6208,20 +6632,12 @@ mod tests {
     }
 
     fn make_storage(data: &[u8], piece_length: u64) -> Arc<MemoryStorage> {
-        let lengths = Lengths::new(
-            data.len() as u64,
-            piece_length,
-            DEFAULT_CHUNK_SIZE,
-        );
+        let lengths = Lengths::new(data.len() as u64, piece_length, DEFAULT_CHUNK_SIZE);
         Arc::new(MemoryStorage::new(lengths))
     }
 
     fn make_seeded_storage(data: &[u8], piece_length: u64) -> Arc<MemoryStorage> {
-        let lengths = Lengths::new(
-            data.len() as u64,
-            piece_length,
-            DEFAULT_CHUNK_SIZE,
-        );
+        let lengths = Lengths::new(data.len() as u64, piece_length, DEFAULT_CHUNK_SIZE);
         let storage = Arc::new(MemoryStorage::new(lengths.clone()));
         // Write data piece by piece
         let num_pieces = lengths.num_pieces();
@@ -6241,7 +6657,9 @@ mod tests {
     }
 
     fn test_ban_manager() -> crate::session::SharedBanManager {
-        Arc::new(std::sync::RwLock::new(crate::ban::BanManager::new(crate::ban::BanConfig::default())))
+        Arc::new(std::sync::RwLock::new(crate::ban::BanManager::new(
+            crate::ban::BanConfig::default(),
+        )))
     }
 
     fn test_ip_filter() -> crate::session::SharedIpFilter {
@@ -6275,9 +6693,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
@@ -6305,9 +6745,28 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dm, _dj) = test_disk_manager();
-        let handle = TorrentHandle::from_magnet(magnet, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_magnet(
+            magnet,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::FetchingMetadata);
@@ -6327,9 +6786,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Bind listeners so the connect attempts succeed and peers stay in connected state
         let _listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6347,9 +6828,12 @@ mod tests {
 
         let stats = handle.stats().await.unwrap();
         // Peers may be available or already connecting (try_connect_peers fires immediately)
-        assert!(stats.peers_available + stats.peers_connected >= 2,
+        assert!(
+            stats.peers_available + stats.peers_connected >= 2,
             "expected at least 2 peers known, got available={}, connected={}",
-            stats.peers_available, stats.peers_connected);
+            stats.peers_available,
+            stats.peers_connected
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -6365,9 +6849,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
@@ -6431,9 +6937,31 @@ mod tests {
         // The from_torrent constructor should disable DHT and PEX
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // We can't directly inspect the actor's config, but we can verify
         // the torrent was created successfully. The real test is that PEX peers
@@ -6455,9 +6983,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         handle.shutdown().await.unwrap();
 
@@ -6478,21 +7028,49 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Bind a listener so the connection succeeds and the peer stays connected
         let _listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = _listener.local_addr().unwrap();
-        handle.add_peers(vec![addr, addr, addr], PeerSource::Tracker).await.unwrap();
+        handle
+            .add_peers(vec![addr, addr, addr], PeerSource::Tracker)
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
         // Only one unique peer should be known (available or connecting)
-        assert!(stats.peers_available + stats.peers_connected <= 1,
+        assert!(
+            stats.peers_available + stats.peers_connected <= 1,
             "expected at most 1 unique peer, got available={}, connected={}",
-            stats.peers_available, stats.peers_connected);
+            stats.peers_available,
+            stats.peers_connected
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -6508,9 +7086,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
         let handle2 = handle.clone();
 
         // Bind a listener so the connection succeeds and the peer stays connected
@@ -6527,9 +7127,12 @@ mod tests {
 
         // Read stats through the other — peer may be available or connecting
         let stats = handle2.stats().await.unwrap();
-        assert!(stats.peers_available + stats.peers_connected >= 1,
+        assert!(
+            stats.peers_available + stats.peers_connected >= 1,
             "expected at least 1 peer known, got available={}, connected={}",
-            stats.peers_available, stats.peers_connected);
+            stats.peers_available,
+            stats.peers_connected
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -6557,9 +7160,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Give the actor time to start
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -6620,9 +7245,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -6656,10 +7303,7 @@ mod tests {
             let ext_hs = ExtHandshake::new();
             let payload = ext_hs.to_bytes().unwrap();
             framed_write
-                .send(Message::Extended {
-                    ext_id: 0,
-                    payload,
-                })
+                .send(Message::Extended { ext_id: 0, payload })
                 .await
                 .unwrap();
 
@@ -6746,9 +7390,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -6780,10 +7446,7 @@ mod tests {
             let ext_hs = ExtHandshake::new();
             let payload = ext_hs.to_bytes().unwrap();
             framed_write
-                .send(Message::Extended {
-                    ext_id: 0,
-                    payload,
-                })
+                .send(Message::Extended { ext_id: 0, payload })
                 .await
                 .unwrap();
 
@@ -6874,9 +7537,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -6907,10 +7592,7 @@ mod tests {
             let ext_hs = ExtHandshake::new();
             let payload = ext_hs.to_bytes().unwrap();
             framed_write
-                .send(Message::Extended {
-                    ext_id: 0,
-                    payload,
-                })
+                .send(Message::Extended { ext_id: 0, payload })
                 .await
                 .unwrap();
 
@@ -6993,9 +7675,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -7023,10 +7727,7 @@ mod tests {
             let ext_hs = ExtHandshake::new();
             let payload = ext_hs.to_bytes().unwrap();
             framed_write
-                .send(Message::Extended {
-                    ext_id: 0,
-                    payload,
-                })
+                .send(Message::Extended { ext_id: 0, payload })
                 .await
                 .unwrap();
 
@@ -7127,10 +7828,7 @@ mod tests {
             let ext_hs = ExtHandshake::new();
             let payload = ext_hs.to_bytes().unwrap();
             framed_write
-                .send(Message::Extended {
-                    ext_id: 0,
-                    payload,
-                })
+                .send(Message::Extended { ext_id: 0, payload })
                 .await
                 .unwrap();
 
@@ -7154,9 +7852,7 @@ mod tests {
                         begin,
                         length,
                     } => {
-                        let piece_data = seeder_storage
-                            .read_chunk(index, begin, length)
-                            .unwrap();
+                        let piece_data = seeder_storage.read_chunk(index, begin, length).unwrap();
                         framed_write
                             .send(Message::Piece {
                                 index,
@@ -7179,12 +7875,37 @@ mod tests {
         let leecher_config = test_config();
         let (latx, lamask) = test_alert_channel();
         let (ldh, ldm, _ldj) = test_register_disk(leecher_meta.info_hash, leecher_storage).await;
-        let leecher = TorrentHandle::from_torrent(leecher_meta, torrent_core::TorrentVersion::V1Only, None, ldh, ldm, leecher_config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), latx, lamask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let leecher = TorrentHandle::from_torrent(
+            leecher_meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            ldh,
+            ldm,
+            leecher_config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            latx,
+            lamask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Add seeder as a peer
-        leecher.add_peers(vec![seeder_addr], PeerSource::Tracker).await.unwrap();
+        leecher
+            .add_peers(vec![seeder_addr], PeerSource::Tracker)
+            .await
+            .unwrap();
 
         // Give the connect interval time to fire (it ticks every 5s).
         // The actor's try_connect_peers runs on the timer, and also immediately
@@ -7202,7 +7923,11 @@ mod tests {
                 let stats = leecher.stats().await.unwrap();
                 panic!(
                     "seeder/leecher: leecher did not complete, state={:?}, have={}/{}, connected={}, available={}",
-                    stats.state, stats.pieces_have, stats.pieces_total, stats.peers_connected, stats.peers_available,
+                    stats.state,
+                    stats.pieces_have,
+                    stats.pieces_total,
+                    stats.peers_connected,
+                    stats.peers_available,
                 );
             }
         }
@@ -7227,9 +7952,28 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dm, _dj) = test_disk_manager();
-        let handle = TorrentHandle::from_magnet(magnet, dm, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_magnet(
+            magnet,
+            dm,
+            test_config(),
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::FetchingMetadata);
@@ -7291,9 +8035,31 @@ mod tests {
         // the tracker doesn't exist, but that's fine — failures are non-fatal).
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
@@ -7349,9 +8115,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
@@ -7375,9 +8163,28 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dm, _dj) = test_disk_manager();
-        let handle = TorrentHandle::from_magnet(magnet, dm, test_config(), None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_magnet(
+            magnet,
+            dm,
+            test_config(),
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::FetchingMetadata);
@@ -7400,9 +8207,31 @@ mod tests {
         let config = test_config();
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
@@ -7430,9 +8259,31 @@ mod tests {
         let config = test_config();
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         handle.pause().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -7467,9 +8318,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -7483,7 +8356,10 @@ mod tests {
                 let mut writer = writer;
                 let mut reader = reader;
 
-                let hs = Handshake::new(info_hash, Id20::from_hex("6666666666666666666666666666666666666666").unwrap());
+                let hs = Handshake::new(
+                    info_hash,
+                    Id20::from_hex("6666666666666666666666666666666666666666").unwrap(),
+                );
                 writer.write_all(&hs.to_bytes()).await.unwrap();
                 writer.flush().await.unwrap();
                 let mut hs_buf = [0u8; HANDSHAKE_SIZE];
@@ -7495,25 +8371,38 @@ mod tests {
                 let _msg = framed_read.next().await; // ext handshake
                 let ext_hs = ExtHandshake::new();
                 let payload = ext_hs.to_bytes().unwrap();
-                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+                framed_write
+                    .send(Message::Extended { ext_id: 0, payload })
+                    .await
+                    .unwrap();
 
                 // Send bitfield + unchoke
                 let mut bf = Bitfield::new(1);
                 bf.set(0);
-                framed_write.send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes()))).await.unwrap();
+                framed_write
+                    .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                    .await
+                    .unwrap();
                 framed_write.send(Message::Unchoke).await.unwrap();
 
                 // Respond to requests
                 while let Some(Ok(msg)) = framed_read.next().await {
                     match msg {
-                        Message::Request { index, begin, length } => {
+                        Message::Request {
+                            index,
+                            begin,
+                            length,
+                        } => {
                             let start = begin as usize;
                             let end = start + length as usize;
-                            framed_write.send(Message::Piece {
-                                index,
-                                begin,
-                                data: Bytes::copy_from_slice(&seed_data[start..end]),
-                            }).await.unwrap();
+                            framed_write
+                                .send(Message::Piece {
+                                    index,
+                                    begin,
+                                    data: Bytes::copy_from_slice(&seed_data[start..end]),
+                                })
+                                .await
+                                .unwrap();
                         }
                         Message::Interested => {}
                         _ => {}
@@ -7545,7 +8434,10 @@ mod tests {
                 let mut writer = writer;
                 let mut reader = reader;
 
-                let hs = Handshake::new(info_hash, Id20::from_hex("7777777777777777777777777777777777777777").unwrap());
+                let hs = Handshake::new(
+                    info_hash,
+                    Id20::from_hex("7777777777777777777777777777777777777777").unwrap(),
+                );
                 writer.write_all(&hs.to_bytes()).await.unwrap();
                 writer.flush().await.unwrap();
                 let mut hs_buf = [0u8; HANDSHAKE_SIZE];
@@ -7557,7 +8449,10 @@ mod tests {
                 let _msg = framed_read.next().await; // ext handshake
                 let ext_hs = ExtHandshake::new();
                 let payload = ext_hs.to_bytes().unwrap();
-                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+                framed_write
+                    .send(Message::Extended { ext_id: 0, payload })
+                    .await
+                    .unwrap();
 
                 // Send Interested and wait for Unchoke
                 framed_write.send(Message::Interested).await.unwrap();
@@ -7579,7 +8474,14 @@ mod tests {
                 }
 
                 // Request piece 0
-                framed_write.send(Message::Request { index: 0, begin: 0, length: 16384 }).await.unwrap();
+                framed_write
+                    .send(Message::Request {
+                        index: 0,
+                        begin: 0,
+                        length: 16384,
+                    })
+                    .await
+                    .unwrap();
 
                 // Read Piece response
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -7616,7 +8518,11 @@ mod tests {
 
         // Verify uploaded bytes
         let stats = handle.stats().await.unwrap();
-        assert!(stats.uploaded > 0, "expected uploaded > 0, got {}", stats.uploaded);
+        assert!(
+            stats.uploaded > 0,
+            "expected uploaded > 0, got {}",
+            stats.uploaded
+        );
 
         handle.shutdown().await.unwrap();
         seeder_task.abort();
@@ -7645,9 +8551,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -7661,7 +8589,10 @@ mod tests {
                 let mut writer = writer;
                 let mut reader = reader;
 
-                let hs = Handshake::new(info_hash, Id20::from_hex("8888888888888888888888888888888888888888").unwrap());
+                let hs = Handshake::new(
+                    info_hash,
+                    Id20::from_hex("8888888888888888888888888888888888888888").unwrap(),
+                );
                 writer.write_all(&hs.to_bytes()).await.unwrap();
                 writer.flush().await.unwrap();
                 let mut hs_buf = [0u8; HANDSHAKE_SIZE];
@@ -7673,23 +8604,36 @@ mod tests {
                 let _msg = framed_read.next().await;
                 let ext_hs = ExtHandshake::new();
                 let payload = ext_hs.to_bytes().unwrap();
-                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+                framed_write
+                    .send(Message::Extended { ext_id: 0, payload })
+                    .await
+                    .unwrap();
 
                 let mut bf = Bitfield::new(1);
                 bf.set(0);
-                framed_write.send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes()))).await.unwrap();
+                framed_write
+                    .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+                    .await
+                    .unwrap();
                 framed_write.send(Message::Unchoke).await.unwrap();
 
                 while let Some(Ok(msg)) = framed_read.next().await {
                     match msg {
-                        Message::Request { index, begin, length } => {
+                        Message::Request {
+                            index,
+                            begin,
+                            length,
+                        } => {
                             let start = begin as usize;
                             let end = start + length as usize;
-                            framed_write.send(Message::Piece {
-                                index,
-                                begin,
-                                data: Bytes::copy_from_slice(&seed_data[start..end]),
-                            }).await.unwrap();
+                            framed_write
+                                .send(Message::Piece {
+                                    index,
+                                    begin,
+                                    data: Bytes::copy_from_slice(&seed_data[start..end]),
+                                })
+                                .await
+                                .unwrap();
                         }
                         Message::Interested => {}
                         _ => {}
@@ -7720,7 +8664,10 @@ mod tests {
                 let mut writer = writer;
                 let mut reader = reader;
 
-                let hs = Handshake::new(info_hash, Id20::from_hex("9999999999999999999999999999999999999999").unwrap());
+                let hs = Handshake::new(
+                    info_hash,
+                    Id20::from_hex("9999999999999999999999999999999999999999").unwrap(),
+                );
                 writer.write_all(&hs.to_bytes()).await.unwrap();
                 writer.flush().await.unwrap();
                 let mut hs_buf = [0u8; HANDSHAKE_SIZE];
@@ -7732,7 +8679,10 @@ mod tests {
                 let _msg = framed_read.next().await;
                 let ext_hs = ExtHandshake::new();
                 let payload = ext_hs.to_bytes().unwrap();
-                framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+                framed_write
+                    .send(Message::Extended { ext_id: 0, payload })
+                    .await
+                    .unwrap();
 
                 framed_write.send(Message::Interested).await.unwrap();
 
@@ -7752,7 +8702,14 @@ mod tests {
                 }
 
                 // Request piece 0
-                framed_write.send(Message::Request { index: 0, begin: 0, length: 16384 }).await.unwrap();
+                framed_write
+                    .send(Message::Request {
+                        index: 0,
+                        begin: 0,
+                        length: 16384,
+                    })
+                    .await
+                    .unwrap();
 
                 // Read until connection closes (the torrent may stop and disconnect us)
                 while let Some(Ok(_msg)) = framed_read.next().await {}
@@ -7765,7 +8722,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stats = handle.stats().await.unwrap();
             if stats.state == TorrentState::Stopped {
-                assert!(stats.uploaded >= 16384, "expected uploaded >= 16384, got {}", stats.uploaded);
+                assert!(
+                    stats.uploaded >= 16384,
+                    "expected uploaded >= 16384, got {}",
+                    stats.uploaded
+                );
                 break;
             }
             if tokio::time::Instant::now() > deadline {
@@ -7793,15 +8754,41 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Give the actor time to verify existing pieces
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let stats = handle.stats().await.unwrap();
-        assert_eq!(stats.state, TorrentState::Seeding, "should start as seeder with all pieces verified");
+        assert_eq!(
+            stats.state,
+            TorrentState::Seeding,
+            "should start as seeder with all pieces verified"
+        );
         assert_eq!(stats.pieces_have, 2);
         assert_eq!(stats.pieces_total, 2);
 
@@ -7820,9 +8807,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Give actor time to start
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -7856,9 +8865,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Give actor time to verify pieces and switch to seeding
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -7872,7 +8903,11 @@ mod tests {
         // All pieces should be marked in the bitfield
         // 2 pieces -> 1 byte, top 2 bits set = 0b1100_0000 = 0xC0
         assert_eq!(rd.pieces.len(), 1);
-        assert_eq!(rd.pieces[0] & 0xC0, 0xC0, "both pieces should be marked complete");
+        assert_eq!(
+            rd.pieces[0] & 0xC0,
+            0xC0,
+            "both pieces should be marked complete"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -7888,9 +8923,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.pause().await.unwrap();
@@ -7922,9 +8979,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Default priorities should all be Normal
         let prios = handle.file_priorities().await.unwrap();
@@ -7966,13 +9045,41 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Set file priorities
-        handle.set_file_priority(0, FilePriority::High).await.unwrap();
-        handle.set_file_priority(1, FilePriority::Skip).await.unwrap();
+        handle
+            .set_file_priority(0, FilePriority::High)
+            .await
+            .unwrap();
+        handle
+            .set_file_priority(1, FilePriority::Skip)
+            .await
+            .unwrap();
 
         // Save resume data
         let rd = handle.save_resume_data().await.unwrap();
@@ -8012,9 +9119,31 @@ mod tests {
         drop(listener);
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -8024,7 +9153,10 @@ mod tests {
         let mut writer = writer;
         let mut reader = reader;
 
-        let hs = Handshake::new(info_hash, Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap());
+        let hs = Handshake::new(
+            info_hash,
+            Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+        );
         writer.write_all(&hs.to_bytes()).await.unwrap();
         writer.flush().await.unwrap();
         let mut hs_buf = [0u8; HANDSHAKE_SIZE];
@@ -8037,7 +9169,10 @@ mod tests {
         let _msg = framed_read.next().await;
         let ext_hs = ExtHandshake::new();
         let payload = ext_hs.to_bytes().unwrap();
-        framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+        framed_write
+            .send(Message::Extended { ext_id: 0, payload })
+            .await
+            .unwrap();
 
         // Read the bitfield
         let _bf_msg = framed_read.next().await;
@@ -8063,7 +9198,14 @@ mod tests {
         }
 
         // Request piece 0
-        framed_write.send(Message::Request { index: 0, begin: 0, length: 16384 }).await.unwrap();
+        framed_write
+            .send(Message::Request {
+                index: 0,
+                begin: 0,
+                length: 16384,
+            })
+            .await
+            .unwrap();
 
         // At 1 KB/s, the bucket accumulates ~100 bytes per 100ms tick (max burst = 1024).
         // A 16 KB chunk needs 16384 tokens, so it should NOT be served quickly.
@@ -8085,7 +9227,10 @@ mod tests {
         }
 
         // Piece should NOT have arrived in 2 seconds (would need 16s at 1 KB/s)
-        assert!(!got_piece, "piece should be delayed by rate limiter (1 KB/s for 16 KB chunk)");
+        assert!(
+            !got_piece,
+            "piece should be delayed by rate limiter (1 KB/s for 16 KB chunk)"
+        );
 
         // Verify actor is still alive
         let stats = handle.stats().await.unwrap();
@@ -8108,9 +9253,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
@@ -8140,9 +9307,31 @@ mod tests {
         drop(listener);
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -8152,7 +9341,10 @@ mod tests {
         let mut writer = writer;
         let mut reader = reader;
 
-        let hs = Handshake::new(info_hash, Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap());
+        let hs = Handshake::new(
+            info_hash,
+            Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap(),
+        );
         writer.write_all(&hs.to_bytes()).await.unwrap();
         writer.flush().await.unwrap();
         let mut hs_buf = [0u8; HANDSHAKE_SIZE];
@@ -8165,13 +9357,19 @@ mod tests {
         let _msg = framed_read.next().await;
         let ext_hs = ExtHandshake::new();
         let payload = ext_hs.to_bytes().unwrap();
-        framed_write.send(Message::Extended { ext_id: 0, payload }).await.unwrap();
+        framed_write
+            .send(Message::Extended { ext_id: 0, payload })
+            .await
+            .unwrap();
 
         // Send bitfield saying we have all pieces (act as seeder)
         let mut bf = Bitfield::new(2);
         bf.set(0);
         bf.set(1);
-        framed_write.send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes()))).await.unwrap();
+        framed_write
+            .send(Message::Bitfield(Bytes::copy_from_slice(bf.as_bytes())))
+            .await
+            .unwrap();
 
         // Unchoke the torrent
         framed_write.send(Message::Unchoke).await.unwrap();
@@ -8259,7 +9457,10 @@ mod tests {
         let ip2: IpAddr = "10.0.0.2".parse().unwrap();
         let parole_ip: IpAddr = "10.0.0.3".parse().unwrap();
 
-        let mut mgr = BanManager::new(BanConfig { max_failures: 2, use_parole: true });
+        let mut mgr = BanManager::new(BanConfig {
+            max_failures: 2,
+            use_parole: true,
+        });
 
         let parole = ParoleState {
             original_contributors: [ip1, ip2].into_iter().collect(),
@@ -8292,7 +9493,10 @@ mod tests {
         let ip1: IpAddr = "10.0.0.1".parse().unwrap();
         let parole_ip: IpAddr = "10.0.0.3".parse().unwrap();
 
-        let mut mgr = BanManager::new(BanConfig { max_failures: 2, use_parole: true });
+        let mut mgr = BanManager::new(BanConfig {
+            max_failures: 2,
+            use_parole: true,
+        });
 
         let parole = ParoleState {
             original_contributors: [ip1].into_iter().collect(),
@@ -8322,23 +9526,54 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, Arc::clone(&ban_mgr), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            Arc::clone(&ban_mgr),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Add the banned peer — it should be filtered out
-        handle.add_peers(vec![
-            SocketAddr::new(banned_ip, 6881),
-            "10.0.0.1:6881".parse().unwrap(),
-        ], PeerSource::Tracker).await.unwrap();
+        handle
+            .add_peers(
+                vec![
+                    SocketAddr::new(banned_ip, 6881),
+                    "10.0.0.1:6881".parse().unwrap(),
+                ],
+                PeerSource::Tracker,
+            )
+            .await
+            .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
         // Only the non-banned peer should be in available pool (and may have connected)
         // The banned one should never appear
-        assert!(stats.peers_available + stats.peers_connected <= 1,
+        assert!(
+            stats.peers_available + stats.peers_connected <= 1,
             "banned peer should not be added: available={}, connected={}",
-            stats.peers_available, stats.peers_connected);
+            stats.peers_available,
+            stats.peers_connected
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -8387,8 +9622,27 @@ mod tests {
         let mut rx = atx.subscribe();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8404,13 +9658,20 @@ mod tests {
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
                 Ok(Ok(alert)) => match alert.kind {
-                    AlertKind::StateChanged { new_state: TorrentState::Checking, .. } => {
+                    AlertKind::StateChanged {
+                        new_state: TorrentState::Checking,
+                        ..
+                    } => {
                         saw_checking = true;
                     }
                     AlertKind::CheckingProgress { progress, .. } => {
                         progress_values.push(progress);
                     }
-                    AlertKind::TorrentChecked { pieces_have, pieces_total, .. } => {
+                    AlertKind::TorrentChecked {
+                        pieces_have,
+                        pieces_total,
+                        ..
+                    } => {
                         saw_checked = true;
                         checked_have = pieces_have;
                         checked_total = pieces_total;
@@ -8423,10 +9684,18 @@ mod tests {
         }
 
         assert!(saw_checking, "should have seen StateChanged → Checking");
-        assert!(!progress_values.is_empty(), "should have seen CheckingProgress alerts");
+        assert!(
+            !progress_values.is_empty(),
+            "should have seen CheckingProgress alerts"
+        );
         // Progress should be monotonically increasing
         for w in progress_values.windows(2) {
-            assert!(w[1] >= w[0], "progress should be monotonically increasing: {} < {}", w[0], w[1]);
+            assert!(
+                w[1] >= w[0],
+                "progress should be monotonically increasing: {} < {}",
+                w[0],
+                w[1]
+            );
         }
         assert!(saw_checked, "should have seen TorrentChecked");
         assert_eq!(checked_have, 4);
@@ -8451,8 +9720,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8462,7 +9750,10 @@ mod tests {
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.state, TorrentState::Downloading);
-        assert_eq!(stats.checking_progress, 0.0, "checking_progress should be 0.0 when not checking");
+        assert_eq!(
+            stats.checking_progress, 0.0,
+            "checking_progress should be 0.0 when not checking"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -8481,7 +9772,9 @@ mod tests {
         for p in 0..2u32 {
             let offset = lengths.piece_offset(p) as usize;
             let size = lengths.piece_size(p) as usize;
-            storage.write_chunk(p, 0, &data[offset..offset + size]).unwrap();
+            storage
+                .write_chunk(p, 0, &data[offset..offset + size])
+                .unwrap();
         }
         // Pieces 2 and 3 have no data (zeros) — won't match hash
 
@@ -8490,8 +9783,27 @@ mod tests {
         let mut rx = atx.subscribe();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8503,7 +9815,12 @@ mod tests {
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
                 Ok(Ok(alert)) => {
-                    if let AlertKind::TorrentChecked { pieces_have, pieces_total, .. } = alert.kind {
+                    if let AlertKind::TorrentChecked {
+                        pieces_have,
+                        pieces_total,
+                        ..
+                    } = alert.kind
+                    {
                         checked_have = pieces_have;
                         checked_total = pieces_total;
                         break;
@@ -8549,8 +9866,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), Arc::clone(&ip_filter), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            Arc::clone(&ip_filter),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8558,14 +9894,20 @@ mod tests {
         // Add peers: one blocked (public IP in TEST-NET-3), one allowed (different public IP)
         let blocked_addr: SocketAddr = "203.0.113.42:6881".parse().unwrap();
         let allowed_addr: SocketAddr = "198.51.100.1:6881".parse().unwrap();
-        handle.add_peers(vec![blocked_addr, allowed_addr], PeerSource::Tracker).await.unwrap();
+        handle
+            .add_peers(vec![blocked_addr, allowed_addr], PeerSource::Tracker)
+            .await
+            .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
         // Only the allowed peer should be in the pool
-        assert!(stats.peers_available + stats.peers_connected <= 1,
+        assert!(
+            stats.peers_available + stats.peers_connected <= 1,
             "blocked peer should not be added: available={}, connected={}",
-            stats.peers_available, stats.peers_connected);
+            stats.peers_available,
+            stats.peers_connected
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -8586,8 +9928,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), Arc::clone(&ip_filter), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            Arc::clone(&ip_filter),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8596,11 +9957,16 @@ mod tests {
         // Use a local listener so the connection succeeds and the peer stays known.
         let _listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = _listener.local_addr().unwrap();
-        handle.add_peers(vec![local_addr], PeerSource::Tracker).await.unwrap();
+        handle
+            .add_peers(vec![local_addr], PeerSource::Tracker)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let stats = handle.stats().await.unwrap();
-        assert!(stats.peers_available + stats.peers_connected >= 1,
-            "peer should be allowed initially");
+        assert!(
+            stats.peers_available + stats.peers_connected >= 1,
+            "peer should be allowed initially"
+        );
         handle.shutdown().await.unwrap();
 
         // Now update the shared filter to block that IP range
@@ -8614,9 +9980,19 @@ mod tests {
         }
 
         // Verify the filter is updated (public IP, so is_blocked applies)
-        assert!(ip_filter.read().unwrap().is_blocked("198.51.100.1".parse().unwrap()));
+        assert!(
+            ip_filter
+                .read()
+                .unwrap()
+                .is_blocked("198.51.100.1".parse().unwrap())
+        );
         // Verify a different public IP is still allowed
-        assert!(!ip_filter.read().unwrap().is_blocked("203.0.113.1".parse().unwrap()));
+        assert!(
+            !ip_filter
+                .read()
+                .unwrap()
+                .is_blocked("203.0.113.1".parse().unwrap())
+        );
     }
 
     #[test]
@@ -8660,7 +10036,8 @@ mod tests {
 
     #[test]
     fn relocate_files_skips_missing() {
-        let tmp = std::env::temp_dir().join(format!("torrent_relocate_skip_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("torrent_relocate_skip_{}", std::process::id()));
         let src = tmp.join("src");
         let dst = tmp.join("dst");
         std::fs::create_dir_all(&src).unwrap();
@@ -8693,24 +10070,82 @@ mod tests {
         }
 
         let candidates = vec![
-            Candidate { addr: "10.0.0.1:6881".parse().unwrap(), download_rate: 100, is_seed: false, has_requests: false, in_parole: false, connected_at: old },
-            Candidate { addr: "10.0.0.2:6881".parse().unwrap(), download_rate: 5000, is_seed: false, has_requests: false, in_parole: false, connected_at: old },
-            Candidate { addr: "10.0.0.3:6881".parse().unwrap(), download_rate: 50, is_seed: false, has_requests: false, in_parole: false, connected_at: old },
-            Candidate { addr: "10.0.0.4:6881".parse().unwrap(), download_rate: 0, is_seed: true, has_requests: false, in_parole: false, connected_at: old },
-            Candidate { addr: "10.0.0.5:6881".parse().unwrap(), download_rate: 10, is_seed: false, has_requests: true, in_parole: false, connected_at: old },
-            Candidate { addr: "10.0.0.6:6881".parse().unwrap(), download_rate: 0, is_seed: false, has_requests: false, in_parole: false, connected_at: now },
-            Candidate { addr: "10.0.0.7:6881".parse().unwrap(), download_rate: 5, is_seed: false, has_requests: false, in_parole: true, connected_at: old },
+            Candidate {
+                addr: "10.0.0.1:6881".parse().unwrap(),
+                download_rate: 100,
+                is_seed: false,
+                has_requests: false,
+                in_parole: false,
+                connected_at: old,
+            },
+            Candidate {
+                addr: "10.0.0.2:6881".parse().unwrap(),
+                download_rate: 5000,
+                is_seed: false,
+                has_requests: false,
+                in_parole: false,
+                connected_at: old,
+            },
+            Candidate {
+                addr: "10.0.0.3:6881".parse().unwrap(),
+                download_rate: 50,
+                is_seed: false,
+                has_requests: false,
+                in_parole: false,
+                connected_at: old,
+            },
+            Candidate {
+                addr: "10.0.0.4:6881".parse().unwrap(),
+                download_rate: 0,
+                is_seed: true,
+                has_requests: false,
+                in_parole: false,
+                connected_at: old,
+            },
+            Candidate {
+                addr: "10.0.0.5:6881".parse().unwrap(),
+                download_rate: 10,
+                is_seed: false,
+                has_requests: true,
+                in_parole: false,
+                connected_at: old,
+            },
+            Candidate {
+                addr: "10.0.0.6:6881".parse().unwrap(),
+                download_rate: 0,
+                is_seed: false,
+                has_requests: false,
+                in_parole: false,
+                connected_at: now,
+            },
+            Candidate {
+                addr: "10.0.0.7:6881".parse().unwrap(),
+                download_rate: 5,
+                is_seed: false,
+                has_requests: false,
+                in_parole: true,
+                connected_at: old,
+            },
         ];
 
-        let mut eligible: Vec<_> = candidates.iter()
-            .filter(|c| !c.is_seed && !c.has_requests && !c.in_parole && c.connected_at.elapsed() >= Duration::from_secs(30))
+        let mut eligible: Vec<_> = candidates
+            .iter()
+            .filter(|c| {
+                !c.is_seed
+                    && !c.has_requests
+                    && !c.in_parole
+                    && c.connected_at.elapsed() >= Duration::from_secs(30)
+            })
             .collect();
         assert_eq!(eligible.len(), 3);
 
         eligible.sort_by_key(|c| c.download_rate);
         let turnover_count = ((eligible.len() as f64 * 0.04).floor() as usize).max(1);
         assert_eq!(turnover_count, 1);
-        assert_eq!(eligible[0].addr, "10.0.0.3:6881".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            eligible[0].addr,
+            "10.0.0.3:6881".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -8749,9 +10184,31 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let mut arx = atx.subscribe();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Wait for initial verification to complete (should become Seeding)
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -8774,7 +10231,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_checking, "should have transitioned through Checking state");
+        assert!(
+            saw_checking,
+            "should have transitioned through Checking state"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -8790,9 +10250,31 @@ mod tests {
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
-        let handle = TorrentHandle::from_torrent(meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config, None, None, None, None, crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None, test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()), None, None, Arc::new(crate::transport::NetworkFactory::tokio()))
-            .await
-            .unwrap();
+        let handle = TorrentHandle::from_torrent(
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
+        )
+        .await
+        .unwrap();
 
         // Wait for initial verification
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -8804,7 +10286,11 @@ mod tests {
         handle.force_recheck().await.unwrap();
 
         let stats = handle.stats().await.unwrap();
-        assert_eq!(stats.state, TorrentState::Seeding, "should return to Seeding after recheck");
+        assert_eq!(
+            stats.state,
+            TorrentState::Seeding,
+            "should return to Seeding after recheck"
+        );
         assert_eq!(stats.pieces_have, 2, "all pieces should still be verified");
 
         handle.shutdown().await.unwrap();
@@ -8833,11 +10319,27 @@ mod tests {
         let mut arx = atx.subscribe();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8881,11 +10383,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8913,11 +10431,27 @@ mod tests {
         let mut arx = atx.subscribe();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -8933,7 +10467,10 @@ mod tests {
                 saw_file_completed = true;
             }
         }
-        assert!(saw_file_completed, "should have received FileCompleted alert");
+        assert!(
+            saw_file_completed,
+            "should have received FileCompleted alert"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -8946,11 +10483,15 @@ mod tests {
         let info_hash = Id20::from([0u8; 20]);
         let alert = crate::alert::Alert::new(AlertKind::MetadataFailed { info_hash });
         assert!(
-            alert.category().contains(crate::alert::AlertCategory::STATUS),
+            alert
+                .category()
+                .contains(crate::alert::AlertCategory::STATUS),
             "MetadataFailed should have STATUS category"
         );
         assert!(
-            alert.category().contains(crate::alert::AlertCategory::ERROR),
+            alert
+                .category()
+                .contains(crate::alert::AlertCategory::ERROR),
             "MetadataFailed should have ERROR category"
         );
 
@@ -8974,11 +10515,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9013,11 +10570,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9045,11 +10618,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9080,11 +10669,27 @@ mod tests {
         let mut arx = atx.subscribe();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9094,7 +10699,8 @@ mod tests {
 
         // Send UpdateExternalIp command
         let test_ip: std::net::IpAddr = "203.0.113.42".parse().unwrap();
-        handle.cmd_tx
+        handle
+            .cmd_tx
             .send(TorrentCommand::UpdateExternalIp { ip: test_ip })
             .await
             .unwrap();
@@ -9127,11 +10733,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta.clone(), torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta.clone(),
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9144,14 +10766,21 @@ mod tests {
         let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = peer_listener.local_addr().unwrap();
 
-        handle.add_peers(vec![peer_addr], PeerSource::Tracker).await.unwrap();
+        handle
+            .add_peers(vec![peer_addr], PeerSource::Tracker)
+            .await
+            .unwrap();
 
         // Accept the connection and complete the handshake
-        let accept_timeout = tokio::time::timeout(Duration::from_secs(2), peer_listener.accept()).await;
+        let accept_timeout =
+            tokio::time::timeout(Duration::from_secs(2), peer_listener.accept()).await;
         if let Ok(Ok((mut stream, _))) = accept_timeout {
             // Read handshake
             let mut hs_buf = [0u8; HANDSHAKE_SIZE];
-            if tokio::time::timeout(Duration::from_millis(500), stream.read_exact(&mut hs_buf)).await.is_ok() {
+            if tokio::time::timeout(Duration::from_millis(500), stream.read_exact(&mut hs_buf))
+                .await
+                .is_ok()
+            {
                 // Send back handshake
                 let hs = Handshake::new(meta.info_hash, Id20::from([0xBB; 20]));
                 let hs_bytes = hs.to_bytes();
@@ -9168,7 +10797,10 @@ mod tests {
                     // Verify default choking/interested state
                     assert!(p.peer_choking, "peer should be choking us initially");
                     assert!(p.am_choking, "we should be choking peer initially");
-                    assert!(!p.peer_interested, "peer should not be interested initially");
+                    assert!(
+                        !p.peer_interested,
+                        "peer should not be interested initially"
+                    );
                     assert_eq!(p.num_pieces, 0);
                     assert_eq!(p.source, PeerSource::Tracker);
                 }
@@ -9193,11 +10825,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9220,17 +10868,36 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
 
         let queue = handle.get_download_queue().await.unwrap();
-        assert!(queue.is_empty(), "download queue should be empty with no active downloads");
+        assert!(
+            queue.is_empty(),
+            "download queue should be empty with no active downloads"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -9247,17 +10914,39 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
 
-        assert!(!handle.have_piece(0).await.unwrap(), "piece 0 should not be downloaded initially");
-        assert!(!handle.have_piece(1).await.unwrap(), "piece 1 should not be downloaded initially");
+        assert!(
+            !handle.have_piece(0).await.unwrap(),
+            "piece 0 should not be downloaded initially"
+        );
+        assert!(
+            !handle.have_piece(1).await.unwrap(),
+            "piece 1 should not be downloaded initially"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -9274,18 +10963,37 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
 
         let avail = handle.piece_availability().await.unwrap();
         assert_eq!(avail.len(), 2, "should have availability for 2 pieces");
-        assert!(avail.iter().all(|&c| c == 0), "all availability counts should be 0 with no peers");
+        assert!(
+            avail.iter().all(|&c| c == 0),
+            "all availability counts should be 0 with no peers"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -9302,11 +11010,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9321,7 +11045,11 @@ mod tests {
     // ---- Test: file_progress length matches file count (multi-file) ----
 
     /// Build a multi-file TorrentMetaV1 from a total data blob and file lengths.
-    fn make_test_torrent_multi(data: &[u8], piece_length: u64, file_lengths: &[u64]) -> TorrentMetaV1 {
+    fn make_test_torrent_multi(
+        data: &[u8],
+        piece_length: u64,
+        file_lengths: &[u64],
+    ) -> TorrentMetaV1 {
         use serde::Serialize;
 
         let mut pieces = Vec::new();
@@ -9354,12 +11082,14 @@ mod tests {
             info: Info<'a>,
         }
 
-        let files: Vec<FileE> = file_lengths.iter().enumerate().map(|(i, &len)| {
-            FileE {
+        let files: Vec<FileE> = file_lengths
+            .iter()
+            .enumerate()
+            .map(|(i, &len)| FileE {
                 length: len,
                 path: vec![format!("file{i}.bin")],
-            }
-        }).collect();
+            })
+            .collect();
 
         let t = Torrent {
             info: Info {
@@ -9386,18 +11116,41 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
 
         let progress = handle.file_progress().await.unwrap();
-        assert_eq!(progress.len(), 3, "multi-file torrent should have 3 entries");
-        assert!(progress.iter().all(|&b| b == 0), "all progress should be 0 initially");
+        assert_eq!(
+            progress.len(),
+            3,
+            "multi-file torrent should have 3 entries"
+        );
+        assert!(
+            progress.iter().all(|&b| b == 0),
+            "all progress should be 0 initially"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -9414,16 +11167,35 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
 
-        assert!(handle.is_valid(), "handle should be valid while torrent actor is alive");
+        assert!(
+            handle.is_valid(),
+            "handle should be valid while torrent actor is alive"
+        );
 
         handle.shutdown().await.unwrap();
     }
@@ -9440,11 +11212,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9457,7 +11245,10 @@ mod tests {
         // Give the actor time to stop and close the channel
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        assert!(!handle.is_valid(), "handle should be invalid after shutdown");
+        assert!(
+            !handle.is_valid(),
+            "handle should be invalid after shutdown"
+        );
     }
 
     // ---- Test: clear_error resets error state ----
@@ -9472,11 +11263,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9508,11 +11315,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();
@@ -9524,12 +11347,18 @@ mod tests {
         assert!(!initial.contains(crate::types::TorrentFlags::SUPER_SEEDING));
 
         // Enable sequential download via set_flags
-        handle.set_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD).await.unwrap();
+        handle
+            .set_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD)
+            .await
+            .unwrap();
         let after_set = handle.flags().await.unwrap();
         assert!(after_set.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
 
         // Disable it via unset_flags
-        handle.unset_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD).await.unwrap();
+        handle
+            .unset_flags(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD)
+            .await
+            .unwrap();
         let after_unset = handle.flags().await.unwrap();
         assert!(!after_unset.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD));
 
@@ -9551,11 +11380,27 @@ mod tests {
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
         let handle = TorrentHandle::from_torrent(
-            meta, torrent_core::TorrentVersion::V1Only, None, dh, dm, config,
-            None, None, None, None,
-            crate::slot_tuner::SlotTuner::disabled(4), atx, amask, None, None,
-            test_ban_manager(), test_ip_filter(), Arc::new(Vec::new()),
-            None, None, Arc::new(crate::transport::NetworkFactory::tokio()),
+            meta,
+            torrent_core::TorrentVersion::V1Only,
+            None,
+            dh,
+            dm,
+            config,
+            None,
+            None,
+            None,
+            None,
+            crate::slot_tuner::SlotTuner::disabled(4),
+            atx,
+            amask,
+            None,
+            None,
+            test_ban_manager(),
+            test_ip_filter(),
+            Arc::new(Vec::new()),
+            None,
+            None,
+            Arc::new(crate::transport::NetworkFactory::tokio()),
         )
         .await
         .unwrap();

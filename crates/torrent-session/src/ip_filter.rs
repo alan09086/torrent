@@ -24,8 +24,12 @@ trait Successor {
 }
 
 impl Bounded for Ipv4Addr {
-    fn min_value() -> Self { Ipv4Addr::new(0, 0, 0, 0) }
-    fn max_value() -> Self { Ipv4Addr::new(255, 255, 255, 255) }
+    fn min_value() -> Self {
+        Ipv4Addr::new(0, 0, 0, 0)
+    }
+    fn max_value() -> Self {
+        Ipv4Addr::new(255, 255, 255, 255)
+    }
 }
 
 impl Successor for Ipv4Addr {
@@ -36,8 +40,14 @@ impl Successor for Ipv4Addr {
 }
 
 impl Bounded for Ipv6Addr {
-    fn min_value() -> Self { Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0) }
-    fn max_value() -> Self { Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff) }
+    fn min_value() -> Self {
+        Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)
+    }
+    fn max_value() -> Self {
+        Ipv6Addr::new(
+            0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+        )
+    }
 }
 
 impl Successor for Ipv6Addr {
@@ -48,12 +58,18 @@ impl Successor for Ipv6Addr {
 }
 
 impl Bounded for u16 {
-    fn min_value() -> Self { 0 }
-    fn max_value() -> Self { u16::MAX }
+    fn min_value() -> Self {
+        0
+    }
+    fn max_value() -> Self {
+        u16::MAX
+    }
 }
 
 impl Successor for u16 {
-    fn successor(self) -> Self { self.saturating_add(1) }
+    fn successor(self) -> Self {
+        self.saturating_add(1)
+    }
 }
 
 // ── IntervalMap ──────────────────────────────────────────────────────
@@ -321,27 +337,34 @@ pub fn parse_dat(input: &str) -> Result<IpFilter, IpFilterError> {
             });
         }
 
-        let first: IpAddr = ips[0].trim().parse().map_err(|e: std::net::AddrParseError| {
-            IpFilterError::InvalidAddress {
-                line: line_num + 1,
-                message: e.to_string(),
-            }
-        })?;
+        let first: IpAddr = ips[0]
+            .trim()
+            .parse()
+            .map_err(
+                |e: std::net::AddrParseError| IpFilterError::InvalidAddress {
+                    line: line_num + 1,
+                    message: e.to_string(),
+                },
+            )?;
 
-        let last: IpAddr = ips[1].trim().parse().map_err(|e: std::net::AddrParseError| {
-            IpFilterError::InvalidAddress {
-                line: line_num + 1,
-                message: e.to_string(),
-            }
-        })?;
+        let last: IpAddr = ips[1]
+            .trim()
+            .parse()
+            .map_err(
+                |e: std::net::AddrParseError| IpFilterError::InvalidAddress {
+                    line: line_num + 1,
+                    message: e.to_string(),
+                },
+            )?;
 
         // Parse level (flags)
-        let level: u32 = parts[1].trim().parse().map_err(|_| {
-            IpFilterError::MalformedLine {
+        let level: u32 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| IpFilterError::MalformedLine {
                 line: line_num + 1,
                 message: "invalid level (expected integer)".into(),
-            }
-        })?;
+            })?;
 
         filter.add_rule(first, last, level);
     }
@@ -363,10 +386,12 @@ pub fn parse_p2p(input: &str) -> Result<IpFilter, IpFilterError> {
         }
 
         // Split on last ':' to separate description from IP range
-        let colon_pos = line.rfind(':').ok_or_else(|| IpFilterError::MalformedLine {
-            line: line_num + 1,
-            message: "expected 'description:first_ip-last_ip'".into(),
-        })?;
+        let colon_pos = line
+            .rfind(':')
+            .ok_or_else(|| IpFilterError::MalformedLine {
+                line: line_num + 1,
+                message: "expected 'description:first_ip-last_ip'".into(),
+            })?;
 
         let ip_range = &line[colon_pos + 1..];
         let ips: Vec<&str> = ip_range.splitn(2, '-').collect();
@@ -377,19 +402,25 @@ pub fn parse_p2p(input: &str) -> Result<IpFilter, IpFilterError> {
             });
         }
 
-        let first: IpAddr = ips[0].trim().parse().map_err(|e: std::net::AddrParseError| {
-            IpFilterError::InvalidAddress {
-                line: line_num + 1,
-                message: e.to_string(),
-            }
-        })?;
+        let first: IpAddr = ips[0]
+            .trim()
+            .parse()
+            .map_err(
+                |e: std::net::AddrParseError| IpFilterError::InvalidAddress {
+                    line: line_num + 1,
+                    message: e.to_string(),
+                },
+            )?;
 
-        let last: IpAddr = ips[1].trim().parse().map_err(|e: std::net::AddrParseError| {
-            IpFilterError::InvalidAddress {
-                line: line_num + 1,
-                message: e.to_string(),
-            }
-        })?;
+        let last: IpAddr = ips[1]
+            .trim()
+            .parse()
+            .map_err(
+                |e: std::net::AddrParseError| IpFilterError::InvalidAddress {
+                    line: line_num + 1,
+                    message: e.to_string(),
+                },
+            )?;
 
         // P2P format always blocks (flags=1)
         filter.add_rule(first, last, 1);
@@ -417,11 +448,7 @@ mod tests {
     #[test]
     fn interval_map_single_range() {
         let mut map: IntervalMap<Ipv4Addr> = IntervalMap::new();
-        map.add_rule(
-            Ipv4Addr::new(10, 0, 0, 0),
-            Ipv4Addr::new(10, 0, 0, 255),
-            1,
-        );
+        map.add_rule(Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(10, 0, 0, 255), 1);
 
         // Inside range
         assert_eq!(map.access(&Ipv4Addr::new(10, 0, 0, 0)), 1);
@@ -439,11 +466,7 @@ mod tests {
     fn interval_map_overlapping_last_wins() {
         let mut map: IntervalMap<Ipv4Addr> = IntervalMap::new();
         // Block 10.0.0.0 - 10.0.0.255 with flags=1
-        map.add_rule(
-            Ipv4Addr::new(10, 0, 0, 0),
-            Ipv4Addr::new(10, 0, 0, 255),
-            1,
-        );
+        map.add_rule(Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(10, 0, 0, 255), 1);
         // Allow 10.0.0.100 - 10.0.0.200 with flags=0 (override)
         map.add_rule(
             Ipv4Addr::new(10, 0, 0, 100),
@@ -507,7 +530,9 @@ mod tests {
         );
         filter.add_rule(
             IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)),
-            IpAddr::V6(Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff)),
+            IpAddr::V6(Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            )),
             1,
         );
 

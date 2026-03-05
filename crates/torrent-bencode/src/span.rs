@@ -167,10 +167,7 @@ mod tests {
     fn find_info_key() {
         let data = b"d4:infod4:name4:test12:piece lengthi1024ee8:url-list4:httpe";
         let span = find_dict_key_span(data, "info").unwrap();
-        assert_eq!(
-            &data[span],
-            b"d4:name4:test12:piece lengthi1024ee"
-        );
+        assert_eq!(&data[span], b"d4:name4:test12:piece lengthi1024ee");
     }
 
     #[test]

@@ -29,7 +29,10 @@ impl MerkleTree {
     /// Pads to the next power of two with zero hashes, then builds bottom-up
     /// by hashing pairs: `parent = SHA-256(left || right)`.
     pub fn from_leaves(leaves: &[Id32]) -> Self {
-        assert!(!leaves.is_empty(), "cannot build Merkle tree from empty leaves");
+        assert!(
+            !leaves.is_empty(),
+            "cannot build Merkle tree from empty leaves"
+        );
 
         let leaf_count = leaves.len();
         let padded = leaf_count.next_power_of_two();
