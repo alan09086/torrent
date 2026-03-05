@@ -9643,9 +9643,15 @@ mod tests {
     #[test]
     fn hashing_threads_config_default() {
         let s = crate::settings::Settings::default();
-        assert_eq!(s.hashing_threads, 2);
+        let expected = {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            (cores / 4).clamp(2, 8)
+        };
+        assert_eq!(s.hashing_threads, expected);
         let tc = TorrentConfig::default();
-        assert_eq!(tc.hashing_threads, 2);
+        assert_eq!(tc.hashing_threads, expected);
     }
 
     #[tokio::test]

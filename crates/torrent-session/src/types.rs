@@ -159,7 +159,12 @@ impl Default for TorrentConfig {
             super_seeding: false,
             upload_only_announce: true,
             have_send_delay_ms: 0,
-            hashing_threads: 2,
+            hashing_threads: {
+                let cores = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
+                (cores / 4).clamp(2, 8)
+            },
             sequential_download: false,
             initial_picker_threshold: 4,
             whole_pieces_threshold: 20,

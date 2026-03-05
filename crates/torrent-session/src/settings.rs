@@ -71,7 +71,10 @@ fn default_smart_ban_max_failures() -> u32 {
     3
 }
 fn default_disk_io_threads() -> usize {
-    4
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores / 2).clamp(4, 16)
 }
 fn default_storage_mode() -> StorageMode {
     StorageMode::Auto
@@ -86,7 +89,10 @@ fn default_disk_channel_capacity() -> usize {
     512
 }
 fn default_hashing_threads() -> usize {
-    2
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores / 4).clamp(2, 8)
 }
 fn default_max_request_queue_depth() -> usize {
     250
@@ -717,13 +723,13 @@ impl Default for Settings {
             smart_ban_max_failures: 3,
             smart_ban_parole: true,
             // Disk I/O
-            disk_io_threads: 4,
+            disk_io_threads: default_disk_io_threads(),
             storage_mode: StorageMode::Auto,
             disk_cache_size: 64 * 1024 * 1024,
             disk_write_cache_ratio: 0.25,
             disk_channel_capacity: 512,
             // Hashing & piece picking
-            hashing_threads: 2,
+            hashing_threads: default_hashing_threads(),
             max_request_queue_depth: 250,
             initial_queue_depth: 128,
             request_queue_time: 3.0,
@@ -1194,12 +1200,12 @@ mod tests {
         assert_eq!(s.alert_channel_size, 1024);
         assert_eq!(s.smart_ban_max_failures, 3);
         assert!(s.smart_ban_parole);
-        assert_eq!(s.disk_io_threads, 4);
+        assert_eq!(s.disk_io_threads, default_disk_io_threads());
         assert_eq!(s.storage_mode, StorageMode::Auto);
         assert_eq!(s.disk_cache_size, 64 * 1024 * 1024);
         assert!((s.disk_write_cache_ratio - 0.25).abs() < f32::EPSILON);
         assert_eq!(s.disk_channel_capacity, 512);
-        assert_eq!(s.hashing_threads, 2);
+        assert_eq!(s.hashing_threads, default_hashing_threads());
         assert_eq!(s.max_request_queue_depth, 250);
         assert_eq!(s.initial_queue_depth, 128);
         assert!((s.request_queue_time - 3.0).abs() < f64::EPSILON);
@@ -1308,7 +1314,7 @@ mod tests {
     fn disk_config_from_settings() {
         let s = Settings::default();
         let dc = crate::disk::DiskConfig::from(&s);
-        assert_eq!(dc.io_threads, 4);
+        assert_eq!(dc.io_threads, default_disk_io_threads());
         assert_eq!(dc.storage_mode, StorageMode::Auto);
         assert_eq!(dc.cache_size, 64 * 1024 * 1024);
         assert!((dc.write_cache_ratio - 0.25).abs() < f32::EPSILON);
