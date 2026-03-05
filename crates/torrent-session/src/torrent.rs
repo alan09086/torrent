@@ -3396,6 +3396,16 @@ impl TorrentActor {
         begin: u32,
         data: Bytes,
     ) {
+        // Skip duplicate blocks — in end-game mode or after timeout re-requests,
+        // the same block may arrive from multiple peers. Writing it to the store
+        // buffer would overwrite valid data that's pending verification.
+        if let Some(ref ct) = self.chunk_tracker
+            && ct.has_chunk(index, begin)
+        {
+            self.total_download += data.len() as u64 + 13;
+            return;
+        }
+
         let data_len = data.len();
 
         // Fire-and-forget write (zero-copy: Bytes moved from wire codec -> disk)
