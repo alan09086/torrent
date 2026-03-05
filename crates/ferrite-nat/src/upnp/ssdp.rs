@@ -11,14 +11,20 @@ pub const SSDP_MULTICAST: std::net::Ipv4Addr = std::net::Ipv4Addr::new(239, 255,
 /// SSDP multicast port.
 pub const SSDP_PORT: u16 = 1900;
 
-/// UPnP WANIPConnection service type.
+/// UPnP WANIPConnection service type (v1).
 pub const WAN_IP_SERVICE: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
 
 /// UPnP WANPPPConnection service type (for PPPoE gateways).
 pub const WAN_PPP_SERVICE: &str = "urn:schemas-upnp-org:service:WANPPPConnection:1";
 
-/// UPnP Internet Gateway Device type.
+/// UPnP WANIPConnection service type (v2).
+pub const WAN_IP_SERVICE_V2: &str = "urn:schemas-upnp-org:service:WANIPConnection:2";
+
+/// UPnP Internet Gateway Device type (v1).
 const IGD_DEVICE: &str = "urn:schemas-upnp-org:device:InternetGatewayDevice:1";
+
+/// UPnP Internet Gateway Device type (v2).
+const IGD_DEVICE_V2: &str = "urn:schemas-upnp-org:device:InternetGatewayDevice:2";
 
 /// Format an SSDP M-SEARCH request.
 pub fn format_msearch(search_target: &str) -> Vec<u8> {
@@ -74,26 +80,45 @@ pub fn parse_msearch_response(data: &[u8]) -> Option<SsdpResponse> {
 
 /// Discover an Internet Gateway Device via SSDP multicast.
 ///
-/// Sends M-SEARCH for IGD and returns the first valid LOCATION URL.
+/// Sends M-SEARCH for both IGD v1 and v2 and returns the first valid LOCATION
+/// URL from an IGD response (skipping non-IGD responders like DLNA servers).
 pub async fn discover_igd(timeout: std::time::Duration) -> Result<String> {
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
 
     let target = std::net::SocketAddr::from((SSDP_MULTICAST, SSDP_PORT));
-    let search = format_msearch(IGD_DEVICE);
-    socket.send_to(&search, target).await?;
+
+    // Send both v1 and v2 M-SEARCH packets.
+    socket.send_to(&format_msearch(IGD_DEVICE), target).await?;
+    socket
+        .send_to(&format_msearch(IGD_DEVICE_V2), target)
+        .await?;
 
     let mut buf = vec![0u8; 2048];
 
-    match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
-        Ok(Ok((n, _addr))) => {
-            if let Some(resp) = parse_msearch_response(&buf[..n]) {
-                Ok(resp.location)
-            } else {
-                Err(Error::UpnpDiscovery("no valid SSDP response".into()))
-            }
+    // Collect responses until timeout, accepting the first IGD match.
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::Timeout);
         }
-        Ok(Err(e)) => Err(Error::Io(e)),
-        Err(_) => Err(Error::Timeout),
+
+        match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, _addr))) => {
+                if let Some(resp) = parse_msearch_response(&buf[..n]) {
+                    // Accept only IGD responses, skip DLNA/other.
+                    if resp.search_target.contains("InternetGatewayDevice") {
+                        return Ok(resp.location);
+                    }
+                    tracing::debug!(
+                        st = %resp.search_target,
+                        "skipping non-IGD SSDP response"
+                    );
+                }
+            }
+            Ok(Err(e)) => return Err(Error::Io(e)),
+            Err(_) => return Err(Error::Timeout),
+        }
     }
 }
 
