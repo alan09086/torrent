@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.66.0 — Performance Consistency & Tuning
+
+### Fixed
+- **Store buffer lock scope** — made Mutex lock scope explicit in verify path with block scope, preventing potential contention between enqueue_write and spawn_blocking verify tasks
+- **Pipeline fill loop peer validation** — peer existence check and bitfield refresh each iteration of the pick_blocks loop, preventing stale context from causing wasted block picks
+- **Disconnect handler re-request guard** — defensive peer existence check before re-requesting blocks from remaining peers after a disconnect
+
+### Changed
+- **Snub timeout reduced 60s to 15s** — stalled peers now free their 128 request slots 4x faster; rqbit handles this in ~10s
+- **Queue depth floor raised from 2 to 64** — prevents EWMA-driven negative feedback loop where brief throughput dips cascade into near-zero queue depth
+- **Peer turnover increased from 4%/300s to 8%/120s** — underperforming peers cycled 4x faster (~120 replacements/hour)
+- **Zombie peer pruning** — peers with empty bitfields after 30s are disconnected during choking evaluation to free connection slots (only during downloading, not seeding)
+- Test count: 1385+
+
 ## 0.65.0 — `torrent` v0.65.0: Rename, Non-Blocking Pipeline, Production Hardening
 
 ### Breaking
