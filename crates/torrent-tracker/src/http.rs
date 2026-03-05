@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::{AnnounceEvent, AnnounceRequest, AnnounceResponse, ScrapeInfo};
 
 /// HTTP tracker client (BEP 3).
+#[derive(Clone)]
 pub struct HttpTracker {
     client: reqwest::Client,
 }

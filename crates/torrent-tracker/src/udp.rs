@@ -55,6 +55,7 @@ const ACTION_SCRAPE: u32 = 2;
 const UDP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// UDP tracker client (BEP 15).
+#[derive(Clone)]
 pub struct UdpTracker {
     timeout: Duration,
     dscp: u8,

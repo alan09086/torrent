@@ -428,26 +428,51 @@ impl TrackerManager {
             compact: true,
         };
         let now = Instant::now();
-        let mut all_peers = Vec::new();
-        let mut seen_peers = std::collections::HashSet::new();
-        let mut outcomes = Vec::new();
 
-        for tracker in &mut self.trackers {
+        // Spawn all eligible tracker announces in parallel
+        type AnnounceOk = (
+            Vec<SocketAddr>,
+            u32,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+        );
+        let mut join_set =
+            tokio::task::JoinSet::<(usize, Result<AnnounceOk, torrent_tracker::Error>)>::new();
+
+        for (idx, tracker) in self.trackers.iter().enumerate() {
             // For the secondary (v2) hash, always announce (don't skip based on next_announce,
             // since the timer tracks the primary hash). For the primary hash, respect the timer.
             if hash == self.info_hash && tracker.next_announce > now {
                 continue;
             }
 
-            let result = match tracker.protocol {
-                TrackerProtocol::Http => {
-                    Self::announce_http(&self.http_client, &tracker.url, &req).await
-                }
-                TrackerProtocol::Udp => {
-                    Self::announce_udp(&self.udp_client, &tracker.url, &req).await
-                }
-            };
+            let http_client = self.http_client.clone();
+            let udp_client = self.udp_client.clone();
+            let url = tracker.url.clone();
+            let protocol = tracker.protocol;
+            let req = req.clone();
 
+            join_set.spawn(async move {
+                let result = match protocol {
+                    TrackerProtocol::Http => {
+                        Self::announce_http(&http_client, &url, &req).await
+                    }
+                    TrackerProtocol::Udp => {
+                        Self::announce_udp(&udp_client, &url, &req).await
+                    }
+                };
+                (idx, result)
+            });
+        }
+
+        // Collect results and update tracker state
+        let mut all_peers = Vec::new();
+        let mut seen_peers = std::collections::HashSet::new();
+        let mut outcomes = Vec::new();
+
+        while let Some(Ok((idx, result))) = join_set.join_next().await {
+            let tracker = &mut self.trackers[idx];
             match result {
                 Ok((peers, interval, tracker_id, seeders, leechers)) => {
                     let num_peers = peers.len();
