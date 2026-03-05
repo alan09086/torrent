@@ -5050,108 +5050,112 @@ impl TorrentActor {
             .map(|(&addr, p)| (addr, p.pipeline.ewma_rate()))
             .collect();
 
-        let ctx = PickContext {
-            peer_addr,
-            peer_has: &peer_bitfield,
-            peer_speed,
-            peer_is_snubbed: is_snubbed,
-            peer_rate,
-            we_have: &we_have,
-            in_flight_pieces: &self.in_flight_pieces,
-            wanted: &self.wanted_pieces,
-            streaming_pieces: &self.streaming_pieces,
-            time_critical_pieces: &self.time_critical_pieces,
-            suggested_pieces: &suggested,
-            sequential_download: self.config.sequential_download,
-            completed_count,
-            initial_picker_threshold: self.config.initial_picker_threshold,
-            connected_peer_count: self.peers.len(),
-            whole_pieces_threshold: self.config.whole_pieces_threshold,
-            piece_size: self
-                .lengths
-                .as_ref()
-                .map(|l| l.piece_length() as u32)
-                .unwrap_or(262144),
-            extent_affinity: self.config.piece_extent_affinity,
-            auto_sequential_active: self.config.auto_sequential && self.auto_sequential_active,
-            peer_rates: &peer_rates,
-            steal_threshold_ratio: self.config.steal_threshold_ratio,
-        };
-
         let missing_buf = std::cell::RefCell::new(Vec::with_capacity(128));
-        let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
-            self.chunk_tracker
-                .as_ref()
-                .map(|ct| {
-                    let mut buf = missing_buf.borrow_mut();
-                    ct.missing_chunks_into(piece, &mut buf);
-                    buf.clone()
-                })
-                .unwrap_or_default()
-        };
+        let mut slots_remaining = slots;
 
-        if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
-            debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots, "pick_blocks: sending requests");
-            // Track in in_flight_pieces
-            let total_blocks = self
-                .chunk_tracker
-                .as_ref()
-                .map(|ct| ct.missing_chunks(result.piece).len() as u32)
-                .unwrap_or(1);
-            let ifp = self
-                .in_flight_pieces
-                .entry(result.piece)
-                .or_insert_with(|| InFlightPiece::new(total_blocks));
-
-            for (begin, length) in result.blocks.iter().take(slots) {
-                // Check download rate limits
-                if !self.download_bucket.is_unlimited() {
-                    let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
-                    if !is_local
-                        && let Some(ref global) = self.global_download_bucket
-                        && !global.lock().unwrap().try_consume(*length as u64)
-                    {
-                        break;
-                    }
-                    if !self.download_bucket.try_consume(*length as u64) {
-                        break;
-                    }
-                }
-
-                if let Some(peer) = self.peers.get_mut(&peer_addr)
-                    && peer
-                        .cmd_tx
-                        .try_send(PeerCommand::Request {
-                            index: result.piece,
-                            begin: *begin,
-                            length: *length,
-                        })
-                        .is_ok()
-                {
-                    // Only mark as assigned AFTER successful send — phantom
-                    // assignments block piece completion permanently.
-                    ifp.assigned_blocks
-                        .insert((result.piece, *begin), peer_addr);
-                    peer.pipeline
-                        .request_sent(result.piece, *begin, std::time::Instant::now());
-                    peer.pending_requests.push((result.piece, *begin, *length));
-                }
-                // If channel full, skip — block will be re-requested next cycle
+        // Loop to fill all pipeline slots — pick_blocks returns blocks from a
+        // single piece (~34 blocks for 512 KiB pieces), but we may have 128+
+        // slots to fill.  Without looping, the pipeline runs at ~25% capacity.
+        loop {
+            if slots_remaining == 0 {
+                break;
             }
-        } else {
-            let bf_ones = self
-                .peers
-                .get(&peer_addr)
-                .map(|p| p.bitfield.count_ones())
-                .unwrap_or(0);
-            let have = self
-                .chunk_tracker
-                .as_ref()
-                .map(|ct| ct.bitfield().count_ones())
-                .unwrap_or(0);
-            let in_flight = self.in_flight_pieces.len();
-            debug!(%peer_addr, bf_ones, have, in_flight, "pick_blocks: no blocks available");
-            self.check_end_game_activation();
+
+            // Re-create closure and context each iteration so borrows don't
+            // conflict with the mutable access to in_flight_pieces/peers below.
+            let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
+                self.chunk_tracker
+                    .as_ref()
+                    .map(|ct| {
+                        let mut buf = missing_buf.borrow_mut();
+                        ct.missing_chunks_into(piece, &mut buf);
+                        buf.clone()
+                    })
+                    .unwrap_or_default()
+            };
+
+            let ctx = PickContext {
+                peer_addr,
+                peer_has: &peer_bitfield,
+                peer_speed,
+                peer_is_snubbed: is_snubbed,
+                peer_rate,
+                we_have: &we_have,
+                in_flight_pieces: &self.in_flight_pieces,
+                wanted: &self.wanted_pieces,
+                streaming_pieces: &self.streaming_pieces,
+                time_critical_pieces: &self.time_critical_pieces,
+                suggested_pieces: &suggested,
+                sequential_download: self.config.sequential_download,
+                completed_count,
+                initial_picker_threshold: self.config.initial_picker_threshold,
+                connected_peer_count: self.peers.len(),
+                whole_pieces_threshold: self.config.whole_pieces_threshold,
+                piece_size: self
+                    .lengths
+                    .as_ref()
+                    .map(|l| l.piece_length() as u32)
+                    .unwrap_or(262144),
+                extent_affinity: self.config.piece_extent_affinity,
+                auto_sequential_active: self.config.auto_sequential
+                    && self.auto_sequential_active,
+                peer_rates: &peer_rates,
+                steal_threshold_ratio: self.config.steal_threshold_ratio,
+            };
+
+            if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
+                debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots = slots_remaining, "pick_blocks: sending requests");
+                let total_blocks = self
+                    .chunk_tracker
+                    .as_ref()
+                    .map(|ct| ct.missing_chunks(result.piece).len() as u32)
+                    .unwrap_or(1);
+                let ifp = self
+                    .in_flight_pieces
+                    .entry(result.piece)
+                    .or_insert_with(|| InFlightPiece::new(total_blocks));
+
+                let mut sent = 0usize;
+                for (begin, length) in result.blocks.iter().take(slots_remaining) {
+                    if !self.download_bucket.is_unlimited() {
+                        let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
+                        if !is_local
+                            && let Some(ref global) = self.global_download_bucket
+                            && !global.lock().unwrap().try_consume(*length as u64)
+                        {
+                            break;
+                        }
+                        if !self.download_bucket.try_consume(*length as u64) {
+                            break;
+                        }
+                    }
+
+                    if let Some(peer) = self.peers.get_mut(&peer_addr)
+                        && peer
+                            .cmd_tx
+                            .try_send(PeerCommand::Request {
+                                index: result.piece,
+                                begin: *begin,
+                                length: *length,
+                            })
+                            .is_ok()
+                    {
+                        ifp.assigned_blocks
+                            .insert((result.piece, *begin), peer_addr);
+                        peer.pipeline
+                            .request_sent(result.piece, *begin, std::time::Instant::now());
+                        peer.pending_requests.push((result.piece, *begin, *length));
+                        sent += 1;
+                    }
+                }
+                if sent == 0 {
+                    break; // peer channel full or rate limited
+                }
+                slots_remaining -= sent;
+            } else {
+                self.check_end_game_activation();
+                break;
+            }
         }
     }
 
@@ -5678,7 +5682,7 @@ impl TorrentActor {
                 continue;
             }
 
-            let (cmd_tx, cmd_rx) = mpsc::channel(64);
+            let (cmd_tx, cmd_rx) = mpsc::channel(256);
             let bitfield = if self.super_seed.is_some() {
                 // Super seeding: send empty bitfield to hide our pieces
                 Bitfield::new(self.num_pieces)
@@ -6140,7 +6144,7 @@ impl TorrentActor {
             return;
         }
 
-        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let bitfield = if self.super_seed.is_some() {
             // Super seeding: send empty bitfield to hide our pieces
             Bitfield::new(self.num_pieces)
@@ -6335,7 +6339,7 @@ impl TorrentActor {
         }
 
         // Set up peer state and channels (same pattern as try_connect_peers)
-        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let bitfield = if self.super_seed.is_some() {
             Bitfield::new(self.num_pieces)
         } else {
