@@ -17,8 +17,10 @@ pub(crate) struct LtTrackersMessage {
 #[allow(dead_code)]
 impl LtTrackersMessage {
     /// Deserialize from bencoded bytes.
+    ///
+    /// Uses lenient parsing to accept unsorted dictionary keys from peers.
     pub fn from_bytes(data: &[u8]) -> crate::Result<Self> {
-        torrent_bencode::from_bytes(data)
+        torrent_bencode::from_bytes_lenient(data)
             .map_err(|e| crate::Error::Core(torrent_core::Error::from(e)))
     }
 

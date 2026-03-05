@@ -53,8 +53,23 @@ pub fn to_bytes<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
 }
 
 /// Deserialize a value from bencode bytes.
+///
+/// Enforces BEP 3 dictionary key ordering. Use [`from_bytes_lenient`] for
+/// peer wire messages where real-world clients may send unsorted keys.
 pub fn from_bytes<'de, T: serde::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T> {
     let mut deserializer = Deserializer::new(bytes);
+    let value = serde::Deserialize::deserialize(&mut deserializer)?;
+    deserializer.finish()?;
+    Ok(value)
+}
+
+/// Deserialize a value from bencode bytes, accepting unsorted dictionary keys.
+///
+/// Many real-world BitTorrent clients send extension handshakes and other
+/// messages with unsorted dictionary keys. This function accepts such input
+/// while still correctly parsing all bencode types.
+pub fn from_bytes_lenient<'de, T: serde::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T> {
+    let mut deserializer = Deserializer::lenient(bytes);
     let value = serde::Deserialize::deserialize(&mut deserializer)?;
     deserializer.finish()?;
     Ok(value)

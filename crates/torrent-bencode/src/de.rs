@@ -9,12 +9,33 @@ use crate::error::{Error, Result};
 pub struct Deserializer<'de> {
     input: &'de [u8],
     pos: usize,
+    strict_order: bool,
 }
 
 impl<'de> Deserializer<'de> {
     /// Create a new deserializer from a byte slice.
+    ///
+    /// By default, dictionary key ordering is enforced per BEP 3.
+    /// Use [`Deserializer::lenient`] to accept unsorted keys.
     pub fn new(input: &'de [u8]) -> Self {
-        Deserializer { input, pos: 0 }
+        Deserializer {
+            input,
+            pos: 0,
+            strict_order: true,
+        }
+    }
+
+    /// Create a lenient deserializer that accepts unsorted dictionary keys.
+    ///
+    /// Many real-world clients send extension handshakes with unsorted keys.
+    /// Use this for parsing peer wire messages where strict BEP 3 compliance
+    /// would reject otherwise valid data.
+    pub fn lenient(input: &'de [u8]) -> Self {
+        Deserializer {
+            input,
+            pos: 0,
+            strict_order: false,
+        }
     }
 
     /// Verify all input has been consumed. Call after deserializing.
@@ -350,9 +371,11 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         self.expect(b'd')?;
+        let strict_order = self.strict_order;
         let value = visitor.visit_map(MapAccess {
             de: self,
             last_key: None,
+            strict_order,
         })?;
         self.expect(b'e')?;
         Ok(value)
@@ -459,6 +482,7 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
 struct MapAccess<'a, 'de> {
     de: &'a mut Deserializer<'de>,
     last_key: Option<Vec<u8>>,
+    strict_order: bool,
 }
 
 impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
@@ -474,8 +498,9 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
         let key_data = self.de.parse_byte_string()?;
         let key_vec = key_data.to_vec();
 
-        // Validate sorted order
+        // Validate sorted order (strict mode only — lenient accepts unsorted)
         if let Some(ref last) = self.last_key
+            && self.strict_order
             && key_vec <= *last
         {
             return Err(Error::UnsortedKeys {
@@ -672,5 +697,23 @@ mod tests {
     #[test]
     fn reject_trailing_data() {
         assert!(from_bytes::<i64>(b"i42eXXX").is_err());
+    }
+
+    #[test]
+    fn strict_rejects_unsorted_dict_keys() {
+        // d2:zz1:a2:aa1:be — keys "zz" then "aa" are unsorted
+        let unsorted = b"d2:zz1:a2:aa1:be";
+        assert!(from_bytes::<std::collections::BTreeMap<String, String>>(unsorted).is_err());
+    }
+
+    #[test]
+    fn lenient_accepts_unsorted_dict_keys() {
+        use crate::from_bytes_lenient;
+        // d2:zz1:a2:aa1:be — keys "zz" then "aa" are unsorted
+        let unsorted = b"d2:zz1:a2:aa1:be";
+        let map: std::collections::BTreeMap<String, String> =
+            from_bytes_lenient(unsorted).unwrap();
+        assert_eq!(map.get("zz").unwrap(), "a");
+        assert_eq!(map.get("aa").unwrap(), "b");
     }
 }

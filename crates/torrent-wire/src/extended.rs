@@ -41,7 +41,7 @@ impl ExtHandshake {
 
         ExtHandshake {
             m,
-            v: Some("Ferrite 0.1.0".into()),
+            v: Some("Torrent 0.65.0".into()),
             p: None,
             reqq: Some(250),
             metadata_size: None,
@@ -80,8 +80,11 @@ impl ExtHandshake {
     }
 
     /// Decode from bencode bytes.
+    ///
+    /// Uses lenient parsing to accept unsorted dictionary keys, which many
+    /// real-world clients send in their extension handshakes.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        Ok(torrent_bencode::from_bytes(data)?)
+        Ok(torrent_bencode::from_bytes_lenient(data)?)
     }
 
     /// Look up the message ID for an extension by name.
@@ -181,7 +184,7 @@ impl MetadataMessage {
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         // Find the end of the bencode dict by scanning for the matching 'e'
         let dict_end = find_bencode_dict_end(data)?;
-        let dict: MetadataDict = torrent_bencode::from_bytes(&data[..dict_end])?;
+        let dict: MetadataDict = torrent_bencode::from_bytes_lenient(&data[..dict_end])?;
 
         let msg_type = match dict.msg_type {
             0 => MetadataMessageType::Request,
