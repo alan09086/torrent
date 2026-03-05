@@ -5510,6 +5510,65 @@ impl TorrentActor {
 
         // Serve any buffered requests from newly-unchoked peers
         self.serve_incoming_requests().await;
+
+        // Zombie pruning: disconnect peers with empty bitfields after 30s.
+        // These peers consume connection slots but contribute no pieces.
+        // Only prune during downloading — when seeding, empty-bitfield peers
+        // are leechers we want to upload to.
+        if self.state == TorrentState::Downloading {
+            let zombie_threshold = Duration::from_secs(30);
+            let zombies: Vec<SocketAddr> = self
+                .peers
+                .values()
+                .filter(|p| {
+                    p.bitfield.count_ones() == 0
+                        && p.connected_at.elapsed() > zombie_threshold
+                })
+                .map(|p| p.addr)
+                .collect();
+
+            for addr in zombies {
+                debug!(%addr, "disconnecting zombie peer (empty bitfield after 30s)");
+                if let Some(ref mut ss) = self.super_seed {
+                    ss.peer_disconnected(addr);
+                }
+                if let Some(peer) = self.peers.remove(&addr) {
+                    self.piece_selector.remove_peer_bitfield(&peer.bitfield);
+                    // Remove pieces that only this peer was downloading
+                    let peer_pieces: HashSet<u32> = peer
+                        .pending_requests
+                        .iter()
+                        .map(|&(idx, _, _)| idx)
+                        .collect();
+                    for piece_idx in peer_pieces {
+                        let other_has = self
+                            .peers
+                            .values()
+                            .any(|p| p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx));
+                        if !other_has {
+                            self.in_flight_pieces.remove(&piece_idx);
+                        }
+                    }
+                    for ifp in self.in_flight_pieces.values_mut() {
+                        ifp.assigned_blocks.retain(|_, a| *a != addr);
+                    }
+                    if self.end_game.is_active() {
+                        self.end_game.peer_disconnected(addr);
+                    }
+                    let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+                    post_alert(
+                        &self.alert_tx,
+                        &self.alert_mask,
+                        AlertKind::PeerDisconnected {
+                            info_hash: self.info_hash,
+                            addr,
+                            reason: Some("zombie peer (empty bitfield)".into()),
+                        },
+                    );
+                }
+                self.suggested_to_peers.remove(&addr);
+            }
+        }
     }
 
     async fn serve_incoming_requests(&mut self) {
