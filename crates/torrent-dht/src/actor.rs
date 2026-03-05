@@ -539,6 +539,7 @@ impl DhtActor {
         let mut recv_buf = vec![0u8; 65535];
         let mut maintenance_tick = tokio::time::interval(MAINTENANCE_INTERVAL);
         let mut cleanup_tick = tokio::time::interval(CLEANUP_INTERVAL);
+        let mut query_timeout_tick = tokio::time::interval(self.config.query_timeout);
 
         loop {
             tokio::select! {
@@ -600,7 +601,13 @@ impl DhtActor {
                     }
                 }
 
-                // Periodic maintenance
+                // Expire timed-out queries and advance stalled lookups
+                // (like libtorrent's traversal_algorithm::failed → add_requests)
+                _ = query_timeout_tick.tick() => {
+                    self.expire_queries_and_advance_lookups().await;
+                }
+
+                // Periodic maintenance (routing table housekeeping)
                 _ = maintenance_tick.tick() => {
                     self.maintenance().await;
                 }
@@ -1459,8 +1466,11 @@ impl DhtActor {
         let _ = reply.send(Ok(()));
     }
 
-    async fn maintenance(&mut self) {
-        // Expire timed-out pending queries
+    /// Expire timed-out queries and advance any stalled get_peers lookups.
+    /// Runs every query_timeout interval — mirrors libtorrent's pattern where
+    /// `traversal_algorithm::failed()` immediately calls `add_requests()` to
+    /// query the next closest nodes.
+    async fn expire_queries_and_advance_lookups(&mut self) {
         let timeout = self.config.query_timeout;
         let expired: Vec<u16> = self
             .pending
@@ -1469,6 +1479,12 @@ impl DhtActor {
             .map(|(txn, _)| *txn)
             .collect();
 
+        if expired.is_empty() {
+            return;
+        }
+
+        let mut stalled_lookups: Vec<Id20> = Vec::new();
+
         for txn in expired {
             if let Some(pending) = self.pending.remove(&txn) {
                 trace!(txn, addr = %pending.addr, "query timed out");
@@ -1476,14 +1492,50 @@ impl DhtActor {
                 if node_id != Id20::ZERO {
                     self.routing_table.mark_failed(&node_id);
                 }
-                // Gap 10/13: Clean up sample_replies on timeout
                 if matches!(pending.kind, PendingQueryKind::SampleInfohashes { .. })
                     && let Some(reply) = self.sample_replies.remove(&txn)
                 {
                     let _ = reply.send(Err(Error::Timeout));
                 }
+                if let PendingQueryKind::GetPeers { info_hash } = pending.kind {
+                    stalled_lookups.push(info_hash);
+                }
             }
         }
+
+        // Advance stalled lookups immediately — query next closest unqueried nodes
+        for info_hash in stalled_lookups {
+            let has_pending = self
+                .pending
+                .values()
+                .any(|p| matches!(p.kind, PendingQueryKind::GetPeers { info_hash: ih } if ih == info_hash));
+
+            if let Some(lookup) = self.lookups.get_mut(&info_hash) {
+                let to_query: Vec<CompactNodeInfo> = lookup
+                    .closest
+                    .iter()
+                    .filter(|n| !lookup.queried.contains(&n.id))
+                    .take(3)
+                    .copied()
+                    .collect();
+
+                if !to_query.is_empty() {
+                    for node in &to_query {
+                        lookup.queried.insert(node.id);
+                    }
+                    for node in to_query {
+                        self.send_get_peers(node.addr, info_hash).await;
+                    }
+                } else if !has_pending {
+                    debug!(%info_hash, "get_peers lookup exhausted all nodes");
+                    self.lookups.remove(&info_hash);
+                }
+            }
+        }
+    }
+
+    async fn maintenance(&mut self) {
+        // Query timeouts are now handled by expire_queries_and_advance_lookups()
 
         // Clean up completed lookups (where the reply channel is closed)
         self.lookups.retain(|_, lookup| !lookup.reply.is_closed());
