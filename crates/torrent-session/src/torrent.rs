@@ -376,6 +376,7 @@ impl TorrentHandle {
             write_error_tx,
             verify_result_rx,
             verify_result_tx,
+            pending_verify: HashSet::new(),
             meta: Some(meta),
             listener,
             utp_socket,
@@ -620,6 +621,7 @@ impl TorrentHandle {
             write_error_tx,
             verify_result_rx,
             verify_result_tx,
+            pending_verify: HashSet::new(),
             meta: None,
             listener,
             utp_socket,
@@ -1302,6 +1304,9 @@ struct TorrentActor {
     write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
     verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
     verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
+    /// Pieces currently awaiting async verification — prevents duplicate
+    /// verify tasks when end game or slow peers deliver duplicate blocks.
+    pending_verify: HashSet<u32>,
 
     // TCP listener for incoming peer connections
     listener: Option<Box<dyn crate::transport::TransportListener>>,
@@ -1824,6 +1829,7 @@ impl TorrentActor {
                 }
                 // Async piece verification results
                 Some(result) = self.verify_result_rx.recv() => {
+                    self.pending_verify.remove(&result.piece);
                     // Guard: ignore stale/duplicate results for already-verified pieces
                     let dominated = self.chunk_tracker.as_ref()
                         .map(|ct| ct.bitfield().get(result.piece))
@@ -3469,7 +3475,7 @@ impl TorrentActor {
             false
         };
 
-        if piece_complete {
+        if piece_complete && !self.pending_verify.contains(&index) {
             // M44: Predictive piece announce — send Have before verification
             if self.config.predictive_piece_announce_ms > 0
                 && !self.predictive_have_sent.contains(&index)
@@ -3491,6 +3497,7 @@ impl TorrentActor {
                             .as_ref()
                             .and_then(|m| m.info.piece_hash(index as usize))
                     {
+                        self.pending_verify.insert(index);
                         disk.enqueue_verify(index, expected, &self.verify_result_tx);
                     }
                 }

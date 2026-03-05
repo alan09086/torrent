@@ -101,18 +101,6 @@ pub(crate) enum DiskJob {
         flags: DiskJobFlags,
         reply: oneshot::Sender<torrent_storage::Result<bool>>,
     },
-    VerifyAsync {
-        info_hash: Id20,
-        piece: u32,
-        expected: Id20,
-        result_tx: mpsc::Sender<VerifyResult>,
-    },
-    VerifyV2Async {
-        info_hash: Id20,
-        piece: u32,
-        expected: Id32,
-        result_tx: mpsc::Sender<VerifyResult>,
-    },
     BlockHash {
         info_hash: Id20,
         piece: u32,
@@ -546,33 +534,80 @@ impl DiskHandle {
         }
     }
 
-    /// Enqueue a non-blocking v1 piece hash verification.
+    /// Spawn a non-blocking v1 piece hash verification.
+    ///
+    /// Bypasses the disk channel entirely — hashes from the store buffer
+    /// (in-memory) and sends the result directly via `result_tx`.  This avoids
+    /// channel contention with write jobs which previously caused verify jobs
+    /// to be silently dropped or blocked behind a backlog of writes.
     pub fn enqueue_verify(
         &self,
         piece: u32,
         expected: Id20,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        let _ = self.tx.try_send(DiskJob::VerifyAsync {
-            info_hash: self.info_hash,
-            piece,
-            expected,
-            result_tx: result_tx.clone(),
+        let store_buffer = Arc::clone(&self.store_buffer);
+        let info_hash = self.info_hash;
+        let result_tx = result_tx.clone();
+        tokio::spawn(async move {
+            let passed = tokio::task::spawn_blocking(move || {
+                let blocks = store_buffer
+                    .lock()
+                    .unwrap()
+                    .remove(&(info_hash, piece));
+                if let Some(blocks) = blocks {
+                    let mut piece_data =
+                        Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
+                    for data in blocks.values() {
+                        piece_data.extend_from_slice(data);
+                    }
+                    torrent_core::sha1(&piece_data) == expected
+                } else {
+                    // Store buffer empty — blocks already consumed (shouldn't
+                    // happen in normal flow since only verify removes them).
+                    warn!(piece, "verify: store buffer miss, treating as failed");
+                    false
+                }
+            })
+            .await
+            .unwrap();
+            let _ = result_tx.send(VerifyResult { piece, passed }).await;
         });
     }
 
-    /// Enqueue a non-blocking v2 piece hash verification.
+    /// Spawn a non-blocking v2 piece hash verification.
+    ///
+    /// Same approach as [`enqueue_verify`] — bypasses disk channel.
     pub fn enqueue_verify_v2(
         &self,
         piece: u32,
         expected: Id32,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        let _ = self.tx.try_send(DiskJob::VerifyV2Async {
-            info_hash: self.info_hash,
-            piece,
-            expected,
-            result_tx: result_tx.clone(),
+        let store_buffer = Arc::clone(&self.store_buffer);
+        let info_hash = self.info_hash;
+        let result_tx = result_tx.clone();
+        tokio::spawn(async move {
+            let passed = tokio::task::spawn_blocking(move || {
+                let blocks = store_buffer
+                    .lock()
+                    .unwrap()
+                    .remove(&(info_hash, piece));
+                if let Some(blocks) = blocks {
+                    let mut piece_data =
+                        Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
+                    for data in blocks.values() {
+                        piece_data.extend_from_slice(data);
+                    }
+                    torrent_core::sha256(&piece_data) == expected
+                } else {
+                    warn!(piece, "verify v2: store buffer miss, treating as failed");
+                    false
+                }
+            })
+            .await
+            .unwrap();
+            let _ = result_tx.send(VerifyResult { piece, passed }).await;
         });
     }
 }
@@ -790,92 +825,6 @@ impl DiskActor {
                     .unwrap();
                     drop(permit);
                     let _ = reply.send(to_storage_result(result));
-                });
-            }
-
-            // --- Async verify v1 (hash from store buffer, fire-and-forget) ---
-            DiskJob::VerifyAsync {
-                info_hash,
-                piece,
-                expected,
-                result_tx,
-            } => {
-                let store_buffer = Arc::clone(&self.store_buffer);
-                let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
-                tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let passed = tokio::task::spawn_blocking(move || {
-                        // Try to hash from store buffer (in-memory, no disk read).
-                        let blocks = store_buffer
-                            .lock()
-                            .unwrap()
-                            .remove(&(info_hash, piece));
-                        if let Some(blocks) = blocks {
-                            let mut piece_data =
-                                Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
-                            for data in blocks.values() {
-                                piece_data.extend_from_slice(data);
-                            }
-                            torrent_core::sha1(&piece_data) == expected
-                        } else {
-                            // Blocks already flushed to disk — read back and hash.
-                            let _ = backend.flush_piece(info_hash, piece);
-                            backend
-                                .hash_piece(info_hash, piece, &expected)
-                                .map_err(|e| {
-                                    warn!(piece, "verify fallback error: {e}");
-                                    e
-                                })
-                                .unwrap_or(false)
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
-                    let _ = result_tx.send(VerifyResult { piece, passed }).await;
-                });
-            }
-
-            // --- Async verify v2 (hash from store buffer, fire-and-forget) ---
-            DiskJob::VerifyV2Async {
-                info_hash,
-                piece,
-                expected,
-                result_tx,
-            } => {
-                let store_buffer = Arc::clone(&self.store_buffer);
-                let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
-                tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let passed = tokio::task::spawn_blocking(move || {
-                        let blocks = store_buffer
-                            .lock()
-                            .unwrap()
-                            .remove(&(info_hash, piece));
-                        if let Some(blocks) = blocks {
-                            let mut piece_data =
-                                Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
-                            for data in blocks.values() {
-                                piece_data.extend_from_slice(data);
-                            }
-                            torrent_core::sha256(&piece_data) == expected
-                        } else {
-                            let _ = backend.flush_piece(info_hash, piece);
-                            backend
-                                .hash_piece_v2(info_hash, piece, &expected)
-                                .map_err(|e| {
-                                    warn!(piece, "verify v2 fallback error: {e}");
-                                    e
-                                })
-                                .unwrap_or(false)
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
-                    let _ = result_tx.send(VerifyResult { piece, passed }).await;
                 });
             }
 
@@ -1271,7 +1220,7 @@ mod tests {
         disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
             .unwrap();
 
-        // Enqueue verify — should hash from store buffer
+        // Enqueue verify — should hash from store buffer (spawns task directly)
         disk.enqueue_verify(0, expected, &result_tx);
 
         // Wait for result
