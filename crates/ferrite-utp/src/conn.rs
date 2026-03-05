@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use bytes::Bytes;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::congestion::LedbatController;
 use crate::packet::{ExtensionType, Header, Packet, PacketType, HEADER_SIZE};
@@ -338,7 +338,7 @@ impl Connection {
             self.timeout_count += 1;
 
             if self.timeout_count >= MAX_TIMEOUTS {
-                warn!("max timeouts reached, closing connection");
+                debug!("max timeouts reached, closing connection");
                 self.state = ConnState::Closed;
                 actions.push(ConnAction::Closed);
                 return actions;

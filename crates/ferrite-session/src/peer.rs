@@ -271,7 +271,7 @@ pub(crate) async fn run_peer(
                         }
                     }
                     Some(Err(e)) => {
-                        warn!(%addr, "wire error: {e}");
+                        debug!(%addr, "wire error: {e}");
                         break Some(e.to_string());
                     }
                     None => {
@@ -336,7 +336,7 @@ pub(crate) async fn run_peer(
                             peer_ut_metadata,
                             peer_ut_holepunch,
                         ).await {
-                            warn!(%addr, "error sending message: {e}");
+                            debug!(%addr, "error sending message: {e}");
                             break Some(e.to_string());
                         }
                     }
