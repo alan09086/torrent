@@ -6671,7 +6671,7 @@ mod tests {
             sequential_download: false,
             initial_picker_threshold: 4,
             whole_pieces_threshold: 20,
-            snub_timeout_secs: 60,
+            snub_timeout_secs: 15,
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
             max_concurrent_stream_reads: 8,

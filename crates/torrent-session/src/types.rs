@@ -168,7 +168,7 @@ impl Default for TorrentConfig {
             sequential_download: false,
             initial_picker_threshold: 4,
             whole_pieces_threshold: 20,
-            snub_timeout_secs: 60,
+            snub_timeout_secs: 15,
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
             max_concurrent_stream_reads: 8,
@@ -1178,7 +1178,7 @@ mod tests {
         assert!(!cfg.sequential_download);
         assert_eq!(cfg.initial_picker_threshold, 4);
         assert_eq!(cfg.whole_pieces_threshold, 20);
-        assert_eq!(cfg.snub_timeout_secs, 60);
+        assert_eq!(cfg.snub_timeout_secs, 15);
         assert_eq!(cfg.readahead_pieces, 8);
         assert!(cfg.streaming_timeout_escalation);
     }

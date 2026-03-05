@@ -188,7 +188,7 @@ fn default_whole_pieces_threshold() -> u32 {
     20
 }
 fn default_snub_timeout_secs() -> u32 {
-    60
+    15
 }
 fn default_readahead_pieces() -> u32 {
     8
@@ -741,7 +741,7 @@ impl Default for Settings {
             max_web_seeds: 4,
             initial_picker_threshold: 4,
             whole_pieces_threshold: 20,
-            snub_timeout_secs: 60,
+            snub_timeout_secs: 15,
             readahead_pieces: 8,
             streaming_timeout_escalation: true,
             // Piece picker enhancements (M44)
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(s.max_web_seeds, 4);
         assert_eq!(s.initial_picker_threshold, 4);
         assert_eq!(s.whole_pieces_threshold, 20);
-        assert_eq!(s.snub_timeout_secs, 60);
+        assert_eq!(s.snub_timeout_secs, 15);
         assert_eq!(s.readahead_pieces, 8);
         assert!(s.streaming_timeout_escalation);
         assert_eq!(s.max_peers_per_torrent, 200);
