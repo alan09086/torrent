@@ -38,3 +38,7 @@ ed25519-dalek = { version = "2" }
 
 # Testing
 pretty_assertions = "1"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+large_enum_variant = "warn"

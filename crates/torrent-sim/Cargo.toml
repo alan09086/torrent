@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "In-process network simulation for torrent swarm integration testing"
 
+[lints]
+workspace = true
+
 [dependencies]
 torrent-session = { path = "../torrent-session" }
 torrent-core = { path = "../torrent-core" }

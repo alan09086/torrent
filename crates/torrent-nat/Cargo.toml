@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "UPnP IGD / NAT-PMP / PCP port mapping for torrent"
 
+[lints]
+workspace = true
+
 [dependencies]
 torrent-core = { path = "../torrent-core" }
 tokio = { workspace = true }

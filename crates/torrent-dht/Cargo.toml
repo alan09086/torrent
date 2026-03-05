@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Kademlia DHT for BitTorrent (BEP 5)"
 
+[lints]
+workspace = true
+
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }
 torrent-core = { path = "../torrent-core" }

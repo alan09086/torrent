@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "BitTorrent session management: peers, torrents, and piece selection"
 
+[lints]
+workspace = true
+
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }
 torrent-core = { path = "../torrent-core" }

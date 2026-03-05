@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Piece storage, verification, and disk I/O for BitTorrent"
 
+[lints]
+workspace = true
+
 [dependencies]
 torrent-core = { path = "../torrent-core" }
 memmap2 = "0.9"

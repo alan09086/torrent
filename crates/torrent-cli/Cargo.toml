@@ -10,6 +10,9 @@ publish = false
 name = "torrent"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 torrent = { path = "../torrent" }
 clap = { version = "4", features = ["derive"] }

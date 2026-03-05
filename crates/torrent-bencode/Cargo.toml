@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Serde-based bencode serialization for BitTorrent"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true }
 serde_bytes = { workspace = true }
