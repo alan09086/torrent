@@ -17,6 +17,10 @@ use torrent_core::DEFAULT_CHUNK_SIZE;
 /// before saturating the link). rqbit uses 128 semaphore permits as well.
 const INITIAL_QUEUE_DEPTH: usize = 128;
 
+/// Minimum queue depth floor. Prevents EWMA-driven depth from spiralling
+/// to near-zero during brief throughput dips.
+const MIN_QUEUE_DEPTH: usize = 64;
+
 /// Per-peer dynamic request queue sizing with slow-start.
 ///
 /// Tracks in-flight requests, measures throughput via EWMA, and adjusts the
@@ -146,11 +150,13 @@ impl PeerPipelineState {
 
     /// Recompute queue depth from EWMA rate and target queue time.
     ///
-    /// `depth = ewma_rate * request_queue_time / chunk_size`, clamped to [2, max].
+    /// `depth = ewma_rate * request_queue_time / chunk_size`, clamped to
+    /// [`MIN_QUEUE_DEPTH`, `max_queue_depth`].
     fn recompute_queue_depth(&mut self) {
         let depth = (self.ewma_rate_bytes_sec * self.request_queue_time / DEFAULT_CHUNK_SIZE as f64)
             as usize;
-        self.queue_depth = depth.clamp(2, self.max_queue_depth);
+        let floor = MIN_QUEUE_DEPTH.min(self.max_queue_depth);
+        self.queue_depth = depth.clamp(floor, self.max_queue_depth);
     }
 
     /// Override the queue depth directly (e.g. for snubbed peers).
@@ -236,32 +242,31 @@ mod tests {
 
     #[test]
     fn steady_state_formula() {
-        let mut state = PeerPipelineState::new(250, 3.0, 128);
+        let mut state = PeerPipelineState::new(500, 3.0, 128);
 
         // Force out of slow-start
         state.in_slow_start = false;
         state.slow_start_exited = true;
 
-        // Set EWMA to 100 KB/s
-        state.ewma_rate_bytes_sec = 100.0 * 1024.0;
+        // Set EWMA to 1 MB/s — produces depth = 1048576 * 3.0 / 16384 = 192
+        state.ewma_rate_bytes_sec = 1024.0 * 1024.0;
 
         state.recompute_queue_depth();
 
-        // Expected: 100 * 1024 * 3.0 / 16384 = 18.75 -> truncated to 18
-        let expected = (100.0 * 1024.0 * 3.0 / DEFAULT_CHUNK_SIZE as f64) as usize;
-        assert_eq!(expected, 18);
+        let expected = (1024.0 * 1024.0 * 3.0 / DEFAULT_CHUNK_SIZE as f64) as usize;
+        assert_eq!(expected, 192);
         assert_eq!(state.queue_depth(), expected);
     }
 
     #[test]
     fn queue_depth_clamped() {
-        // Very low EWMA -> floor of 2
+        // Very low EWMA -> floor of MIN_QUEUE_DEPTH (64)
         let mut state = PeerPipelineState::new(250, 3.0, 128);
         state.in_slow_start = false;
         state.slow_start_exited = true;
-        state.ewma_rate_bytes_sec = 100.0; // ~100 B/s -> depth ≈ 0 -> clamped to 2
+        state.ewma_rate_bytes_sec = 100.0; // ~100 B/s -> depth ≈ 0 -> clamped to 64
         state.recompute_queue_depth();
-        assert_eq!(state.queue_depth(), 2);
+        assert_eq!(state.queue_depth(), 64);
 
         // Very high EWMA -> ceiling of max_queue_depth
         state.ewma_rate_bytes_sec = 10.0 * 1024.0 * 1024.0; // 10 MB/s
@@ -309,5 +314,21 @@ mod tests {
         assert_eq!(timed_out2.len(), 2);
         assert!(timed_out2.contains(&(0, 0)));
         assert!(timed_out2.contains(&(1, 0)));
+    }
+
+    #[test]
+    fn queue_depth_floor_prevents_ewma_spiral() {
+        let mut p = PeerPipelineState::new(250, 3.0, 128);
+        // Simulate near-zero EWMA rate
+        p.in_slow_start = false;
+        p.slow_start_exited = true;
+        p.ewma_rate_bytes_sec = 100.0; // ~100 bytes/sec, would compute depth ~0
+        p.recompute_queue_depth();
+        // Floor should prevent depth from dropping below MIN_QUEUE_DEPTH (64)
+        assert!(
+            p.queue_depth() >= 64,
+            "depth {} should be >= 64",
+            p.queue_depth()
+        );
     }
 }
