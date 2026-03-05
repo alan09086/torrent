@@ -3310,7 +3310,9 @@ impl TorrentActor {
                     if had_pending {
                         let addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
                         for addr in addrs {
-                            self.request_pieces_from_peer(addr).await;
+                            if self.peers.contains_key(&addr) {
+                                self.request_pieces_from_peer(addr).await;
+                            }
                         }
                     }
                 }
