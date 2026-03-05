@@ -769,8 +769,13 @@ impl TorrentHandle {
 
     /// Gracefully shut down the torrent session.
     pub async fn shutdown(&self) -> crate::Result<()> {
-        // Best-effort send; if the channel is already closed, that's fine.
-        let _ = self.cmd_tx.send(TorrentCommand::Shutdown).await;
+        // Best-effort send with timeout — if the channel is full or closed,
+        // the actor will exit when all senders are dropped anyway.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.cmd_tx.send(TorrentCommand::Shutdown),
+        )
+        .await;
         Ok(())
     }
 
@@ -3065,14 +3070,18 @@ impl TorrentActor {
     }
 
     async fn shutdown_peers(&mut self) {
-        // Best-effort announce Stopped to trackers
+        // Best-effort announce Stopped to trackers (with timeout to prevent hang)
         let left = self.calculate_left();
-        self.tracker_manager
-            .announce_stopped(self.uploaded, self.downloaded, left)
-            .await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.tracker_manager
+                .announce_stopped(self.uploaded, self.downloaded, left),
+        )
+        .await;
 
+        // Non-blocking peer shutdown — peers may already be dead or channels full
         for peer in self.peers.values() {
-            let _ = peer.cmd_tx.send(PeerCommand::Shutdown).await;
+            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
         }
     }
 
@@ -3094,15 +3103,18 @@ impl TorrentActor {
             let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
         }
         self.peers.clear();
-        // Announce Stopped to trackers
+        // Announce Stopped to trackers (with timeout to prevent hang)
         if prev_state == TorrentState::Downloading
             || prev_state == TorrentState::Seeding
             || prev_state == TorrentState::Complete
         {
             let left = self.calculate_left();
-            self.tracker_manager
-                .announce_stopped(self.uploaded, self.downloaded, left)
-                .await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.tracker_manager
+                    .announce_stopped(self.uploaded, self.downloaded, left),
+            )
+            .await;
         }
     }
 

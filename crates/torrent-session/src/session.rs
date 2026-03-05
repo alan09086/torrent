@@ -905,7 +905,12 @@ impl SessionHandle {
 
     /// Gracefully shut down the session and all torrents.
     pub async fn shutdown(&self) -> crate::Result<()> {
-        let _ = self.cmd_tx.send(SessionCommand::Shutdown).await;
+        // Timeout prevents hang if SessionActor is processing a heavy batch
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.cmd_tx.send(SessionCommand::Shutdown),
+        )
+        .await;
         Ok(())
     }
 
