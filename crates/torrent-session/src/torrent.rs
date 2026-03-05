@@ -5033,11 +5033,7 @@ impl TorrentActor {
         let we_have = ct.bitfield().clone();
         let completed_count = ct.bitfield().count_ones();
 
-        // Collect pieces to request (must borrow self.peers immutably for bitfield)
-        let peer_bitfield = match self.peers.get(&peer_addr) {
-            Some(p) => p.bitfield.clone(),
-            None => return,
-        };
+        // Collect pieces to request
         let suggested = self
             .peers
             .get(&peer_addr)
@@ -5060,6 +5056,14 @@ impl TorrentActor {
             if slots_remaining == 0 {
                 break;
             }
+
+            // Defensive: verify peer still exists and refresh bitfield each
+            // iteration. The peer's channel may have closed (peer task exited),
+            // and the bitfield may have been updated by Have messages.
+            let peer_bitfield = match self.peers.get(&peer_addr) {
+                Some(p) => p.bitfield.clone(),
+                None => break,
+            };
 
             // Re-create closure and context each iteration so borrows don't
             // conflict with the mutable access to in_flight_pieces/peers below.
