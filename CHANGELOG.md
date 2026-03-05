@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.65.0 — `torrent` v0.65.0: Rename, Non-Blocking Pipeline, Production Hardening
+
+### Breaking
+- **Workspace renamed from `ferrite` to `torrent`** — all 12 crates renamed: `ferrite-*` → `torrent-*`. Update your `Cargo.toml` dependencies and `use` imports accordingly.
+- Version bumped 0.64.0 → 0.65.0
+
+### Added
+- crates.io metadata: keywords, categories, homepage, documentation URLs
+- `rust-version = "1.85"` MSRV set for all publishable crates
+- Non-blocking disk writes and async piece verification (M58 pipeline re-applied)
+- O(1) peer dedup via `HashSet<SocketAddr>` in `handle_add_peers()`
+- Criterion benchmarks for bencode parsing and piece hashing
+- `rustfmt.toml` with workspace-wide formatting rules
+- Workspace-level clippy lint configuration
+- Resource exhaustion limits: `max_metadata_size`, `max_message_size`, `max_piece_length`, `max_outstanding_requests`
+- `cargo-fuzz` scaffolding with 4 fuzz targets (bencode, peer_wire, tracker, metadata)
+- Architecture documentation (`docs/architecture.md`, `docs/configuration.md`, `docs/security.md`)
+
+### Changed
+- CLI binary renamed from `ferrite` to `torrent`
+- `torrent-cli` marked `publish = false`
+- Test count: 1378+
+
 ## 0.64.0 — TCP Listener, UPnP Gateway Probe & Log Cleanup
 
 ### Fixed

@@ -1,12 +1,12 @@
-# 🧲 Ferrite
+# 🧲 Torrent
 
 A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** feature parity.
 
-Ferrite is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
+Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
 [![Tests](https://img.shields.io/badge/tests-1378-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.64.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.65.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -28,21 +28,21 @@ Ferrite is a modular workspace of focused crates, each handling one layer of the
 
 ## 🚀 Getting Started
 
-Add ferrite to your `Cargo.toml`:
+Add torrent to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrite = "0.64.0"
+torrent = "0.65.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
 Download a torrent from a magnet link:
 
 ```rust,no_run
-use ferrite::prelude::*;
+use torrent::prelude::*;
 
 #[tokio::main]
-async fn main() -> ferrite::Result<()> {
+async fn main() -> torrent::Result<()> {
     let session = ClientBuilder::new()
         .download_dir("/tmp/downloads")
         .start()
@@ -63,49 +63,49 @@ async fn main() -> ferrite::Result<()> {
 }
 ```
 
-See [`examples/`](crates/ferrite/examples/) for more usage patterns including torrent creation, file streaming, and DHT lookups.
+See [`examples/`](crates/torrent/examples/) for more usage patterns including torrent creation, file streaming, and DHT lookups.
 
 ### CLI
 
-Ferrite also ships a standalone CLI binary:
+Torrent also ships a standalone CLI binary:
 
 ```bash
 # Download a torrent
-ferrite download "magnet:?xt=urn:btih:..." -o /tmp/downloads
+torrent download "magnet:?xt=urn:btih:..." -o /tmp/downloads
 
 # Create a .torrent file
-ferrite create ./my-file.tar.gz -t http://tracker.example.com/announce -o my-file.torrent
+torrent create ./my-file.tar.gz -t http://tracker.example.com/announce -o my-file.torrent
 
 # Display torrent metadata
-ferrite info my-file.torrent
+torrent info my-file.torrent
 ```
 
-Build with `cargo build --release -p ferrite-cli`.
+Build with `cargo build --release -p torrent-cli`.
 
 ---
 
 ## 🏛️ Architecture
 
 ```
-ferrite-bencode      🔤 Serde bencode codec (leaf, no deps)
+torrent-bencode      🔤 Serde bencode codec (leaf, no deps)
      │
-ferrite-core         🔑 Hashes, metainfo (v1+v2), magnets, piece arithmetic
+torrent-core         🔑 Hashes, metainfo (v1+v2), magnets, piece arithmetic
      │
-     ├──▶ ferrite-wire       🔌 Peer wire protocol, handshake, BEP 6/9/10/21/52, MSE/PE
-     ├──▶ ferrite-tracker    📡 HTTP + UDP tracker announce/scrape
-     ├──▶ ferrite-dht        🌐 Kademlia DHT (BEP 5/24), actor model
+     ├──▶ torrent-wire       🔌 Peer wire protocol, handshake, BEP 6/9/10/21/52, MSE/PE
+     ├──▶ torrent-tracker    📡 HTTP + UDP tracker announce/scrape
+     ├──▶ torrent-dht        🌐 Kademlia DHT (BEP 5/24), actor model
      │
-ferrite-storage      💾 Piece verification (SHA-1 + SHA-256), chunk tracking, mmap, ARC cache
+torrent-storage      💾 Piece verification (SHA-1 + SHA-256), chunk tracking, mmap, ARC cache
      │
-ferrite-session      🎯 Session manager, torrent orchestration, disk I/O actor
+torrent-session      🎯 Session manager, torrent orchestration, disk I/O actor
      │
-ferrite-utp          🚀 uTP (BEP 29) micro transport protocol, LEDBAT congestion
+torrent-utp          🚀 uTP (BEP 29) micro transport protocol, LEDBAT congestion
      │
-ferrite-nat          🔓 PCP / NAT-PMP / UPnP IGD automatic port mapping
+torrent-nat          🔓 PCP / NAT-PMP / UPnP IGD automatic port mapping
      │
 ferrite              📦 Public facade: ClientBuilder + prelude + unified error
      │
-ferrite-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, virtual clock
+torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, virtual clock
 ```
 
 ---
@@ -114,21 +114,21 @@ ferrite-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 
 | Crate | Description | Tests |
 |-------|-------------|:-----:|
-| `ferrite-bencode` | Serde-based bencode serialization with sorted map key ordering | 64 |
-| `ferrite-core` | Id20/Id32, TorrentMeta (v1/v2/hybrid), InfoHashes, MerkleTree, Magnet (v1+v2), CreateTorrent, FastResumeData, FilePriority, FileSelection (BEP 53) | 183 |
-| `ferrite-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH), SSL/TLS transport | 91 |
-| `ferrite-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 40 |
-| `ferrite-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 141 |
-| `ferrite-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 66 |
-| `ferrite-session` | Full session orchestration — see [Session Features](#-session-features) below | 659 |
-| `ferrite-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
-| `ferrite-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
-| `ferrite` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
-| `ferrite-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
+| `torrent-bencode` | Serde-based bencode serialization with sorted map key ordering | 64 |
+| `torrent-core` | Id20/Id32, TorrentMeta (v1/v2/hybrid), InfoHashes, MerkleTree, Magnet (v1+v2), CreateTorrent, FastResumeData, FilePriority, FileSelection (BEP 53) | 183 |
+| `torrent-wire` | Handshake, Message codec, BEP 6/9/10/21/52 extensions, MSE/PE encryption (RC4 + DH), SSL/TLS transport | 91 |
+| `torrent-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 40 |
+| `torrent-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 141 |
+| `torrent-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 66 |
+| `torrent-session` | Full session orchestration — see [Session Features](#-session-features) below | 659 |
+| `torrent-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
+| `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
+| `torrent` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
+| `torrent-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
 
 ### 🎯 Session Features
 
-The `ferrite-session` crate (659 tests) includes:
+The `torrent-session` crate (659 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -242,7 +242,7 @@ Ferrite uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 | 0.61.0 | M53 | Full torrent operations API parity — 40+ SessionHandle methods, PeerInfo, TorrentFlags |
 | 0.59.0 | — | Full libtorrent `torrent_status` parity — ~55-field TorrentStats |
 | 0.58.0 | M52 | API documentation: `#![warn(missing_docs)]` on all 12 crates, example programs, `SessionHandle::open_file()` |
-| 0.57.0 | M51 | Network simulation: ferrite-sim crate, NetworkFactory pluggable transport, SimNetwork/SimSwarm, 5 integration tests |
+| 0.57.0 | M51 | Network simulation: torrent-sim crate, NetworkFactory pluggable transport, SimNetwork/SimSwarm, 5 integration tests |
 | 0.56.0 | M50 | Session statistics: 70 atomic counters, periodic reporting, SessionStatsAlert, rate computation |
 | 0.55.0 | M49 | Pluggable disk I/O: DiskIoBackend trait, PosixDiskIo, MmapDiskIo, DisabledDiskIo, backend factory |
 | 0.54.0 | M48 | DSCP/ToS socket marking, anonymous mode hardening, ext handshake suppression |
