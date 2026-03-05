@@ -10,13 +10,20 @@ All notable changes to this project will be documented in this file.
 - **Store buffer lock scope** — made Mutex lock scope explicit in verify path with block scope, preventing potential contention between enqueue_write and spawn_blocking verify tasks
 - **Pipeline fill loop peer validation** — peer existence check and bitfield refresh each iteration of the pick_blocks loop, preventing stale context from causing wasted block picks
 - **Disconnect handler re-request guard** — defensive peer existence check before re-requesting blocks from remaining peers after a disconnect
+- **Event loop stalls from blocking sends** — all peer channel sends in TorrentActor converted from `.send().await` to `try_send()`, preventing the actor event loop from freezing when any peer channel is full
+- **Duplicate block handling** — `handle_piece_data` now returns early when a block was already received, preventing wasted disk writes and double-counting
+- **DHT stalled lookups** — `get_peers` queries now advance on timeout instead of stalling; query expiry logging added
+- **DHT BEP42 node sorting** — routing table now sorts by XOR distance for correct closest-node selection; all-K parallel `get_peers` queries for faster peer discovery
+- **DHT timeout** — reduced from 10s to 5s for faster peer discovery
 
 ### Changed
+- **Fixed permit pipeline model** — replaced EWMA-computed queue depth with fixed 128 permits (rqbit model). `queue_depth()` is now constant — zero-latency scheduling with no negative feedback loops
+- **End-game pipelining** — end-game mode now sends up to 4 requests per peer (was 1), eliminating the 128x pipeline depth reduction that caused last-3% slowdowns
+- **Reactive end-game cancel re-requesting** — when a block is received and duplicate requests are cancelled, freed peers immediately get new end-game blocks instead of waiting for the next tick
 - **Snub timeout reduced 60s to 15s** — stalled peers now free their 128 request slots 4x faster; rqbit handles this in ~10s
-- **Queue depth floor raised from 2 to 64** — prevents EWMA-driven negative feedback loop where brief throughput dips cascade into near-zero queue depth
 - **Peer turnover increased from 4%/300s to 8%/120s** — underperforming peers cycled 4x faster (~120 replacements/hour)
 - **Zombie peer pruning** — peers with empty bitfields after 30s are disconnected during choking evaluation to free connection slots (only during downloading, not seeding)
-- Test count: 1385+
+- Test count: 1386
 
 ## 0.65.0 — `torrent` v0.65.0: Rename, Non-Blocking Pipeline, Production Hardening
 
