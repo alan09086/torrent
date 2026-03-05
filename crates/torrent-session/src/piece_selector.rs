@@ -70,8 +70,14 @@ impl InFlightPiece {
             .saturating_sub(self.assigned_blocks.len() as u32)
     }
 
-    pub fn peer_set(&self) -> HashSet<SocketAddr> {
-        self.assigned_blocks.values().copied().collect()
+    pub fn peer_count(&self) -> usize {
+        if self.assigned_blocks.len() <= 1 {
+            return self.assigned_blocks.len();
+        }
+        let mut peers: Vec<SocketAddr> = self.assigned_blocks.values().copied().collect();
+        peers.sort_unstable();
+        peers.dedup();
+        peers.len()
     }
 }
 
@@ -354,18 +360,13 @@ impl PieceSelector {
                 continue;
             }
 
-            // Speed affinity: prefer pieces where peers of similar speed are working
-            let peers = ifp.peer_set();
-            let has_fast = peers.iter().any(|_| true); // simplified: prefer pieces with fewer peers
             let score = if ctx.peer_is_snubbed {
                 // Snubbed peers avoid busy pieces
-                -(peers.len() as i32)
+                -(ifp.peer_count() as i32)
             } else {
                 // Prefer pieces with fewer unassigned blocks (closer to completion)
                 -(ifp.unassigned_count() as i32)
             };
-
-            let _ = has_fast; // suppress unused warning
             if score > best_score {
                 best_score = score;
                 best_piece = Some(piece);

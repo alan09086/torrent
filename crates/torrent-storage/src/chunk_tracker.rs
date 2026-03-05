@@ -102,23 +102,37 @@ impl ChunkTracker {
         &self.have
     }
 
-    /// Return chunk offsets that are still missing for a piece.
-    pub fn missing_chunks(&self, piece: u32) -> Vec<(u32, u32)> {
+    /// Append missing chunk (offset, length) pairs to `out`.
+    /// Caller can reuse the Vec across calls to avoid allocation.
+    pub fn missing_chunks_into(&self, piece: u32, out: &mut Vec<(u32, u32)>) {
+        out.clear();
         if self.have.get(piece) {
-            return Vec::new();
+            return;
         }
 
         let num_chunks = self.lengths.chunks_in_piece(piece);
 
         match self.in_progress.get(&piece) {
-            Some(bf) => bf
-                .zeros()
-                .filter_map(|ci| self.lengths.chunk_info(piece, ci))
-                .collect(),
-            None => (0..num_chunks)
-                .filter_map(|ci| self.lengths.chunk_info(piece, ci))
-                .collect(),
+            Some(bf) => {
+                out.extend(
+                    bf.zeros()
+                        .filter_map(|ci| self.lengths.chunk_info(piece, ci)),
+                );
+            }
+            None => {
+                out.extend(
+                    (0..num_chunks)
+                        .filter_map(|ci| self.lengths.chunk_info(piece, ci)),
+                );
+            }
         }
+    }
+
+    /// Return chunk offsets that are still missing for a piece.
+    pub fn missing_chunks(&self, piece: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        self.missing_chunks_into(piece, &mut out);
+        out
     }
 
     /// Reset all piece completion state (for force recheck).

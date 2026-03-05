@@ -5055,10 +5055,15 @@ impl TorrentActor {
             steal_threshold_ratio: self.config.steal_threshold_ratio,
         };
 
+        let missing_buf = std::cell::RefCell::new(Vec::with_capacity(128));
         let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
             self.chunk_tracker
                 .as_ref()
-                .map(|ct| ct.missing_chunks(piece))
+                .map(|ct| {
+                    let mut buf = missing_buf.borrow_mut();
+                    ct.missing_chunks_into(piece, &mut buf);
+                    buf.clone()
+                })
                 .unwrap_or_default()
         };
 
