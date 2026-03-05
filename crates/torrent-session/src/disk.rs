@@ -23,6 +23,26 @@ bitflags! {
     }
 }
 
+/// Error reported asynchronously from a non-blocking disk write.
+#[derive(Debug)]
+pub struct DiskWriteError {
+    /// Piece index that failed to write.
+    pub piece: u32,
+    /// Byte offset within the piece.
+    pub begin: u32,
+    /// The underlying storage error.
+    pub error: torrent_storage::Error,
+}
+
+/// Result of an asynchronous piece hash verification.
+#[derive(Debug)]
+pub struct VerifyResult {
+    /// Piece index that was verified.
+    pub piece: u32,
+    /// Whether the piece hash matched the expected value.
+    pub passed: bool,
+}
+
 pub(crate) enum DiskJob {
     Register {
         info_hash: Id20,
@@ -40,6 +60,14 @@ pub(crate) enum DiskJob {
         data: Bytes,
         flags: DiskJobFlags,
         reply: oneshot::Sender<torrent_storage::Result<()>>,
+    },
+    WriteAsync {
+        info_hash: Id20,
+        piece: u32,
+        begin: u32,
+        data: Bytes,
+        flags: DiskJobFlags,
+        error_tx: mpsc::Sender<DiskWriteError>,
     },
     Read {
         info_hash: Id20,
@@ -64,6 +92,18 @@ pub(crate) enum DiskJob {
         #[allow(dead_code)]
         flags: DiskJobFlags,
         reply: oneshot::Sender<torrent_storage::Result<bool>>,
+    },
+    VerifyAsync {
+        info_hash: Id20,
+        piece: u32,
+        expected: Id20,
+        result_tx: mpsc::Sender<VerifyResult>,
+    },
+    VerifyV2Async {
+        info_hash: Id20,
+        piece: u32,
+        expected: Id32,
+        result_tx: mpsc::Sender<VerifyResult>,
     },
     BlockHash {
         info_hash: Id20,
@@ -433,6 +473,66 @@ impl DiskHandle {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk actor gone"),
         )))
     }
+
+    /// Enqueue a non-blocking write. Returns `Err(data)` if the channel is full
+    /// (back-pressure signal), or `Ok(())` on success or if the actor is gone.
+    pub fn enqueue_write(
+        &self,
+        piece: u32,
+        begin: u32,
+        data: Bytes,
+        flags: DiskJobFlags,
+        error_tx: &mpsc::Sender<DiskWriteError>,
+    ) -> Result<(), Bytes> {
+        match self.tx.try_send(DiskJob::WriteAsync {
+            info_hash: self.info_hash,
+            piece,
+            begin,
+            data,
+            flags,
+            error_tx: error_tx.clone(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(job)) => {
+                if let DiskJob::WriteAsync { data, .. } = job {
+                    Err(data)
+                } else {
+                    unreachable!()
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
+        }
+    }
+
+    /// Enqueue a non-blocking v1 piece hash verification.
+    pub fn enqueue_verify(
+        &self,
+        piece: u32,
+        expected: Id20,
+        result_tx: &mpsc::Sender<VerifyResult>,
+    ) {
+        let _ = self.tx.try_send(DiskJob::VerifyAsync {
+            info_hash: self.info_hash,
+            piece,
+            expected,
+            result_tx: result_tx.clone(),
+        });
+    }
+
+    /// Enqueue a non-blocking v2 piece hash verification.
+    pub fn enqueue_verify_v2(
+        &self,
+        piece: u32,
+        expected: Id32,
+        result_tx: &mpsc::Sender<VerifyResult>,
+    ) {
+        let _ = self.tx.try_send(DiskJob::VerifyV2Async {
+            info_hash: self.info_hash,
+            piece,
+            expected,
+            result_tx: result_tx.clone(),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +625,28 @@ impl DiskActor {
                 drop(permit);
                 let _ = reply.send(to_storage_result(result));
             }
+            DiskJob::WriteAsync {
+                info_hash,
+                piece,
+                begin,
+                data,
+                flags,
+                error_tx,
+            } => {
+                let flush = flags.contains(DiskJobFlags::FLUSH_PIECE);
+                let backend = Arc::clone(&self.backend);
+                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                let result = tokio::task::spawn_blocking(move || {
+                    backend.write_chunk(info_hash, piece, begin, &data, flush)
+                })
+                .await
+                .unwrap();
+                drop(permit);
+                if let Err(e) = to_storage_result(result) {
+                    let _ = error_tx
+                        .try_send(DiskWriteError { piece, begin, error: e });
+                }
+            }
             DiskJob::Read {
                 info_hash,
                 piece,
@@ -577,6 +699,42 @@ impl DiskActor {
                 .unwrap();
                 drop(permit);
                 let _ = reply.send(to_storage_result(result));
+            }
+            DiskJob::VerifyAsync {
+                info_hash,
+                piece,
+                expected,
+                result_tx,
+            } => {
+                let backend = Arc::clone(&self.backend);
+                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                let result = tokio::task::spawn_blocking(move || {
+                    let _ = backend.flush_piece(info_hash, piece);
+                    backend.hash_piece(info_hash, piece, &expected)
+                })
+                .await
+                .unwrap();
+                drop(permit);
+                let passed = to_storage_result(result).unwrap_or(false);
+                let _ = result_tx.try_send(VerifyResult { piece, passed });
+            }
+            DiskJob::VerifyV2Async {
+                info_hash,
+                piece,
+                expected,
+                result_tx,
+            } => {
+                let backend = Arc::clone(&self.backend);
+                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                let result = tokio::task::spawn_blocking(move || {
+                    let _ = backend.flush_piece(info_hash, piece);
+                    backend.hash_piece_v2(info_hash, piece, &expected)
+                })
+                .await
+                .unwrap();
+                drop(permit);
+                let passed = to_storage_result(result).unwrap_or(false);
+                let _ = result_tx.try_send(VerifyResult { piece, passed });
             }
             DiskJob::BlockHash {
                 info_hash,

@@ -179,6 +179,8 @@ impl TorrentHandle {
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        let (write_error_tx, write_error_rx) = mpsc::channel(64);
+        let (verify_result_tx, verify_result_rx) = mpsc::channel(64);
         let our_peer_id = if config.anonymous_mode {
             PeerId::generate_anonymous().0
         } else {
@@ -319,6 +321,7 @@ impl TorrentHandle {
             end_game: EndGame::new(),
             peers: HashMap::new(),
             available_peers: Vec::new(),
+            available_peers_set: std::collections::HashSet::new(),
             choker,
             max_connections: 0,
             metadata_downloader: None,
@@ -350,6 +353,10 @@ impl TorrentHandle {
             cmd_rx,
             event_tx,
             event_rx,
+            write_error_rx,
+            write_error_tx,
+            verify_result_rx,
+            verify_result_tx,
             meta: Some(meta),
             listener,
             utp_socket,
@@ -427,6 +434,8 @@ impl TorrentHandle {
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        let (write_error_tx, write_error_rx) = mpsc::channel(64);
+        let (verify_result_tx, verify_result_rx) = mpsc::channel(64);
         let our_peer_id = if config.anonymous_mode {
             PeerId::generate_anonymous().0
         } else {
@@ -545,6 +554,7 @@ impl TorrentHandle {
             end_game: EndGame::new(),
             peers: HashMap::new(),
             available_peers: Vec::new(),
+            available_peers_set: std::collections::HashSet::new(),
             choker,
             max_connections: 0,
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
@@ -576,6 +586,10 @@ impl TorrentHandle {
             cmd_rx,
             event_tx,
             event_rx,
+            write_error_rx,
+            write_error_tx,
+            verify_result_rx,
+            verify_result_tx,
             meta: None,
             listener,
             utp_socket,
@@ -1188,6 +1202,8 @@ struct TorrentActor {
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
+    /// O(1) dedup set for available_peers — kept in sync with the Vec.
+    available_peers_set: std::collections::HashSet<SocketAddr>,
     choker: Choker,
     /// Per-torrent connection limit override (0 = use config.max_peers).
     max_connections: usize,
@@ -1226,6 +1242,12 @@ struct TorrentActor {
     cmd_rx: mpsc::Receiver<TorrentCommand>,
     event_tx: mpsc::Sender<PeerEvent>,
     event_rx: mpsc::Receiver<PeerEvent>,
+
+    // Async disk pipeline channels
+    write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
+    write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
+    verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
+    verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
 
     // TCP listener for incoming peer connections
     listener: Option<Box<dyn crate::transport::TransportListener>>,
@@ -1734,6 +1756,22 @@ impl TorrentActor {
                         self.handle_peer_event(event).await;
                     }
                 }
+                // Async disk write errors
+                Some(err) = self.write_error_rx.recv() => {
+                    warn!(piece = err.piece, begin = err.begin, "async disk write failed: {}", err.error);
+                }
+                // Async piece verification results
+                Some(result) = self.verify_result_rx.recv() => {
+                    if result.passed {
+                        self.on_piece_verified(result.piece).await;
+                    } else {
+                        self.on_piece_hash_failed(result.piece).await;
+                        let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
+                        for addr in addrs {
+                            self.request_pieces_from_peer(addr).await;
+                        }
+                    }
+                }
                 // Accept incoming peers
                 result = accept_incoming(&mut self.listener) => {
                     if let Ok((stream, addr)) = result {
@@ -2032,7 +2070,7 @@ impl TorrentActor {
                     continue;
                 }
                 if !self.peers.contains_key(&addr)
-                    && !self.available_peers.iter().any(|(a, _)| *a == addr)
+                    && self.available_peers_set.insert(addr)
                 {
                     self.available_peers.push((addr, source));
                     added = true;
@@ -2604,6 +2642,7 @@ impl TorrentActor {
         }
         // Add to the end of available peers (pop() takes from the end, so it
         // will be the next peer attempted) and trigger connection immediately.
+        self.available_peers_set.insert(addr);
         self.available_peers.push((addr, PeerSource::Incoming));
         self.try_connect_peers();
     }
@@ -2958,7 +2997,7 @@ impl TorrentActor {
                 begin,
                 data,
             } => {
-                self.handle_piece_data(peer_addr, index, begin, &data)
+                self.handle_piece_data(peer_addr, index, begin, data)
                     .await;
             }
             PeerEvent::PeerChoking {
@@ -3190,18 +3229,27 @@ impl TorrentActor {
         peer_addr: SocketAddr,
         index: u32,
         begin: u32,
-        data: &[u8],
+        data: Bytes,
     ) {
-        // Write chunk to disk
-        if let Some(ref disk) = self.disk
-            && let Err(e) = disk.write_chunk(index, begin, Bytes::copy_from_slice(data), DiskJobFlags::empty()).await
-        {
-            warn!(index, begin, "failed to write chunk: {e}");
-            return;
+        let data_len = data.len();
+
+        // Fire-and-forget write (zero-copy: Bytes moved from wire codec -> disk)
+        if let Some(ref disk) = self.disk {
+            match disk.enqueue_write(index, begin, data, DiskJobFlags::empty(), &self.write_error_tx) {
+                Ok(()) => {}
+                Err(returned_data) => {
+                    // Channel full — fall back to blocking write
+                    warn!(index, begin, "disk channel full, blocking write");
+                    if let Err(e) = disk.write_chunk(index, begin, returned_data, DiskJobFlags::empty()).await {
+                        warn!(index, begin, "failed to write chunk: {e}");
+                        return;
+                    }
+                }
+            }
         }
 
-        self.downloaded += data.len() as u64;
-        self.total_download += data.len() as u64 + 13; // payload + message header
+        self.downloaded += data_len as u64;
+        self.total_download += data_len as u64 + 13; // payload + message header
         self.last_download = now_unix();
         self.need_save_resume = true;
 
@@ -3216,10 +3264,8 @@ impl TorrentActor {
             {
                 peer.pending_requests.swap_remove(pos);
             }
-            peer.download_bytes_window += data.len() as u64;
-
-            // Update pipeline state (M28)
-            peer.pipeline.block_received(index, begin, data.len() as u32, std::time::Instant::now());
+            peer.download_bytes_window += data_len as u64;
+            peer.pipeline.block_received(index, begin, data_len as u32, std::time::Instant::now());
             peer.last_data_received = Some(std::time::Instant::now());
             // Clear snub if snubbed
             if peer.snubbed {
@@ -3276,7 +3322,25 @@ impl TorrentActor {
                 }
             }
 
-            self.verify_and_mark_piece(index).await;
+            match self.version {
+                torrent_core::TorrentVersion::V1Only => {
+                    // Async: fire-and-forget, result via verify_result_rx
+                    if let Some(ref disk) = self.disk
+                        && let Some(expected) = self.meta.as_ref()
+                            .and_then(|m| m.info.piece_hash(index as usize))
+                    {
+                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
+                    }
+                }
+                torrent_core::TorrentVersion::V2Only => {
+                    // Blocking: needs mutable hash_picker for Merkle tree
+                    self.verify_and_mark_piece_v2(index).await;
+                }
+                torrent_core::TorrentVersion::Hybrid => {
+                    // Blocking: needs both v1+v2 decision matrix
+                    self.verify_and_mark_piece_hybrid(index).await;
+                }
+            }
         }
 
         // Try to request more from this peer
@@ -4105,7 +4169,15 @@ impl TorrentActor {
             }
         }
         // Remove from available peers pool
-        self.available_peers.retain(|(a, _)| a.ip() != ip);
+        let set = &mut self.available_peers_set;
+        self.available_peers.retain(|(a, _)| {
+            if a.ip() == ip {
+                set.remove(a);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Flush the batched Have buffer, sending accumulated Haves or a full bitfield.
@@ -5222,7 +5294,10 @@ impl TorrentActor {
     fn try_connect_peers(&mut self) {
         while self.peers.len() < self.effective_max_connections() {
             let (addr, source) = match self.available_peers.pop() {
-                Some(pair) => pair,
+                Some(pair) => {
+                    self.available_peers_set.remove(&pair.0);
+                    pair
+                }
                 None => break,
             };
 
