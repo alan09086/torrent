@@ -281,6 +281,129 @@ impl Message {
         }
     }
 
+    /// Encode this message (with length prefix) directly into a buffer.
+    ///
+    /// Unlike [`to_bytes`](Self::to_bytes), this writes directly into `dst`
+    /// without allocating an intermediate `Bytes`, avoiding a double-copy
+    /// when used with `tokio_util::codec::Encoder`.
+    pub fn encode_into(&self, dst: &mut BytesMut) {
+        match self {
+            Message::KeepAlive => {
+                dst.put_u32(0);
+            }
+            Message::Choke => encode_fixed_into(dst, ID_CHOKE),
+            Message::Unchoke => encode_fixed_into(dst, ID_UNCHOKE),
+            Message::Interested => encode_fixed_into(dst, ID_INTERESTED),
+            Message::NotInterested => encode_fixed_into(dst, ID_NOT_INTERESTED),
+            Message::Have { index } => {
+                dst.put_u32(5);
+                dst.put_u8(ID_HAVE);
+                dst.put_u32(*index);
+            }
+            Message::Bitfield(bits) => {
+                dst.reserve(5 + bits.len());
+                dst.put_u32(1 + bits.len() as u32);
+                dst.put_u8(ID_BITFIELD);
+                dst.put_slice(bits);
+            }
+            Message::Request {
+                index,
+                begin,
+                length,
+            } => encode_triple_into(dst, ID_REQUEST, *index, *begin, *length),
+            Message::Piece { index, begin, data } => {
+                dst.reserve(13 + data.len());
+                dst.put_u32(9 + data.len() as u32);
+                dst.put_u8(ID_PIECE);
+                dst.put_u32(*index);
+                dst.put_u32(*begin);
+                dst.put_slice(data);
+            }
+            Message::Cancel {
+                index,
+                begin,
+                length,
+            } => encode_triple_into(dst, ID_CANCEL, *index, *begin, *length),
+            Message::Port(port) => {
+                dst.put_u32(3);
+                dst.put_u8(ID_PORT);
+                dst.put_u16(*port);
+            }
+            Message::Extended { ext_id, payload } => {
+                dst.reserve(6 + payload.len());
+                dst.put_u32(2 + payload.len() as u32);
+                dst.put_u8(ID_EXTENDED);
+                dst.put_u8(*ext_id);
+                dst.put_slice(payload);
+            }
+            Message::SuggestPiece(index) => {
+                dst.put_u32(5);
+                dst.put_u8(ID_SUGGEST_PIECE);
+                dst.put_u32(*index);
+            }
+            Message::HaveAll => encode_fixed_into(dst, ID_HAVE_ALL),
+            Message::HaveNone => encode_fixed_into(dst, ID_HAVE_NONE),
+            Message::RejectRequest {
+                index,
+                begin,
+                length,
+            } => encode_triple_into(dst, ID_REJECT_REQUEST, *index, *begin, *length),
+            Message::AllowedFast(index) => {
+                dst.put_u32(5);
+                dst.put_u8(ID_ALLOWED_FAST);
+                dst.put_u32(*index);
+            }
+            Message::HashRequest {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            }
+            | Message::HashReject {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            } => {
+                let id = match self {
+                    Message::HashRequest { .. } => ID_HASH_REQUEST,
+                    _ => ID_HASH_REJECT,
+                };
+                dst.put_u32(49); // 1 + 32 + 4*4
+                dst.put_u8(id);
+                dst.put_slice(&pieces_root.0);
+                dst.put_u32(*base);
+                dst.put_u32(*index);
+                dst.put_u32(*count);
+                dst.put_u32(*proof_layers);
+            }
+            Message::Hashes {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+                hashes,
+            } => {
+                let hash_bytes = hashes.len() * 32;
+                let payload_len = 1 + 32 + 16 + hash_bytes;
+                dst.reserve(4 + payload_len);
+                dst.put_u32(payload_len as u32);
+                dst.put_u8(ID_HASHES);
+                dst.put_slice(&pieces_root.0);
+                dst.put_u32(*base);
+                dst.put_u32(*index);
+                dst.put_u32(*count);
+                dst.put_u32(*proof_layers);
+                for h in hashes {
+                    dst.put_slice(&h.0);
+                }
+            }
+        }
+    }
+
     /// Parse a message from its payload (after the 4-byte length prefix has
     /// been consumed). `payload` is everything after the length prefix.
     pub fn from_payload(payload: BytesMut) -> Result<Self> {
@@ -422,6 +545,19 @@ impl Message {
             _ => Err(Error::InvalidMessageId(id)),
         }
     }
+}
+
+fn encode_fixed_into(dst: &mut BytesMut, id: u8) {
+    dst.put_u32(1);
+    dst.put_u8(id);
+}
+
+fn encode_triple_into(dst: &mut BytesMut, id: u8, a: u32, b: u32, c: u32) {
+    dst.put_u32(13);
+    dst.put_u8(id);
+    dst.put_u32(a);
+    dst.put_u32(b);
+    dst.put_u32(c);
 }
 
 fn fixed_msg(id: u8) -> Bytes {
@@ -777,6 +913,80 @@ mod tests {
         let mut payload = vec![21u8];
         payload.extend_from_slice(&[0u8; 10]);
         assert!(Message::from_payload(BytesMut::from(&payload[..])).is_err());
+    }
+
+    #[test]
+    fn encode_into_matches_to_bytes() {
+        let messages = vec![
+            Message::KeepAlive,
+            Message::Choke,
+            Message::Unchoke,
+            Message::Interested,
+            Message::NotInterested,
+            Message::Have { index: 42 },
+            Message::Bitfield(Bytes::from_static(b"\xff\x00")),
+            Message::Request {
+                index: 1,
+                begin: 0,
+                length: 16384,
+            },
+            Message::Piece {
+                index: 0,
+                begin: 0,
+                data: Bytes::from_static(b"block data here"),
+            },
+            Message::Cancel {
+                index: 1,
+                begin: 0,
+                length: 16384,
+            },
+            Message::Port(6881),
+            Message::Extended {
+                ext_id: 0,
+                payload: Bytes::from_static(b"ext payload"),
+            },
+            Message::SuggestPiece(7),
+            Message::HaveAll,
+            Message::HaveNone,
+            Message::RejectRequest {
+                index: 1,
+                begin: 0,
+                length: 16384,
+            },
+            Message::AllowedFast(5),
+            Message::HashRequest {
+                pieces_root: torrent_core::Id32::ZERO,
+                base: 7,
+                index: 0,
+                count: 512,
+                proof_layers: 3,
+            },
+            Message::HashReject {
+                pieces_root: torrent_core::Id32::ZERO,
+                base: 7,
+                index: 0,
+                count: 512,
+                proof_layers: 3,
+            },
+            Message::Hashes {
+                pieces_root: torrent_core::Id32::ZERO,
+                base: 0,
+                index: 0,
+                count: 2,
+                proof_layers: 1,
+                hashes: vec![
+                    torrent_core::sha256(b"block1"),
+                    torrent_core::sha256(b"block2"),
+                    torrent_core::sha256(b"uncle"),
+                ],
+            },
+        ];
+        for msg in messages {
+            let expected = msg.to_bytes();
+            let mut buf = BytesMut::new();
+            msg.encode_into(&mut buf);
+            assert_eq!(&expected[..], &buf[..], "mismatch for {msg:?}");
+        }
     }
 
     #[test]

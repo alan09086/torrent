@@ -77,8 +77,7 @@ impl Encoder<Message> for MessageCodec {
     type Error = Error;
 
     fn encode(&mut self, msg: Message, dst: &mut BytesMut) -> Result<(), Error> {
-        let bytes = msg.to_bytes();
-        dst.extend_from_slice(&bytes);
+        msg.encode_into(dst);
         Ok(())
     }
 }
