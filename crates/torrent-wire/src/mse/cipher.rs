@@ -37,11 +37,33 @@ impl Rc4 {
 
     /// Pseudo-Random Generation Algorithm (PRGA). XORs data in-place with keystream.
     pub fn apply(&mut self, data: &mut [u8]) {
-        for byte in data.iter_mut() {
+        let mut pos = 0;
+        let len = data.len();
+
+        // Bulk phase: generate keystream in 64-byte blocks, XOR in bulk
+        while pos + 64 <= len {
+            let mut keystream = [0u8; 64];
+            for k in &mut keystream {
+                self.i = self.i.wrapping_add(1);
+                self.j = self.j.wrapping_add(self.s[self.i as usize]);
+                self.s.swap(self.i as usize, self.j as usize);
+                *k = self.s[self.s[self.i as usize]
+                    .wrapping_add(self.s[self.j as usize]) as usize];
+            }
+            // XOR the 64-byte block — compiler can auto-vectorize this
+            for (d, k) in data[pos..pos + 64].iter_mut().zip(keystream.iter()) {
+                *d ^= k;
+            }
+            pos += 64;
+        }
+
+        // Tail: byte-at-a-time for remainder
+        for byte in data[pos..].iter_mut() {
             self.i = self.i.wrapping_add(1);
             self.j = self.j.wrapping_add(self.s[self.i as usize]);
             self.s.swap(self.i as usize, self.j as usize);
-            let k = self.s[self.s[self.i as usize].wrapping_add(self.s[self.j as usize]) as usize];
+            let k = self.s[self.s[self.i as usize]
+                .wrapping_add(self.s[self.j as usize]) as usize];
             *byte ^= k;
         }
     }
@@ -93,5 +115,17 @@ mod tests {
         Rc4::new(b"key one").apply(&mut buf1);
         Rc4::new(b"key two").apply(&mut buf2);
         assert_ne!(buf1, buf2);
+    }
+
+    #[test]
+    fn rc4_large_data_roundtrip() {
+        let key = b"benchmark key for large data";
+        let original: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let mut encrypted = original.clone();
+        Rc4::new(key).apply(&mut encrypted);
+        assert_ne!(encrypted, original);
+        let mut decrypted = encrypted;
+        Rc4::new(key).apply(&mut decrypted);
+        assert_eq!(decrypted, original);
     }
 }
