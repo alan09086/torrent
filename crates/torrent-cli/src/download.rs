@@ -157,6 +157,11 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
             peak_peers = peak_peers.max(stats.peers_connected);
             last_download_rate = stats.download_rate;
 
+            // Fallback completion check via progress (in case alert is missed)
+            if stats.progress >= 1.0 {
+                finished = true;
+            }
+
             if let Some(ref pb) = pb {
                 let pct = (stats.progress * 100.0) as u64;
                 pb.set_position(pct);

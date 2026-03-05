@@ -833,7 +833,7 @@ impl DiskActor {
                     .await
                     .unwrap();
                     drop(permit);
-                    let _ = result_tx.try_send(VerifyResult { piece, passed });
+                    let _ = result_tx.send(VerifyResult { piece, passed }).await;
                 });
             }
 
@@ -875,7 +875,7 @@ impl DiskActor {
                     .await
                     .unwrap();
                     drop(permit);
-                    let _ = result_tx.try_send(VerifyResult { piece, passed });
+                    let _ = result_tx.send(VerifyResult { piece, passed }).await;
                 });
             }
 

@@ -187,7 +187,7 @@ impl TorrentHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (write_error_tx, write_error_rx) = mpsc::channel(64);
-        let (verify_result_tx, verify_result_rx) = mpsc::channel(64);
+        let (verify_result_tx, verify_result_rx) = mpsc::channel(1024);
         let our_peer_id = if config.anonymous_mode {
             PeerId::generate_anonymous().0
         } else {
@@ -455,7 +455,7 @@ impl TorrentHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (write_error_tx, write_error_rx) = mpsc::channel(64);
-        let (verify_result_tx, verify_result_rx) = mpsc::channel(64);
+        let (verify_result_tx, verify_result_rx) = mpsc::channel(1024);
         let our_peer_id = if config.anonymous_mode {
             PeerId::generate_anonymous().0
         } else {
