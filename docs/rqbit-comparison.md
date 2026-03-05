@@ -206,6 +206,35 @@ No immediate changes needed. Long-term, consider whether a ring buffer approach 
 
 ---
 
+## Duplicate Block Prevention
+
+### rqbit: Three-Layer Guard
+1. **Per-peer inflight_requests HashSet** — `HashSet::insert()` returns false if block already requested from same peer; `HashSet::remove()` on receipt bails if block wasn't in flight
+2. **Global inflight_pieces HashMap** — tracks which peer "owns" each piece; if stolen by another peer, data is discarded (`"was stolen by {peer}, ignoring"`)
+3. **Chunk-level BitVector** — `mark_chunk_downloaded()` returns `PreviouslyCompleted` if all chunks in piece already set; early return skips disk write entirely
+
+### libtorrent: Block State Machine
+- Four states: `none → requested → writing → finished`
+- State transitions prevent duplicate writes structurally — a block in `writing` or `finished` state cannot be overwritten
+- End-game mode allows controlled redundancy (configurable via `strict_end_game` setting)
+- Tracks redundant bytes received as a session statistic
+
+### ferrite (before fix): No Guard
+- `handle_piece_data` called `enqueue_write` unconditionally — no check for already-received blocks
+- In end-game mode or after timeout re-requests, duplicate blocks overwrote valid data in the store buffer
+- This caused piece hash failures (SHA-1 mismatch) and forced re-downloads, hurting throughput
+
+### ferrite (after fix): Single-Layer Guard
+- Added `chunk_tracker.has_chunk(index, begin)` check at top of `handle_piece_data`
+- Returns early for already-received blocks, counting bytes as redundant download
+- Equivalent to rqbit's Layer 3 (chunk-level BitVector)
+
+### Future Consideration
+- rqbit's Layer 2 (piece-level steal protection) could prevent wasted data transfers earlier
+- Per-peer inflight tracking (Layer 1) would catch unsolicited data, but our actor model already validates via `pending_requests`
+
+---
+
 ## Priority Improvements (Post-Bugfix)
 
 1. **Semaphore-based request scheduling** — highest impact, replaces tick-based pipeline
