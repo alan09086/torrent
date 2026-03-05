@@ -41,6 +41,18 @@ impl ClientBuilder {
         }
     }
 
+    /// Create a builder from an existing `Settings` struct.
+    ///
+    /// Useful for loading settings from a JSON config file and then
+    /// applying CLI overrides on top.
+    pub fn from_settings(settings: Settings) -> Self {
+        Self {
+            settings,
+            plugins: Vec::new(),
+            backend: None,
+        }
+    }
+
     /// Register a custom BEP 10 extension plugin.
     ///
     /// Plugins are assigned extension IDs starting at 10 in registration order.

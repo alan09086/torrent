@@ -39,9 +39,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
             .with_context(|| format!("failed to read config: {}", config_path.display()))?;
         let settings: torrent::session::Settings =
             serde_json::from_str(&data).with_context(|| "failed to parse settings JSON")?;
-        let mut b = torrent::ClientBuilder::new();
-        b = b.listen_port(settings.listen_port);
-        b
+        settings.validate().with_context(|| "invalid settings")?;
+        torrent::ClientBuilder::from_settings(settings)
     } else {
         torrent::ClientBuilder::new()
     };
