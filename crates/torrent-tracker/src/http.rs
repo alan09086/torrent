@@ -51,7 +51,7 @@ impl HttpTracker {
     pub fn new() -> Self {
         HttpTracker {
             client: reqwest::Client::builder()
-                .user_agent("Ferrite/0.60.0")
+                .user_agent("Torrent/0.60.0")
                 .build()
                 .expect("failed to build HTTP client"),
         }
@@ -74,7 +74,7 @@ impl HttpTracker {
     /// When `proxy_url` is provided (e.g. `"socks5://host:port"`), all
     /// HTTP requests are routed through it.
     pub fn with_proxy(proxy_url: Option<&str>) -> Self {
-        let mut builder = reqwest::Client::builder().user_agent("Ferrite/0.60.0");
+        let mut builder = reqwest::Client::builder().user_agent("Torrent/0.60.0");
         if let Some(url) = proxy_url
             && let Ok(proxy) = reqwest::Proxy::all(url)
         {
@@ -95,7 +95,7 @@ impl HttpTracker {
         validate_tls: bool,
         ssrf_mitigation: bool,
     ) -> Self {
-        let mut builder = reqwest::Client::builder().user_agent("Ferrite/0.60.0");
+        let mut builder = reqwest::Client::builder().user_agent("Torrent/0.60.0");
 
         if ssrf_mitigation {
             let policy = reqwest::redirect::Policy::custom(|attempt| {

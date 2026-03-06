@@ -3,7 +3,7 @@ use crate::hash::Id20;
 /// A BitTorrent peer ID (20 bytes).
 ///
 /// Uses Azureus-style encoding: `-FE0100-` followed by 12 random bytes.
-/// FE = Ferrite, 0100 = version 0.1.0.
+/// FE = Torrent (formerly Ferrite), 0100 = version 0.1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId(pub Id20);
 
@@ -11,7 +11,7 @@ impl PeerId {
     /// Client identifier prefix.
     const PREFIX: &'static [u8] = b"-FE0100-";
 
-    /// Generate a new random peer ID with the default Ferrite prefix.
+    /// Generate a new random peer ID with the default Torrent prefix.
     pub fn generate() -> Self {
         Self::generate_with_prefix(Self::PREFIX)
     }

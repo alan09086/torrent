@@ -1,6 +1,6 @@
-# Ferrite vs rqbit: Detailed Architecture Comparison
+# Torrent vs rqbit: Detailed Architecture Comparison
 
-Reference for post-bugfix architectural improvements. rqbit consistently achieves ~80 MB/s on well-seeded torrents. Ferrite peaks at 116 MB/s but is inconsistent.
+Reference for post-bugfix architectural improvements. rqbit consistently achieves ~80 MB/s on well-seeded torrents. Torrent peaks at 116 MB/s but is inconsistent.
 
 ## Request Scheduling
 
@@ -12,7 +12,7 @@ Reference for post-bugfix architectural improvements. rqbit consistently achieve
 - Single-piece-at-a-time reservation, but full request pipelining across 128 permits
 - **No tick-based evaluation. Fully reactive.**
 
-### ferrite: Tick-Based Pipeline + EWMA
+### torrent: Tick-Based Pipeline + EWMA
 - Pipeline evaluated on periodic ticks
 - EWMA-based dynamic queue depth: `depth = (ewma_rate * 3.0) / 16384`
 - Initial depth: 128, max: 250
@@ -21,7 +21,7 @@ Reference for post-bugfix architectural improvements. rqbit consistently achieve
 - `pick_blocks()` called in a loop to fill slots (commit 9687704)
 
 ### Key Difference
-Ferrite has **latency gaps** between block receipt and next request due to tick scheduling. rqbit's semaphore fires instantly. The EWMA depth formula can also create negative feedback loops: brief throughput dip -> reduced depth -> less data in flight -> further dip. rqbit avoids this entirely with fixed 128 permits.
+Torrent has **latency gaps** between block receipt and next request due to tick scheduling. rqbit's semaphore fires instantly. The EWMA depth formula can also create negative feedback loops: brief throughput dip -> reduced depth -> less data in flight -> further dip. rqbit avoids this entirely with fixed 128 permits.
 
 ### Recommendation
 Adopt semaphore-based per-peer request scheduling. Keep EWMA for monitoring/stats, but decouple it from request depth decisions. Fixed depth (128) with semaphore gating matches rqbit's proven model.
@@ -39,7 +39,7 @@ Adopt semaphore-based per-peer request scheduling. Keep EWMA for monitoring/stat
 - No explicit rarity tracking — time-based stealing handles distribution naturally
 - Computationally cheaper than rarity-based selection
 
-### ferrite: Rarest-First with Layered Priority
+### torrent: Rarest-First with Layered Priority
 - Per-piece availability counter (updated on peer connect/bitfield)
 - Selection priority stack:
   1. Streaming pieces (file streaming window)
@@ -52,10 +52,10 @@ Adopt semaphore-based per-peer request scheduling. Keep EWMA for monitoring/stat
 - Endgame mode with duplicate requests + auto-cancel
 
 ### Key Difference
-Ferrite's piece picker is more sophisticated (better for swarm health and rare piece distribution) but has more overhead per selection. rqbit's stealing approach is simpler and optimizes for raw throughput by reassigning work from slow peers quickly. Ferrite's endgame mode is a strength rqbit lacks.
+Torrent's piece picker is more sophisticated (better for swarm health and rare piece distribution) but has more overhead per selection. rqbit's stealing approach is simpler and optimizes for raw throughput by reassigning work from slow peers quickly. Torrent's endgame mode is a strength rqbit lacks.
 
 ### Recommendation
-Keep ferrite's rarest-first as the base algorithm. Add aggressive piece stealing as an overlay: if a peer is >5x slower than the median, reassign its in-flight blocks. This combines swarm-healthy selection with rqbit's adaptive speed optimization.
+Keep torrent's rarest-first as the base algorithm. Add aggressive piece stealing as an overlay: if a peer is >5x slower than the median, reassign its in-flight blocks. This combines swarm-healthy selection with rqbit's adaptive speed optimization.
 
 ---
 
@@ -70,7 +70,7 @@ Keep ferrite's rarest-first as the base algorithm. Add aggressive piece stealing
 - **Read/write timeout**: 10 seconds
 - **No zombie tracking needed** — semaphore naturally limits connections
 
-### ferrite
+### torrent
 - **Max peers**: 200 (configurable)
 - **Connection**: `try_connect_peers()` triggered on peer discovery
 - **TCP timeout**: 5 seconds
@@ -79,7 +79,7 @@ Keep ferrite's rarest-first as the base algorithm. Add aggressive piece stealing
 - **Peer turnover**: 4% replacement every 300 seconds (30 peer changes/hour)
 
 ### Key Difference
-rqbit's 128 peer limit with aggressive retry keeps the active peer pool healthy. Ferrite's 200 limit allows more zombies, and the 60-second snub timeout is 6x longer than rqbit's effective timeout (10s read/write). Ferrite's peer turnover is also very conservative (4% every 5 minutes).
+rqbit's 128 peer limit with aggressive retry keeps the active peer pool healthy. Torrent's 200 limit allows more zombies, and the 60-second snub timeout is 6x longer than rqbit's effective timeout (10s read/write). Torrent's peer turnover is also very conservative (4% every 5 minutes).
 
 ### Recommendation
 - Reduce snub timeout to 15-20 seconds
@@ -99,7 +99,7 @@ rqbit's 128 peer limit with aggressive retry keeps the active peer pool healthy.
 - 32 KB ring buffer (`ReadBuf`) for incoming messages
 - Bitfield flushed every 16 MB
 
-### ferrite: Store Buffer + Fire-and-Forget
+### torrent: Store Buffer + Fire-and-Forget
 - Block arrives -> store buffer (Mutex<HashMap>) -> fire-and-forget async write
 - Piece verification reads from store buffer (in-memory, avoids disk read-back)
 - Write buffer: 16 MB max (oldest piece flushed first)
@@ -108,7 +108,7 @@ rqbit's 128 peer limit with aggressive retry keeps the active peer pool healthy.
 - Hashing threads: `(cores/4).clamp(2, 8)`
 
 ### Key Difference
-rqbit eliminates intermediate copies entirely. Ferrite's store buffer adds a layer (Mutex contention, memory copies) but enables in-memory verification which avoids reading pieces back from disk. Both approaches have merit — ferrite's is better for verification speed, rqbit's is better for write throughput.
+rqbit eliminates intermediate copies entirely. Torrent's store buffer adds a layer (Mutex contention, memory copies) but enables in-memory verification which avoids reading pieces back from disk. Both approaches have merit — torrent's is better for verification speed, rqbit's is better for write throughput.
 
 ### Recommendation
 Fix the immediate Mutex contention bug (hashing under lock). Long-term, consider a lock-free store buffer using `DashMap` or per-piece `RwLock` instead of a single global Mutex. The store buffer concept is sound (avoiding disk read-back for verification) — the implementation just needs to avoid contention.
@@ -122,17 +122,17 @@ Fix the immediate Mutex contention bug (hashing under lock). Long-term, consider
 - Unchoke on connection, send 128 permits
 - Relies on peer selection and stealing for balance
 
-### ferrite: Full Implementation
+### torrent: Full Implementation
 - Fixed-slots: 4 regular + 1 optimistic unchoke (configurable)
 - Rate-based alternative: dynamic slot allocation based on throughput
 - Seed mode strategies: FastestUpload, RoundRobin, AntiLeech
 - Evaluation interval: every 10 seconds
 
 ### Key Difference
-rqbit's simplicity avoids overhead. Ferrite's implementation is more protocol-correct and better for swarm health. This is a strength of ferrite's, not a gap.
+rqbit's simplicity avoids overhead. Torrent's implementation is more protocol-correct and better for swarm health. This is a strength of torrent's, not a gap.
 
 ### Recommendation
-Keep ferrite's choking implementation. Consider reducing evaluation interval from 10s to 5s for faster adaptation to changing peer conditions.
+Keep torrent's choking implementation. Consider reducing evaluation interval from 10s to 5s for faster adaptation to changing peer conditions.
 
 ---
 
@@ -144,7 +144,7 @@ Keep ferrite's choking implementation. Consider reducing evaluation interval fro
 - No pre-allocation for pieces — chunks written to disk immediately
 - Minimal memory footprint: ~50 KB per active peer
 
-### ferrite
+### torrent
 - Store buffer: up to 16 MB global
 - ARC read cache: up to 48 MB
 - Per-peer channel: 256 slots
@@ -152,7 +152,7 @@ Keep ferrite's choking implementation. Consider reducing evaluation interval fro
 - Zero-copy wire codec (Bytes throughout)
 
 ### Key Difference
-rqbit uses dramatically less memory per peer but requires disk read-back for verification. Ferrite uses more memory but avoids verification I/O. Both are valid tradeoffs.
+rqbit uses dramatically less memory per peer but requires disk read-back for verification. Torrent uses more memory but avoids verification I/O. Both are valid tradeoffs.
 
 ### Recommendation
 No changes needed for the buffer architecture. The store buffer approach is a valid optimization. Just fix the contention issues.
@@ -168,7 +168,7 @@ No changes needed for the buffer architecture. The store buffer approach is a va
 - TCP preferred (1s head start over uTP)
 - Speed estimator updates every 100ms
 
-### ferrite
+### torrent
 - Tokio-based with `FramedRead`/`FramedWrite` + `MessageCodec`
 - Zero-copy message decoding (Bytes)
 - Direct-write encoding (no double-copy)
@@ -176,7 +176,7 @@ No changes needed for the buffer architecture. The store buffer approach is a va
 - uTP fallback with 5s timeout
 
 ### Key Difference
-Both use tokio effectively. rqbit's ring buffer approach is slightly more efficient for scatter-gather reads. Ferrite's framed codec approach is more idiomatic tokio but may have slightly higher overhead per message boundary.
+Both use tokio effectively. rqbit's ring buffer approach is slightly more efficient for scatter-gather reads. Torrent's framed codec approach is more idiomatic tokio but may have slightly higher overhead per message boundary.
 
 ### Recommendation
 No immediate changes needed. Long-term, consider whether a ring buffer approach would reduce per-message overhead.
@@ -185,14 +185,14 @@ No immediate changes needed. Long-term, consider whether a ring buffer approach 
 
 ## Constants Comparison
 
-| Parameter | ferrite | rqbit | Notes |
+| Parameter | torrent | rqbit | Notes |
 |-----------|---------|-------|-------|
 | Initial queue depth | 128 | 128 (semaphore) | Same |
-| Max queue depth | 250 | 128 (fixed) | ferrite allows more, but EWMA can reduce it |
+| Max queue depth | 250 | 128 (fixed) | torrent allows more, but EWMA can reduce it |
 | Chunk size | 16 KB | 16 KB | Same (BEP standard) |
-| Max peers | 200 | 128 | ferrite allows more |
-| Connect timeout | 5s | 10s | ferrite is more aggressive |
-| Read/write timeout | N/A | 10s | ferrite uses snub detection instead |
+| Max peers | 200 | 128 | torrent allows more |
+| Connect timeout | 5s | 10s | torrent is more aggressive |
+| Read/write timeout | N/A | 10s | torrent uses snub detection instead |
 | Snub timeout | 60s | N/A | rqbit uses read timeout + stealing |
 | Keep-alive | implicit | 120s | |
 | Unchoke slots | 4+1 | N/A | rqbit doesn't implement traditional choking |
@@ -219,12 +219,12 @@ No immediate changes needed. Long-term, consider whether a ring buffer approach 
 - End-game mode allows controlled redundancy (configurable via `strict_end_game` setting)
 - Tracks redundant bytes received as a session statistic
 
-### ferrite (before fix): No Guard
+### torrent (before fix): No Guard
 - `handle_piece_data` called `enqueue_write` unconditionally — no check for already-received blocks
 - In end-game mode or after timeout re-requests, duplicate blocks overwrote valid data in the store buffer
 - This caused piece hash failures (SHA-1 mismatch) and forced re-downloads, hurting throughput
 
-### ferrite (after fix): Single-Layer Guard
+### torrent (after fix): Single-Layer Guard
 - Added `chunk_tracker.has_chunk(index, begin)` check at top of `handle_piece_data`
 - Returns early for already-received blocks, counting bytes as redundant download
 - Equivalent to rqbit's Layer 3 (chunk-level BitVector)

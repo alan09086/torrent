@@ -19,7 +19,7 @@ pub struct UnfinishedPiece {
 /// libtorrent-compatible fast-resume data in bencode format.
 ///
 /// This struct matches libtorrent's resume file format so that resume data
-/// can be read/written by both Ferrite and libtorrent-based clients.
+/// can be read/written by both Torrent and libtorrent-based clients.
 /// Every field uses `#[serde(rename = "...")]` to match libtorrent's exact
 /// bencode dictionary keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

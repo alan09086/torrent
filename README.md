@@ -194,7 +194,7 @@ Requires Rust edition 2024 support (**rustc 1.85+**).
 
 ## 🗺️ Roadmap
 
-See [docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md](docs/plans/2026-03-01-ferrite-roadmap-v3-full-parity.md) for the full 51-milestone roadmap to complete libtorrent-rasterbar parity. Implementation plans exist for every milestone.
+See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md) for the full 51-milestone roadmap to complete libtorrent-rasterbar parity. Implementation plans exist for every milestone.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|

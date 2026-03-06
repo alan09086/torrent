@@ -13,7 +13,7 @@ echo "Building torrent-cli (release)..."
 cargo build --release -p torrent-cli 2>/dev/null
 TORRENT="target/release/torrent"
 
-echo "Ferrite binary: $TORRENT"
+echo "Torrent binary: $TORRENT"
 echo "Magnet: $MAGNET"
 echo "Trials: $TRIALS"
 echo ""
@@ -73,7 +73,7 @@ for trial in $(seq 1 "$TRIALS"); do
     echo ""
 done
 
-echo "=== Ferrite peer stats ===" && cat "$OUTPUT_DIR"/torrent-stats-*.txt 2>/dev/null || true
+echo "=== Torrent peer stats ===" && cat "$OUTPUT_DIR"/torrent-stats-*.txt 2>/dev/null || true
 echo ""
 echo "Results saved to $RESULTS"
 echo ""
