@@ -59,11 +59,33 @@ pub fn sha1(data: &[u8]) -> Id20 {
     Id20(hash.into())
 }
 
+/// Compute SHA1 hash of multiple chunks without concatenating them.
+///
+/// Avoids allocating a large buffer when piece data is stored as separate blocks.
+pub fn sha1_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id20 {
+    use sha1::Digest;
+    let mut hasher = sha1::Sha1::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    Id20(hasher.finalize().into())
+}
+
 /// Compute SHA-256 hash of input bytes (used by BitTorrent v2, BEP 52).
 pub fn sha256(data: &[u8]) -> Id32 {
     use sha2::Digest;
     let hash = sha2::Sha256::digest(data);
     Id32(hash.into())
+}
+
+/// Compute SHA-256 hash of multiple chunks without concatenating them.
+pub fn sha256_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id32 {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    Id32(hasher.finalize().into())
 }
 
 /// Fill a buffer with pseudo-random bytes (xorshift64, not cryptographic).

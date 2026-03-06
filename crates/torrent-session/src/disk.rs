@@ -546,24 +546,45 @@ impl DiskHandle {
         expected: Id20,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        let store_buffer = Arc::clone(&self.store_buffer);
-        let info_hash = self.info_hash;
+        // Extract blocks synchronously BEFORE spawning to prevent race with
+        // re-download: if verification is slow to start, new blocks for the
+        // same piece could arrive and be written to the store buffer, producing
+        // a frankenstein piece that mixes blocks from different attempts.
+        let blocks = {
+            self.store_buffer
+                .lock()
+                .unwrap()
+                .remove(&(self.info_hash, piece))
+        };
         let result_tx = result_tx.clone();
         tokio::spawn(async move {
             let passed = tokio::task::spawn_blocking(move || {
-                let blocks = {
-                    store_buffer.lock().unwrap().remove(&(info_hash, piece))
-                };
                 if let Some(blocks) = blocks {
-                    let mut piece_data =
-                        Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
-                    for data in blocks.values() {
-                        piece_data.extend_from_slice(data);
+                    // Stream-hash blocks in-place to avoid concatenation alloc
+                    let actual = torrent_core::sha1_chunks(
+                        blocks.values().map(|b| b.as_ref()),
+                    );
+                    let passed = actual == expected;
+                    if !passed {
+                        let num_blocks = blocks.len();
+                        let total_size: usize =
+                            blocks.values().map(|b| b.len()).sum();
+                        let block_info: Vec<(u32, usize)> = blocks
+                            .iter()
+                            .map(|(&offset, data)| (offset, data.len()))
+                            .collect();
+                        warn!(
+                            piece,
+                            num_blocks,
+                            total_size,
+                            ?block_info,
+                            expected = %expected.to_hex(),
+                            actual = %actual.to_hex(),
+                            "verify FAILED: hash mismatch"
+                        );
                     }
-                    torrent_core::sha1(&piece_data) == expected
+                    passed
                 } else {
-                    // Store buffer empty — blocks already consumed (shouldn't
-                    // happen in normal flow since only verify removes them).
                     warn!(piece, "verify: store buffer miss, treating as failed");
                     false
                 }
@@ -583,21 +604,21 @@ impl DiskHandle {
         expected: Id32,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        let store_buffer = Arc::clone(&self.store_buffer);
-        let info_hash = self.info_hash;
+        // Extract blocks synchronously — same race prevention as enqueue_verify.
+        let blocks = {
+            self.store_buffer
+                .lock()
+                .unwrap()
+                .remove(&(self.info_hash, piece))
+        };
         let result_tx = result_tx.clone();
         tokio::spawn(async move {
             let passed = tokio::task::spawn_blocking(move || {
-                let blocks = {
-                    store_buffer.lock().unwrap().remove(&(info_hash, piece))
-                };
                 if let Some(blocks) = blocks {
-                    let mut piece_data =
-                        Vec::with_capacity(blocks.values().map(|b| b.len()).sum());
-                    for data in blocks.values() {
-                        piece_data.extend_from_slice(data);
-                    }
-                    torrent_core::sha256(&piece_data) == expected
+                    let actual = torrent_core::sha256_chunks(
+                        blocks.values().map(|b| b.as_ref()),
+                    );
+                    actual == expected
                 } else {
                     warn!(piece, "verify v2: store buffer miss, treating as failed");
                     false
