@@ -339,6 +339,7 @@ impl TorrentHandle {
             wanted_pieces,
             end_game: EndGame::new(),
             peers: HashMap::new(),
+            cached_peer_rates: FxHashMap::default(),
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
             choker,
@@ -607,6 +608,7 @@ impl TorrentHandle {
             wanted_pieces: Bitfield::new(0),
             end_game: EndGame::new(),
             peers: HashMap::new(),
+            cached_peer_rates: FxHashMap::default(),
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
             choker,
@@ -1307,6 +1309,9 @@ struct TorrentActor {
 
     // Peer management
     peers: HashMap<SocketAddr, PeerState>,
+    /// Cached peer download rates for piece stealing decisions.
+    /// Refreshed on each periodic tick (~1s) instead of rebuilding per block.
+    cached_peer_rates: FxHashMap<SocketAddr, f64>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
     /// O(1) dedup set for available_peers — kept in sync with the Vec.
     available_peers_set: std::collections::HashSet<SocketAddr>,
@@ -1874,10 +1879,19 @@ impl TorrentActor {
                         }
                     }
                 }
-                // Events from peers
+                // Events from peers — batch-drain to reduce select! overhead.
+                // At 100 MB/s we get ~6K events/sec; processing one-by-one
+                // means 6K select! iterations with waker re-registration.
                 event = self.event_rx.recv() => {
                     if let Some(event) = event {
                         self.handle_peer_event(event).await;
+                        // Drain up to 64 more ready events without re-entering select!
+                        for _ in 0..64 {
+                            match self.event_rx.try_recv() {
+                                Ok(event) => self.handle_peer_event(event).await,
+                                Err(_) => break,
+                            }
+                        }
                     }
                 }
                 // Async disk write errors
@@ -2143,6 +2157,10 @@ impl TorrentActor {
                             ifp.assigned_blocks.retain(|_, addr| !snubbed_peers.contains(addr));
                         }
                     }
+
+                    // Refresh cached peer rates for steal decisions (avoids
+                    // rebuilding a FxHashMap from all peers on every block arrival).
+                    self.refresh_peer_rates();
 
                     // Proactive request scheduling: re-evaluate all unchoked peers
                     // for new work. Without this, peers that become idle (e.g. after
@@ -3510,7 +3528,11 @@ impl TorrentActor {
             if self.end_game.is_active() {
                 self.end_game.block_received(index, begin, peer_addr);
             }
-            self.request_pieces_from_peer(peer_addr).await;
+            // Don't call request_pieces_from_peer() for duplicates — the peer's
+            // pipeline is already stocked. Calling it here triggers a full picker
+            // cycle (bitfield clone + peer_rates rebuild + O(num_pieces) iteration)
+            // for every duplicate block, which at high throughput can stall the
+            // actor event loop.
             return;
         }
 
@@ -3551,6 +3573,7 @@ impl TorrentActor {
             .or_default()
             .insert(peer_addr.ip());
 
+        let now = std::time::Instant::now();
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
             if let Some(pos) = peer
                 .pending_requests
@@ -3561,8 +3584,8 @@ impl TorrentActor {
             }
             peer.download_bytes_window += data_len as u64;
             peer.pipeline
-                .block_received(index, begin, data_len as u32, std::time::Instant::now());
-            peer.last_data_received = Some(std::time::Instant::now());
+                .block_received(index, begin, data_len as u32, now);
+            peer.last_data_received = Some(now);
             // Clear snub if snubbed
             if peer.snubbed {
                 peer.snubbed = false;
@@ -5083,6 +5106,15 @@ impl TorrentActor {
         self.web_seed_in_flight.clear();
     }
 
+    /// Rebuild the cached peer rates map from current peer state.
+    fn refresh_peer_rates(&mut self) {
+        self.cached_peer_rates.clear();
+        self.cached_peer_rates.reserve(self.peers.len());
+        for (&addr, p) in &self.peers {
+            self.cached_peer_rates.insert(addr, p.pipeline.ewma_rate());
+        }
+    }
+
     // ----- Piece requesting -----
 
     async fn request_pieces_from_peer(&mut self, peer_addr: SocketAddr) {
@@ -5175,14 +5207,18 @@ impl TorrentActor {
             .map(|p| p.suggested_pieces.clone())
             .unwrap_or_default();
 
-        let peer_rates: FxHashMap<SocketAddr, f64> = self
-            .peers
-            .iter()
-            .map(|(&addr, p)| (addr, p.pipeline.ewma_rate()))
-            .collect();
+        let peer_rates = &self.cached_peer_rates;
 
         let missing_buf = std::cell::RefCell::new(Vec::with_capacity(128));
         let mut slots_remaining = slots;
+
+        // Clone peer bitfield once before the loop — within a single actor
+        // call no other code can mutate it, so refreshing every iteration
+        // was pure overhead (a full bitfield clone per pick cycle).
+        let peer_bitfield = match self.peers.get(&peer_addr) {
+            Some(p) => p.bitfield.clone(),
+            None => return,
+        };
 
         // Loop to fill all pipeline slots — pick_blocks returns blocks from a
         // single piece (~34 blocks for 512 KiB pieces), but we may have 128+
@@ -5192,13 +5228,10 @@ impl TorrentActor {
                 break;
             }
 
-            // Defensive: verify peer still exists and refresh bitfield each
-            // iteration. The peer's channel may have closed (peer task exited),
-            // and the bitfield may have been updated by Have messages.
-            let peer_bitfield = match self.peers.get(&peer_addr) {
-                Some(p) => p.bitfield.clone(),
-                None => break,
-            };
+            // Verify peer still exists (channel may have been removed).
+            if !self.peers.contains_key(&peer_addr) {
+                break;
+            }
 
             // Re-create closure and context each iteration so borrows don't
             // conflict with the mutable access to in_flight_pieces/peers below.
@@ -5238,16 +5271,17 @@ impl TorrentActor {
                 extent_affinity: self.config.piece_extent_affinity,
                 auto_sequential_active: self.config.auto_sequential
                     && self.auto_sequential_active,
-                peer_rates: &peer_rates,
+                peer_rates,
                 steal_threshold_ratio: self.config.steal_threshold_ratio,
             };
 
             if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
                 debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots = slots_remaining, "pick_blocks: sending requests");
+                // Use Lengths arithmetic instead of iterating chunk tracker
                 let total_blocks = self
-                    .chunk_tracker
+                    .lengths
                     .as_ref()
-                    .map(|ct| ct.missing_chunks(result.piece).len() as u32)
+                    .map(|l| l.chunks_in_piece(result.piece))
                     .unwrap_or(1);
                 let ifp = self
                     .in_flight_pieces
