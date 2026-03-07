@@ -1,13 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Benchmark: torrent vs rqbit vs libtorrent
+# Benchmark: torrent vs rqbit vs qbittorrent
 # Usage: ./benchmarks/run_benchmark.sh <magnet_uri> [trials]
 
 MAGNET="${1:?Usage: $0 <magnet_uri> [trials]}"
-TRIALS="${2:-3}"
+TRIALS="${2:-5}"
 OUTPUT_DIR="/tmp/torrent-bench"
 RESULTS="benchmarks/results.csv"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Building torrent-cli (release)..."
 cargo build --release -p torrent-cli 2>/dev/null
@@ -18,7 +19,7 @@ echo "Magnet: $MAGNET"
 echo "Trials: $TRIALS"
 echo ""
 
-echo "client,trial,time_secs,avg_speed_mbps,peak_rss_kb" > "$RESULTS"
+echo "client,trial,time_secs,cpu_secs,avg_speed_mbps,peak_rss_kb" > "$RESULTS"
 
 parse_time_output() {
     local file="$1"
@@ -28,9 +29,15 @@ parse_time_output() {
         else if (NF == 2) print $1*60 + $2;
         else print $1
     }')
+    local user_time
+    user_time=$(grep "User time" "$file" | sed 's/.*: //')
+    local sys_time
+    sys_time=$(grep "System time" "$file" | sed 's/.*: //')
+    local cpu_time
+    cpu_time=$(echo "${user_time:-0} ${sys_time:-0}" | awk '{printf "%.2f", $1 + $2}')
     local rss
     rss=$(grep "Maximum resident" "$file" | sed 's/[^0-9]//g')
-    echo "${wall_time:-0} ${rss:-0}"
+    echo "${wall_time:-0} ${cpu_time:-0} ${rss:-0}"
 }
 
 run_trial() {
@@ -48,14 +55,14 @@ run_trial() {
 
     /usr/bin/time -v bash -c "$cmd 2>\"$stats_file\"" 2>"$time_file" || true
 
-    read -r wall_time rss <<< "$(parse_time_output "$time_file")"
+    read -r wall_time cpu_time rss <<< "$(parse_time_output "$time_file")"
     local size
     size=$(du -sb "$client_dir" 2>/dev/null | awk '{print $1}')
     local avg_speed
     avg_speed=$(echo "${size:-0} $wall_time" | awk '{if ($2 > 0) printf "%.2f", $1/1048576/$2; else print 0}')
 
-    echo "$client,$trial,$wall_time,$avg_speed,$rss" >> "$RESULTS"
-    echo "    -> ${wall_time}s, ${avg_speed} MB/s, RSS ${rss} KB"
+    echo "$client,$trial,$wall_time,$cpu_time,$avg_speed,$rss" >> "$RESULTS"
+    echo "    -> ${wall_time}s, CPU ${cpu_time}s, ${avg_speed} MB/s, RSS ${rss} KB"
 }
 
 for trial in $(seq 1 "$TRIALS"); do
@@ -67,8 +74,8 @@ for trial in $(seq 1 "$TRIALS"); do
     run_trial "rqbit" "$trial" \
         "rqbit download '$MAGNET' -o '$OUTPUT_DIR/rqbit' -e"
 
-    run_trial "libtorrent" "$trial" \
-        "python benchmarks/lt_download.py '$MAGNET' '$OUTPUT_DIR/libtorrent'"
+    run_trial "qbittorrent" "$trial" \
+        "bash '$SCRIPT_DIR/qbt_wrapper.sh' '$MAGNET' '$OUTPUT_DIR/qbittorrent'"
 
     echo ""
 done
