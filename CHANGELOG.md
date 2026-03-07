@@ -31,6 +31,15 @@ All notable changes to this project will be documented in this file.
 - **Zombie peer pruning** — peers with empty bitfields after 30s are disconnected during choking evaluation to free connection slots (only during downloading, not seeding)
 - Test count: 1386
 
+### Benchmark (Arch ISO 1.5 GiB, 5 trials)
+| Client | Time (s) | CPU (s) | Speed (MB/s) | RSS (MiB) |
+|--------|----------|---------|-------------|-----------|
+| torrent 0.66.0 | 100.3 ±19.3 | 37.1 ±4.7 | 15.0 ±3.5 | 170.2 ±42.9 |
+| rqbit 8.1.1 | 34.4 ±24.1 | 10.4 ±0.6 | 56.7 ±27.0 | 37.5 ±3.9 |
+| qbittorrent 5.1.4 | 51.5 ±10.7 | 18.1 ±2.5 | 29.1 ±5.3 | 1525.5 ±5.5 |
+
+**Identified bottlenecks for M68:** end-game pipeline depth too shallow (4 vs 128), O(n) linear scans in pending_requests, redundant bitfield clones in hot path, reactive re-requesting triggers 2+ full picker cycles per block, peer_count() does O(n log n) sort per invocation, unbounded store buffer memory
+
 ## 0.65.0 — `torrent` v0.65.0: Rename, Non-Blocking Pipeline, Production Hardening
 
 ### Breaking
