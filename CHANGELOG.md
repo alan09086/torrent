@@ -27,6 +27,11 @@ All notable changes to this project will be documented in this file.
 - `set_queue_depth_override()` method (incompatible with semaphore architecture)
 - Pipeline compat shims: `new_compat()`, `queue_depth()`, `reset_to_slow_start()`
 
+### Fixed
+- **Completion exit bug** — cancel all request drivers before Seeding transition to prevent infinite busy-loop (drivers acquire permits instantly when not Downloading, causing 300%+ CPU spin)
+- **State-dependent driver spawning** — guard `spawn_request_driver` against non-Downloading state to prevent drivers spawned by late unchoke/bitfield messages from busy-looping
+- **Parole peer assignment** — restored BEP 25 smart banning parole logic that was lost when `request_pieces_from_peer` was removed
+
 ### Deprecated
 - `Settings::request_queue_time` — ignored since the semaphore pipeline uses fixed permits from `initial_queue_depth`
 - `Settings::max_request_queue_depth` — reserved for future adaptive permit sizing; currently unused
