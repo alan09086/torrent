@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use torrent_storage::Bitfield;
 use torrent_wire::ExtHandshake;
@@ -134,6 +137,12 @@ pub(crate) struct PeerState {
     pub appears_nated: bool,
     /// Transport protocol used for this peer connection.
     pub transport: Option<crate::rate_limiter::PeerTransport>,
+    /// Shared snub flag readable by the request driver.
+    pub snubbed_flag: Arc<AtomicBool>,
+    /// Cancellation token for the request driver task.
+    pub driver_cancel: Option<CancellationToken>,
+    /// Handle to the spawned driver task (for cleanup).
+    pub driver_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[allow(dead_code)]
@@ -179,6 +188,9 @@ impl PeerState {
             supports_holepunch: false,
             appears_nated: false,
             transport: None,
+            snubbed_flag: Arc::new(AtomicBool::new(false)),
+            driver_cancel: None,
+            driver_handle: None,
         }
     }
 }
