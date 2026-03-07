@@ -108,6 +108,9 @@ pub(crate) struct PickContext<'a> {
     pub peer_rates: &'a FxHashMap<SocketAddr, f64>,
     /// Ratio threshold for stealing: steal if target peer rate < requesting peer rate / ratio.
     pub steal_threshold_ratio: f64,
+    /// Whether the in-flight piece cap has been reached. When true, the picker
+    /// skips new piece selection and only returns blocks from already-in-flight pieces.
+    pub cap_reached: bool,
 }
 
 /// Result of a pick: which piece and blocks to request.
@@ -289,7 +292,8 @@ impl PieceSelector {
             }
         }
 
-        // Layer 3: Suggested pieces
+        // Layer 3: Suggested pieces (skip new pieces if in-flight cap reached)
+        if !ctx.cap_reached {
         for &piece in ctx.suggested_pieces {
             if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece) {
                 continue;
@@ -311,13 +315,17 @@ impl PieceSelector {
                 });
             }
         }
+        }
 
         // Layer 4: Partial pieces with unassigned blocks (speed affinity)
         if let Some(result) = self.pick_partial(ctx, &missing_chunks) {
             return Some(result);
         }
 
-        // Layer 5: New piece selection
+        // Layer 5: New piece selection (skip if in-flight cap reached)
+        if ctx.cap_reached {
+            return None; // only partial/steal blocks available when cap reached
+        }
         self.pick_new_piece(ctx, &missing_chunks)
     }
 
@@ -1069,6 +1077,7 @@ mod tests {
             auto_sequential_active: false,
             peer_rates: &EMPTY_RATES,
             steal_threshold_ratio: 10.0,
+            cap_reached: false,
         }
     }
 
@@ -1796,5 +1805,146 @@ mod tests {
     fn auto_sequential_zero_peers() {
         assert!(!evaluate_auto_sequential(10, 0, false));
         assert!(!evaluate_auto_sequential(10, 0, true));
+    }
+
+    // ── In-flight cap tests ──────────────────────────────────────────
+
+    #[test]
+    fn cap_reached_skips_new_piece_but_allows_partial() {
+        // Set up 4 pieces, peer has all, we have none
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 {
+            peer_has.set(i);
+        }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        // Piece 0 is in-flight with 1 unassigned block
+        let mut ifp = InFlightPiece::new(2);
+        ifp.assigned_blocks.insert((0, 0), addr(12000));
+        let mut in_flight = FxHashMap::default();
+        in_flight.insert(0u32, ifp);
+
+        // With cap_reached = true, should still pick partial piece 0
+        let mut ctx = default_pick_context(
+            addr(12001),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
+        );
+        ctx.cap_reached = true;
+        ctx.completed_count = 100;
+
+        let chunks = |piece: u32| match piece {
+            0 => vec![(0, 16384), (16384, 16384)],
+            _ => vec![(0, 16384)],
+        };
+        let result = sel.pick_blocks(&ctx, chunks);
+        // Should pick partial piece 0 (1 unassigned block at offset 16384)
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.piece, 0);
+        assert_eq!(r.blocks, vec![(16384, 16384)]);
+    }
+
+    #[test]
+    fn cap_reached_returns_none_without_partial() {
+        // Set up 4 pieces, peer has all, we have none
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 {
+            peer_has.set(i);
+        }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+        let in_flight = FxHashMap::default(); // no in-flight pieces
+
+        // With cap_reached = true and no in-flight pieces, should return None
+        let mut ctx = default_pick_context(
+            addr(13000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
+        );
+        ctx.cap_reached = true;
+        ctx.completed_count = 100;
+
+        let chunks = |_piece: u32| vec![(0, 16384)];
+        let result = sel.pick_blocks(&ctx, chunks);
+        // No partial pieces and cap reached — new piece selection skipped
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn cap_not_reached_picks_new_piece() {
+        // Verify normal behavior when cap_reached = false
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 {
+            peer_has.set(i);
+        }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 {
+            wanted.set(i);
+        }
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+        let in_flight = FxHashMap::default();
+
+        let mut ctx = default_pick_context(
+            addr(14000),
+            &peer_has,
+            &we_have,
+            &wanted,
+            &in_flight,
+            &streaming,
+            &time_critical,
+            &suggested,
+        );
+        ctx.cap_reached = false;
+        ctx.completed_count = 100;
+
+        let chunks = |_piece: u32| vec![(0, 16384)];
+        let result = sel.pick_blocks(&ctx, chunks);
+        // Should pick a new piece normally
+        assert!(result.is_some());
     }
 }

@@ -5267,6 +5267,7 @@ impl TorrentActor {
                     && self.auto_sequential_active,
                 peer_rates,
                 steal_threshold_ratio: self.config.steal_threshold_ratio,
+                cap_reached: self.in_flight_pieces.len() >= self.config.max_in_flight_pieces,
             };
 
             if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
@@ -6933,6 +6934,7 @@ mod tests {
             max_message_size: 16 * 1024 * 1024,
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
+            max_in_flight_pieces: 32,
         }
     }
 

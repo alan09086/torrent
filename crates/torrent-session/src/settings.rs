@@ -205,6 +205,9 @@ fn default_max_piece_length() -> u64 {
 fn default_max_outstanding_requests() -> usize {
     500
 }
+fn default_max_in_flight_pieces() -> usize {
+    32
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -641,6 +644,12 @@ pub struct Settings {
     /// are dropped. Default: 500.
     #[serde(default = "default_max_outstanding_requests")]
     pub max_outstanding_requests: usize,
+    /// Maximum number of pieces simultaneously in-flight (downloaded but not
+    /// yet verified). Caps the store buffer memory usage: 32 pieces × 512 KiB
+    /// = 16 MiB for typical torrents. When the cap is reached, the piece
+    /// selector only returns blocks from already-in-flight pieces. Default: 32.
+    #[serde(default = "default_max_in_flight_pieces")]
+    pub max_in_flight_pieces: usize,
     /// Timeout in seconds for outbound TCP peer connections.
     /// Default 5. Set to 0 to use the OS default (~2 minutes on Linux).
     #[serde(default = "default_peer_connect_timeout")]
@@ -796,6 +805,7 @@ impl Default for Settings {
             max_message_size: 16 * 1024 * 1024,
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
+            max_in_flight_pieces: 32,
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
             // Session Stats (M50)
@@ -1153,6 +1163,7 @@ impl PartialEq for Settings {
             && self.max_message_size == other.max_message_size
             && self.max_piece_length == other.max_piece_length
             && self.max_outstanding_requests == other.max_outstanding_requests
+            && self.max_in_flight_pieces == other.max_in_flight_pieces
             && self.peer_connect_timeout == other.peer_connect_timeout
             && self.peer_dscp == other.peer_dscp
             && self.stats_report_interval == other.stats_report_interval
