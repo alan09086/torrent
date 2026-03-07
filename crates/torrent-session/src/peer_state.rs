@@ -166,7 +166,7 @@ impl PeerState {
             upload_only: false,
             super_seed_assigned: None,
             cmd_tx,
-            pipeline: PeerPipelineState::new(
+            pipeline: PeerPipelineState::new_compat(
                 max_queue_depth,
                 request_queue_time,
                 initial_queue_depth,
