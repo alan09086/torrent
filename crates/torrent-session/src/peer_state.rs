@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -9,6 +10,54 @@ use torrent_wire::ExtHandshake;
 
 use crate::pipeline::PeerPipelineState;
 use crate::types::PeerCommand;
+
+/// O(1) lookup container for outstanding block requests to a peer.
+///
+/// Keyed on `(piece_index, block_offset)`, value is `block_length`.
+/// Replaces `Vec<(u32, u32, u32)>` which required O(n) linear scan.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRequests {
+    inner: FxHashMap<(u32, u32), u32>,
+}
+
+#[allow(dead_code)]
+impl PendingRequests {
+    pub fn new() -> Self {
+        Self {
+            inner: FxHashMap::default(),
+        }
+    }
+
+    pub fn insert(&mut self, index: u32, begin: u32, length: u32) {
+        self.inner.insert((index, begin), length);
+    }
+
+    pub fn remove(&mut self, index: u32, begin: u32) -> Option<u32> {
+        self.inner.remove(&(index, begin))
+    }
+
+    pub fn contains(&self, index: u32, begin: u32) -> bool {
+        self.inner.contains_key(&(index, begin))
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
+        self.inner
+            .iter()
+            .map(|(&(index, begin), &length)| (index, begin, length))
+    }
+}
 
 /// Origin of a peer address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,7 +101,7 @@ pub(crate) struct PeerState {
     /// Bytes uploaded to this peer in current rate window.
     pub upload_bytes_window: u64,
     /// Outstanding requests to this peer (index, begin, length).
-    pub pending_requests: Vec<(u32, u32, u32)>,
+    pub pending_requests: PendingRequests,
     /// Requests from this peer to us (index, begin, length).
     pub incoming_requests: Vec<(u32, u32, u32)>,
     /// Peer's extension handshake, if received.
@@ -109,7 +158,7 @@ impl PeerState {
             upload_rate: 0,
             download_bytes_window: 0,
             upload_bytes_window: 0,
-            pending_requests: Vec::new(),
+            pending_requests: PendingRequests::new(),
             incoming_requests: Vec::new(),
             ext_handshake: None,
             supports_fast: false,
@@ -178,6 +227,47 @@ mod tests {
             128,
         );
         assert!(peer.connected_at.elapsed().as_secs() < 1);
+    }
+
+    #[test]
+    fn pending_requests_insert_remove() {
+        let mut pr = PendingRequests::new();
+        assert!(pr.is_empty());
+        assert_eq!(pr.len(), 0);
+
+        // Insert
+        pr.insert(5, 0, 16384);
+        pr.insert(5, 16384, 16384);
+        pr.insert(10, 0, 16384);
+        assert_eq!(pr.len(), 3);
+        assert!(pr.contains(5, 0));
+        assert!(pr.contains(10, 0));
+        assert!(!pr.contains(99, 0));
+
+        // Remove existing
+        assert_eq!(pr.remove(5, 0), Some(16384));
+        assert_eq!(pr.len(), 2);
+        assert!(!pr.contains(5, 0));
+
+        // Remove non-existent
+        assert_eq!(pr.remove(99, 0), None);
+
+        // Duplicate insert overwrites
+        pr.insert(5, 16384, 8192);
+        assert_eq!(pr.len(), 2); // same key, count unchanged
+        assert_eq!(pr.remove(5, 16384), Some(8192)); // new value
+
+        // Clear
+        pr.insert(1, 0, 16384);
+        pr.clear();
+        assert!(pr.is_empty());
+
+        // Iter
+        pr.insert(3, 0, 16384);
+        pr.insert(3, 16384, 16384);
+        let mut items: Vec<_> = pr.iter().collect();
+        items.sort();
+        assert_eq!(items, vec![(3, 0, 16384), (3, 16384, 16384)]);
     }
 
     #[test]

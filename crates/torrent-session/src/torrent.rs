@@ -3343,13 +3343,8 @@ impl TorrentActor {
                 begin,
                 length: _,
             } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr)
-                    && let Some(pos) = peer
-                        .pending_requests
-                        .iter()
-                        .position(|&(i, b, _)| i == index && b == begin)
-                {
-                    peer.pending_requests.swap_remove(pos);
+                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                    peer.pending_requests.remove(index, begin);
                 }
                 debug!(index, %peer_addr, "request rejected by peer");
             }
@@ -3392,14 +3387,14 @@ impl TorrentActor {
                     let peer_pieces: HashSet<u32> = peer
                         .pending_requests
                         .iter()
-                        .map(|&(idx, _, _)| idx)
+                        .map(|(idx, _, _)| idx)
                         .collect();
                     let had_pending = !peer_pieces.is_empty();
                     for piece_idx in peer_pieces {
                         let other_has = self
                             .peers
                             .values()
-                            .any(|p| p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx));
+                            .any(|p| p.pending_requests.iter().any(|(i, _, _)| i == piece_idx));
                         if !other_has {
                             self.in_flight_pieces.remove(&piece_idx);
                         }
@@ -3511,13 +3506,8 @@ impl TorrentActor {
             // Remove from pending_requests to free pipeline slots. Without this,
             // the peer accumulates phantom entries from already-verified pieces
             // and eventually has zero available pipeline slots — permanent stall.
-            if let Some(peer) = self.peers.get_mut(&peer_addr)
-                && let Some(pos) = peer
-                    .pending_requests
-                    .iter()
-                    .position(|&(i, b, _)| i == index && b == begin)
-            {
-                peer.pending_requests.swap_remove(pos);
+            if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                peer.pending_requests.remove(index, begin);
             }
             if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
                 ifp.assigned_blocks.remove(&(index, begin));
@@ -3575,13 +3565,7 @@ impl TorrentActor {
 
         let now = std::time::Instant::now();
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
-            if let Some(pos) = peer
-                .pending_requests
-                .iter()
-                .position(|&(i, b, _)| i == index && b == begin)
-            {
-                peer.pending_requests.swap_remove(pos);
-            }
+            peer.pending_requests.remove(index, begin);
             peer.download_bytes_window += data_len as u64;
             peer.pipeline
                 .block_received(index, begin, data_len as u32, now);
@@ -3611,13 +3595,7 @@ impl TorrentActor {
                         begin: cb,
                         length: cl,
                     });
-                    if let Some(pos) = cancel_peer
-                        .pending_requests
-                        .iter()
-                        .position(|&(i, b, _)| i == ci && b == cb)
-                    {
-                        cancel_peer.pending_requests.swap_remove(pos);
-                    }
+                    cancel_peer.pending_requests.remove(ci, cb);
                     freed_peers.push(cancel_addr);
                 }
             }
@@ -5317,7 +5295,7 @@ impl TorrentActor {
                             .insert((result.piece, *begin), peer_addr);
                         peer.pipeline
                             .request_sent(result.piece, *begin, std::time::Instant::now());
-                        peer.pending_requests.push((result.piece, *begin, *length));
+                        peer.pending_requests.insert(result.piece, *begin, *length);
                         sent += 1;
                     }
                 }
@@ -5345,7 +5323,7 @@ impl TorrentActor {
             let pending: Vec<_> = self
                 .peers
                 .iter()
-                .map(|(addr, p)| (*addr, p.pending_requests.clone()))
+                .map(|(addr, p)| (*addr, p.pending_requests.iter().collect::<Vec<_>>()))
                 .collect();
             self.end_game
                 .activate_with_inflight(&self.in_flight_pieces, &pending);
@@ -5407,7 +5385,7 @@ impl TorrentActor {
                     .is_ok()
             {
                 self.end_game.register_request(index, begin, peer_addr);
-                peer.pending_requests.push((index, begin, length));
+                peer.pending_requests.insert(index, begin, length);
             } else {
                 break;
             }
@@ -5596,13 +5574,13 @@ impl TorrentActor {
                 let peer_pieces: HashSet<u32> = peer
                     .pending_requests
                     .iter()
-                    .map(|&(idx, _, _)| idx)
+                    .map(|(idx, _, _)| idx)
                     .collect();
                 for piece_idx in peer_pieces {
                     let other_has = self
                         .peers
                         .values()
-                        .any(|p| p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx));
+                        .any(|p| p.pending_requests.iter().any(|(i, _, _)| i == piece_idx));
                     if !other_has {
                         self.in_flight_pieces.remove(&piece_idx);
                     }
@@ -5723,13 +5701,13 @@ impl TorrentActor {
                     let peer_pieces: HashSet<u32> = peer
                         .pending_requests
                         .iter()
-                        .map(|&(idx, _, _)| idx)
+                        .map(|(idx, _, _)| idx)
                         .collect();
                     for piece_idx in peer_pieces {
                         let other_has = self
                             .peers
                             .values()
-                            .any(|p| p.pending_requests.iter().any(|&(i, _, _)| i == piece_idx));
+                            .any(|p| p.pending_requests.iter().any(|(i, _, _)| i == piece_idx));
                         if !other_has {
                             self.in_flight_pieces.remove(&piece_idx);
                         }
