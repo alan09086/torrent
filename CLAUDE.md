@@ -30,7 +30,7 @@ cargo clippy --workspace -- -D warnings
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md`
 - M1-M53 complete. All 51 parity milestones done + M52 API documentation + TorrentStats full parity + M53 full torrent operations API parity.
-- Current: v0.64.0, 1378 tests. Post-parity: M55 (speed), M56 (DHT persistence/stealing), throughput fixes, config wiring fix, TCP listener, UPnP gateway probe.
+- Current: v0.68.0, 1402 tests. Post-parity: M55 (speed), M56 (DHT persistence/stealing), M62 (semaphore pipeline).
 - Implementation plans exist for all remaining milestones (M40-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
