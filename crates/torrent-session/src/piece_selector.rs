@@ -74,10 +74,7 @@ impl InFlightPiece {
         if self.assigned_blocks.len() <= 1 {
             return self.assigned_blocks.len();
         }
-        let mut peers: Vec<SocketAddr> = self.assigned_blocks.values().copied().collect();
-        peers.sort_unstable();
-        peers.dedup();
-        peers.len()
+        self.assigned_blocks.values().collect::<HashSet<_>>().len()
     }
 }
 
