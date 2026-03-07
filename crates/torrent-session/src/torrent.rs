@@ -1469,6 +1469,11 @@ struct TorrentActor {
     factory: Arc<crate::transport::NetworkFactory>,
 }
 
+/// Maximum number of in-flight end-game requests per peer.
+/// libtorrent continues full pipelining in end-game; we use a moderate
+/// depth so that round-trip latency doesn't bottleneck throughput.
+const END_GAME_DEPTH: usize = 4;
+
 impl TorrentActor {
     /// Returns the effective maximum connection count for this torrent.
     ///
@@ -1590,6 +1595,8 @@ impl TorrentActor {
             None
         };
         let mut pipeline_tick_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
+        end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
 
         // Don't fire immediately for the first tick
@@ -1604,6 +1611,7 @@ impl TorrentActor {
             interval.tick().await;
         }
         pipeline_tick_interval.tick().await;
+        end_game_tick_interval.tick().await;
         diag_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
@@ -2176,6 +2184,18 @@ impl TorrentActor {
                         for addr in idle_peers {
                             self.request_pieces_from_peer(addr).await;
                         }
+                    }
+                }
+                // End-game refill tick (200ms) — replace reactive per-block cascade
+                // with periodic batch refill. All peers with available pipeline slots
+                // get new end-game blocks, preventing idle stalls between ticks.
+                _ = end_game_tick_interval.tick(), if self.end_game.is_active() => {
+                    let addrs: Vec<SocketAddr> = self.peers.iter()
+                        .filter(|(_, p)| !p.peer_choking && p.pending_requests.len() < END_GAME_DEPTH)
+                        .map(|(addr, _)| *addr)
+                        .collect();
+                    for addr in addrs {
+                        self.request_end_game_block(addr).await;
                     }
                 }
                 // Periodic download status report (5s)
@@ -3582,12 +3602,10 @@ impl TorrentActor {
             ifp.assigned_blocks.remove(&(index, begin));
         }
 
-        // End-game: cancel this block on all other peers, then immediately
-        // re-request from cancelled peers. Without reactive re-requesting,
-        // cancelled peers go idle until the next pipeline tick (up to 1s).
+        // End-game: cancel this block on all other peers. The 200ms end-game
+        // refill tick will re-stock freed peers — no reactive cascade needed.
         if self.end_game.is_active() {
             let cancels = self.end_game.block_received(index, begin, peer_addr);
-            let mut freed_peers = Vec::new();
             for (cancel_addr, ci, cb, cl) in cancels {
                 if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
                     let _ = cancel_peer.cmd_tx.try_send(PeerCommand::Cancel {
@@ -3596,12 +3614,7 @@ impl TorrentActor {
                         length: cl,
                     });
                     cancel_peer.pending_requests.remove(ci, cb);
-                    freed_peers.push(cancel_addr);
                 }
-            }
-            // Reactive scheduling: feed cancelled peers new blocks immediately
-            for addr in freed_peers {
-                self.request_end_game_block(addr).await;
             }
         }
 
@@ -5335,12 +5348,6 @@ impl TorrentActor {
     }
 
     async fn request_end_game_block(&mut self, peer_addr: SocketAddr) {
-        // End-game pipeline depth: allow moderate pipelining (4 requests)
-        // instead of 1. With 1 request per peer, throughput drops ~128x
-        // because each peer's round-trip latency becomes the bottleneck.
-        // libtorrent continues full pipelining in end-game.
-        const END_GAME_DEPTH: usize = 4;
-
         let can_request = self
             .peers
             .get(&peer_addr)
