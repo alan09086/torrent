@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## 0.67.0 — M61 Performance Optimizations
+
+### Performance
+- **O(1) pending request lookup** — replaced `PeerState.pending_requests: Vec<(u32, u32, u32)>` with `PendingRequests` newtype wrapping `FxHashMap<(u32, u32), u32>`. Eliminates O(128) linear scan on every block received (~6000/sec). 4 call sites converted from `.iter().position()` + `.swap_remove()` to `.remove(index, begin)`.
+- **End-game cascade eliminated** — removed reactive re-requesting loop that triggered 50 picker invocations per block in end-game mode. Replaced with a 200ms periodic batch refill tick (`end_game_tick_interval`) with `MissedTickBehavior::Skip` to prevent burst-fire on activation. All peers with available pipeline slots refilled in a single pass.
+- **END_GAME_DEPTH raised 4 → 128** — matches normal-mode pipeline depth. With depth 4, each peer only had 64KB queued (6.4ms of work at 10 MB/s), idling 97% of the time between refill ticks. With depth 128, each peer has 2MB queued (200ms of work), fully utilising the 200ms tick interval. Eliminates `final_speed=0.0 MB/s` tail stall observed in all v0.66.0 benchmark trials.
+- **In-flight piece cap** — new `max_in_flight_pieces` setting (default 32) bounds store buffer memory at the piece selector level. When the cap is reached, Layers 3 (suggested) and 5 (new piece) are skipped — only partial/steal paths remain active. Memory bound: 32 × 512KB = 16 MiB for typical torrents (was unbounded).
+
+### Added
+- `benchmarks/build_report.py` — generates versioned markdown benchmark reports from CSV data
+- `benchmarks/generate_report.sh` — orchestrates benchmark summarization and report generation
+- `--json` output mode for `benchmarks/summarize.py`
+- `docs/benchmark-report-v0.66.0.md` — baseline benchmark report
+- `PendingRequests` newtype with full API: `new()`, `insert()`, `remove()`, `contains()`, `len()`, `is_empty()`, `clear()`, `iter()`
+- `max_in_flight_pieces` setting in `Settings` and `TorrentConfig` (default: 32)
+- `cap_reached` field in `PickContext` for piece selector backpressure
+- Test count: 1390
+
 ## 0.66.0 — Performance Consistency & Tuning
 
 ### Fixed

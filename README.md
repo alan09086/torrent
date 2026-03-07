@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1386-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1390-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.66.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.67.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1386 tests, zero clippy warnings**
+- 📊 **1390 tests, zero clippy warnings**
 
 ---
 
@@ -236,6 +236,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling |
 | 0.65.0 | M60 | Rename ferrite → torrent, non-blocking disk I/O, async piece verification, resource exhaustion limits, cargo-fuzz scaffolding, workspace clippy lints |
 | 0.64.0 | — | TCP listener for incoming peers, UPnP gateway probe fallback + IGD v2, log spam cleanup |
 | 0.63.1 | — | Settings ↔ TorrentConfig wiring fix (13 fields), throughput fixes (try_send, phantom blocks, snub detection) |
