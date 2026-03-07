@@ -1482,13 +1482,6 @@ struct TorrentActor {
     driver_msg_rx: mpsc::Receiver<(SocketAddr, DriverMessage)>,
 }
 
-/// Maximum number of in-flight end-game requests per peer.
-/// libtorrent continues full pipelining in end-game; we use a moderate
-/// depth so that round-trip latency doesn't bottleneck throughput.
-/// End-game pipeline depth: match normal mode (128 slots per peer).
-/// Safe because the reactive per-block cascade was replaced with a 200ms
-/// batch refill tick — raising depth no longer amplifies picker invocations.
-const END_GAME_DEPTH: usize = 128;
 
 impl TorrentActor {
     /// Returns the effective maximum connection count for this torrent.
@@ -1611,8 +1604,6 @@ impl TorrentActor {
             None
         };
         let mut pipeline_tick_interval = tokio::time::interval(Duration::from_secs(1));
-        let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
-        end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
 
         // Don't fire immediately for the first tick
@@ -1627,7 +1618,6 @@ impl TorrentActor {
             interval.tick().await;
         }
         pipeline_tick_interval.tick().await;
-        end_game_tick_interval.tick().await;
         diag_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
@@ -2212,18 +2202,6 @@ impl TorrentActor {
                         for addr in idle_peers {
                             self.request_pieces_from_peer(addr).await;
                         }
-                    }
-                }
-                // End-game refill tick (200ms) — replace reactive per-block cascade
-                // with periodic batch refill. All peers with available pipeline slots
-                // get new end-game blocks, preventing idle stalls between ticks.
-                _ = end_game_tick_interval.tick(), if self.end_game.is_active() => {
-                    let addrs: Vec<SocketAddr> = self.peers.iter()
-                        .filter(|(_, p)| !p.peer_choking && p.pending_requests.len() < END_GAME_DEPTH)
-                        .map(|(addr, _)| *addr)
-                        .collect();
-                    for addr in addrs {
-                        self.request_end_game_block(addr).await;
                     }
                 }
                 // Periodic download status report (5s)
@@ -3650,8 +3628,8 @@ impl TorrentActor {
             ifp.assigned_blocks.remove(&(index, begin));
         }
 
-        // End-game: cancel this block on all other peers. The 200ms end-game
-        // refill tick will re-stock freed peers — no reactive cascade needed.
+        // End-game: cancel this block on all other peers. Releasing permits
+        // on cancelled peers wakes their drivers to pick new end-game blocks.
         if self.end_game.is_active() {
             let cancels = self.end_game.block_received(index, begin, peer_addr);
             for (cancel_addr, ci, cb, cl) in cancels {
@@ -5227,15 +5205,62 @@ impl TorrentActor {
             return;
         }
 
-        // In end-game mode, delegate to the end-game requester and release permit
-        // (end-game has its own depth management).
+        // Check peer is valid for requesting (applies to both normal and end-game)
+        let peer_bitfield = match self.peers.get(&peer_addr) {
+            Some(p) if !p.peer_choking => p.bitfield.clone(),
+            _ => {
+                // Peer gone or choked — return the permit
+                if let Some(p) = self.peers.get(&peer_addr) {
+                    p.pipeline.release_permit();
+                }
+                return;
+            }
+        };
+
+        // End-game mode: use end-game picker instead of normal piece selector
         if self.end_game.is_active() {
-            if let Some(p) = self.peers.get(&peer_addr) {
-                p.pipeline.release_permit();
+            let block = if !self.streaming_pieces.is_empty() {
+                self.end_game
+                    .pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
+            } else if self.config.strict_end_game {
+                self.end_game
+                    .pick_block_strict(peer_addr, &peer_bitfield, &[])
+            } else {
+                self.end_game.pick_block(peer_addr, &peer_bitfield)
+            };
+
+            if let Some((index, begin, length)) = block {
+                if let Some(peer) = self.peers.get_mut(&peer_addr)
+                    && peer
+                        .cmd_tx
+                        .try_send(PeerCommand::Request {
+                            index,
+                            begin,
+                            length,
+                        })
+                        .is_ok()
+                {
+                    self.end_game.register_request(index, begin, peer_addr);
+                    peer.pipeline
+                        .request_sent(index, begin, std::time::Instant::now());
+                    peer.pending_requests.insert(index, begin, length);
+                    // Permit consumed — returns when the block arrives
+                } else {
+                    // Channel full or peer gone — release permit
+                    if let Some(p) = self.peers.get(&peer_addr) {
+                        p.pipeline.release_permit();
+                    }
+                }
+            } else {
+                // No end-game block available — release permit
+                if let Some(p) = self.peers.get(&peer_addr) {
+                    p.pipeline.release_permit();
+                }
             }
             return;
         }
 
+        // Normal mode: need chunk tracker, meta, and non-snubbed peer
         let ct = match &self.chunk_tracker {
             Some(ct) => ct,
             None => {
@@ -5253,14 +5278,13 @@ impl TorrentActor {
             return;
         }
 
-        // Check peer is valid for requesting
         let (peer_speed, peer_rate, is_snubbed) = match self.peers.get(&peer_addr) {
-            Some(p) if !p.peer_choking && !p.snubbed => {
+            Some(p) if !p.snubbed => {
                 let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
                 (speed, p.pipeline.ewma_rate(), p.snubbed)
             }
             _ => {
-                // Peer gone, choked, or snubbed — return the permit
+                // Peer gone or snubbed — return the permit
                 if let Some(p) = self.peers.get(&peer_addr) {
                     p.pipeline.release_permit();
                 }
@@ -5284,15 +5308,6 @@ impl TorrentActor {
             .get(&peer_addr)
             .map(|p| p.suggested_pieces.clone())
             .unwrap_or_default();
-
-        let peer_bitfield = match self.peers.get(&peer_addr) {
-            Some(p) => p.bitfield.clone(),
-            // Peer vanished between the checks above — no release_permit needed because
-            // the peer's semaphore dies with the peer, and cancel_request_driver already
-            // triggered the driver's cancel token, so the permit is effectively orphaned
-            // on a dead semaphore.
-            None => return,
-        };
 
         let peer_rates = &self.cached_peer_rates;
         let missing_buf = std::cell::RefCell::new(Vec::with_capacity(128));
@@ -5433,9 +5448,9 @@ impl TorrentActor {
             return;
         }
 
-        // In end-game: request single block, no pipelining
+        // In end-game mode, dispatch is handled by the semaphore-driven
+        // dispatch_single_block — skip the legacy batch path.
         if self.end_game.is_active() {
-            self.request_end_game_block(peer_addr).await;
             return;
         }
 
@@ -5646,60 +5661,13 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
-        }
-    }
-
-    async fn request_end_game_block(&mut self, peer_addr: SocketAddr) {
-        let can_request = self
-            .peers
-            .get(&peer_addr)
-            .is_some_and(|p| !p.peer_choking && p.pending_requests.len() < END_GAME_DEPTH);
-        if !can_request {
-            return;
-        }
-
-        let peer_bitfield = match self.peers.get(&peer_addr) {
-            Some(p) => p.bitfield.clone(),
-            None => return,
-        };
-
-        // Fill up to END_GAME_DEPTH slots
-        let slots = END_GAME_DEPTH
-            - self
-                .peers
-                .get(&peer_addr)
-                .map(|p| p.pending_requests.len())
-                .unwrap_or(END_GAME_DEPTH);
-
-        for _ in 0..slots {
-            let block = if !self.streaming_pieces.is_empty() {
-                self.end_game
-                    .pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
-            } else if self.config.strict_end_game {
-                self.end_game
-                    .pick_block_strict(peer_addr, &peer_bitfield, &[])
-            } else {
-                self.end_game.pick_block(peer_addr, &peer_bitfield)
-            };
-
-            if let Some((index, begin, length)) = block
-                && let Some(peer) = self.peers.get_mut(&peer_addr)
-                && peer
-                    .cmd_tx
-                    .try_send(PeerCommand::Request {
-                        index,
-                        begin,
-                        length,
-                    })
-                    .is_ok()
-            {
-                self.end_game.register_request(index, begin, peer_addr);
-                peer.pending_requests.insert(index, begin, length);
-            } else {
-                break;
+            // Wake all peers' drivers so they can start picking redundant blocks
+            for peer in self.peers.values() {
+                peer.pipeline.wake_driver();
             }
         }
     }
+
 
     fn update_streaming_cursors(&mut self) {
         // Remove cursors whose receiver has been dropped (FileStream dropped)
