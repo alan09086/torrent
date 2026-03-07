@@ -1472,7 +1472,10 @@ struct TorrentActor {
 /// Maximum number of in-flight end-game requests per peer.
 /// libtorrent continues full pipelining in end-game; we use a moderate
 /// depth so that round-trip latency doesn't bottleneck throughput.
-const END_GAME_DEPTH: usize = 4;
+/// End-game pipeline depth: match normal mode (128 slots per peer).
+/// Safe because the reactive per-block cascade was replaced with a 200ms
+/// batch refill tick — raising depth no longer amplifies picker invocations.
+const END_GAME_DEPTH: usize = 128;
 
 impl TorrentActor {
     /// Returns the effective maximum connection count for this torrent.
