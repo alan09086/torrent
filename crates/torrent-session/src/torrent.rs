@@ -3174,6 +3174,7 @@ impl TorrentActor {
         } else if let Some(ref ct) = self.chunk_tracker
             && ct.bitfield().count_ones() == self.num_pieces
         {
+            self.cancel_all_request_drivers();
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
         } else {
@@ -3775,6 +3776,7 @@ impl TorrentActor {
         if self.config.share_mode {
             self.transition_state(TorrentState::Sharing);
         } else if verified_count == self.num_pieces {
+            self.cancel_all_request_drivers();
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
             info!("all pieces verified, starting as seeder");
@@ -4331,6 +4333,7 @@ impl TorrentActor {
                 },
             );
             self.end_game.deactivate();
+            self.cancel_all_request_drivers();
             self.transition_state(TorrentState::Seeding);
             self.choker.set_seed_mode(true);
             // BEP 21: broadcast upload-only status
