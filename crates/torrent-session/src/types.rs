@@ -121,7 +121,7 @@ pub struct TorrentConfig {
     pub peer_connect_timeout: u64,
     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
     pub peer_dscp: u8,
-    /// Initial per-peer request queue depth for the pipeline slow-start.
+    /// Number of semaphore permits for the per-peer request pipeline.
     pub initial_queue_depth: usize,
     /// Maximum per-peer request queue depth. Reserved for future adaptive
     /// permit sizing; currently unused by the semaphore pipeline.

@@ -119,7 +119,7 @@ pub(crate) struct PeerState {
     pub super_seed_assigned: Option<u32>,
     /// Channel to send commands to this peer's task.
     pub cmd_tx: mpsc::Sender<PeerCommand>,
-    /// Per-peer dynamic request queue sizing (M28).
+    /// Per-peer semaphore-based request pipeline.
     pub pipeline: PeerPipelineState,
     /// Whether this peer is snubbed (no data for snub_timeout_secs).
     pub snubbed: bool,

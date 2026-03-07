@@ -304,6 +304,9 @@ impl ClientBuilder {
     }
 
     /// Set the maximum per-peer request queue depth. Default: 250.
+    ///
+    /// Currently unused by the semaphore pipeline; reserved for future
+    /// adaptive permit sizing.
     pub fn max_request_queue_depth(mut self, n: usize) -> Self {
         self.settings.max_request_queue_depth = n;
         self

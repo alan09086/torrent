@@ -36,7 +36,6 @@ pub(crate) struct PeerPipelineState {
     max_permits: usize,
 }
 
-#[allow(dead_code)]
 impl PeerPipelineState {
     /// Create a new pipeline state with the given number of request permits.
     ///
@@ -72,6 +71,7 @@ impl PeerPipelineState {
     }
 
     /// Number of permits currently available (not acquired).
+    #[allow(dead_code)]
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
     }
@@ -101,6 +101,7 @@ impl PeerPipelineState {
     ///
     /// Closes the old semaphore and creates a new one with
     /// `max_permits - currently_in_flight` available permits.
+    #[allow(dead_code)]
     pub fn reset_permits(&mut self, currently_in_flight: usize) {
         self.semaphore.close();
         let available = self.max_permits.saturating_sub(currently_in_flight);
@@ -153,6 +154,7 @@ impl PeerPipelineState {
     }
 
     /// Returns the most recently sent request still pending, if any.
+    #[allow(dead_code)]
     pub fn most_recent_request(&self) -> Option<(u32, u32, Instant)> {
         self.request_times
             .iter()
@@ -161,6 +163,7 @@ impl PeerPipelineState {
     }
 
     /// Returns all (piece, begin) pairs whose requests have exceeded the timeout.
+    #[allow(dead_code)]
     pub fn timed_out_blocks(&self, timeout: Duration, now: Instant) -> Vec<(u32, u32)> {
         self.request_times
             .iter()
@@ -170,11 +173,13 @@ impl PeerPipelineState {
     }
 
     /// Remove a request from tracking (e.g. after cancel or timeout).
+    #[allow(dead_code)]
     pub fn remove_request(&mut self, piece: u32, begin: u32) {
         self.request_times.remove(&(piece, begin));
     }
 
     /// Number of requests currently in flight.
+    #[allow(dead_code)]
     pub fn pending_count(&self) -> usize {
         self.request_times.len()
     }

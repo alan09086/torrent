@@ -5195,6 +5195,26 @@ impl TorrentActor {
             }
         };
 
+        // Parole piece assignment: check if any parole piece can be assigned
+        // to this peer (peer must not be an original contributor, must have the piece,
+        // and must not already have a parole peer assigned).
+        let peer_ip = peer_addr.ip();
+        for (&parole_idx, parole) in self.parole_pieces.iter_mut() {
+            if parole.parole_peer.is_some() {
+                continue; // already assigned
+            }
+            if parole.original_contributors.contains(&peer_ip) {
+                continue; // this peer is a suspect
+            }
+            if !peer_bitfield.get(parole_idx) {
+                continue; // peer doesn't have this piece
+            }
+            // Assign this peer as parole peer
+            parole.parole_peer = Some(peer_ip);
+            debug!(parole_idx, %peer_addr, "assigned parole peer for piece");
+            break;
+        }
+
         // End-game mode: use end-game picker instead of normal piece selector
         if self.end_game.is_active() {
             let block = if !self.streaming_pieces.is_empty() {
