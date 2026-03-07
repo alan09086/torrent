@@ -5126,6 +5126,11 @@ impl TorrentActor {
     /// Spawn a per-peer request driver that acquires semaphore permits and
     /// sends [`DriverMessage::NeedBlocks`] to the torrent actor.
     fn spawn_request_driver(&mut self, peer_addr: SocketAddr) {
+        // Only spawn drivers when we actually need pieces
+        if self.state != TorrentState::Downloading {
+            return;
+        }
+
         let peer = match self.peers.get_mut(&peer_addr) {
             Some(p) => p,
             None => return,
@@ -5180,9 +5185,13 @@ impl TorrentActor {
     /// the permit to avoid pipeline stalls.
     async fn dispatch_single_block(&mut self, peer_addr: SocketAddr) {
         if self.state != TorrentState::Downloading {
+            // Not downloading — release the consumed permit and cancel the
+            // driver to prevent busy-loop. This handles drivers spawned just
+            // before a state transition or by late unchoke/bitfield messages.
             if let Some(p) = self.peers.get(&peer_addr) {
                 p.pipeline.release_permit();
             }
+            self.cancel_request_driver(peer_addr);
             return;
         }
 
