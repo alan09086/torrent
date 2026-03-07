@@ -2176,8 +2176,11 @@ impl TorrentActor {
                                 .unwrap_or(false);
                             if idle {
                                 peer.snubbed = true;
+                                // The driver checks snubbed_flag atomically and parks
+                                // on notify.notified() — no need to manipulate the
+                                // semaphore here. (set_queue_depth_override would kill
+                                // the driver's semaphore Arc, breaking snub recovery.)
                                 peer.snubbed_flag.store(true, Ordering::Release);
-                                peer.pipeline.set_queue_depth_override(1);
                                 snubbed_peers.push(*addr);
                                 debug!(%addr, "peer snubbed — no data for {}s", self.config.snub_timeout_secs);
                             }
@@ -3133,6 +3136,11 @@ impl TorrentActor {
     }
 
     async fn shutdown_peers(&mut self) {
+        // Cancel all request drivers before sending shutdown commands, matching
+        // the pattern in handle_pause() and handle_force_recheck(). Without this,
+        // orphaned drivers could send stale NeedBlocks after peers are gone.
+        self.cancel_all_request_drivers();
+
         // Best-effort announce Stopped to trackers (with timeout to prevent hang)
         let left = self.calculate_left();
         let _ = tokio::time::timeout(
@@ -5279,6 +5287,10 @@ impl TorrentActor {
 
         let peer_bitfield = match self.peers.get(&peer_addr) {
             Some(p) => p.bitfield.clone(),
+            // Peer vanished between the checks above — no release_permit needed because
+            // the peer's semaphore dies with the peer, and cancel_request_driver already
+            // triggered the driver's cancel token, so the permit is effectively orphaned
+            // on a dead semaphore.
             None => return,
         };
 

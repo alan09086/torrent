@@ -81,21 +81,7 @@ impl PeerPipelineState {
         false
     }
 
-    /// Compatibility shim: sets queue depth by adjusting semaphore permits.
-    ///
-    /// Closes the semaphore (drains all permits) and reopens with `depth` permits.
-    /// TODO(M62): Remove or rework after Task 3.
-    pub fn set_queue_depth_override(&mut self, depth: usize) {
-        // Close the old semaphore and create a new one with the desired depth.
-        self.semaphore.close();
-        let permits = depth.max(1);
-        self.semaphore = Arc::new(Semaphore::new(permits));
-        // Don't update max_permits — this is a temporary override (e.g., snub).
-    }
-
-    /// Compatibility shim: resets permits to max (replaces old `reset_to_slow_start`).
-    ///
-    /// TODO(M62): Remove after Task 3 updates callers to use `reset_permits()`.
+    /// Reset permits to max and clear EWMA rate (used for snub recovery, unchoke, etc.).
     pub fn reset_to_slow_start(&mut self) {
         self.reset_permits(0);
         self.ewma_rate_bytes_sec = 0.0;
@@ -270,17 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn snub_override_and_reset() {
+    fn reset_to_slow_start_restores_permits() {
         let mut state = PeerPipelineState::new(128);
 
-        // Snub: force depth to 1
-        state.set_queue_depth_override(1);
-        // queue_depth compat shim still returns max_permits
-        assert_eq!(state.available_permits(), 1);
+        // Acquire some permits to reduce availability
+        let _p1 = state.semaphore().try_acquire_owned().unwrap();
+        let _p2 = state.semaphore().try_acquire_owned().unwrap();
+        assert_eq!(state.available_permits(), 126);
 
-        // Un-snub: reset to max
+        // reset_to_slow_start restores to max
         state.reset_to_slow_start();
         assert_eq!(state.available_permits(), 128);
+        assert_eq!(state.ewma_rate(), 0.0);
     }
 
     #[test]
