@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ## 0.66.0 — Performance Consistency & Tuning
 
 ### Fixed
+- **Store buffer race causing hash verification failures** — `store_buffer.remove()` was called inside a spawned blocking task, creating a race window where `on_piece_hash_failed()` could trigger re-download and write new blocks before the verify task consumed the old ones, producing "frankenstein pieces" that mixed data from different download attempts (thousands of hash failures per download). Fix: extract blocks synchronously before spawning. Also added `sha1_chunks()`/`sha256_chunks()` for incremental hashing, eliminating ~512KB concatenation allocation per piece verification. Before: 235-300s (4-5 MB/s); After: 35-49s (35-54 MB/s)
 - **Store buffer lock scope** — made Mutex lock scope explicit in verify path with block scope, preventing potential contention between enqueue_write and spawn_blocking verify tasks
 - **Pipeline fill loop peer validation** — peer existence check and bitfield refresh each iteration of the pick_blocks loop, preventing stale context from causing wasted block picks
 - **Disconnect handler re-request guard** — defensive peer existence check before re-requesting blocks from remaining peers after a disconnect
@@ -16,6 +17,9 @@ All notable changes to this project will be documented in this file.
 - **DHT BEP42 node sorting** — routing table now sorts by XOR distance for correct closest-node selection; all-K parallel `get_peers` queries for faster peer discovery
 - **DHT timeout** — reduced from 10s to 5s for faster peer discovery
 - **Shutdown hang** — `shutdown_peers()` converted peer shutdown from blocking `.send().await` to `try_send()`; `announce_stopped()` wrapped in 3s timeout; `TorrentHandle::shutdown()` and `SessionHandle::shutdown()` wrapped in 5s/10s timeouts
+
+### Performance
+- **Actor CPU overhead reduced** — six targeted optimizations to `request_pieces_from_peer()` and the event loop: skip picker call for duplicate blocks, cache peer_rates on actor (refresh on 1s tick), clone peer bitfield once before picker loop, use `Lengths::chunks_in_piece()` arithmetic instead of iterating chunk tracker, batch-drain up to 64 peer events per `select!` iteration, share single `Instant::now()` call. CPU usage reduced from 3.3x to 1.83x vs rqbit. Before: ~26s user CPU, ~47 MB/s peak; After: ~12.6s user CPU, ~78.5 MB/s peak; rqbit: ~6.9s user CPU, ~105 MB/s peak
 
 ### Changed
 - **Parallel tracker announces** — all tracker announces now fire concurrently via `tokio::task::JoinSet` instead of sequentially. Time-to-first-piece reduced from `sum(tracker_timeouts)` to `max(tracker_timeouts)`
