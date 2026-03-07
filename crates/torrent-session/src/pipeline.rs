@@ -54,40 +54,7 @@ impl PeerPipelineState {
         }
     }
 
-    // ---- Backward compatibility shims (to be removed in Task 3) ----
-
-    /// Compatibility constructor: accepts 3 args but only uses `initial_queue_depth`.
-    ///
-    /// TODO(M62): Remove after Task 3 updates all callers.
-    pub fn new_compat(
-        _max_queue_depth: usize,
-        _request_queue_time: f64,
-        initial_queue_depth: usize,
-    ) -> Self {
-        Self::new(initial_queue_depth)
-    }
-
-    /// Compatibility shim: returns `max_permits` (replaces old fixed queue depth).
-    ///
-    /// TODO(M62): Remove after Task 3 updates all callers to use `max_permits()`.
-    pub fn queue_depth(&self) -> usize {
-        self.max_permits
-    }
-
-    /// Compatibility shim: always returns false (no slow-start).
-    ///
-    /// TODO(M62): Remove after Task 3 updates all callers.
-    pub fn in_slow_start(&self) -> bool {
-        false
-    }
-
-    /// Reset permits to max and clear EWMA rate (used for snub recovery, unchoke, etc.).
-    pub fn reset_to_slow_start(&mut self) {
-        self.reset_permits(0);
-        self.ewma_rate_bytes_sec = 0.0;
-    }
-
-    // ---- New semaphore-based API ----
+    // ---- Semaphore-based API ----
 
     /// Get a clone of the semaphore `Arc` (for use by the request driver).
     pub fn semaphore(&self) -> Arc<Semaphore> {
@@ -222,7 +189,6 @@ mod tests {
         let state = PeerPipelineState::new(128);
         assert_eq!(state.max_permits(), 128);
         assert_eq!(state.available_permits(), 128);
-        assert!(!state.in_slow_start());
     }
 
     #[test]
@@ -256,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_to_slow_start_restores_permits() {
+    fn reset_permits_restores_availability() {
         let mut state = PeerPipelineState::new(128);
 
         // Acquire some permits to reduce availability
@@ -264,10 +230,9 @@ mod tests {
         let _p2 = state.semaphore().try_acquire_owned().unwrap();
         assert_eq!(state.available_permits(), 126);
 
-        // reset_to_slow_start restores to max
-        state.reset_to_slow_start();
+        // reset_permits(0) restores to max
+        state.reset_permits(0);
         assert_eq!(state.available_permits(), 128);
-        assert_eq!(state.ewma_rate(), 0.0);
     }
 
     #[test]
@@ -308,14 +273,7 @@ mod tests {
         assert!(timed_out2.contains(&(1, 0)));
     }
 
-    #[test]
-    fn compat_constructor_works() {
-        let state = PeerPipelineState::new_compat(250, 3.0, 128);
-        assert_eq!(state.max_permits(), 128);
-        assert_eq!(state.queue_depth(), 128);
-    }
-
-    // ---- New semaphore-specific tests ----
+    // ---- Semaphore-specific tests ----
 
     #[tokio::test]
     async fn test_semaphore_acquire_and_release() {

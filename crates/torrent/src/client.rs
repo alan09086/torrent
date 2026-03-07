@@ -309,7 +309,9 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the request queue time multiplier (seconds). Default: 3.0.
+    /// **Deprecated.** Previously controlled BDP-based queue depth calculation.
+    /// Ignored since the semaphore pipeline uses fixed permits. Retained for
+    /// API compatibility.
     pub fn request_queue_time(mut self, secs: f64) -> Self {
         self.settings.request_queue_time = secs;
         self

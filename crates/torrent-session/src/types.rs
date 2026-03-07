@@ -123,9 +123,11 @@ pub struct TorrentConfig {
     pub peer_dscp: u8,
     /// Initial per-peer request queue depth for the pipeline slow-start.
     pub initial_queue_depth: usize,
-    /// Maximum per-peer request queue depth.
+    /// Maximum per-peer request queue depth. Reserved for future adaptive
+    /// permit sizing; currently unused by the semaphore pipeline.
     pub max_request_queue_depth: usize,
-    /// Request queue time multiplier in seconds for steady-state depth.
+    /// **Deprecated.** Ignored since the semaphore pipeline uses fixed permits.
+    /// Retained for config compatibility.
     pub request_queue_time: f64,
     /// Maximum BEP 9 metadata size in bytes accepted from peers.
     pub max_metadata_size: u64,
