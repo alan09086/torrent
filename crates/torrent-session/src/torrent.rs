@@ -3663,9 +3663,11 @@ impl TorrentActor {
                             .meta
                             .as_ref()
                             .and_then(|m| m.info.piece_hash(index as usize))
+                        && let Some(ref lengths) = self.lengths
                     {
                         self.pending_verify.insert(index);
-                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
+                        let piece_length = lengths.piece_size(index);
+                        disk.enqueue_verify(index, piece_length, expected, &self.verify_result_tx);
                     }
                 }
                 torrent_core::TorrentVersion::V2Only => {

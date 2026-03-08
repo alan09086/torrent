@@ -64,6 +64,17 @@ pub trait DiskIoBackend: Send + Sync {
         volatile: bool,
     ) -> crate::Result<Bytes>;
 
+    /// Read an entire piece as a single contiguous buffer.
+    /// Default implementation reads chunk-by-chunk using `read_chunk()`.
+    fn read_piece(
+        &self,
+        info_hash: Id20,
+        piece: u32,
+        piece_length: u32,
+    ) -> crate::Result<Bytes> {
+        self.read_chunk(info_hash, piece, 0, piece_length, true)
+    }
+
     /// Verify a piece against its expected SHA-1 hash.
     fn hash_piece(&self, info_hash: Id20, piece: u32, expected: &Id20) -> crate::Result<bool>;
 
