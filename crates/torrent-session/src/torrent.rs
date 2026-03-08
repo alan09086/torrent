@@ -1915,8 +1915,10 @@ impl TorrentActor {
                 // Request driver NeedBlocks messages
                 Some((peer_addr, msg)) = self.driver_msg_rx.recv() => {
                     match msg {
-                        DriverMessage::NeedBlocks => {
-                            self.dispatch_single_block(peer_addr).await;
+                        DriverMessage::NeedBlocks(count) => {
+                            for _ in 0..count {
+                                self.dispatch_single_block(peer_addr).await;
+                            }
                         }
                     }
                 }

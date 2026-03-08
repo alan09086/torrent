@@ -18,16 +18,17 @@ use tokio_util::sync::CancellationToken;
 /// Messages sent from the per-peer request driver to the torrent actor.
 #[derive(Debug)]
 pub(crate) enum DriverMessage {
-    /// The driver acquired a permit and needs the torrent actor to pick +
-    /// dispatch a block.
-    NeedBlocks,
+    /// The driver acquired N permits and needs the torrent actor to pick +
+    /// dispatch N blocks.
+    NeedBlocks(u32),
 }
 
 /// Per-peer async loop that acquires semaphore permits and signals the torrent
 /// actor to pick and dispatch blocks.
 ///
-/// The driver acquires one permit at a time from the peer's semaphore. Each
-/// acquired permit is [`forget`](tokio::sync::SemaphorePermit::forget)ten —
+/// The driver acquires at least one permit from the peer's semaphore, then
+/// opportunistically grabs up to 7 more (for a max batch of 8). All acquired
+/// permits are [`forget`](tokio::sync::SemaphorePermit::forget)ten —
 /// ownership is conceptually transferred to the torrent actor, which calls
 /// [`release_permit()`](crate::pipeline::PeerPipelineState::release_permit)
 /// when the corresponding block arrives.
@@ -55,7 +56,7 @@ pub(crate) async fn request_driver(
             }
         }
 
-        // Acquire a permit (blocks until capacity is available).
+        // Acquire at least 1 permit (blocking), then try to grab up to 7 more.
         let permit = tokio::select! {
             () = cancel.cancelled() => return,
             result = semaphore.acquire() => {
@@ -65,13 +66,21 @@ pub(crate) async fn request_driver(
                 }
             }
         };
-
-        // Transfer permit ownership to the torrent actor. It will call
-        // release_permit() when the block is received.
         permit.forget();
+        let mut count: u32 = 1;
 
-        // Signal the torrent actor to pick and dispatch a block for this peer.
-        if driver_tx.send((peer_addr, DriverMessage::NeedBlocks)).await.is_err() {
+        // Opportunistically grab more permits without blocking.
+        // try_acquire_many is all-or-nothing, so try descending counts.
+        for n in (1..=7u32).rev() {
+            if let Ok(extra) = semaphore.try_acquire_many(n) {
+                count += n;
+                extra.forget();
+                break;
+            }
+        }
+
+        // Signal the torrent actor to pick and dispatch blocks for this peer.
+        if driver_tx.send((peer_addr, DriverMessage::NeedBlocks(count))).await.is_err() {
             return; // torrent actor dropped the receiver
         }
     }
@@ -98,12 +107,21 @@ mod tests {
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(request_driver(sem, notify, snubbed, tx, addr, cancel2));
 
-        // Should receive exactly 3 NeedBlocks (one per permit)
-        for _ in 0..3 {
+        // With batching the driver may send 1 message with count=3 or several
+        // messages whose counts sum to 3. Collect until all 3 permits are
+        // accounted for.
+        let mut total: u32 = 0;
+        while total < 3 {
             let (peer, msg) = rx.recv().await.unwrap();
             assert_eq!(peer, addr);
-            assert!(matches!(msg, DriverMessage::NeedBlocks));
+            match msg {
+                DriverMessage::NeedBlocks(n) => {
+                    assert!(n >= 1);
+                    total += n;
+                }
+            }
         }
+        assert_eq!(total, 3);
 
         // Driver should now be blocked on acquire (0 permits left).
         // Cancel to clean up.
@@ -182,7 +200,7 @@ mod tests {
 
         // Now should get a NeedBlocks
         let (_, msg) = rx.recv().await.unwrap();
-        assert!(matches!(msg, DriverMessage::NeedBlocks));
+        assert!(matches!(msg, DriverMessage::NeedBlocks(_)));
 
         cancel.cancel();
         handle.await.unwrap();
