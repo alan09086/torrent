@@ -207,6 +207,7 @@ impl From<crate::disk_backend::DiskIoStats> for DiskStats {
 pub struct DiskManagerHandle {
     tx: mpsc::Sender<DiskJob>,
     store_buffer: Arc<StoreBuffer>,
+    verify_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl DiskManagerHandle {
@@ -224,10 +225,11 @@ impl DiskManagerHandle {
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let store_buffer = Arc::new(Mutex::new(HashMap::new()));
+        let verify_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         let actor = DiskActor::new(rx, config, backend, Arc::clone(&store_buffer));
         let join = tokio::spawn(actor.run());
-        (DiskManagerHandle { tx, store_buffer }, join)
+        (DiskManagerHandle { tx, store_buffer, verify_semaphore }, join)
     }
 
     /// Register a torrent's storage with the disk subsystem and return a
@@ -251,6 +253,7 @@ impl DiskManagerHandle {
             tx: self.tx.clone(),
             info_hash,
             store_buffer: Arc::clone(&self.store_buffer),
+            verify_semaphore: Arc::clone(&self.verify_semaphore),
         }
     }
 
@@ -277,6 +280,7 @@ pub struct DiskHandle {
     tx: mpsc::Sender<DiskJob>,
     info_hash: Id20,
     store_buffer: Arc<StoreBuffer>,
+    verify_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl DiskHandle {
@@ -287,6 +291,7 @@ impl DiskHandle {
             tx,
             info_hash,
             store_buffer: Arc::new(Mutex::new(HashMap::new())),
+            verify_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 
@@ -557,7 +562,9 @@ impl DiskHandle {
                 .remove(&(self.info_hash, piece))
         };
         let result_tx = result_tx.clone();
+        let verify_sem = self.verify_semaphore.clone();
         tokio::spawn(async move {
+            let _permit = verify_sem.acquire().await.unwrap();
             let passed = tokio::task::spawn_blocking(move || {
                 if let Some(blocks) = blocks {
                     // Stream-hash blocks in-place to avoid concatenation alloc
@@ -612,7 +619,9 @@ impl DiskHandle {
                 .remove(&(self.info_hash, piece))
         };
         let result_tx = result_tx.clone();
+        let verify_sem = self.verify_semaphore.clone();
         tokio::spawn(async move {
+            let _permit = verify_sem.acquire().await.unwrap();
             let passed = tokio::task::spawn_blocking(move || {
                 if let Some(blocks) = blocks {
                     let actual = torrent_core::sha256_chunks(
