@@ -74,7 +74,23 @@ impl InFlightPiece {
         if self.assigned_blocks.len() <= 1 {
             return self.assigned_blocks.len();
         }
-        self.assigned_blocks.values().collect::<HashSet<_>>().len()
+        // Stack array covers >99% of cases (pieces rarely have 8+ unique peers).
+        // Falls back to HashSet only when exceeded.
+        let mut seen: [SocketAddr; 8] = [SocketAddr::from(([0, 0, 0, 0], 0)); 8];
+        let mut count = 0usize;
+
+        for addr in self.assigned_blocks.values() {
+            let found = seen.iter().take(count).any(|s| s == addr);
+            if !found {
+                if count >= 8 {
+                    // Overflow: fall back to HashSet
+                    return self.assigned_blocks.values().collect::<HashSet<_>>().len();
+                }
+                seen[count] = *addr;
+                count += 1;
+            }
+        }
+        count
     }
 }
 
