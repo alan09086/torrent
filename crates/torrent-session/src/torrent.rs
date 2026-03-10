@@ -1479,9 +1479,11 @@ const END_GAME_DEPTH: usize = 128;
 
 /// Minimum free pipeline slots before invoking the full piece picker in
 /// `handle_piece_data()`.  Avoids running the 5-layer picker on every single
-/// block arrival (~91k times per 1.4 GiB download).  The 1-second pipeline
-/// tick and end-game bypass ensure no peer starves.
-const BATCH_DISPATCH_THRESHOLD: usize = 32;
+/// block arrival (~91k times per 1.4 GiB download).  Set to 4 so that a peer
+/// with 128-slot queue depth gets refilled after just 4 completions instead of
+/// waiting up to 1s for the pipeline tick.  The 250ms pipeline tick and
+/// end-game bypass ensure no peer starves.
+const BATCH_DISPATCH_THRESHOLD: usize = 4;
 
 impl TorrentActor {
     /// Returns the effective maximum connection count for this torrent.
@@ -1603,7 +1605,7 @@ impl TorrentActor {
         } else {
             None
         };
-        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(250));
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
@@ -2146,7 +2148,7 @@ impl TorrentActor {
                 } => {
                     self.run_peer_turnover().await;
                 }
-                // Pipeline tick (1s) — update EWMA, snub detection, stale block cleanup
+                // Pipeline tick (250ms) — update EWMA, snub detection, stale block cleanup
                 _ = pipeline_tick_interval.tick() => {
                     let snub_timeout = Duration::from_secs(self.config.snub_timeout_secs as u64);
                     let mut snubbed_peers = Vec::new();
