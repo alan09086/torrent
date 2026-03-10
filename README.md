@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1390-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1395-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.68.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.69.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1390 tests, zero clippy warnings**
+- 📊 **1395 tests, zero clippy warnings**
 
 ---
 
@@ -121,7 +121,7 @@ torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 | `torrent-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 40 |
 | `torrent-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 141 |
 | `torrent-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 66 |
-| `torrent-session` | Full session orchestration — see [Session Features](#-session-features) below | 679 |
+| `torrent-session` | Full session orchestration — see [Session Features](#-session-features) below | 672 |
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `torrent` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
@@ -129,7 +129,7 @@ torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 
 ### 🎯 Session Features
 
-The `torrent-session` crate (679 tests) includes:
+The `torrent-session` crate (672 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -238,6 +238,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.69.0 | M66 | Adaptive queue depth: per-peer BDP-based pipeline depth replaces fixed 128 slots — fast peers get deeper pipelines (up to 250), slow peers get shallower (floor 16) |
 | 0.68.0 | M65 | CPU efficiency: SHA-NI hardware acceleration via `asm` feature on sha1/sha2, batch dispatch threshold gates 5-layer picker behind 32 free slots (~97% reduction in picker invocations) |
 | 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling (M62 semaphore pipeline attempted and reverted due to data corruption) |
 | 0.65.0 | M60 | Rename ferrite → torrent, non-blocking disk I/O, async piece verification, resource exhaustion limits, cargo-fuzz scaffolding, workspace clippy lints |

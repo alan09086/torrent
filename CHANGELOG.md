@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.69.0] — 2026-03-10
+
+### Changed
+- **Adaptive queue depth (BDP model)**: Per-peer request pipeline depth now computed dynamically
+  using libtorrent's Bandwidth-Delay Product formula: `depth = (ewma_rate × request_queue_time / 16384)`
+  clamped to `[16, max_queue_depth]`. Fast peers get deeper pipelines (up to 250 slots), slow peers
+  get shallower ones (floor of 16). Replaces fixed 128-slot depth for all peers.
+- Snub override flag (`depth_overridden`) prevents BDP formula from overwriting snub depth of 1;
+  cleared on un-snub via `reset_to_slow_start()`
+- `request_queue_time` parameter (previously ignored with `_` prefix) now actively used in BDP computation
+- Test count: 1395
+
 ## [0.68.0] — 2026-03-10
 
 ### Changed
