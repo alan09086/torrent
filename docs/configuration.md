@@ -22,7 +22,7 @@ Two built-in presets are available:
 
 - **`Settings::default()`** — Balanced defaults suitable for most desktop use
 - **`Settings::min_memory()`** — Constrained environments (8 MiB cache, 20 torrents, 30 peers)
-- **`Settings::high_performance()`** — Desktop/server (256 MiB cache, 2000 torrents, 500 peers)
+- **`Settings::high_performance()`** — Desktop/server (256 MiB cache, 2000 torrents, 250 peers)
 
 ## Key Settings Groups
 

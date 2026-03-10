@@ -55,8 +55,8 @@ cargo clippy --workspace -- -D warnings
 - `Id20([u8; 20])` — SHA1 hash (info hash, piece hash). Methods: `from_hex()`, `to_hex()`, `as_bytes()`
 - `Id32([u8; 32])` — SHA-256 (BEP 52). Methods: `from_hex()`, `to_hex()`, `from_base32()`, `to_base32()`, `from_multihash_hex()`, `to_multihash_hex()`
 - `InfoHashes { v1: Option<Id20>, v2: Option<Id32> }` — unified hash container. Constructors: `v1_only()`, `v2_only()`, `hybrid()`. `best_v1()` for tracker/DHT compat
-- `sha1(data: &[u8]) -> Id20` — uses `sha1` crate (v0.10)
-- `sha256(data: &[u8]) -> Id32` — uses `sha2` crate (v0.10)
+- `sha1(data: &[u8]) -> Id20` — uses `ring` (BoringSSL assembly)
+- `sha256(data: &[u8]) -> Id32` — uses `ring` (BoringSSL assembly)
 - `MerkleTree` — binary heap layout. `from_leaves()`, `root()`, `layer()`, `piece_layer()`, `proof_path()`, `verify_proof()`
 - `Lengths { total_length, piece_length, chunk_size }` — piece arithmetic: `num_pieces()`, `piece_size(idx)`, `piece_offset(idx)`
 - `DEFAULT_CHUNK_SIZE = 16384`

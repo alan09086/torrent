@@ -1,6 +1,5 @@
 //! MSE/PE hash functions and crypto method negotiation.
 
-
 /// Verification Constant: 8 zero bytes.
 pub(crate) const VC: [u8; 8] = [0u8; 8];
 
