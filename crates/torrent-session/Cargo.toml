@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 bitflags = { workspace = true }
-tokio-util = { version = "0.7", features = ["codec", "rt"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rustc-hash = "2"
 rustls = { version = "0.23", features = ["ring"] }

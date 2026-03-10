@@ -428,17 +428,14 @@ pub struct Settings {
     #[serde(default = "default_hashing_threads")]
     pub hashing_threads: usize,
     /// Maximum per-peer request queue depth (default: 250).
-    /// Reserved for future adaptive permit sizing; currently unused by the
-    /// semaphore-based pipeline which uses `initial_queue_depth` directly.
     #[serde(default = "default_max_request_queue_depth")]
     pub max_request_queue_depth: usize,
-    /// Initial per-peer request queue depth (default: 128). This is the fixed
-    /// number of semaphore permits allocated to each peer's request pipeline.
+    /// Initial per-peer request queue depth (default: 128). Higher values let
+    /// peers reach full throughput faster by skipping slow-start ramp-up.
     #[serde(default = "default_initial_queue_depth")]
     pub initial_queue_depth: usize,
-    /// **Deprecated.** Previously controlled BDP-based queue depth calculation.
-    /// Ignored since the semaphore pipeline uses fixed permits from
-    /// `initial_queue_depth`. Retained for config file compatibility.
+    /// Request queue time multiplier in seconds. Controls how many seconds
+    /// worth of requests to keep in flight per peer (default: 3.0).
     #[serde(default = "default_request_queue_time")]
     pub request_queue_time: f64,
     /// Block request timeout in seconds before the request is considered

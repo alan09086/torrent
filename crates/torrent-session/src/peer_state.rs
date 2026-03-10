@@ -1,12 +1,9 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use torrent_storage::Bitfield;
 use torrent_wire::ExtHandshake;
@@ -119,7 +116,7 @@ pub(crate) struct PeerState {
     pub super_seed_assigned: Option<u32>,
     /// Channel to send commands to this peer's task.
     pub cmd_tx: mpsc::Sender<PeerCommand>,
-    /// Per-peer semaphore-based request pipeline.
+    /// Per-peer dynamic request queue sizing (M28).
     pub pipeline: PeerPipelineState,
     /// Whether this peer is snubbed (no data for snub_timeout_secs).
     pub snubbed: bool,
@@ -137,12 +134,6 @@ pub(crate) struct PeerState {
     pub appears_nated: bool,
     /// Transport protocol used for this peer connection.
     pub transport: Option<crate::rate_limiter::PeerTransport>,
-    /// Shared snub flag readable by the request driver.
-    pub snubbed_flag: Arc<AtomicBool>,
-    /// Cancellation token for the request driver task.
-    pub driver_cancel: Option<CancellationToken>,
-    /// Handle to the spawned driver task (for cleanup).
-    pub driver_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[allow(dead_code)]
@@ -152,6 +143,8 @@ impl PeerState {
         bitfield_len: u32,
         cmd_tx: mpsc::Sender<PeerCommand>,
         source: PeerSource,
+        max_queue_depth: usize,
+        request_queue_time: f64,
         initial_queue_depth: usize,
     ) -> Self {
         Self {
@@ -173,7 +166,11 @@ impl PeerState {
             upload_only: false,
             super_seed_assigned: None,
             cmd_tx,
-            pipeline: PeerPipelineState::new(initial_queue_depth),
+            pipeline: PeerPipelineState::new(
+                max_queue_depth,
+                request_queue_time,
+                initial_queue_depth,
+            ),
             snubbed: false,
             last_data_received: None,
             connected_at: std::time::Instant::now(),
@@ -182,9 +179,6 @@ impl PeerState {
             supports_holepunch: false,
             appears_nated: false,
             transport: None,
-            snubbed_flag: Arc::new(AtomicBool::new(false)),
-            driver_cancel: None,
-            driver_handle: None,
         }
     }
 }
@@ -228,6 +222,8 @@ mod tests {
             100,
             tx,
             PeerSource::Tracker,
+            250,
+            3.0,
             128,
         );
         assert!(peer.connected_at.elapsed().as_secs() < 1);

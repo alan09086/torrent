@@ -29,7 +29,6 @@ mod persistence;
 pub(crate) mod pex;
 pub(crate) mod piece_selector;
 pub(crate) mod pipeline;
-pub(crate) mod request_driver;
 #[allow(dead_code)] // Wired in during Step 5 (proxy integration).
 pub(crate) mod proxy;
 pub(crate) mod queue;

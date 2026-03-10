@@ -4,39 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## 0.68.0 — M62 Semaphore-Based Reactive Pipeline
-
-### Changed
-- **Semaphore-based reactive pipeline** — replaced poll-based batch request dispatch (`request_pieces_from_peer`) with per-peer `tokio::Semaphore` scheduling. Each peer spawns a dedicated `request_driver` task that acquires permits and signals the torrent actor to dispatch blocks. Requests are now dispatched immediately when capacity frees up (zero-latency reactive dispatch via `semaphore.add_permits(1)` on block receipt).
-- **End-game 1-redundant-copy limit** — end-game mode now limits each block to at most 2 assignees (original + 1 redundant), matching libtorrent's strategy. Prevents bandwidth waste from spraying blocks to all peers. Guard applied to both `pick_block()` and `pick_block_streaming()`.
-- **Reactive cancel cascade** — end-game cancels immediately free permits on cancelled peers, waking their request drivers for new useful work. Replaces the 200ms batch refill tick with zero-latency reactive dispatch.
-- **Unified dispatch path** — both normal and end-game modes now route through `dispatch_single_block`, eliminating the separate `request_end_game_block` function.
-- **Simplified PeerState constructor** — reduced from 7 to 5 parameters by removing unused `max_queue_depth` and `request_queue_time` args.
-
-### Added
-- `request_driver.rs` — per-peer async loop with semaphore acquire, cancellation token, snub probe mode, and shared mpsc channel for NeedBlocks signalling
-- `PeerPipelineState` semaphore API: `semaphore()`, `notify()`, `release_permit()`, `wake_driver()`, `restore_full_permits()`, `reset_permits()`
-- 12 new tests for semaphore pipeline and request driver behaviour
-- Test count: 1402
-
-### Removed
-- `request_pieces_from_peer` batch dispatch function (215 lines)
-- `END_GAME_DEPTH` constant (replaced by semaphore permit count)
-- 200ms end-game refill tick (replaced by reactive cancel cascade)
-- `in_slow_start()` stub (always returned false)
-- `set_queue_depth_override()` method (incompatible with semaphore architecture)
-- Pipeline compat shims: `new_compat()`, `queue_depth()`, `reset_to_slow_start()`
-
-### Fixed
-- **Completion exit bug** — cancel all request drivers before Seeding transition to prevent infinite busy-loop (drivers acquire permits instantly when not Downloading, causing 300%+ CPU spin)
-- **State-dependent driver spawning** — guard `spawn_request_driver` against non-Downloading state to prevent drivers spawned by late unchoke/bitfield messages from busy-looping
-- **Parole peer assignment** — restored BEP 25 smart banning parole logic that was lost when `request_pieces_from_peer` was removed
-
-### Deprecated
-- `Settings::request_queue_time` — ignored since the semaphore pipeline uses fixed permits from `initial_queue_depth`
-- `Settings::max_request_queue_depth` — reserved for future adaptive permit sizing; currently unused
-
-## 0.67.0 — M61 Performance Optimizations
+## 0.67.0 — M61 Performance Optimizations (current)
 
 ### Performance
 - **O(1) pending request lookup** — replaced `PeerState.pending_requests: Vec<(u32, u32, u32)>` with `PendingRequests` newtype wrapping `FxHashMap<(u32, u32), u32>`. Eliminates O(128) linear scan on every block received (~6000/sec). 4 call sites converted from `.iter().position()` + `.swap_remove()` to `.remove(index, begin)`.

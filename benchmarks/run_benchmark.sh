@@ -2,13 +2,32 @@
 set -euo pipefail
 
 # Benchmark: torrent vs rqbit vs qbittorrent
-# Usage: ./benchmarks/run_benchmark.sh <magnet_uri> [trials]
+# Usage: ./benchmarks/run_benchmark.sh <magnet_uri> [trials] [timeout_secs]
 
-MAGNET="${1:?Usage: $0 <magnet_uri> [trials]}"
+MAGNET="${1:?Usage: $0 <magnet_uri> [trials] [timeout_secs]}"
 TRIALS="${2:-5}"
+TIMEOUT="${3:-300}"  # 5 minute default timeout per trial
 OUTPUT_DIR="/tmp/torrent-bench"
 RESULTS="benchmarks/results.csv"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# --- Cleanup old processes and files ---
+echo "Cleaning up old benchmark state..."
+
+# Kill any leftover benchmark processes
+for proc in "torrent download" "rqbit download" "qbittorrent-nox.*qbt-bench"; do
+    pkill -f "$proc" 2>/dev/null || true
+done
+sleep 1
+# Force-kill stragglers
+for proc in "torrent download" "rqbit download" "qbittorrent-nox.*qbt-bench"; do
+    pkill -9 -f "$proc" 2>/dev/null || true
+done
+
+# Remove old benchmark output
+rm -rf "$OUTPUT_DIR"
+rm -rf /tmp/qbt-bench-profile /tmp/qbt-bench-cookies.txt /tmp/qbt-bench-startup.log
+mkdir -p "$OUTPUT_DIR"
 
 echo "Building torrent-cli (release)..."
 cargo build --release -p torrent-cli 2>/dev/null
@@ -17,6 +36,7 @@ TORRENT="target/release/torrent"
 echo "Torrent binary: $TORRENT"
 echo "Magnet: $MAGNET"
 echo "Trials: $TRIALS"
+echo "Timeout: ${TIMEOUT}s per trial"
 echo ""
 
 echo "client,trial,time_secs,cpu_secs,avg_speed_mbps,peak_rss_kb" > "$RESULTS"
@@ -53,7 +73,14 @@ run_trial() {
     local time_file="$OUTPUT_DIR/${client}-time-${trial}.txt"
     local stats_file="$OUTPUT_DIR/${client}-stats-${trial}.txt"
 
-    /usr/bin/time -v bash -c "$cmd 2>\"$stats_file\"" 2>"$time_file" || true
+    # Run with timeout to prevent hangs
+    timeout --signal=TERM --kill-after=10 "$TIMEOUT" \
+        /usr/bin/time -v bash -c "$cmd 2>\"$stats_file\"" 2>"$time_file"
+    local exit_code=$?
+
+    if [ "$exit_code" -eq 124 ]; then
+        echo "    !! TIMED OUT after ${TIMEOUT}s"
+    fi
 
     read -r wall_time cpu_time rss <<< "$(parse_time_output "$time_file")"
     local size
@@ -63,6 +90,13 @@ run_trial() {
 
     echo "$client,$trial,$wall_time,$cpu_time,$avg_speed,$rss" >> "$RESULTS"
     echo "    -> ${wall_time}s, CPU ${cpu_time}s, ${avg_speed} MB/s, RSS ${rss} KB"
+
+    # Kill any lingering processes from this client after each trial
+    case "$client" in
+        torrent) pkill -f "torrent download" 2>/dev/null || true ;;
+        rqbit)   pkill -f "rqbit download" 2>/dev/null || true ;;
+    esac
+    sleep 1
 }
 
 for trial in $(seq 1 "$TRIALS"); do

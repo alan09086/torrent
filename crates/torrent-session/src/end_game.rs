@@ -92,10 +92,6 @@ impl EndGame {
             if entry.peers.contains(&peer_addr) {
                 continue;
             }
-            // Skip blocks that already have maximum redundancy (1 original + 1 redundant)
-            if entry.peers.len() >= 2 {
-                continue;
-            }
             return Some((index, begin, entry.length));
         }
         None
@@ -211,10 +207,7 @@ impl EndGame {
                 continue;
             }
             for (&(idx, begin), entry) in &self.blocks {
-                if idx == piece
-                    && !entry.peers.contains(&peer_addr)
-                    && entry.peers.len() < 2
-                {
+                if idx == piece && !entry.peers.contains(&peer_addr) {
                     return Some((idx, begin, entry.length));
                 }
             }
@@ -421,47 +414,5 @@ mod tests {
         // Duplicate register is idempotent
         eg.register_request(0, 0, peer_b);
         assert_eq!(eg.block_requesters(0, 0).len(), 2);
-    }
-
-    #[test]
-    fn test_pick_block_skips_fully_redundant() {
-        let mut eg = EndGame::new();
-        let peer_a = addr(1);
-        let peer_b = addr(2);
-        let peer_c = addr(3);
-
-        // One block assigned to 2 peers (original + 1 redundant = max)
-        let pending = vec![
-            (peer_a, vec![(0, 0, 16384)]),
-            (peer_b, vec![(0, 0, 16384)]),
-        ];
-        eg.activate(&pending);
-        assert_eq!(eg.block_requesters(0, 0).len(), 2);
-
-        // peer_c tries to pick — should get None (block already at max redundancy)
-        let mut peer_c_has = Bitfield::new(4);
-        peer_c_has.set(0);
-        let block = eg.pick_block(peer_c, &peer_c_has);
-        assert!(block.is_none());
-    }
-
-    #[test]
-    fn test_pick_block_allows_one_redundant() {
-        let mut eg = EndGame::new();
-        let peer_a = addr(1);
-        let peer_b = addr(2);
-
-        // One block assigned to 1 peer (original only, room for 1 redundant)
-        let pending = vec![(peer_a, vec![(0, 0, 16384)])];
-        eg.activate(&pending);
-        assert_eq!(eg.block_requesters(0, 0).len(), 1);
-
-        // peer_b tries to pick — should succeed (1 assignee < 2 max)
-        let mut peer_b_has = Bitfield::new(4);
-        peer_b_has.set(0);
-        let block = eg.pick_block(peer_b, &peer_b_has);
-        assert!(block.is_some());
-        let (idx, begin, len) = block.unwrap();
-        assert_eq!((idx, begin, len), (0, 0, 16384));
     }
 }

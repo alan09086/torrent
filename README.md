@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1402-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1390-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.68.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.67.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1402 tests, zero clippy warnings**
+- 📊 **1390 tests, zero clippy warnings**
 
 ---
 
@@ -33,7 +33,7 @@ Add torrent to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.68.0"
+torrent = "0.67.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -134,7 +134,7 @@ The `torrent-session` crate (679 tests) includes:
 | Category | Features |
 |----------|----------|
 | **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange (bidirectional), BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange, BEP 53 magnet `so=` file selection |
-| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode with 1-redundant-copy limit, semaphore-based reactive request pipeline (128 permits/peer), file streaming (`AsyncRead` + `AsyncSeek`), sequential download, auto-sequential hysteresis, block-level picking, SuggestPiece, predictive announce |
+| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode with batch refill, poll-based request pipeline (128-depth), file streaming (`AsyncRead` + `AsyncSeek`), sequential download, auto-sequential hysteresis, block-level picking, SuggestPiece, predictive announce |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode TCP/uTP algorithm, automatic upload slot optimization |
 | **Storage** | Pluggable DiskIoBackend trait (Posix/Mmap/Disabled), async DiskActor, ARC read cache, write buffering, parallel hashing, move storage |
 | **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport, pluggable transport (NetworkFactory) |
@@ -212,7 +212,7 @@ See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | ✅ Done |
 | 12: Simulation | M51 | In-process network simulation framework | ✅ Done |
 | 13: API Parity | M52–M53 | API documentation, full torrent operations API parity | ✅ Done |
-| 14: Performance | M55–M62 | Speed optimization, DHT persistence, piece stealing, semaphore pipeline | ✅ Done |
+| 14: Performance | M55–M61 | Speed optimization, DHT persistence, piece stealing, perf optimizations | ✅ Done |
 
 ---
 
@@ -237,8 +237,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
-| 0.68.0 | M62 | Semaphore-based reactive pipeline: per-peer `tokio::Semaphore` request driver, end-game 1-redundant-copy limit, reactive cancel cascade, unified dispatch path |
-| 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling |
+| 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling (M62 semaphore pipeline attempted and reverted due to data corruption) |
 | 0.65.0 | M60 | Rename ferrite → torrent, non-blocking disk I/O, async piece verification, resource exhaustion limits, cargo-fuzz scaffolding, workspace clippy lints |
 | 0.64.0 | — | TCP listener for incoming peers, UPnP gateway probe fallback + IGD v2, log spam cleanup |
 | 0.63.1 | — | Settings ↔ TorrentConfig wiring fix (13 fields), throughput fixes (try_send, phantom blocks, snub detection) |

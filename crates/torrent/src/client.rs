@@ -304,17 +304,12 @@ impl ClientBuilder {
     }
 
     /// Set the maximum per-peer request queue depth. Default: 250.
-    ///
-    /// Currently unused by the semaphore pipeline; reserved for future
-    /// adaptive permit sizing.
     pub fn max_request_queue_depth(mut self, n: usize) -> Self {
         self.settings.max_request_queue_depth = n;
         self
     }
 
-    /// **Deprecated.** Previously controlled BDP-based queue depth calculation.
-    /// Ignored since the semaphore pipeline uses fixed permits. Retained for
-    /// API compatibility.
+    /// Set the request queue time multiplier (seconds). Default: 3.0.
     pub fn request_queue_time(mut self, secs: f64) -> Self {
         self.settings.request_queue_time = secs;
         self
