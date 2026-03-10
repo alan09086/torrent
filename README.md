@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1395-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.69.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.70.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -238,6 +238,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.70.0 | M67 | Crypto optimization: `ring` (BoringSSL AVX2 asm) replaces `sha1`/`sha2` crates (~4.6x SHA1 throughput on Broadwell), `target-cpu=native` codegen, RC4 write buffer reuse, default peers 200→128 |
 | 0.69.0 | M66 | Adaptive queue depth: per-peer BDP-based pipeline depth replaces fixed 128 slots — fast peers get deeper pipelines (up to 250), slow peers get shallower (floor 16) |
 | 0.68.0 | M65 | CPU efficiency: SHA-NI hardware acceleration via `asm` feature on sha1/sha2, batch dispatch threshold gates 5-layer picker behind 32 free slots (~97% reduction in picker invocations) |
 | 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling (M62 semaphore pipeline attempted and reverted due to data corruption) |

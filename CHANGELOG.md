@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.70.0] — 2026-03-10
+
+### Changed
+- **BoringSSL crypto via `ring`**: Replaced `sha1`/`sha2` crates with `ring` (BoringSSL hand-optimized
+  AVX2 assembly). ~4.6x SHA1 throughput improvement on Broadwell (174 → ~800 MB/s). All four hash
+  functions (`sha1`, `sha1_chunks`, `sha256`, `sha256_chunks`) and MSE handshake hashing now use `ring::digest`.
+- **`target-cpu=native` codegen**: Added `.cargo/config.toml` enabling AVX2/SHA-NI/BMI2 instruction
+  generation for all crates (binaries are build-machine specific).
+- **RC4 write buffer reuse**: `MseStream::poll_write` now reuses a persistent `Vec<u8>` instead of
+  allocating per write — zero allocations after the first encrypted write.
+- **Default peers reduced 200 → 128**: Default `max_peers_per_torrent` lowered from 200 to 128;
+  `high_performance` preset from 500 to 250. Reduces per-piece verification overhead.
+- Removed all direct `sha1`/`sha2` crate dependencies from workspace.
+- Test count: 1395
+
 ## [0.69.0] — 2026-03-10
 
 ### Changed
