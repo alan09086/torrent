@@ -6946,7 +6946,7 @@ mod tests {
             max_message_size: 16 * 1024 * 1024,
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
-            max_in_flight_pieces: 32,
+            max_in_flight_pieces: 20,
         }
     }
 
