@@ -170,7 +170,7 @@ fn default_peer_dscp() -> u8 {
     0x08 // CS1 (scavenger/low-priority)
 }
 fn default_max_peers_per_torrent() -> usize {
-    200
+    128
 }
 fn default_stats_report_interval() -> u64 {
     1000
@@ -792,7 +792,7 @@ impl Default for Settings {
             seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: ChokingAlgorithm::FixedSlots,
             // Peer connections
-            max_peers_per_torrent: 200,
+            max_peers_per_torrent: 128,
             // Peer turnover
             peer_turnover: 0.08,
             peer_turnover_cutoff: 0.9,
@@ -843,7 +843,7 @@ impl Settings {
         Self {
             disk_cache_size: 256 * 1024 * 1024,
             max_torrents: 2000,
-            max_peers_per_torrent: 500,
+            max_peers_per_torrent: 250,
             active_downloads: 30,
             active_seeds: 100,
             active_limit: 2000,
@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(s.snub_timeout_secs, 15);
         assert_eq!(s.readahead_pieces, 8);
         assert!(s.streaming_timeout_escalation);
-        assert_eq!(s.max_peers_per_torrent, 200);
+        assert_eq!(s.max_peers_per_torrent, 128);
     }
 
     #[test]
@@ -1266,7 +1266,7 @@ mod tests {
         let s = Settings::high_performance();
         assert_eq!(s.disk_cache_size, 256 * 1024 * 1024);
         assert_eq!(s.max_torrents, 2000);
-        assert_eq!(s.max_peers_per_torrent, 500);
+        assert_eq!(s.max_peers_per_torrent, 250);
         assert_eq!(s.active_downloads, 30);
         assert_eq!(s.active_seeds, 100);
         assert_eq!(s.active_limit, 2000);

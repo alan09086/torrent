@@ -144,7 +144,7 @@ impl Default for TorrentConfig {
     fn default() -> Self {
         Self {
             listen_port: 6881,
-            max_peers: 200,
+            max_peers: 128,
             target_request_queue: 5,
             download_dir: PathBuf::from("."),
             enable_dht: true,

@@ -11,7 +11,7 @@ let session = ClientBuilder::new()
     .download_dir("/tmp/downloads")
     .listen_port(6881)
     .enable_dht(true)
-    .max_peers_per_torrent(200)
+    .max_peers_per_torrent(128)
     .start()
     .await?;
 ```
