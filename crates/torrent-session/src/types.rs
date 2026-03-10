@@ -121,11 +121,12 @@ pub struct TorrentConfig {
     pub peer_connect_timeout: u64,
     /// DSCP (Differentiated Services Code Point) value for peer traffic sockets.
     pub peer_dscp: u8,
-    /// Initial per-peer request queue depth for the pipeline slow-start.
+    /// Fixed per-peer request queue depth for the lifetime of the connection.
     pub initial_queue_depth: usize,
     /// Maximum per-peer request queue depth.
     pub max_request_queue_depth: usize,
-    /// Request queue time multiplier in seconds for steady-state depth.
+    /// Deprecated — unused in the fixed-depth pipeline model. Retained for API
+    /// compatibility; was formerly used to scale BDP-based queue depth.
     pub request_queue_time: f64,
     /// Maximum BEP 9 metadata size in bytes accepted from peers.
     pub max_metadata_size: u64,

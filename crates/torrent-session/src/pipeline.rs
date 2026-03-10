@@ -1,32 +1,24 @@
-//! Per-peer request pipeline with BDP-based adaptive queue depth.
+//! Per-peer request pipeline with fixed queue depth.
 //!
-//! Modelled after libtorrent's bandwidth-delay product approach: each peer's
-//! queue depth is computed from its EWMA throughput and a configurable request
-//! queue time. Fast peers get deeper pipelines; slow peers are clamped to the
-//! floor. The formula is:
+//! Uses a fixed queue depth model: each peer maintains `initial_queue_depth`
+//! (default 128) concurrent request slots for the lifetime of the connection.
+//! EWMA throughput is tracked for stats/reporting but does not influence depth.
 //!
-//! ```text
-//! queue_depth = (ewma_rate_bytes_sec × request_queue_time / BLOCK_SIZE)
-//!               .clamp(QUEUE_DEPTH_FLOOR, max_queue_depth)
-//! ```
+//! The fixed depth avoids the BDP negative feedback loop where a slow first
+//! tick would collapse depth to the floor, limiting in-flight data and keeping
+//! throughput (and thus depth) permanently suppressed.
 //!
-//! Depth is recomputed on each tick (once per second). Snub overrides set a
-//! `depth_overridden` flag that prevents tick from changing the depth until
-//! `reset_to_slow_start()` clears it.
+//! Snub overrides set a `depth_overridden` flag that reduces depth until
+//! `reset_to_slow_start()` restores it to `initial_queue_depth`.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Minimum pipeline depth for any peer (prevents starvation).
-const QUEUE_DEPTH_FLOOR: usize = 16;
-
-/// Standard BitTorrent block size (16 KiB).
-const BLOCK_SIZE: f64 = 16384.0;
-
 /// Per-peer request pipeline state.
 ///
-/// Tracks in-flight requests and measures throughput. Queue depth is
-/// adaptively computed from the bandwidth-delay product on each tick.
+/// Tracks in-flight requests and measures throughput. Queue depth is fixed at
+/// `initial_queue_depth` and does not change unless overridden by a snub.
+#[allow(dead_code)]
 pub(crate) struct PeerPipelineState {
     /// Bytes received in the current tick window (for throughput stats).
     last_second_bytes: u64,
@@ -40,22 +32,23 @@ pub(crate) struct PeerPipelineState {
     queue_depth: usize,
     /// Hard ceiling on queue depth.
     max_queue_depth: usize,
-    /// Request queue time in seconds (BDP formula parameter).
+    /// Request queue time in seconds (kept for API compatibility, unused in fixed-depth model).
     request_queue_time: f64,
     /// Initial queue depth for reset_to_slow_start().
     initial_queue_depth: usize,
-    /// Whether depth was explicitly overridden (e.g. snub). Prevents BDP tick
+    /// Whether depth was explicitly overridden (e.g. snub). Prevents tick
     /// from overwriting the override until `reset_to_slow_start()` clears it.
     depth_overridden: bool,
 }
 
 #[allow(dead_code)]
 impl PeerPipelineState {
-    /// Create a new pipeline state with adaptive queue depth.
+    /// Create a new pipeline state with fixed queue depth.
     ///
-    /// `max_queue_depth` is the hard ceiling. `request_queue_time` is the BDP
-    /// time parameter in seconds. `initial_queue_depth` sets the starting
-    /// depth (clamped to `[1, max_queue_depth]`).
+    /// `max_queue_depth` is the hard ceiling. `request_queue_time` is retained
+    /// for API compatibility but unused. `initial_queue_depth` sets the depth
+    /// (clamped to `[1, max_queue_depth]`) and remains fixed for the lifetime
+    /// of the connection.
     pub fn new(
         max_queue_depth: usize,
         request_queue_time: f64,
@@ -97,8 +90,8 @@ impl PeerPipelineState {
 
     /// Record that a block was received, returning the RTT if tracked.
     ///
-    /// Queue depth is NOT adjusted here — it is recomputed on tick via the
-    /// BDP formula. Throughput bytes are accumulated for EWMA stats.
+    /// Queue depth is NOT adjusted here. Throughput bytes are accumulated for
+    /// EWMA stats only.
     pub fn block_received(
         &mut self,
         piece: u32,
@@ -116,22 +109,17 @@ impl PeerPipelineState {
         rtt
     }
 
-    /// Called once per second to update throughput stats and recompute queue depth.
+    /// Called periodically to update throughput stats.
     ///
-    /// Uses the BDP formula to adaptively size the queue. If `depth_overridden`
-    /// is set (e.g. by snub), the depth is left unchanged.
+    /// Updates the EWMA rate for stats/reporting only. Queue depth is fixed
+    /// at `initial_queue_depth` and is not modified here.
     pub fn tick(&mut self) {
         const ALPHA: f64 = 0.3;
         self.ewma_rate_bytes_sec =
             ALPHA * self.last_second_bytes as f64 + (1.0 - ALPHA) * self.ewma_rate_bytes_sec;
         self.last_second_bytes = 0;
         self.last_tick = Instant::now();
-
-        // BDP-based adaptive queue depth (libtorrent model)
-        if !self.depth_overridden {
-            let bdp = (self.ewma_rate_bytes_sec * self.request_queue_time / BLOCK_SIZE) as usize;
-            self.queue_depth = bdp.clamp(QUEUE_DEPTH_FLOOR, self.max_queue_depth);
-        }
+        // No BDP depth adjustment — fixed depth model
     }
 
     /// Override the queue depth directly (e.g. for snubbed peers).
@@ -144,7 +132,8 @@ impl PeerPipelineState {
 
     /// Reset to initial queue depth (e.g. after un-snub or reconnect).
     ///
-    /// Clears the `depth_overridden` flag so tick() resumes BDP computation.
+    /// Clears the `depth_overridden` flag. Tick() does not adjust depth in the
+    /// fixed-depth model, so this simply restores full pipeline capacity.
     pub fn reset_to_slow_start(&mut self) {
         self.queue_depth = self.initial_queue_depth;
         self.ewma_rate_bytes_sec = 0.0;
@@ -211,15 +200,13 @@ mod tests {
         state.last_second_bytes = 1_048_576;
         state.tick();
         assert!(state.ewma_rate() > 0.0);
-        // After first tick: EWMA = 0.3 * 1_048_576 = 314_572.8
-        // BDP = 314_572.8 * 3.0 / 16384 = 57.6 → 57, clamped to [16, 250] = 57
-        assert_eq!(state.queue_depth(), 57);
+        // Fixed depth model: depth stays at initial_queue_depth (128), never changes on tick
+        assert_eq!(state.queue_depth(), 128);
 
         state.last_second_bytes = 1_048_576;
         state.tick();
-        // EWMA = 0.3 * 1_048_576 + 0.7 * 314_572.8 = 534_773.76
-        // BDP = 534_773.76 * 3.0 / 16384 = 97.9 → 97
-        assert_eq!(state.queue_depth(), 97);
+        // Depth still fixed at 128 regardless of throughput
+        assert_eq!(state.queue_depth(), 128);
     }
 
     #[test]
@@ -245,42 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_depth_from_bdp() {
-        // Steady-state 1 MB/s: set both EWMA and last_second_bytes so EWMA
-        // stays at 1_000_000 after tick (0.3 * 1M + 0.7 * 1M = 1M).
-        // BDP = 1_000_000 * 3.0 / 16384 = 183.10 → 183
-        let mut state = PeerPipelineState::new(250, 3.0, 128);
-        state.ewma_rate_bytes_sec = 1_000_000.0;
-        state.last_second_bytes = 1_000_000;
-        state.tick();
-        assert_eq!(state.queue_depth(), 183);
-    }
-
-    #[test]
-    fn adaptive_depth_floor() {
-        // Very slow peer (100 bytes/s) → depth clamped to QUEUE_DEPTH_FLOOR (16)
-        let mut state = PeerPipelineState::new(250, 3.0, 128);
-        state.last_second_bytes = 100;
-        state.tick();
-        // EWMA = 0.3 * 100 = 30
-        // BDP = 30 * 3.0 / 16384 = 0.0054 → 0, clamped to 16
-        assert_eq!(state.queue_depth(), QUEUE_DEPTH_FLOOR);
-    }
-
-    #[test]
-    fn adaptive_depth_ceiling() {
-        // Very fast peer (100 MB/s) → depth clamped to max_queue_depth (250)
-        let mut state = PeerPipelineState::new(250, 3.0, 128);
-        state.ewma_rate_bytes_sec = 100_000_000.0;
-        state.last_second_bytes = 100_000_000;
-        state.tick();
-        // EWMA = 0.3 * 100M + 0.7 * 100M = 100M
-        // BDP = 100_000_000 * 3.0 / 16384 = 18310 → clamped to 250
-        assert_eq!(state.queue_depth(), 250);
-    }
-
-    #[test]
-    fn snub_prevents_bdp_override() {
+    fn snub_override_survives_tick() {
         // After snub, tick() does not change depth from 1
         let mut state = PeerPipelineState::new(250, 3.0, 128);
         state.set_queue_depth_override(1);
@@ -298,13 +250,14 @@ mod tests {
     }
 
     #[test]
-    fn zero_rate_clamps_to_floor() {
-        // EWMA = 0 → depth = QUEUE_DEPTH_FLOOR (16)
+    fn zero_rate_keeps_fixed_depth() {
+        // Fixed depth model: EWMA = 0 does not affect queue depth
         let mut state = PeerPipelineState::new(250, 3.0, 128);
         state.ewma_rate_bytes_sec = 0.0;
         state.last_second_bytes = 0;
         state.tick();
-        assert_eq!(state.queue_depth(), QUEUE_DEPTH_FLOOR);
+        // Depth stays at initial_queue_depth (128), not dropped to floor
+        assert_eq!(state.queue_depth(), 128);
     }
 
     #[test]

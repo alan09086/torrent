@@ -434,8 +434,12 @@ pub struct Settings {
     /// peers reach full throughput faster by skipping slow-start ramp-up.
     #[serde(default = "default_initial_queue_depth")]
     pub initial_queue_depth: usize,
-    /// Request queue time multiplier in seconds. Controls how many seconds
-    /// worth of requests to keep in flight per peer (default: 3.0).
+    /// Request queue time multiplier in seconds (default: 3.0).
+    ///
+    /// **Deprecated**: This field is retained for backward compatibility with
+    /// existing config files. The pipeline now uses a fixed-depth model where
+    /// queue depth equals `initial_queue_depth` for the lifetime of the
+    /// connection; this value is no longer used in depth computation.
     #[serde(default = "default_request_queue_time")]
     pub request_queue_time: f64,
     /// Block request timeout in seconds before the request is considered
