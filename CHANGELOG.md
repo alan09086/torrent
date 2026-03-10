@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## 0.67.0 — M61 Performance Optimizations (current)
+## [0.68.0] — 2026-03-10
+
+### Changed
+- **SHA hardware acceleration**: Enabled `asm` feature on `sha1`/`sha2` crates for runtime CPU-dispatched
+  SHA-NI instructions — accelerates piece verification and MSE/PE encryption handshakes
+- **Batch dispatch threshold**: Gated per-block picker invocation behind a 32-slot free threshold,
+  reducing ~91k picker calls to ~2.9k per 1.4 GiB download (~97% reduction in hot-path CPU)
+- Pipeline tick safety net widened to catch both fully idle peers and peers crossing the batch threshold
+
+## 0.67.0 — M61 Performance Optimizations
 
 ### Performance
 - **O(1) pending request lookup** — replaced `PeerState.pending_requests: Vec<(u32, u32, u32)>` with `PendingRequests` newtype wrapping `FxHashMap<(u32, u32), u32>`. Eliminates O(128) linear scan on every block received (~6000/sec). 4 call sites converted from `.iter().position()` + `.swap_remove()` to `.remove(index, begin)`.

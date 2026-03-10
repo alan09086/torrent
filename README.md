@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1390-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.67.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.68.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -213,6 +213,7 @@ See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 12: Simulation | M51 | In-process network simulation framework | ✅ Done |
 | 13: API Parity | M52–M53 | API documentation, full torrent operations API parity | ✅ Done |
 | 14: Performance | M55–M61 | Speed optimization, DHT persistence, piece stealing, perf optimizations | ✅ Done |
+| 15: CPU Efficiency | M65 | SHA hardware acceleration, batch dispatch threshold | ✅ Done |
 
 ---
 
@@ -237,6 +238,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.68.0 | M65 | CPU efficiency: SHA-NI hardware acceleration via `asm` feature on sha1/sha2, batch dispatch threshold gates 5-layer picker behind 32 free slots (~97% reduction in picker invocations) |
 | 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling (M62 semaphore pipeline attempted and reverted due to data corruption) |
 | 0.65.0 | M60 | Rename ferrite → torrent, non-blocking disk I/O, async piece verification, resource exhaustion limits, cargo-fuzz scaffolding, workspace clippy lints |
 | 0.64.0 | — | TCP listener for incoming peers, UPnP gateway probe fallback + IGD v2, log spam cleanup |
