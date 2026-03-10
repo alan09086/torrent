@@ -13,6 +13,7 @@ torrent-session = { path = "../torrent-session" }
 torrent-core = { path = "../torrent-core" }
 torrent-bencode = { path = "../torrent-bencode" }
 torrent-storage = { path = "../torrent-storage" }
+torrent-wire = { path = "../torrent-wire" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

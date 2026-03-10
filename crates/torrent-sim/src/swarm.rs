@@ -11,6 +11,7 @@ use std::sync::Arc;
 use torrent_core::{DEFAULT_CHUNK_SIZE, Id20, Lengths, StorageMode, TorrentMeta, TorrentMetaV1};
 use torrent_session::transport::NetworkFactory;
 use torrent_session::{PeerSource, SessionHandle, Settings, TorrentStats};
+use torrent_wire::mse::EncryptionMode;
 use torrent_storage::{MemoryStorage, TorrentStorage};
 
 use crate::network::{LinkConfig, SimNetwork};
@@ -83,6 +84,7 @@ impl SimSwarmBuilder {
                 enable_natpmp: false,
                 enable_holepunch: false,
                 enable_ipv6: false,
+                encryption_mode: EncryptionMode::Disabled,
                 alert_channel_size: 64,
                 disk_io_threads: 2,
                 storage_mode: StorageMode::Sparse,
