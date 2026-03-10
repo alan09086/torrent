@@ -5219,7 +5219,7 @@ impl TorrentActor {
 
         let peer_rates = &self.cached_peer_rates;
 
-        let missing_buf = std::cell::RefCell::new(Vec::with_capacity(128));
+        let mut scratch = Vec::with_capacity(64);
         let mut slots_remaining = slots;
 
         // Clone peer bitfield once before the loop — within a single actor
@@ -5243,17 +5243,13 @@ impl TorrentActor {
                 break;
             }
 
-            // Re-create closure and context each iteration so borrows don't
-            // conflict with the mutable access to in_flight_pieces/peers below.
-            let missing_chunks_fn = |piece: u32| -> Vec<(u32, u32)> {
-                self.chunk_tracker
-                    .as_ref()
-                    .map(|ct| {
-                        let mut buf = missing_buf.borrow_mut();
-                        ct.missing_chunks_into(piece, &mut buf);
-                        buf.clone()
-                    })
-                    .unwrap_or_default()
+            // Re-create closure each iteration so borrows don't conflict
+            // with the mutable access to in_flight_pieces/peers below.
+            let missing_chunks_fn = |piece: u32, buf: &mut Vec<(u32, u32)>| {
+                buf.clear();
+                if let Some(ct) = self.chunk_tracker.as_ref() {
+                    ct.missing_chunks_into(piece, buf);
+                }
             };
 
             let ctx = PickContext {
@@ -5286,7 +5282,7 @@ impl TorrentActor {
                 cap_reached: self.in_flight_pieces.len() >= self.config.max_in_flight_pieces,
             };
 
-            if let Some(result) = self.piece_selector.pick_blocks(&ctx, missing_chunks_fn) {
+            if let Some(result) = self.piece_selector.pick_blocks(&ctx, &missing_chunks_fn, &mut scratch) {
                 debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots = slots_remaining, "pick_blocks: sending requests");
                 // Use Lengths arithmetic instead of iterating chunk tracker
                 let total_blocks = self

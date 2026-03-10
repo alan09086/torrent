@@ -248,9 +248,9 @@ impl PieceSelector {
     /// 3. Suggested pieces (BEP 6)
     /// 4. Partial pieces with unassigned blocks (speed affinity)
     /// 5. New piece selection (sequential/random/rarest-first)
-    pub fn pick_blocks<F>(&self, ctx: &PickContext<'_>, missing_chunks: F) -> Option<PickResult>
+    pub fn pick_blocks<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         // Layer 1: Streaming window pieces
         if !ctx.peer_is_snubbed {
@@ -258,11 +258,11 @@ impl PieceSelector {
                 if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece) {
                     continue;
                 }
-                let blocks = self.unassigned_blocks(piece, ctx, &missing_chunks);
-                if !blocks.is_empty() {
+                self.unassigned_blocks(piece, ctx, missing_chunks, scratch);
+                if !scratch.is_empty() {
                     return Some(PickResult {
                         piece,
-                        blocks,
+                        blocks: std::mem::take(scratch),
                         exclusive: false,
                     });
                 }
@@ -278,11 +278,11 @@ impl PieceSelector {
                 if ctx.streaming_pieces.contains(&piece) {
                     continue; // already handled in layer 1
                 }
-                let blocks = self.unassigned_blocks(piece, ctx, &missing_chunks);
-                if !blocks.is_empty() {
+                self.unassigned_blocks(piece, ctx, missing_chunks, scratch);
+                if !scratch.is_empty() {
                     return Some(PickResult {
                         piece,
-                        blocks,
+                        blocks: std::mem::take(scratch),
                         exclusive: false,
                     });
                 }
@@ -302,12 +302,12 @@ impl PieceSelector {
             if avail == 0 {
                 continue;
             }
-            let blocks = missing_chunks(piece);
-            if !blocks.is_empty() {
-                let exclusive = self.should_whole_piece(ctx, &blocks);
+            missing_chunks(piece, scratch);
+            if !scratch.is_empty() {
+                let exclusive = self.should_whole_piece(ctx, scratch);
                 return Some(PickResult {
                     piece,
-                    blocks,
+                    blocks: std::mem::take(scratch),
                     exclusive,
                 });
             }
@@ -315,7 +315,7 @@ impl PieceSelector {
         }
 
         // Layer 4: Partial pieces with unassigned blocks (speed affinity)
-        if let Some(result) = self.pick_partial(ctx, &missing_chunks) {
+        if let Some(result) = self.pick_partial(ctx, missing_chunks, scratch) {
             return Some(result);
         }
 
@@ -323,45 +323,42 @@ impl PieceSelector {
         if ctx.cap_reached {
             return None; // only partial/steal blocks available when cap reached
         }
-        self.pick_new_piece(ctx, &missing_chunks)
+        self.pick_new_piece(ctx, missing_chunks, scratch)
     }
 
     /// Get unassigned blocks for a piece that's already in-flight.
+    /// Results are written into `out`, which is cleared first by the closure.
     fn unassigned_blocks<F>(
         &self,
         piece: u32,
         ctx: &PickContext<'_>,
         missing_chunks: &F,
-    ) -> Vec<(u32, u32)>
+        out: &mut Vec<(u32, u32)>,
+    )
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
-        let all_missing = missing_chunks(piece);
+        missing_chunks(piece, out);
         if let Some(ifp) = ctx.in_flight_pieces.get(&piece) {
-            all_missing
-                .into_iter()
-                .filter(|&(begin, _len)| !ifp.assigned_blocks.contains_key(&(piece, begin)))
-                .collect()
-        } else {
-            all_missing
+            out.retain(|&(begin, _len)| !ifp.assigned_blocks.contains_key(&(piece, begin)));
         }
     }
 
     /// Pick a partial piece (already in-flight) with speed affinity.
-    fn pick_partial<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
+    fn pick_partial<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         let mut best_piece: Option<u32> = None;
-        let mut best_blocks: Vec<(u32, u32)> = Vec::new();
+        let mut best_buf: Vec<(u32, u32)> = Vec::new();
         let mut best_score: i32 = i32::MIN;
 
         for (&piece, ifp) in ctx.in_flight_pieces {
             if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece) {
                 continue;
             }
-            let blocks = self.unassigned_blocks(piece, ctx, missing_chunks);
-            if blocks.is_empty() {
+            self.unassigned_blocks(piece, ctx, missing_chunks, scratch);
+            if scratch.is_empty() {
                 continue;
             }
 
@@ -375,14 +372,14 @@ impl PieceSelector {
             if score > best_score {
                 best_score = score;
                 best_piece = Some(piece);
-                best_blocks = blocks;
+                std::mem::swap(&mut best_buf, scratch);
             }
         }
 
         if best_piece.is_some() {
             return best_piece.map(|piece| PickResult {
                 piece,
-                blocks: best_blocks,
+                blocks: best_buf,
                 exclusive: false,
             });
         }
@@ -400,30 +397,27 @@ impl PieceSelector {
                     }
 
                     // Get all missing blocks (includes assigned ones)
-                    let all_missing = missing_chunks(piece);
+                    missing_chunks(piece, scratch);
 
                     // Filter to blocks assigned to slow peers
-                    let stealable: Vec<(u32, u32)> = all_missing
-                        .into_iter()
-                        .filter(|&(begin, _len)| {
-                            if let Some(&assigned_peer) = ifp.assigned_blocks.get(&(piece, begin)) {
-                                if assigned_peer == ctx.peer_addr {
-                                    return false;
-                                }
-                                ctx.peer_rates
-                                    .get(&assigned_peer)
-                                    .map(|&rate| rate < steal_threshold)
-                                    .unwrap_or(false)
-                            } else {
-                                false // unassigned blocks should have been picked already
+                    scratch.retain(|&(begin, _len)| {
+                        if let Some(&assigned_peer) = ifp.assigned_blocks.get(&(piece, begin)) {
+                            if assigned_peer == ctx.peer_addr {
+                                return false;
                             }
-                        })
-                        .collect();
+                            ctx.peer_rates
+                                .get(&assigned_peer)
+                                .map(|&rate| rate < steal_threshold)
+                                .unwrap_or(false)
+                        } else {
+                            false // unassigned blocks should have been picked already
+                        }
+                    });
 
-                    if !stealable.is_empty() {
+                    if !scratch.is_empty() {
                         return Some(PickResult {
                             piece,
-                            blocks: stealable,
+                            blocks: std::mem::take(scratch),
                             exclusive: false,
                         });
                     }
@@ -435,29 +429,29 @@ impl PieceSelector {
     }
 
     /// Pick a new piece (not yet in-flight).
-    fn pick_new_piece<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
+    fn pick_new_piece<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         // Snubbed peers: pick highest-availability piece (reverse rarest-first)
         if ctx.peer_is_snubbed {
-            return self.pick_reverse_rarest(ctx, missing_chunks);
+            return self.pick_reverse_rarest(ctx, missing_chunks, scratch);
         }
 
         // Initial random threshold: randomize to promote piece diversity
         if ctx.completed_count < ctx.initial_picker_threshold
-            && let Some(result) = self.pick_random(ctx, missing_chunks)
+            && let Some(result) = self.pick_random(ctx, missing_chunks, scratch)
         {
             return Some(result);
         }
 
         // Sequential mode or auto-sequential
         if ctx.sequential_download || ctx.auto_sequential_active {
-            return self.pick_sequential(ctx, missing_chunks);
+            return self.pick_sequential(ctx, missing_chunks, scratch);
         }
 
         // Default: rarest-first
-        self.pick_rarest_new(ctx, missing_chunks)
+        self.pick_rarest_new(ctx, missing_chunks, scratch)
     }
 
     /// Size of an extent group in bytes (4 MiB).
@@ -486,23 +480,23 @@ impl PieceSelector {
     ///
     /// When extent affinity is enabled, tries the preferred extent first,
     /// then falls back to any extent if no candidates remain in that extent.
-    fn pick_rarest_new<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
+    fn pick_rarest_new<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         if ctx.extent_affinity
             && let Some(extent) = self.preferred_extent(ctx)
-            && let Some(result) = self.pick_rarest_in_extent(ctx, missing_chunks, extent)
+            && let Some(result) = self.pick_rarest_in_extent(ctx, missing_chunks, extent, scratch)
         {
             return Some(result);
         }
-        self.pick_rarest_any(ctx, missing_chunks)
+        self.pick_rarest_any(ctx, missing_chunks, scratch)
     }
 
     /// Standard rarest-first picking with no extent filter.
-    fn pick_rarest_any<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
+    fn pick_rarest_any<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         let mut best_index: Option<u32> = None;
         let mut best_avail: u32 = u32::MAX;
@@ -525,11 +519,11 @@ impl PieceSelector {
         }
 
         best_index.map(|piece| {
-            let blocks = missing_chunks(piece);
-            let exclusive = self.should_whole_piece(ctx, &blocks);
+            missing_chunks(piece, scratch);
+            let exclusive = self.should_whole_piece(ctx, scratch);
             PickResult {
                 piece,
-                blocks,
+                blocks: std::mem::take(scratch),
                 exclusive,
             }
         })
@@ -541,9 +535,10 @@ impl PieceSelector {
         ctx: &PickContext<'_>,
         missing_chunks: &F,
         extent: u32,
+        scratch: &mut Vec<(u32, u32)>,
     ) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         let mut best_index: Option<u32> = None;
         let mut best_avail: u32 = u32::MAX;
@@ -569,20 +564,20 @@ impl PieceSelector {
         }
 
         best_index.map(|piece| {
-            let blocks = missing_chunks(piece);
-            let exclusive = self.should_whole_piece(ctx, &blocks);
+            missing_chunks(piece, scratch);
+            let exclusive = self.should_whole_piece(ctx, scratch);
             PickResult {
                 piece,
-                blocks,
+                blocks: std::mem::take(scratch),
                 exclusive,
             }
         })
     }
 
     /// Sequential: pick lowest-index available piece not in-flight.
-    fn pick_sequential<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
+    fn pick_sequential<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         for i in 0..self.num_pieces {
             if !ctx.peer_has.get(i) || ctx.we_have.get(i) || !ctx.wanted.get(i) {
@@ -595,12 +590,12 @@ impl PieceSelector {
             if avail == 0 {
                 continue;
             }
-            let blocks = missing_chunks(i);
-            if !blocks.is_empty() {
-                let exclusive = self.should_whole_piece(ctx, &blocks);
+            missing_chunks(i, scratch);
+            if !scratch.is_empty() {
+                let exclusive = self.should_whole_piece(ctx, scratch);
                 return Some(PickResult {
                     piece: i,
-                    blocks,
+                    blocks: std::mem::take(scratch),
                     exclusive,
                 });
             }
@@ -609,9 +604,9 @@ impl PieceSelector {
     }
 
     /// Random selection for initial diversity.
-    fn pick_random<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F) -> Option<PickResult>
+    fn pick_random<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         // Collect all eligible pieces, pick one using simple hash-based selection
         let mut candidates = Vec::new();
@@ -634,11 +629,11 @@ impl PieceSelector {
         // Use peer address port as randomization seed for reproducible-per-peer picks
         let idx = (ctx.peer_addr.port() as usize) % candidates.len();
         let piece = candidates[idx];
-        let blocks = missing_chunks(piece);
-        let exclusive = self.should_whole_piece(ctx, &blocks);
+        missing_chunks(piece, scratch);
+        let exclusive = self.should_whole_piece(ctx, scratch);
         Some(PickResult {
             piece,
-            blocks,
+            blocks: std::mem::take(scratch),
             exclusive,
         })
     }
@@ -648,9 +643,10 @@ impl PieceSelector {
         &self,
         ctx: &PickContext<'_>,
         missing_chunks: &F,
+        scratch: &mut Vec<(u32, u32)>,
     ) -> Option<PickResult>
     where
-        F: Fn(u32) -> Vec<(u32, u32)>,
+        F: Fn(u32, &mut Vec<(u32, u32)>),
     {
         let mut best_index: Option<u32> = None;
         let mut best_avail: u32 = 0;
@@ -673,10 +669,10 @@ impl PieceSelector {
         }
 
         best_index.map(|piece| {
-            let blocks = missing_chunks(piece);
+            missing_chunks(piece, scratch);
             PickResult {
                 piece,
-                blocks,
+                blocks: std::mem::take(scratch),
                 exclusive: false,
             }
         })
@@ -1112,8 +1108,12 @@ mod tests {
             &time_critical,
             &suggested,
         );
-        let chunks = |_piece: u32| vec![(0, 16384), (16384, 16384)];
-        let result_a = sel.pick_blocks(&ctx_a, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384), (16384, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result_a = sel.pick_blocks(&ctx_a, &chunks, &mut scratch).unwrap();
         assert_eq!(result_a.piece, 0);
         assert_eq!(result_a.blocks.len(), 2);
 
@@ -1135,7 +1135,7 @@ mod tests {
             &time_critical,
             &suggested,
         );
-        let result_b = sel.pick_blocks(&ctx_b, chunks);
+        let result_b = sel.pick_blocks(&ctx_b, &chunks, &mut scratch);
         // No unassigned blocks remain, so no pick possible (only 1 piece)
         assert!(result_b.is_none());
     }
@@ -1170,8 +1170,12 @@ mod tests {
             &time_critical,
             &suggested,
         );
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         // Streaming layer picks piece 0 despite piece 1 being rarer
         assert_eq!(result.piece, 0);
     }
@@ -1211,8 +1215,12 @@ mod tests {
         ctx_fast.peer_rate = 102_400.0;
         ctx_fast.peer_is_snubbed = false;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result_fast = sel.pick_blocks(&ctx_fast, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result_fast = sel.pick_blocks(&ctx_fast, &chunks, &mut scratch).unwrap();
         assert_eq!(result_fast.piece, 0); // got streaming piece
 
         // Slow, snubbed peer should NOT get streaming blocks (layer 1 skips snubbed)
@@ -1230,7 +1238,7 @@ mod tests {
         ctx_slow.peer_rate = 1_024.0;
         ctx_slow.peer_is_snubbed = true;
 
-        let result_slow = sel.pick_blocks(&ctx_slow, chunks).unwrap();
+        let result_slow = sel.pick_blocks(&ctx_slow, &chunks, &mut scratch).unwrap();
         // Snubbed peer skips layers 1 & 2, ends up in layer 5 (reverse rarest)
         // Both pieces have avail=2, so it picks the first one with highest avail (both equal, lowest index = 0)
         // But the important thing is it did NOT get picked from the streaming layer
@@ -1274,8 +1282,12 @@ mod tests {
             &time_critical,
             &suggested,
         );
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         // Time-critical pieces 0 or 9 should be picked before rarest piece 5
         assert!(result.piece == 0 || result.piece == 9);
     }
@@ -1317,8 +1329,12 @@ mod tests {
         ctx.sequential_download = true;
         ctx.completed_count = 100; // past initial threshold
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         assert_eq!(result.piece, 0); // lowest index
     }
 
@@ -1357,8 +1373,12 @@ mod tests {
         ctx.completed_count = 0; // below threshold
         ctx.initial_picker_threshold = 4;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         // Random pick — just verify a valid piece was picked
         assert!(result.piece < 10);
         assert!(!result.blocks.is_empty());
@@ -1397,8 +1417,12 @@ mod tests {
         ctx.completed_count = 100; // past initial threshold
 
         // Blocks total 262144 bytes. Time = 262144/1048576 ≈ 0.25s < 20s
-        let chunks = |_piece: u32| vec![(0, 131_072), (131_072, 131_072)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 131_072), (131_072, 131_072)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         assert_eq!(result.piece, 0);
         assert!(
             result.exclusive,
@@ -1449,11 +1473,15 @@ mod tests {
         ctx.peer_rate = 5_000.0;
         ctx.completed_count = 100; // past initial threshold
 
-        let chunks = |piece: u32| match piece {
-            0 => vec![(0, 16384), (16384, 16384), (32768, 16384)],
-            _ => vec![(0, 16384), (16384, 16384)],
+        let chunks = |piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            match piece {
+                0 => buf.extend_from_slice(&[(0, 16384), (16384, 16384), (32768, 16384)]),
+                _ => buf.extend_from_slice(&[(0, 16384), (16384, 16384)]),
+            }
         };
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         // Slow peer can pick partial piece 0 (1 unassigned block) or a new piece (1 or 2).
         // Layer 4 (partial) runs first. Piece 0 has 1 unassigned block.
         // Either partial or new is valid — just verify we got a valid piece.
@@ -1495,8 +1523,12 @@ mod tests {
         );
         ctx.peer_is_snubbed = true;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         // Snubbed peer should pick highest availability (piece 2, avail=3)
         assert_eq!(result.piece, 2);
         assert!(!result.exclusive); // snubbed peers never get exclusive
@@ -1549,15 +1581,17 @@ mod tests {
         ctx.completed_count = 100; // past initial threshold
         ctx.auto_sequential_active = true;
 
-        let chunks = |piece: u32| {
+        let chunks = |piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
             if piece < 10 {
                 // In-flight pieces — all assigned, return full list
-                vec![(0, 16384), (16384, 16384)]
+                buf.extend_from_slice(&[(0, 16384), (16384, 16384)]);
             } else {
-                vec![(0, 16384)]
+                buf.extend_from_slice(&[(0, 16384)]);
             }
         };
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         // Auto-sequential: should pick lowest non-in-flight piece = 10
         assert_eq!(result.piece, 10);
     }
@@ -1673,8 +1707,12 @@ mod tests {
         ctx.piece_size = 262_144;
         ctx.completed_count = 100;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         assert_eq!(result.piece, 5); // extent 0, not 20 (extent 1)
     }
 
@@ -1721,8 +1759,12 @@ mod tests {
         ctx.piece_size = 262_144;
         ctx.completed_count = 100;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         assert_eq!(result.piece, 5); // lowest-index rarest (tie-break)
     }
 
@@ -1770,8 +1812,12 @@ mod tests {
         ctx.piece_size = 262_144;
         ctx.completed_count = 100;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks).unwrap();
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch).unwrap();
         assert!(result.piece >= 16); // falls back to extent 1
     }
 
@@ -1848,11 +1894,15 @@ mod tests {
         ctx.cap_reached = true;
         ctx.completed_count = 100;
 
-        let chunks = |piece: u32| match piece {
-            0 => vec![(0, 16384), (16384, 16384)],
-            _ => vec![(0, 16384)],
+        let chunks = |piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            match piece {
+                0 => buf.extend_from_slice(&[(0, 16384), (16384, 16384)]),
+                _ => buf.extend_from_slice(&[(0, 16384)]),
+            }
         };
-        let result = sel.pick_blocks(&ctx, chunks);
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
         // Should pick partial piece 0 (1 unassigned block at offset 16384)
         assert!(result.is_some());
         let r = result.unwrap();
@@ -1897,8 +1947,12 @@ mod tests {
         ctx.cap_reached = true;
         ctx.completed_count = 100;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks);
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
         // No partial pieces and cap reached — new piece selection skipped
         assert!(result.is_none());
     }
@@ -1939,8 +1993,12 @@ mod tests {
         ctx.cap_reached = false;
         ctx.completed_count = 100;
 
-        let chunks = |_piece: u32| vec![(0, 16384)];
-        let result = sel.pick_blocks(&ctx, chunks);
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+            buf.extend_from_slice(&[(0, 16384)]);
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
         // Should pick a new piece normally
         assert!(result.is_some());
     }
