@@ -1477,6 +1477,12 @@ struct TorrentActor {
 /// batch refill tick — raising depth no longer amplifies picker invocations.
 const END_GAME_DEPTH: usize = 128;
 
+/// Minimum free pipeline slots before invoking the full piece picker in
+/// `handle_piece_data()`.  Avoids running the 5-layer picker on every single
+/// block arrival (~91k times per 1.4 GiB download).  The 1-second pipeline
+/// tick and end-game bypass ensure no peer starves.
+const BATCH_DISPATCH_THRESHOLD: usize = 32;
+
 impl TorrentActor {
     /// Returns the effective maximum connection count for this torrent.
     ///
@@ -2173,18 +2179,20 @@ impl TorrentActor {
                     // rebuilding a FxHashMap from all peers on every block arrival).
                     self.refresh_peer_rates();
 
-                    // Proactive request scheduling: re-evaluate all unchoked peers
-                    // for new work. Without this, peers that become idle (e.g. after
-                    // duplicate block rejection or piece completion) never recover,
-                    // causing download stalls at high completion percentages.
+                    // Proactive request scheduling: re-evaluate unchoked peers
+                    // for new work. Catches two cases the per-block threshold skips:
+                    // 1. Fully idle peers (any queue depth) — original safety net
+                    // 2. High-depth peers with enough free slots to justify the picker
                     if self.state == TorrentState::Downloading {
-                        let idle_peers: Vec<SocketAddr> = self.peers.iter()
+                        let refill_peers: Vec<SocketAddr> = self.peers.iter()
                             .filter(|(_, p)| {
-                                !p.peer_choking && p.pending_requests.is_empty()
+                                if p.peer_choking { return false; }
+                                let free = p.pipeline.queue_depth().saturating_sub(p.pending_requests.len());
+                                p.pending_requests.is_empty() || free >= BATCH_DISPATCH_THRESHOLD
                             })
                             .map(|(addr, _)| *addr)
                             .collect();
-                        for addr in idle_peers {
+                        for addr in refill_peers {
                             self.request_pieces_from_peer(addr).await;
                         }
                     }
@@ -3665,8 +3673,16 @@ impl TorrentActor {
             }
         }
 
-        // Try to request more from this peer
-        self.request_pieces_from_peer(peer_addr).await;
+        // Only invoke the full picker when enough slots are free to justify
+        // the cost, or when end-game needs immediate block assignment.
+        let free_slots = if let Some(peer) = self.peers.get(&peer_addr) {
+            peer.pipeline.queue_depth().saturating_sub(peer.pending_requests.len())
+        } else {
+            0
+        };
+        if self.end_game.is_active() || free_slots >= BATCH_DISPATCH_THRESHOLD {
+            self.request_pieces_from_peer(peer_addr).await;
+        }
     }
 
     async fn verify_existing_pieces(&mut self) {
