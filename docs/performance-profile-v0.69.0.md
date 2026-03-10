@@ -39,21 +39,24 @@ more CPU than rqbit uses in total (10.6s). Everything else combined is ~8s.
 ### SHA1 Analysis (44.5%)
 
 The `sha1_compress` function is the SHA1 block compression. Despite enabling the `asm`
-feature on the `sha1` crate in M65, the profile shows a software implementation path.
-**Possible explanations:**
+feature on the `sha1` crate in M65, the throughput is only 174 MB/s — far below optimal.
 
-1. **SHA-NI not dispatched at runtime** — The `sha1` crate's `asm` feature enables
-   compile-time CPU detection, but the actual SHA-NI path may require specific target
-   features (`+sha,+sse2,+ssse3,+sse4.1,+sse4.2`) to be set at compile time.
-2. **Profile is accurate, SHA1 is just expensive** — Even with hardware acceleration,
-   hashing 1.4 GiB of data requires ~2867 piece verifications × 512 KiB each. At
-   hardware SHA1 speeds (~3 GB/s), this would be ~0.47s. At software speeds (~500 MB/s),
-   it would be ~2.8s. Given 44.5% of 18.1s ≈ 8.05s, this suggests **software SHA1**.
-3. **Incremental hashing overhead** — If `sha1_chunks()` creates/destroys hasher state
-   per chunk rather than streaming, there's per-piece overhead.
+**Root cause confirmed:** The profiling host is a **Xeon E5-2673 v4 (Broadwell, 2016)**
+which does **NOT have SHA-NI extensions**. The `sha1-asm` crate's `cpufeatures` correctly
+detects this and uses its software assembly path. However, this assembly is mediocre
+compared to OpenSSL/BoringSSL's hand-tuned AVX2 code:
 
-**Verdict: SHA1 is almost certainly NOT using SHA-NI hardware acceleration.** 8.05s for
-1.4 GiB = 174 MB/s throughput, consistent with pure Rust software SHA1.
+| Implementation | Throughput | CPU for 1.4 GiB |
+|----------------|-----------|------------------|
+| `sha1` crate (`asm` feature) | 174 MB/s | 8.05s |
+| OpenSSL (BoringSSL AVX2 asm) | 800 MB/s | 1.75s |
+| SHA-NI hardware (not available) | ~3 GB/s | ~0.47s |
+
+**The gap is 4.6x** between `sha1-asm` and OpenSSL's AVX2 assembly on this CPU.
+
+**Fix:** Switch from `sha1`/`sha2` crates to `ring` (which uses BoringSSL's hand-optimized
+assembly). Expected improvement: 174 → ~800 MB/s, saving ~6.3s of CPU time per download.
+On machines with SHA-NI (Zen 1+, Ice Lake+), `ring` would also use the hardware path.
 
 ### RC4 Analysis (11.8%)
 
@@ -63,11 +66,13 @@ on every byte of payload for MSE/PE encrypted connections. 11.8% of 18.1s ≈ 2.
 1.4 GiB at 2.14s = 653 MB/s — reasonable for a pure Rust byte-by-byte RC4 PRGA.
 
 **Optimization opportunities:**
-- RC4 is only needed for the first 1024 bytes of payload per connection (MSE/PE spec).
-  After that, the "plaintext" crypto method should disable it. If we're encrypting ALL
-  traffic, that's a protocol implementation issue.
-- If full-stream encryption is required (negotiated), batch processing with wider
-  registers could help (process 8/16/32 bytes at a time via SIMD).
+- RC4 is applied to ALL payload when the responder selects RC4 (most peers do). The
+  initiator offers `PLAINTEXT | RC4` and the responder picks. We cannot control their
+  choice, but when WE are responder, our `prefer_rc4=false` already prefers plaintext.
+- The write path in `MseStream::poll_write` allocates a fresh `Vec` on every write call
+  (`buf.to_vec()`) — this is a per-write allocation that could be eliminated with a
+  reusable buffer or in-place encryption.
+- The RC4 PRGA's 64-byte bulk phase helps, but register-widened SIMD could do better.
 
 ## Memory Profile (heaptrack)
 
@@ -141,16 +146,16 @@ from peers 129-200.
 
 ### Tier 1: High Impact (estimated 2-3x CPU reduction)
 
-#### 1. Fix SHA-NI Hardware Acceleration — **Critical**
-**Expected impact:** 44.5% → ~5% CPU (8.05s → ~0.5s)
-**Effort:** Small
+#### 1. Switch to `ring` crate for SHA1/SHA256 — **Critical**
+**Expected impact:** 44.5% → ~10% CPU (8.05s → ~1.75s)
+**Effort:** Small-Medium
 
-The SHA1 hashing is using software fallback despite `asm` being enabled. Two approaches:
-- **Option A:** Compile with `RUSTFLAGS="-C target-cpu=native"` to enable SHA-NI codegen
-- **Option B:** Switch to `ring` crate which has hand-optimized asm for SHA1/SHA256
-- **Verification:** After fix, `sha1_compress` should drop from 44.5% to <5% in flamegraph
+The `sha1` crate's `sha1-asm` assembly is 4.6x slower than BoringSSL's AVX2 code on this
+CPU (Broadwell, no SHA-NI). The `ring` crate uses BoringSSL's hand-optimized assembly which
+delivers ~800 MB/s on this hardware. On SHA-NI-capable CPUs (Zen 1+, Ice Lake+), `ring`
+would also use the hardware acceleration path.
 
-This single fix would cut total CPU from ~18s to ~10s — immediately matching rqbit.
+This single fix would cut total CPU from ~18s to ~12s, closing most of the gap to rqbit.
 
 #### 2. RC4 Cipher Optimization — **Important**
 **Expected impact:** 11.8% → ~1% CPU (2.14s → ~0.2s)
@@ -216,12 +221,12 @@ it's wasted memory. Make it optional or reduce default size.
 
 | Finding | Current | Target | Fix |
 |---------|---------|--------|-----|
-| SHA1 not hardware-accelerated | 44.5% CPU | <5% CPU | target-cpu=native or ring crate |
-| RC4 encrypting all payload | 11.8% CPU | <2% CPU | Plaintext after handshake / SIMD |
+| SHA1 slow assembly (4.6x vs BoringSSL) | 44.5% CPU | ~10% CPU | Switch to `ring` crate |
+| RC4 full-stream + Vec alloc per write | 11.8% CPU | ~8% CPU | Reusable write buffer |
 | Temporary allocations | 2M/download | <100K | Pre-allocated scratch buffers |
 | Peer count overhead | 200 peers | 128 peers | Config change |
 | Store buffer size | 16 MiB | 8 MiB | Reduce in-flight cap |
 | ARC cache for non-streaming | 8 MiB | 0 MiB | Optional/disabled |
 
-**Projected v0.70.0 after Tier 1 fixes:** ~10s user CPU (matching rqbit), ~65 MiB RSS.
-**Projected after all tiers:** ~8s user CPU (beating rqbit), ~50 MiB RSS.
+**Projected after M67 (crypto):** ~12s user CPU, ~79 MiB RSS (matching rqbit CPU).
+**Projected after M68 (memory/tuning):** ~11s user CPU, ~55 MiB RSS.
