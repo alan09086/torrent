@@ -1,6 +1,5 @@
 //! MSE/PE hash functions and crypto method negotiation.
 
-use sha1::Digest;
 
 /// Verification Constant: 8 zero bytes.
 pub(crate) const VC: [u8; 8] = [0u8; 8];
@@ -16,27 +15,34 @@ pub const CRYPTO_RC4: u32 = 0x02;
 
 /// Compute HASH(data) = SHA1(data). Returns 20 bytes.
 #[allow(dead_code)]
-pub(crate) fn mse_hash(data: &[u8]) -> [u8; 20] {
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(data);
-    hasher.finalize().into()
+fn mse_hash(data: &[u8]) -> [u8; 20] {
+    let hash = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(hash.as_ref());
+    out
 }
 
 /// HASH(prefix + suffix) — concatenate then SHA1.
-pub(crate) fn mse_hash2(a: &[u8], b: &[u8]) -> [u8; 20] {
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(a);
-    hasher.update(b);
-    hasher.finalize().into()
+fn mse_hash2(a: &[u8], b: &[u8]) -> [u8; 20] {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+    ctx.update(a);
+    ctx.update(b);
+    let hash = ctx.finish();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(hash.as_ref());
+    out
 }
 
 /// HASH(a + b + c) — concatenate three parts then SHA1.
-pub(crate) fn mse_hash3(a: &[u8], b: &[u8], c: &[u8]) -> [u8; 20] {
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(a);
-    hasher.update(b);
-    hasher.update(c);
-    hasher.finalize().into()
+fn mse_hash3(a: &[u8], b: &[u8], c: &[u8]) -> [u8; 20] {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+    ctx.update(a);
+    ctx.update(b);
+    ctx.update(c);
+    let hash = ctx.finish();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(hash.as_ref());
+    out
 }
 
 /// Compute the synchronization marker: HASH("req1" + S)
