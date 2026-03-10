@@ -37,6 +37,9 @@ bitflags = { version = "2", features = ["serde"] }
 # Ed25519 signing (BEP 44 mutable DHT items)
 ed25519-dalek = { version = "2" }
 
+# Cryptography (SHA1, SHA256 via BoringSSL)
+ring = "0.17"
+
 # Testing
 pretty_assertions = "1"
 

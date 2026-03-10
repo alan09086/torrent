@@ -54,38 +54,44 @@ pub enum AddressFamily {
 
 /// Compute SHA1 hash of input bytes.
 pub fn sha1(data: &[u8]) -> Id20 {
-    use sha1::Digest;
-    let hash = sha1::Sha1::digest(data);
-    Id20(hash.into())
+    let hash = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
+    let mut id = [0u8; 20];
+    id.copy_from_slice(hash.as_ref());
+    Id20(id)
 }
 
 /// Compute SHA1 hash of multiple chunks without concatenating them.
 ///
 /// Avoids allocating a large buffer when piece data is stored as separate blocks.
 pub fn sha1_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id20 {
-    use sha1::Digest;
-    let mut hasher = sha1::Sha1::new();
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
     for chunk in chunks {
-        hasher.update(chunk);
+        ctx.update(chunk);
     }
-    Id20(hasher.finalize().into())
+    let hash = ctx.finish();
+    let mut id = [0u8; 20];
+    id.copy_from_slice(hash.as_ref());
+    Id20(id)
 }
 
 /// Compute SHA-256 hash of input bytes (used by BitTorrent v2, BEP 52).
 pub fn sha256(data: &[u8]) -> Id32 {
-    use sha2::Digest;
-    let hash = sha2::Sha256::digest(data);
-    Id32(hash.into())
+    let hash = ring::digest::digest(&ring::digest::SHA256, data);
+    let mut id = [0u8; 32];
+    id.copy_from_slice(hash.as_ref());
+    Id32(id)
 }
 
 /// Compute SHA-256 hash of multiple chunks without concatenating them.
 pub fn sha256_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id32 {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     for chunk in chunks {
-        hasher.update(chunk);
+        ctx.update(chunk);
     }
-    Id32(hasher.finalize().into())
+    let hash = ctx.finish();
+    let mut id = [0u8; 32];
+    id.copy_from_slice(hash.as_ref());
+    Id32(id)
 }
 
 /// Fill a buffer with pseudo-random bytes (xorshift64, not cryptographic).

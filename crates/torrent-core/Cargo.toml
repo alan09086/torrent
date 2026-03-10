@@ -16,8 +16,7 @@ serde_bytes = { workspace = true }
 thiserror = { workspace = true }
 
 # Hashing
-sha1 = { version = "0.10", features = ["asm"] }
-sha2 = { version = "0.10", features = ["asm"] }
+ring = { workspace = true }
 
 # Encoding (hex, base32 for magnets)
 hex = "0.4"
