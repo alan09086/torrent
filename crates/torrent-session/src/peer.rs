@@ -54,10 +54,12 @@ pub(crate) async fn run_peer(
     // Timeout MSE handshake at 5 seconds to avoid blocking on plaintext-only
     // peers that won't respond to our DH key exchange.
     let mut stream = if encryption_mode != EncryptionMode::Disabled {
-        let crypto_provide = if encryption_mode == EncryptionMode::Forced {
-            torrent_wire::mse::CRYPTO_RC4
-        } else {
-            torrent_wire::mse::CRYPTO_PLAINTEXT | torrent_wire::mse::CRYPTO_RC4
+        let crypto_provide = match encryption_mode {
+            EncryptionMode::Forced => torrent_wire::mse::CRYPTO_RC4,
+            EncryptionMode::PreferPlaintext if outbound => torrent_wire::mse::CRYPTO_PLAINTEXT,
+            // Inbound PreferPlaintext (guard false), Enabled, and any future variants —
+            // accept both methods and let the peer choose.
+            _ => torrent_wire::mse::CRYPTO_PLAINTEXT | torrent_wire::mse::CRYPTO_RC4,
         };
 
         let result = if outbound {

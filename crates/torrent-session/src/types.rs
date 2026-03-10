@@ -155,7 +155,7 @@ impl Default for TorrentConfig {
             strict_end_game: true,
             upload_rate_limit: 0,
             download_rate_limit: 0,
-            encryption_mode: torrent_wire::mse::EncryptionMode::Enabled,
+            encryption_mode: torrent_wire::mse::EncryptionMode::PreferPlaintext,
             enable_utp: true,
             enable_web_seed: true,
             enable_holepunch: true,
@@ -702,7 +702,7 @@ pub(crate) enum PeerEvent {
         target: SocketAddr,
         error_code: u32,
     },
-    /// MSE handshake failed — peer is being retried with plaintext.
+    /// MSE handshake failed — peer is being retried with a different encryption mode.
     /// Carries the new command channel sender so the TorrentActor can
     /// update its PeerState.
     MseRetry {
@@ -1148,7 +1148,7 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert_eq!(
             cfg.encryption_mode,
-            torrent_wire::mse::EncryptionMode::Enabled
+            torrent_wire::mse::EncryptionMode::PreferPlaintext
         );
     }
 

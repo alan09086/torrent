@@ -6052,10 +6052,20 @@ impl TorrentActor {
                             {
                                 Ok(()) => debug!(%addr, "uTP peer session ended normally"),
                                 Err(e) => {
-                                    // MSE fallback: reconnect with plaintext on failure
-                                    if encryption_mode == torrent_wire::mse::EncryptionMode::Enabled
-                                    {
-                                        debug!(%addr, error = %e, "uTP MSE failed, retrying plaintext");
+                                    // MSE fallback: determine retry mode based on encryption setting.
+                                    // Enabled: offered both → retry with Disabled (skip MSE entirely)
+                                    // PreferPlaintext: offered plaintext-only → retry with Enabled (offer both)
+                                    let retry_mode = match encryption_mode {
+                                        torrent_wire::mse::EncryptionMode::Enabled => {
+                                            Some(torrent_wire::mse::EncryptionMode::Disabled)
+                                        }
+                                        torrent_wire::mse::EncryptionMode::PreferPlaintext => {
+                                            Some(torrent_wire::mse::EncryptionMode::Enabled)
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(fallback_mode) = retry_mode {
+                                        debug!(%addr, error = %e, ?fallback_mode, "uTP MSE failed, retrying with fallback");
                                         if let Ok(Ok(stream2)) = tokio::time::timeout(
                                             Duration::from_secs(5),
                                             socket.connect(addr),
@@ -6080,7 +6090,7 @@ impl TorrentActor {
                                                 retry_rx,
                                                 enable_dht,
                                                 enable_fast,
-                                                torrent_wire::mse::EncryptionMode::Disabled,
+                                                fallback_mode,
                                                 true,
                                                 anonymous_mode,
                                                 info_bytes.clone(),
@@ -6091,10 +6101,10 @@ impl TorrentActor {
                                             .await
                                             {
                                                 Ok(()) => {
-                                                    debug!(%addr, "uTP plaintext session ended normally")
+                                                    debug!(%addr, "uTP fallback session ended normally")
                                                 }
                                                 Err(e2) => {
-                                                    debug!(%addr, error = %e2, "uTP plaintext also failed");
+                                                    debug!(%addr, error = %e2, "uTP fallback also failed");
                                                     let _ = event_tx
                                                         .send(PeerEvent::Disconnected {
                                                             peer_addr: addr,
@@ -6104,7 +6114,7 @@ impl TorrentActor {
                                                 }
                                             }
                                         } else {
-                                            debug!(%addr, "uTP plaintext reconnect failed");
+                                            debug!(%addr, "uTP fallback reconnect failed");
                                             let _ = event_tx
                                                 .send(PeerEvent::Disconnected {
                                                     peer_addr: addr,
@@ -6233,10 +6243,20 @@ impl TorrentActor {
                             {
                                 Ok(()) => debug!(%addr, "TCP peer session ended normally"),
                                 Err(e) => {
-                                    // MSE fallback for TCP
-                                    if encryption_mode == torrent_wire::mse::EncryptionMode::Enabled
-                                    {
-                                        debug!(%addr, error = %e, "TCP MSE failed, retrying plaintext");
+                                    // MSE fallback for TCP: determine retry mode.
+                                    // Enabled: offered both → retry with Disabled (skip MSE entirely)
+                                    // PreferPlaintext: offered plaintext-only → retry with Enabled (offer both)
+                                    let retry_mode = match encryption_mode {
+                                        torrent_wire::mse::EncryptionMode::Enabled => {
+                                            Some(torrent_wire::mse::EncryptionMode::Disabled)
+                                        }
+                                        torrent_wire::mse::EncryptionMode::PreferPlaintext => {
+                                            Some(torrent_wire::mse::EncryptionMode::Enabled)
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(fallback_mode) = retry_mode {
+                                        debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
                                         if let Ok(tcp2) = factory.connect_tcp(addr).await {
                                             let (retry_tx, retry_rx) = mpsc::channel(64);
                                             let _ = event_tx
@@ -6256,7 +6276,7 @@ impl TorrentActor {
                                                 retry_rx,
                                                 enable_dht,
                                                 enable_fast,
-                                                torrent_wire::mse::EncryptionMode::Disabled,
+                                                fallback_mode,
                                                 true,
                                                 anonymous_mode,
                                                 info_bytes,
@@ -6267,10 +6287,10 @@ impl TorrentActor {
                                             .await
                                             {
                                                 Ok(()) => {
-                                                    debug!(%addr, "TCP plaintext session ended normally")
+                                                    debug!(%addr, "TCP fallback session ended normally")
                                                 }
                                                 Err(e2) => {
-                                                    debug!(%addr, error = %e2, "TCP plaintext also failed");
+                                                    debug!(%addr, error = %e2, "TCP fallback also failed");
                                                     let _ = event_tx
                                                         .send(PeerEvent::Disconnected {
                                                             peer_addr: addr,
@@ -6280,7 +6300,7 @@ impl TorrentActor {
                                                 }
                                             }
                                         } else {
-                                            debug!(%addr, "TCP plaintext reconnect failed");
+                                            debug!(%addr, "TCP fallback reconnect failed");
                                             let _ = event_tx
                                                 .send(PeerEvent::Disconnected {
                                                     peer_addr: addr,

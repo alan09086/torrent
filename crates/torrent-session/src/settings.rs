@@ -32,7 +32,7 @@ fn default_max_torrents() -> usize {
     100
 }
 fn default_encryption() -> EncryptionMode {
-    EncryptionMode::Enabled
+    EncryptionMode::PreferPlaintext
 }
 fn default_auto_upload_slots_min() -> usize {
     2
@@ -286,7 +286,7 @@ pub struct Settings {
     /// relay, or target for holepunch connections. Default: true.
     #[serde(default = "default_true")]
     pub enable_holepunch: bool,
-    /// Connection encryption mode (MSE/PE). Default: Enabled.
+    /// Connection encryption mode (MSE/PE). Default: PreferPlaintext.
     #[serde(default = "default_encryption")]
     pub encryption_mode: EncryptionMode,
     /// Suppress identifying information (client version in BEP 10 handshake)
@@ -698,7 +698,7 @@ impl Default for Settings {
             enable_ipv6: true,
             enable_web_seed: true,
             enable_holepunch: true,
-            encryption_mode: EncryptionMode::Enabled,
+            encryption_mode: EncryptionMode::PreferPlaintext,
             anonymous_mode: false,
             external_ip: None,
             // Seeding
@@ -1199,7 +1199,7 @@ mod tests {
         assert!(s.enable_natpmp);
         assert!(s.enable_ipv6);
         assert!(s.enable_web_seed);
-        assert_eq!(s.encryption_mode, EncryptionMode::Enabled);
+        assert_eq!(s.encryption_mode, EncryptionMode::PreferPlaintext);
         assert!(!s.anonymous_mode);
         assert!(s.seed_ratio_limit.is_none());
         assert!(!s.default_super_seeding);
