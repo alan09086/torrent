@@ -1915,10 +1915,8 @@ impl TorrentActor {
                 // Request driver NeedBlocks messages
                 Some((peer_addr, msg)) = self.driver_msg_rx.recv() => {
                     match msg {
-                        DriverMessage::NeedBlocks(count) => {
-                            for _ in 0..count {
-                                self.dispatch_single_block(peer_addr).await;
-                            }
+                        DriverMessage::NeedBlocks => {
+                            self.dispatch_single_block(peer_addr).await;
                         }
                     }
                 }
@@ -3663,11 +3661,9 @@ impl TorrentActor {
                             .meta
                             .as_ref()
                             .and_then(|m| m.info.piece_hash(index as usize))
-                        && let Some(ref lengths) = self.lengths
                     {
                         self.pending_verify.insert(index);
-                        let piece_length = lengths.piece_size(index);
-                        disk.enqueue_verify(index, piece_length, expected, &self.verify_result_tx);
+                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
                     }
                 }
                 torrent_core::TorrentVersion::V2Only => {
