@@ -1,0 +1,4 @@
+# Optimize for the build machine's CPU (enables AVX2, SHA-NI, BMI2, etc.)
+# Note: binaries built with this are NOT portable to other CPU architectures.
+[build]
+rustflags = ["-C", "target-cpu=native"]
