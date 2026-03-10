@@ -185,7 +185,7 @@ impl TorrentHandle {
             crate::piece_selector::build_wanted_pieces(&file_priorities, &file_lengths, &lengths);
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let (event_tx, event_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(2048);
         let (write_error_tx, write_error_rx) = mpsc::channel(64);
         let (verify_result_tx, verify_result_rx) = mpsc::channel(1024);
         let our_peer_id = if config.anonymous_mode {
@@ -478,7 +478,7 @@ impl TorrentHandle {
         factory: Arc<crate::transport::NetworkFactory>,
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let (event_tx, event_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(2048);
         let (write_error_tx, write_error_rx) = mpsc::channel(64);
         let (verify_result_tx, verify_result_rx) = mpsc::channel(1024);
         let our_peer_id = if config.anonymous_mode {
@@ -1686,6 +1686,42 @@ impl TorrentActor {
 
         loop {
             tokio::select! {
+                biased;
+                // Events from peers — batch-drain to reduce select! overhead.
+                // At 100 MB/s we get ~6K events/sec; processing one-by-one
+                // means 6K select! iterations with waker re-registration.
+                // biased; ensures this high-throughput arm is checked first.
+                event = self.event_rx.recv() => {
+                    if let Some(event) = event {
+                        self.handle_peer_event(event).await;
+                        // Drain up to 256 more ready events without re-entering select!
+                        for _ in 0..256 {
+                            match self.event_rx.try_recv() {
+                                Ok(event) => self.handle_peer_event(event).await,
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+                // Async piece verification results
+                Some(result) = self.verify_result_rx.recv() => {
+                    self.pending_verify.remove(&result.piece);
+                    // Guard: ignore stale/duplicate results for already-verified pieces
+                    let dominated = self.chunk_tracker.as_ref()
+                        .map(|ct| ct.bitfield().get(result.piece))
+                        .unwrap_or(false);
+                    if !dominated {
+                        if result.passed {
+                            self.on_piece_verified(result.piece).await;
+                        } else {
+                            self.on_piece_hash_failed(result.piece).await;
+                            let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
+                            for addr in addrs {
+                                self.request_pieces_from_peer(addr).await;
+                            }
+                        }
+                    }
+                }
                 // Commands from handle
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
@@ -1898,43 +1934,9 @@ impl TorrentActor {
                         }
                     }
                 }
-                // Events from peers — batch-drain to reduce select! overhead.
-                // At 100 MB/s we get ~6K events/sec; processing one-by-one
-                // means 6K select! iterations with waker re-registration.
-                event = self.event_rx.recv() => {
-                    if let Some(event) = event {
-                        self.handle_peer_event(event).await;
-                        // Drain up to 64 more ready events without re-entering select!
-                        for _ in 0..64 {
-                            match self.event_rx.try_recv() {
-                                Ok(event) => self.handle_peer_event(event).await,
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                }
                 // Async disk write errors
                 Some(err) = self.write_error_rx.recv() => {
                     warn!(piece = err.piece, begin = err.begin, "async disk write failed: {}", err.error);
-                }
-                // Async piece verification results
-                Some(result) = self.verify_result_rx.recv() => {
-                    self.pending_verify.remove(&result.piece);
-                    // Guard: ignore stale/duplicate results for already-verified pieces
-                    let dominated = self.chunk_tracker.as_ref()
-                        .map(|ct| ct.bitfield().get(result.piece))
-                        .unwrap_or(false);
-                    if !dominated {
-                        if result.passed {
-                            self.on_piece_verified(result.piece).await;
-                        } else {
-                            self.on_piece_hash_failed(result.piece).await;
-                            let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
-                            for addr in addrs {
-                                self.request_pieces_from_peer(addr).await;
-                            }
-                        }
-                    }
                 }
                 // Accept incoming peers
                 result = accept_incoming(&mut self.listener) => {
