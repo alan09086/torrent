@@ -523,8 +523,6 @@ mod tests {
 
     #[tokio::test]
     async fn large_transfer() {
-        use sha1::{Digest, Sha1};
-
         let (socket_a, mut listener_a) = UtpSocket::bind(localhost_config()).await.unwrap();
         let (socket_b, _listener_b) = UtpSocket::bind(localhost_config()).await.unwrap();
 
@@ -541,11 +539,7 @@ mod tests {
         let mut send_data = vec![0u8; data_size];
         torrent_core::random_bytes(&mut send_data);
 
-        let expected_hash = {
-            let mut h = Sha1::new();
-            h.update(&send_data);
-            h.finalize()
-        };
+        let expected_hash = torrent_core::sha1(&send_data);
 
         // Spawn writer
         let write_handle = tokio::spawn(async move {
@@ -592,11 +586,7 @@ mod tests {
 
         assert_eq!(received.len(), data_size, "received wrong number of bytes");
 
-        let actual_hash = {
-            let mut h = Sha1::new();
-            h.update(&received);
-            h.finalize()
-        };
+        let actual_hash = torrent_core::sha1(&received);
         assert_eq!(actual_hash, expected_hash, "SHA1 mismatch on 1MB transfer");
 
         socket_a.shutdown().await.unwrap();
