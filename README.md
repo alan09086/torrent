@@ -4,7 +4,7 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1395-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1392-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
 [![Version](https://img.shields.io/badge/version-0.71.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1395 tests, zero clippy warnings**
+- 📊 **1392 tests, zero clippy warnings**
 
 ---
 
@@ -238,7 +238,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
-| 0.71.0 | M68 | Memory & allocation optimization: scratch buffer API eliminates 88% of temporary allocations (2.04M→243K), stack-array `peer_count()`, `max_in_flight_pieces` 32→20 — RSS down 20% (79→63 MiB) |
+| 0.71.0 | M68+M69 | Pipeline optimization: dispatch threshold 32→4, fixed-depth pipeline (no BDP feedback loop), event channel 256→2048 with biased select, PreferPlaintext encryption mode, scratch buffer API (-88% temp allocs), stack-array `peer_count()`, `max_in_flight_pieces` 32→20 |
 | 0.70.0 | M67 | Crypto optimization: `ring` (BoringSSL AVX2 asm) replaces `sha1`/`sha2` crates (~4.6x SHA1 throughput on Broadwell), `target-cpu=native` codegen, RC4 write buffer reuse, default peers 200→128 |
 | 0.69.0 | M66 | Adaptive queue depth: per-peer BDP-based pipeline depth replaces fixed 128 slots — fast peers get deeper pipelines (up to 250), slow peers get shallower (floor 16) |
 | 0.68.0 | M65 | CPU efficiency: SHA-NI hardware acceleration via `asm` feature on sha1/sha2, batch dispatch threshold gates 5-layer picker behind 32 free slots (~97% reduction in picker invocations) |

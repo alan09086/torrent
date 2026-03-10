@@ -7,26 +7,26 @@ All notable changes to this project will be documented in this file.
 ## [0.71.0] — 2026-03-10
 
 ### Changed
+- **Pipeline dispatch latency reduced**: Lowered `BATCH_DISPATCH_THRESHOLD` from 32 to 4 and pipeline tick
+  interval from 1s to 250ms — worst-case dispatch latency drops from 1000ms to 250ms while picker CPU
+  remains under 1%.
+- **Fixed-depth pipeline model**: Replaced BDP-based adaptive queue depth with fixed depth at
+  `initial_queue_depth` (128). Eliminates the negative feedback loop where low throughput → low depth →
+  lower throughput. EWMA rate tracking retained for stats only.
+- **Event channel throughput**: Increased event channel capacity 256 → 2048 and batch-drain limit
+  64 → 256. Added `biased;` to `tokio::select!` with data-processing arms first, ensuring peer events
+  take priority over timer maintenance.
+- **PreferPlaintext encryption mode**: New default encryption mode offers plaintext-only MSE on outbound
+  connections, falling back to plaintext + RC4 if the peer rejects. Reduces RC4 CPU overhead (31.6% of
+  profile) for peers that accept plaintext. `Enabled` and `Forced` modes preserved for compatibility.
 - **Scratch buffer API**: Refactored piece selector closure from `Fn(u32) -> Vec<(u32, u32)>` to
   `Fn(u32, &mut Vec<(u32, u32)>)`, threading a reusable scratch buffer through all 10 picker functions.
-  Eliminates ~800K temporary `Vec` allocations per download. `unassigned_blocks()` uses `retain()` in-place
-  instead of `filter().collect()`. `pick_partial()` uses two-buffer swap (`std::mem::swap`) to avoid cloning.
-  Layer 5 pickers use `std::mem::take()` for zero-cost ownership transfer into `PickResult`.
+  Eliminates ~800K temporary `Vec` allocations per download.
 - **Stack-array `peer_count()`**: Replaced `HashSet<&SocketAddr>` allocation with fixed-size `[SocketAddr; 8]`
   stack array for counting unique peers per in-flight piece. Falls back to `HashSet` only when >8 unique peers.
 - **`max_in_flight_pieces` 32 → 20**: Reduced default from 32 to 20, cutting store buffer memory from 16 MiB
-  to 10 MiB. Presets now have explicit values: `min_memory()` = 12, `high_performance()` = 64.
-- **Removed `RefCell` + `.clone()` in torrent actor**: The `missing_chunks_fn` closure no longer uses
-  `RefCell<Vec>` with `.borrow_mut()` + `.clone()`. A simple `&mut Vec` scratch buffer replaces the
-  interior mutability pattern entirely.
-
-### Performance (Arch ISO benchmark, 3-trial average)
-- Temporary allocations: 2.04M → 243K (**-88%**)
-- Total allocations: 3.78M → 2.28M (**-40%**)
-- Allocation rate: 69,682/s → 14,496/s (**-79%**)
-- RSS: 79 MiB → 63 MiB (**-20%**)
-- Peak heap: 32.78 → 32.20 MiB
-- Piece selector no longer a top allocation site (now dominated by MSE/DH key exchange)
+  to 10 MiB. Presets: `min_memory()` = 12, `high_performance()` = 64.
+- Test count: 1392
 
 ## [0.70.0] — 2026-03-10
 
