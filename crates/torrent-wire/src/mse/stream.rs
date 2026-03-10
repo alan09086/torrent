@@ -15,6 +15,7 @@ pub struct MseStream<S> {
     inner: S,
     read_cipher: Option<Rc4>,
     write_cipher: Option<Rc4>,
+    write_buf: Vec<u8>,
 }
 
 impl<S> MseStream<S> {
@@ -24,6 +25,7 @@ impl<S> MseStream<S> {
             inner,
             read_cipher: None,
             write_cipher: None,
+            write_buf: Vec::new(),
         }
     }
 
@@ -33,6 +35,7 @@ impl<S> MseStream<S> {
             inner,
             read_cipher: Some(read_cipher),
             write_cipher: Some(write_cipher),
+            write_buf: Vec::new(),
         }
     }
 }
@@ -68,9 +71,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for MseStream<S> {
         let this = self.get_mut();
 
         if let Some(cipher) = &mut this.write_cipher {
-            let mut encrypted = buf.to_vec();
-            cipher.apply(&mut encrypted);
-            Pin::new(&mut this.inner).poll_write(cx, &encrypted)
+            this.write_buf.clear();
+            this.write_buf.extend_from_slice(buf);
+            cipher.apply(&mut this.write_buf);
+            Pin::new(&mut this.inner).poll_write(cx, &this.write_buf)
         } else {
             Pin::new(&mut this.inner).poll_write(cx, buf)
         }
