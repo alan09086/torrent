@@ -1486,7 +1486,7 @@ const END_GAME_DEPTH: usize = 128;
 /// `handle_piece_data()`.  Avoids running the 5-layer picker on every single
 /// block arrival (~91k times per 1.4 GiB download).  Set to 4 so that a peer
 /// with 128-slot queue depth gets refilled after just 4 completions instead of
-/// waiting up to 1s for the pipeline tick.  The 250ms pipeline tick and
+/// waiting up to 1s for the pipeline tick.  The 500ms pipeline tick and
 /// end-game bypass ensure no peer starves.
 const BATCH_DISPATCH_THRESHOLD: usize = 4;
 
@@ -1610,7 +1610,7 @@ impl TorrentActor {
         } else {
             None
         };
-        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(250));
+        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(500));
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
@@ -2155,7 +2155,7 @@ impl TorrentActor {
                 } => {
                     self.run_peer_turnover().await;
                 }
-                // Pipeline tick (250ms) — update EWMA, snub detection, stale block cleanup
+                // Pipeline tick (500ms) — update EWMA, snub detection, stale block cleanup
                 _ = pipeline_tick_interval.tick() => {
                     let snub_timeout = Duration::from_secs(self.config.snub_timeout_secs as u64);
                     let mut snubbed_peers = Vec::new();
@@ -5213,7 +5213,7 @@ impl TorrentActor {
     ///
     /// Clones the `we_have` bitfield and creates the scratch buffer ONCE,
     /// then iterates all unchoked peers with available pipeline slots.
-    /// This avoids O(peers) redundant bitfield clones on every 250ms
+    /// This avoids O(peers) redundant bitfield clones on every 500ms
     /// pipeline tick.
     async fn batch_fill_all_peers(&mut self) {
         if self.state != TorrentState::Downloading {
