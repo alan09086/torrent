@@ -52,6 +52,7 @@ impl Bitfield {
     /// Get the value of bit `index`.
     ///
     /// Returns `false` for out-of-range indices.
+    #[inline]
     pub fn get(&self, index: u32) -> bool {
         if index >= self.len {
             return false;
