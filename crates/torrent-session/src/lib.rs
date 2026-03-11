@@ -28,6 +28,8 @@ pub(crate) mod peer;
 pub(crate) mod peer_priority;
 mod persistence;
 pub(crate) mod pex;
+#[allow(dead_code)] // Wired in during Task 3/5 (concurrent dispatch integration).
+pub(crate) mod piece_reservation;
 pub(crate) mod piece_selector;
 pub(crate) mod pipeline;
 #[allow(dead_code)] // Wired in during Step 5 (proxy integration).
