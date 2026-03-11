@@ -206,7 +206,7 @@ fn default_max_outstanding_requests() -> usize {
     500
 }
 fn default_max_in_flight_pieces() -> usize {
-    40
+    256
 }
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
@@ -809,7 +809,7 @@ impl Default for Settings {
             max_message_size: 16 * 1024 * 1024,
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
-            max_in_flight_pieces: 40,
+            max_in_flight_pieces: 256,
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
             // Session Stats (M50)
@@ -838,7 +838,7 @@ impl Settings {
             hashing_threads: 1,
             disk_io_threads: 1,
             dht_max_items: 100,
-            max_in_flight_pieces: 16,
+            max_in_flight_pieces: 32,
             ..Self::default()
         }
     }
@@ -862,7 +862,7 @@ impl Settings {
             auto_upload_slots_max: 100,
             suggest_mode: true,
             steal_threshold_ratio: 5.0,
-            max_in_flight_pieces: 80,
+            max_in_flight_pieces: 512,
             ..Self::default()
         }
     }

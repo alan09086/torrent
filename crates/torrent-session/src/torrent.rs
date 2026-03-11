@@ -1630,7 +1630,7 @@ impl TorrentActor {
         } else {
             None
         };
-        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(1000));
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
