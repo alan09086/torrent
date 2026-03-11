@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.75.0] — 2026-03-11
+
+### Added
+- **Piece reservation state** (`PieceReservationState`): Shared state behind
+  `Arc<parking_lot::RwLock<_>>` for concurrent per-peer dispatch. Piece-level
+  exclusive ownership prevents the duplicate block assignment that caused M62's
+  data corruption. Simplified picker: priority pieces → rarest-first.
+- **Per-peer request drivers** (`request_driver`): Autonomous tokio tasks per
+  unchoked peer. Each driver acquires semaphore permits (flow control), reserves
+  pieces from shared state, and sends `PeerCommand::Request` directly to the
+  peer task — bypassing the TorrentActor entirely for normal dispatch.
+- `parking_lot` workspace dependency (fast synchronous RwLock for ~10μs
+  critical sections).
+
+### Changed
+- **Architecture: actor-serialized → per-peer autonomous dispatch.** The
+  TorrentActor no longer runs `batch_fill_all_peers()` or
+  `request_pieces_from_peer()` for normal downloads. Drivers handle all dispatch
+  reactively. The actor handles only verification, peer lifecycle, and endgame.
+- `max_in_flight_pieces`: 40 → 256 (accommodates per-peer piece reservation)
+- `min_memory` preset: 16 → 32 | `high_performance` preset: 80 → 512
+- Pipeline tick: 500ms → 1000ms (dispatch is fully reactive via drivers)
+
+### Removed
+- `batch_fill_all_peers()` (~335 lines) — replaced by per-peer drivers
+- `request_pieces_from_peer()` (~230 lines) — replaced by per-peer drivers
+- `PeerCommand::RequestBatch` — drivers send individual `Request` per block
+- `PeerState::block_queue` / `needs_refill` — replaced by semaphore flow control
+- `refill_notify` select arm — drivers wake via `piece_notify`
+
+### Benchmark (Arch ISO ~1.4 GiB, 3 trials)
+- Speed: 10.8±6.2 MB/s (regression from 28.0 MB/s — dispatch stalls under investigation)
+- CPU: 19.3±2.9s (down from 31.9s — 40% reduction)
+- RSS: 67.6±4.6 MiB (down from 94.8 MiB — 29% reduction)
+- Test count: 1419
+
 ## [0.74.0] — 2026-03-11
 
 ### Changed
