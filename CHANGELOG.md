@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.73.0] — 2026-03-11
+
+### Added
+- **ChunkMask 256-bit bitfield**: Fixed-size `[u64; 4]` bitfield tracking unassigned chunks per
+  `InFlightPiece`. Maintained incrementally (clear on assign, set on disconnect/freed). Replaces
+  the re-compute-and-filter pattern with O(1) bit operations.
+
+### Changed
+- **Zero-alloc block selection**: `unassigned_blocks()` now reads `ChunkMask::iter_set_bits()`
+  directly instead of calling `missing_chunks_into()` → `Vec::extend` → `Vec::retain`. Eliminates
+  the top 3 CPU hotspots (24.27% `Vec::retain`, 8.40% `Vec::extend`, 7.24% `missing_chunks_into`).
+- **Two-phase `pick_partial` scoring**: Phase 1 scores all in-flight pieces via `count_ones()`/
+  `is_empty()` (zero allocation). Phase 2 enumerates blocks only for the winning piece.
+- **Inlined hot-path cross-crate functions**: `#[inline]` on `Lengths::piece_size()`,
+  `chunks_in_piece()`, `chunk_info()` and `Bitfield::get()` — enables cross-crate inlining
+  without LTO for functions called ~300K times per batch fill cycle.
+- CPU time reduced 23% (37.1s → 28.7s on Arch ISO benchmark)
+- Test count: 1405
+
 ## [0.72.0] — 2026-03-10
 
 ### Changed
