@@ -920,15 +920,6 @@ async fn handle_command(
             }
             return Ok(());
         }
-        PeerCommand::RequestBatch { requests } => {
-            for (index, begin, length) in requests {
-                framed_write
-                    .send(Message::Request { index, begin, length })
-                    .await
-                    .map_err(crate::Error::Wire)?;
-            }
-            return Ok(());
-        }
         PeerCommand::UpdateNumPieces(_) | PeerCommand::Shutdown => {
             // Should have been handled in the main loop; this is unreachable.
             return Ok(());

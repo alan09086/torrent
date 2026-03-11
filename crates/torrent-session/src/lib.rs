@@ -9,6 +9,7 @@ mod settings;
 mod types;
 // These will be added as they're implemented:
 pub(crate) mod ban;
+#[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod chunk_mask;
 pub(crate) mod choker;
 /// Disk I/O manager: configuration, handles, and statistics.
@@ -28,10 +29,9 @@ pub(crate) mod peer;
 pub(crate) mod peer_priority;
 mod persistence;
 pub(crate) mod pex;
-#[allow(dead_code)] // Wired in during Task 3/5 (concurrent dispatch integration).
 pub(crate) mod piece_reservation;
-#[allow(dead_code)] // Wired in during Task 5 (concurrent dispatch integration).
 pub(crate) mod request_driver;
+#[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod piece_selector;
 pub(crate) mod pipeline;
 #[allow(dead_code)] // Wired in during Step 5 (proxy integration).

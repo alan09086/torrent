@@ -18,6 +18,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::alert::{Alert, AlertKind, post_alert};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
+use crate::piece_reservation::PieceReservationState;
+use crate::request_driver;
 
 use torrent_core::{
     DEFAULT_CHUNK_SIZE, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1,
@@ -32,7 +34,7 @@ use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::{PeerSource, PeerState};
-use crate::piece_selector::{InFlightPiece, PeerSpeed, PickContext, PieceSelector};
+use crate::piece_selector::{InFlightPiece, PieceSelector};
 use crate::tracker_manager::TrackerManager;
 use crate::types::{
     PartialPieceInfo, PeerCommand, PeerEvent, PeerInfo, TorrentCommand, TorrentConfig,
@@ -342,6 +344,8 @@ impl TorrentHandle {
             peers: HashMap::new(),
             cached_peer_rates: FxHashMap::default(),
             refill_notify: Arc::new(tokio::sync::Notify::new()),
+            reservation_state: None, // Initialized after verify_existing_pieces
+            reservation_notify: None,
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
             choker,
@@ -612,6 +616,8 @@ impl TorrentHandle {
             peers: HashMap::new(),
             cached_peer_rates: FxHashMap::default(),
             refill_notify: Arc::new(tokio::sync::Notify::new()),
+            reservation_state: None, // Initialized after metadata arrives
+            reservation_notify: None,
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
             choker,
@@ -1315,9 +1321,13 @@ struct TorrentActor {
     /// Cached peer download rates for piece stealing decisions.
     /// Refreshed on each periodic tick (~1s) instead of rebuilding per block.
     cached_peer_rates: FxHashMap<SocketAddr, f64>,
-    /// Notify handle for reactive queue refill — wakes the actor when
-    /// any peer's block_queue drops below threshold.
+    /// Notify handle for reactive queue refill (legacy, unused in M73).
+    #[allow(dead_code)]
     refill_notify: Arc<tokio::sync::Notify>,
+    /// Shared piece reservation state (M73: concurrent dispatch).
+    reservation_state: Option<Arc<parking_lot::RwLock<crate::piece_reservation::PieceReservationState>>>,
+    /// Piece notify handle (for driver spawning).
+    reservation_notify: Option<Arc<tokio::sync::Notify>>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
     /// O(1) dedup set for available_peers — kept in sync with the Vec.
     available_peers_set: std::collections::HashSet<SocketAddr>,
@@ -1394,6 +1404,7 @@ struct TorrentActor {
     upload_bucket: crate::rate_limiter::TokenBucket,
     download_bucket: crate::rate_limiter::TokenBucket,
     global_upload_bucket: Option<SharedBucket>,
+    #[allow(dead_code)] // M73: rate limiting deferred to M74
     global_download_bucket: Option<SharedBucket>,
     slot_tuner: crate::slot_tuner::SlotTuner,
     upload_bytes_interval: u64,
@@ -1485,12 +1496,6 @@ const END_GAME_DEPTH: usize = 128;
 
 /// Minimum free pipeline slots before invoking the full piece picker in
 /// `handle_piece_data()`.  Avoids running the 5-layer picker on every single
-/// block arrival (~91k times per 1.4 GiB download).  Set to 4 so that a peer
-/// with 128-slot queue depth gets refilled after just 4 completions instead of
-/// waiting up to 1s for the pipeline tick.  The 500ms pipeline tick and
-/// end-game bypass ensure no peer starves.
-const BATCH_DISPATCH_THRESHOLD: usize = 4;
-
 impl TorrentActor {
     /// Returns the effective maximum connection count for this torrent.
     ///
@@ -1581,6 +1586,20 @@ impl TorrentActor {
     async fn run(mut self) {
         // Verify existing pieces on startup (resume support)
         self.verify_existing_pieces().await;
+
+        // M73: Initialize shared piece reservation state after verification
+        // so we_have reflects already-verified pieces.
+        if let (Some(ct), Some(lengths)) = (&self.chunk_tracker, &self.lengths) {
+            let (reservation, reservation_notify) = PieceReservationState::new(
+                self.num_pieces,
+                lengths.clone(),
+                self.config.max_in_flight_pieces,
+                ct.bitfield().clone(),
+                self.wanted_pieces.clone(),
+            );
+            self.reservation_state = Some(Arc::new(parking_lot::RwLock::new(reservation)));
+            self.reservation_notify = Some(reservation_notify);
+        }
 
         // Spawn web seeds if not already seeding
         if self.state != TorrentState::Seeding {
@@ -1721,10 +1740,7 @@ impl TorrentActor {
                             self.on_piece_verified(result.piece).await;
                         } else {
                             self.on_piece_hash_failed(result.piece).await;
-                            let addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
-                            for addr in addrs {
-                                self.request_pieces_from_peer(addr).await;
-                            }
+                            // M73: Drivers pick up released pieces automatically via shared state
                         }
                     }
                 }
@@ -2178,7 +2194,7 @@ impl TorrentActor {
                         }
                     }
 
-                    // Free assigned blocks from snubbed peers so pick_partial can reassign
+                    // M73: Release pieces from snubbed peers in shared state and cancel their drivers
                     if !snubbed_peers.is_empty() {
                         let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
                         for ifp in self.in_flight_pieces.values_mut() {
@@ -2191,30 +2207,34 @@ impl TorrentActor {
                                 ifp.unassigned.set(chunk_idx);
                             }
                         }
+                        if let Some(ref rs) = self.reservation_state {
+                            let mut state = rs.write();
+                            for addr in &snubbed_peers {
+                                state.release_peer_pieces(*addr);
+                            }
+                        }
+                        // Cancel snubbed peers' drivers
+                        for addr in &snubbed_peers {
+                            if let Some(peer) = self.peers.get_mut(addr) {
+                                if let Some(cancel) = peer.driver_cancel.take() {
+                                    cancel.cancel();
+                                }
+                                peer.driver_handle = None;
+                                peer.semaphore = None;
+                            }
+                        }
                     }
 
                     // Refresh cached peer rates for steal decisions (avoids
                     // rebuilding a FxHashMap from all peers on every block arrival).
                     self.refresh_peer_rates();
 
-                    // Proactive request scheduling: re-evaluate unchoked peers
-                    // for new work. Catches two cases the per-block threshold skips:
-                    // 1. Fully idle peers (any queue depth) — original safety net
-                    // 2. High-depth peers with enough free slots to justify the picker
-                    //
-                    // Uses batch_fill_all_peers() which clones we_have and creates
-                    // scratch/peer_rates once, then iterates all qualifying peers —
-                    // avoiding redundant bitfield clones per peer.
-                    self.batch_fill_all_peers().await;
-                }
-                // Reactive refill: wake immediately when any peer's queue runs low.
-                // Notify coalesces multiple signals — if 10 peers deplete their
-                // queues in the same window, the actor wakes once and refills all.
-                _ = self.refill_notify.notified() => {
-                    if self.state == TorrentState::Downloading && !self.end_game.is_active() {
-                        self.batch_fill_all_peers().await;
+                    // M73: Periodic endgame activation check (was in batch_fill_all_peers)
+                    if !self.end_game.is_active() {
+                        self.check_end_game_activation();
                     }
                 }
+                // (M73: refill_notify removed — drivers handle dispatch autonomously)
                 // End-game refill tick (200ms) — replace reactive per-block cascade
                 // with periodic batch refill. All peers with available pipeline slots
                 // get new end-game blocks, preventing idle stalls between ticks.
@@ -3248,16 +3268,41 @@ impl TorrentActor {
                         self.last_seen_complete = now_unix();
                     }
                 }
+                // M73: Register peer bitfield in shared reservation state
+                if let Some(ref rs) = self.reservation_state
+                    && let Some(peer) = self.peers.get(&peer_addr)
+                {
+                    rs.write().add_peer(peer_addr, peer.bitfield.clone());
+                }
+                // If already unchoked, spawn driver now (bitfield arrived after unchoke)
+                let is_unchoked = self.peers.get(&peer_addr).is_some_and(|p| !p.peer_choking);
+                if is_unchoked
+                    && let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+                    && let Some(peer) = self.peers.get_mut(&peer_addr)
+                    && peer.driver_cancel.is_none()
+                {
+                    let queue_depth = self.config.initial_queue_depth;
+                    let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
+                    peer.semaphore = Some(sem.clone());
+                    let (cancel, handle) = request_driver::spawn_driver(
+                        peer_addr, sem, rs.clone(), notify.clone(), peer.cmd_tx.clone(),
+                    );
+                    peer.driver_cancel = Some(cancel);
+                    peer.driver_handle = Some(handle);
+                }
                 // BEP 16: assign a piece in super-seed mode
                 self.assign_next_piece_for_peer(peer_addr).await;
                 // Check if we're interested in this peer
                 self.maybe_express_interest(peer_addr).await;
-                self.request_pieces_from_peer(peer_addr).await;
             }
             PeerEvent::Have { peer_addr, index } => {
                 self.piece_selector.increment(index);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield.set(index);
+                }
+                // M73: Update shared state
+                if let Some(ref rs) = self.reservation_state {
+                    rs.write().peer_have(peer_addr, index);
                 }
                 // BEP 16: Have-back detection in super-seed mode
                 if let Some(ref mut ss) = self.super_seed
@@ -3266,7 +3311,6 @@ impl TorrentActor {
                     self.assign_next_piece_for_peer(peer_addr).await;
                 }
                 self.maybe_express_interest(peer_addr).await;
-                self.request_pieces_from_peer(peer_addr).await;
             }
             PeerEvent::PieceData {
                 peer_addr,
@@ -3281,8 +3325,35 @@ impl TorrentActor {
                     peer.peer_choking = choking;
                 }
                 if !choking {
-                    // Unchoked — try requesting pieces
-                    self.request_pieces_from_peer(peer_addr).await;
+                    // Unchoked — spawn request driver (M73)
+                    if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+                        && let Some(peer) = self.peers.get_mut(&peer_addr)
+                    {
+                        let queue_depth = self.config.initial_queue_depth;
+                        let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
+                        peer.semaphore = Some(sem.clone());
+                        let (cancel, handle) = request_driver::spawn_driver(
+                            peer_addr,
+                            sem,
+                            rs.clone(),
+                            notify.clone(),
+                            peer.cmd_tx.clone(),
+                        );
+                        peer.driver_cancel = Some(cancel);
+                        peer.driver_handle = Some(handle);
+                    }
+                } else {
+                    // Choked — cancel driver, release pieces
+                    if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                        if let Some(cancel) = peer.driver_cancel.take() {
+                            cancel.cancel();
+                        }
+                        peer.driver_handle = None;
+                        peer.semaphore = None;
+                    }
+                    if let Some(ref rs) = self.reservation_state {
+                        rs.write().release_peer_pieces(peer_addr);
+                    }
                 }
             }
             PeerEvent::PeerInterested {
@@ -3431,18 +3502,17 @@ impl TorrentActor {
                     ss.peer_disconnected(peer_addr);
                 }
                 if let Some(peer) = self.peers.remove(&peer_addr) {
+                    // M73: Cancel driver
+                    if let Some(cancel) = peer.driver_cancel {
+                        cancel.cancel();
+                    }
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
-                    let mut peer_pieces: HashSet<u32> = peer
+                    let peer_pieces: HashSet<u32> = peer
                         .pending_requests
                         .iter()
                         .map(|(idx, _, _)| idx)
                         .collect();
-                    // Also include pieces from pre-computed block_queue
-                    for (idx, _, _) in &peer.block_queue {
-                        peer_pieces.insert(*idx);
-                    }
-                    let had_pending = !peer_pieces.is_empty();
                     for piece_idx in peer_pieces {
                         let other_has = self
                             .peers
@@ -3467,14 +3537,9 @@ impl TorrentActor {
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
                     }
-                    // Re-request freed blocks from remaining peers
-                    if had_pending {
-                        let addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
-                        for addr in addrs {
-                            if self.peers.contains_key(&addr) {
-                                self.request_pieces_from_peer(addr).await;
-                            }
-                        }
+                    // M73: Remove peer from shared state (releases pieces for other drivers)
+                    if let Some(ref rs) = self.reservation_state {
+                        rs.write().remove_peer(peer_addr);
                     }
                 }
                 self.suggested_to_peers.remove(&peer_addr);
@@ -3580,11 +3645,12 @@ impl TorrentActor {
             if self.end_game.is_active() {
                 self.end_game.block_received(index, begin, peer_addr);
             }
-            // Don't call request_pieces_from_peer() for duplicates — the peer's
-            // pipeline is already stocked. Calling it here triggers a full picker
-            // cycle (bitfield clone + peer_rates rebuild + O(num_pieces) iteration)
-            // for every duplicate block, which at high throughput can stall the
-            // actor event loop.
+            // M73: Return semaphore permit for duplicate blocks too
+            if let Some(peer) = self.peers.get(&peer_addr)
+                && let Some(ref sem) = peer.semaphore
+            {
+                sem.add_permits(1);
+            }
             return;
         }
 
@@ -3705,49 +3771,16 @@ impl TorrentActor {
             }
         }
 
-        // O(1) dispatch: pop pre-computed block from queue instead of running full picker
+        // M73: Return semaphore permit to the peer's driver.
+        // The driver autonomously dispatches the next request.
         if !self.end_game.is_active() {
-            // Check rate limit before dispatching from queue
-            let rate_limited = !self.download_bucket.is_unlimited()
-                && self.download_bucket.available() == 0;
-            let mut should_notify = false;
-            if !rate_limited
-                && let Some(peer) = self.peers.get_mut(&peer_addr)
+            if let Some(peer) = self.peers.get(&peer_addr)
+                && let Some(ref sem) = peer.semaphore
             {
-                if let Some((index_q, begin_q, length_q)) = peer.block_queue.pop_front() {
-                    // Send the pre-computed request — only register if send succeeds
-                    if peer
-                        .cmd_tx
-                        .try_send(PeerCommand::Request {
-                            index: index_q,
-                            begin: begin_q,
-                            length: length_q,
-                        })
-                        .is_ok()
-                    {
-                        peer.pipeline.request_sent(
-                            index_q,
-                            begin_q,
-                            std::time::Instant::now(),
-                        );
-                        peer.pending_requests.insert(index_q, begin_q, length_q);
-                    } else {
-                        // Send failed — push back to front of queue
-                        peer.block_queue.push_front((index_q, begin_q, length_q));
-                    }
-                }
-                // Signal refill when queue drops below half of queue_depth
-                let threshold = peer.pipeline.queue_depth() / 2;
-                if peer.block_queue.len() < threshold {
-                    peer.needs_refill = true;
-                    should_notify = true;
-                }
-            }
-            if should_notify {
-                self.refill_notify.notify_one();
+                sem.add_permits(1);
             }
         } else {
-            // End-game still uses the dedicated end-game block requester
+            // End-game: actor-based dispatch (drivers are cancelled)
             self.request_end_game_block(peer_addr).await;
         }
     }
@@ -3933,6 +3966,11 @@ impl TorrentActor {
 
         // Run the full verification pipeline (transitions through Checking)
         self.verify_existing_pieces().await;
+
+        // M73: Update reservation state with verified bitfield
+        if let (Some(rs), Some(ct)) = (&self.reservation_state, &self.chunk_tracker) {
+            rs.write().update_we_have(ct.bitfield());
+        }
 
         let _ = reply.send(Ok(()));
     }
@@ -4304,23 +4342,9 @@ impl TorrentActor {
         if self.end_game.is_active() {
             self.end_game.remove_piece(index);
         }
-        // Remove stale pre-computed blocks for this piece from all peers' queues.
-        // Without this, queued blocks would be requested, received, and discarded
-        // by the has_chunk dedup check — wasting bandwidth.
-        let mut any_needs_refill = false;
-        for peer in self.peers.values_mut() {
-            let before = peer.block_queue.len();
-            peer.block_queue.retain(|(idx, _, _)| *idx != index);
-            if peer.block_queue.len() < before {
-                let threshold = peer.pipeline.queue_depth() / 2;
-                if peer.block_queue.len() < threshold {
-                    peer.needs_refill = true;
-                    any_needs_refill = true;
-                }
-            }
-        }
-        if any_needs_refill {
-            self.refill_notify.notify_one();
+        // M73: Mark piece complete in shared reservation state
+        if let Some(ref rs) = self.reservation_state {
+            rs.write().complete_piece(index);
         }
         info!(index, "piece verified");
         post_alert(
@@ -4484,26 +4508,19 @@ impl TorrentActor {
             ct.mark_failed(index);
         }
         self.in_flight_pieces.remove(&index);
-        // Remove stale pre-computed blocks for this failed piece from all peers' queues.
-        let mut any_needs_refill = false;
-        for peer in self.peers.values_mut() {
-            let before = peer.block_queue.len();
-            peer.block_queue.retain(|(idx, _, _)| *idx != index);
-            if peer.block_queue.len() < before {
-                let threshold = peer.pipeline.queue_depth() / 2;
-                if peer.block_queue.len() < threshold {
-                    peer.needs_refill = true;
-                    any_needs_refill = true;
-                }
-            }
-        }
-        if any_needs_refill {
-            self.refill_notify.notify_one();
+        // M73: Mark piece failed in shared reservation state
+        if let Some(ref rs) = self.reservation_state {
+            rs.write().fail_piece(index);
         }
         // Hash failure in end-game: deactivate and resume normal mode
         if self.end_game.is_active() {
             self.end_game.deactivate();
             info!(index, "end-game deactivated due to hash failure");
+            // Respawn drivers for unchoked peers
+            if let Some(ref rs) = self.reservation_state {
+                rs.write().set_endgame(false);
+            }
+            self.respawn_all_drivers();
         }
     }
 
@@ -4931,15 +4948,25 @@ impl TorrentActor {
                         );
                         info!("metadata assembled, switching to Downloading");
 
+                        // M73: Initialize shared piece reservation state after metadata
+                        if let (Some(ct), Some(lengths)) = (&self.chunk_tracker, &self.lengths) {
+                            let (reservation, reservation_notify) = PieceReservationState::new(
+                                self.num_pieces,
+                                lengths.clone(),
+                                self.config.max_in_flight_pieces,
+                                ct.bitfield().clone(),
+                                self.wanted_pieces.clone(),
+                            );
+                            self.reservation_state = Some(Arc::new(parking_lot::RwLock::new(reservation)));
+                            self.reservation_notify = Some(reservation_notify);
+                        }
+
                         // Start web seeds now that we have metadata
                         self.spawn_web_seeds();
                         self.assign_pieces_to_web_seeds();
 
                         // Kick-start piece requesting for all peers that connected during
-                        // metadata phase.  Their Bitfield/Unchoke events were processed when
-                        // state was FetchingMetadata, so request_pieces_from_peer() returned
-                        // early.  Now that we're Downloading, trigger requests for every
-                        // unchoked peer that has pieces we want.
+                        // metadata phase. Spawn drivers for unchoked peers.
                         let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
                         info!(
                             connected_peers = peer_addrs.len(),
@@ -4958,7 +4985,27 @@ impl TorrentActor {
                                 .unwrap_or(true);
                             debug!(%addr, has_bitfield, is_choking, "post-metadata peer state");
                             self.maybe_express_interest(addr).await;
-                            self.request_pieces_from_peer(addr).await;
+                            // Register peer in shared state and spawn driver if unchoked
+                            if let Some(ref rs) = self.reservation_state
+                                && let Some(peer) = self.peers.get(&addr)
+                                && peer.bitfield.count_ones() > 0
+                            {
+                                rs.write().add_peer(addr, peer.bitfield.clone());
+                            }
+                            if !is_choking
+                                && let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+                                && let Some(peer) = self.peers.get_mut(&addr)
+                                && peer.driver_cancel.is_none()
+                            {
+                                let queue_depth = self.config.initial_queue_depth;
+                                let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
+                                peer.semaphore = Some(sem.clone());
+                                let (cancel, handle) = request_driver::spawn_driver(
+                                    addr, sem, rs.clone(), notify.clone(), peer.cmd_tx.clone(),
+                                );
+                                peer.driver_cancel = Some(cancel);
+                                peer.driver_handle = Some(handle);
+                            }
                         }
                     }
                     Err(e) => {
@@ -5226,587 +5273,12 @@ impl TorrentActor {
         }
     }
 
-    // ----- Piece requesting -----
-
-    /// Batch-fill all qualifying peers from a single shared context.
-    ///
-    /// Clones the `we_have` bitfield and creates the scratch buffer ONCE,
-    /// then iterates all unchoked peers with available pipeline slots.
-    /// This avoids O(peers) redundant bitfield clones on every 500ms
-    /// pipeline tick.
-    async fn batch_fill_all_peers(&mut self) {
-        if self.state != TorrentState::Downloading {
-            return;
-        }
-
-        let ct = match &self.chunk_tracker {
-            Some(ct) => ct,
-            None => return,
-        };
-        if self.meta.is_none() {
-            return;
-        }
-
-        // Rate limit: don't send new requests if download budget exhausted
-        if !self.download_bucket.is_unlimited() && self.download_bucket.available() == 0 {
-            return;
-        }
-
-        // In end-game: individual request_end_game_block handles it
-        if self.end_game.is_active() {
-            return;
-        }
-
-        // Clone we_have ONCE for all peers
-        let we_have = ct.bitfield().clone();
-        let completed_count = ct.bitfield().count_ones();
-
-        // Shared scratch buffer reused across peers
-        let mut scratch = Vec::with_capacity(64);
-
-        // Collect qualifying peers: unchoked with free pipeline slots or needing refill
-        let refill_peers: Vec<(SocketAddr, usize, PeerSpeed, f64, bool)> = self
-            .peers
-            .iter()
-            .filter_map(|(addr, p)| {
-                if p.peer_choking {
-                    return None;
-                }
-                let depth = if p.snubbed { 1 } else { p.pipeline.queue_depth() };
-                let avail = depth.saturating_sub(p.pending_requests.len());
-                if avail == 0 && !p.needs_refill {
-                    return None;
-                }
-                // Qualify if: needs_refill, fully idle, or enough free slots
-                if !p.needs_refill && !p.pending_requests.is_empty() && avail < BATCH_DISPATCH_THRESHOLD {
-                    return None;
-                }
-                let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
-                let rate = p.pipeline.ewma_rate();
-                let snubbed = p.snubbed;
-                Some((*addr, avail, speed, rate, snubbed))
-            })
-            .collect();
-
-        for (peer_addr, slots, peer_speed, peer_rate, is_snubbed) in refill_peers {
-            // Parole piece assignment (same as request_pieces_from_peer)
-            let peer_ip = peer_addr.ip();
-            for (&parole_idx, parole) in &mut self.parole_pieces {
-                if parole.parole_peer.is_some() {
-                    continue;
-                }
-                if parole.original_contributors.contains(&peer_ip) {
-                    continue;
-                }
-                let peer_has = self
-                    .peers
-                    .get(&peer_addr)
-                    .is_some_and(|p| p.bitfield.get(parole_idx));
-                if !peer_has {
-                    continue;
-                }
-                parole.parole_peer = Some(peer_ip);
-                debug!(parole_idx, %peer_addr, "assigned parole peer for piece");
-                break;
-            }
-
-            let suggested = self
-                .peers
-                .get(&peer_addr)
-                .map(|p| p.suggested_pieces.clone())
-                .unwrap_or_default();
-
-            let mut slots_remaining = slots;
-
-            // Clone peer bitfield once per peer
-            let peer_bitfield = match self.peers.get(&peer_addr) {
-                Some(p) => p.bitfield.clone(),
-                None => continue,
-            };
-
-            loop {
-                if slots_remaining == 0 {
-                    break;
-                }
-
-                if !self.peers.contains_key(&peer_addr) {
-                    break;
-                }
-
-                // Re-create closure each iteration so borrows don't conflict
-                let missing_chunks_fn = |piece: u32, buf: &mut Vec<(u32, u32)>| {
-                    buf.clear();
-                    if let Some(ct) = self.chunk_tracker.as_ref() {
-                        ct.missing_chunks_into(piece, buf);
-                    }
-                };
-
-                let ctx = PickContext {
-                    peer_addr,
-                    peer_has: &peer_bitfield,
-                    peer_speed,
-                    peer_is_snubbed: is_snubbed,
-                    peer_rate,
-                    we_have: &we_have,
-                    in_flight_pieces: &self.in_flight_pieces,
-                    wanted: &self.wanted_pieces,
-                    streaming_pieces: &self.streaming_pieces,
-                    time_critical_pieces: &self.time_critical_pieces,
-                    suggested_pieces: &suggested,
-                    sequential_download: self.config.sequential_download,
-                    completed_count,
-                    initial_picker_threshold: self.config.initial_picker_threshold,
-                    connected_peer_count: self.peers.len(),
-                    whole_pieces_threshold: self.config.whole_pieces_threshold,
-                    piece_size: self
-                        .lengths
-                        .as_ref()
-                        .map(|l| l.piece_length() as u32)
-                        .unwrap_or(262144),
-                    chunk_size: self
-                        .lengths
-                        .as_ref()
-                        .map(|l| l.chunk_size())
-                        .unwrap_or(16384),
-                    extent_affinity: self.config.piece_extent_affinity,
-                    auto_sequential_active: self.config.auto_sequential
-                        && self.auto_sequential_active,
-                    peer_rates: &self.cached_peer_rates,
-                    steal_threshold_ratio: self.config.steal_threshold_ratio,
-                    cap_reached: self.in_flight_pieces.len()
-                        >= self.config.max_in_flight_pieces,
-                };
-
-                scratch.clear();
-
-                if let Some(result) =
-                    self.piece_selector
-                        .pick_blocks(&ctx, &missing_chunks_fn, &mut scratch)
-                {
-                    debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots = slots_remaining, "batch_fill: sending requests");
-                    let total_blocks = self
-                        .lengths
-                        .as_ref()
-                        .map(|l| l.chunks_in_piece(result.piece))
-                        .unwrap_or(1);
-                    let chunk_size = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                    let mask = if !self.in_flight_pieces.contains_key(&result.piece) {
-                        if let Some(ct) = self.chunk_tracker.as_ref() {
-                            Self::build_chunk_mask(ct, result.piece, total_blocks, chunk_size)
-                        } else {
-                            ChunkMask::all(total_blocks)
-                        }
-                    } else {
-                        ChunkMask::all(total_blocks) // won't be used — entry already exists
-                    };
-                    let ifp = self
-                        .in_flight_pieces
-                        .entry(result.piece)
-                        .or_insert_with(|| InFlightPiece::new(total_blocks, mask));
-
-                    // Collect blocks for batch send
-                    let mut batch_requests: Vec<(u32, u32, u32)> = Vec::new();
-                    for (begin, length) in result.blocks.iter().take(slots_remaining) {
-                        if !self.download_bucket.is_unlimited() {
-                            let is_local =
-                                crate::rate_limiter::is_local_network(peer_addr.ip());
-                            if !is_local
-                                && let Some(ref global) = self.global_download_bucket
-                                && !global.lock().unwrap().try_consume(*length as u64)
-                            {
-                                break;
-                            }
-                            if !self.download_bucket.try_consume(*length as u64) {
-                                break;
-                            }
-                        }
-                        batch_requests.push((result.piece, *begin, *length));
-                    }
-
-                    // Send entire batch as single channel message
-                    let mut sent = 0usize;
-                    if !batch_requests.is_empty()
-                        && let Some(peer) = self.peers.get_mut(&peer_addr)
-                        && peer
-                            .cmd_tx
-                            .try_send(PeerCommand::RequestBatch {
-                                requests: batch_requests.clone(),
-                            })
-                            .is_ok()
-                    {
-                        for &(index, begin, length) in &batch_requests {
-                            ifp.assigned_blocks
-                                .insert((index, begin), peer_addr);
-                            ifp.unassigned.clear(begin / chunk_size);
-                            peer.pipeline.request_sent(
-                                index,
-                                begin,
-                                std::time::Instant::now(),
-                            );
-                            peer.pending_requests.insert(index, begin, length);
-                        }
-                        sent = batch_requests.len();
-                    }
-                    if sent == 0 {
-                        break; // peer channel full or rate limited
-                    }
-                    slots_remaining -= sent;
-                } else {
-                    self.check_end_game_activation();
-                    break;
-                }
-            }
-
-            // Pre-fill block_queue for O(1) dispatch on future block arrivals
-            let queue_target = slots_remaining; // Fill queue with remaining slots after immediate dispatch
-            let mut queued = 0;
-            loop {
-                if queued >= queue_target {
-                    break;
-                }
-
-                if !self.peers.contains_key(&peer_addr) {
-                    break;
-                }
-
-                // Re-create closure each iteration so borrows don't conflict
-                let missing_chunks_fn = |piece: u32, buf: &mut Vec<(u32, u32)>| {
-                    buf.clear();
-                    if let Some(ct) = self.chunk_tracker.as_ref() {
-                        ct.missing_chunks_into(piece, buf);
-                    }
-                };
-
-                let ctx = PickContext {
-                    peer_addr,
-                    peer_has: &peer_bitfield,
-                    peer_speed,
-                    peer_is_snubbed: is_snubbed,
-                    peer_rate,
-                    we_have: &we_have,
-                    in_flight_pieces: &self.in_flight_pieces,
-                    wanted: &self.wanted_pieces,
-                    streaming_pieces: &self.streaming_pieces,
-                    time_critical_pieces: &self.time_critical_pieces,
-                    suggested_pieces: &suggested,
-                    sequential_download: self.config.sequential_download,
-                    completed_count,
-                    initial_picker_threshold: self.config.initial_picker_threshold,
-                    connected_peer_count: self.peers.len(),
-                    whole_pieces_threshold: self.config.whole_pieces_threshold,
-                    piece_size: self
-                        .lengths
-                        .as_ref()
-                        .map(|l| l.piece_length() as u32)
-                        .unwrap_or(262144),
-                    chunk_size: self
-                        .lengths
-                        .as_ref()
-                        .map(|l| l.chunk_size())
-                        .unwrap_or(16384),
-                    extent_affinity: self.config.piece_extent_affinity,
-                    auto_sequential_active: self.config.auto_sequential
-                        && self.auto_sequential_active,
-                    peer_rates: &self.cached_peer_rates,
-                    steal_threshold_ratio: self.config.steal_threshold_ratio,
-                    cap_reached: self.in_flight_pieces.len()
-                        >= self.config.max_in_flight_pieces,
-                };
-
-                scratch.clear();
-
-                if let Some(result) =
-                    self.piece_selector
-                        .pick_blocks(&ctx, &missing_chunks_fn, &mut scratch)
-                {
-                    let total_blocks = self
-                        .lengths
-                        .as_ref()
-                        .map(|l| l.chunks_in_piece(result.piece))
-                        .unwrap_or(1);
-                    let chunk_size = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                    let mask = if !self.in_flight_pieces.contains_key(&result.piece) {
-                        if let Some(ct) = self.chunk_tracker.as_ref() {
-                            Self::build_chunk_mask(ct, result.piece, total_blocks, chunk_size)
-                        } else {
-                            ChunkMask::all(total_blocks)
-                        }
-                    } else {
-                        ChunkMask::all(total_blocks) // won't be used — entry already exists
-                    };
-                    let ifp = self
-                        .in_flight_pieces
-                        .entry(result.piece)
-                        .or_insert_with(|| InFlightPiece::new(total_blocks, mask));
-
-                    let mut added = 0;
-                    for (begin, length) in &result.blocks {
-                        if queued + added >= queue_target {
-                            break;
-                        }
-                        // Register in in_flight_pieces but DON'T send to peer yet
-                        ifp.assigned_blocks
-                            .insert((result.piece, *begin), peer_addr);
-                        ifp.unassigned.clear(*begin / chunk_size);
-                        if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                            peer.block_queue
-                                .push_back((result.piece, *begin, *length));
-                            added += 1;
-                        }
-                    }
-                    if added == 0 {
-                        break;
-                    }
-                    queued += added;
-                } else {
-                    break;
-                }
-            }
-
-            // Clear needs_refill flag
-            if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                peer.needs_refill = false;
-            }
-        }
-    }
-
-    async fn request_pieces_from_peer(&mut self, peer_addr: SocketAddr) {
-        if self.state != TorrentState::Downloading {
-            debug!(%peer_addr, state = ?self.state, "request_pieces: not downloading");
-            return;
-        }
-
-        let ct = match &self.chunk_tracker {
-            Some(ct) => ct,
-            None => {
-                debug!(%peer_addr, "request_pieces: no chunk_tracker");
-                return;
-            }
-        };
-        if self.meta.is_none() {
-            debug!(%peer_addr, "request_pieces: no meta");
-            return;
-        }
-
-        // Rate limit: don't send new requests if download budget exhausted
-        if !self.download_bucket.is_unlimited() && self.download_bucket.available() == 0 {
-            debug!(%peer_addr, "request_pieces: rate limited");
-            return;
-        }
-
-        // In end-game: request single block, no pipelining
-        if self.end_game.is_active() {
-            self.request_end_game_block(peer_addr).await;
-            return;
-        }
-
-        // Compute available slots from pipeline
-        let (slots, peer_speed, peer_rate, is_snubbed) = match self.peers.get(&peer_addr) {
-            Some(p) => {
-                if p.peer_choking {
-                    debug!(%peer_addr, "request_pieces: peer choking");
-                    return;
-                }
-                let depth = if p.snubbed {
-                    1
-                } else {
-                    p.pipeline.queue_depth()
-                };
-                let avail = depth.saturating_sub(p.pending_requests.len());
-                if avail == 0 {
-                    debug!(%peer_addr, depth, pending = p.pending_requests.len(), "request_pieces: no pipeline slots");
-                    return;
-                }
-                let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
-                (avail, speed, p.pipeline.ewma_rate(), p.snubbed)
-            }
-            None => {
-                debug!(%peer_addr, "request_pieces: peer not found");
-                return;
-            }
-        };
-
-        // Parole piece assignment: check if any parole piece can be assigned
-        // to this peer (peer must not be an original contributor, must have the piece,
-        // and must not already have a parole peer assigned).
-        let peer_ip = peer_addr.ip();
-        for (&parole_idx, parole) in &mut self.parole_pieces {
-            if parole.parole_peer.is_some() {
-                continue; // already assigned
-            }
-            if parole.original_contributors.contains(&peer_ip) {
-                continue; // this peer is a suspect
-            }
-            let peer_has = self
-                .peers
-                .get(&peer_addr)
-                .is_some_and(|p| p.bitfield.get(parole_idx));
-            if !peer_has {
-                continue;
-            }
-            // Assign this peer as parole peer
-            parole.parole_peer = Some(peer_ip);
-            debug!(parole_idx, %peer_addr, "assigned parole peer for piece");
-            break;
-        }
-
-        let we_have = ct.bitfield().clone();
-        let completed_count = ct.bitfield().count_ones();
-
-        // Collect pieces to request
-        let suggested = self
-            .peers
-            .get(&peer_addr)
-            .map(|p| p.suggested_pieces.clone())
-            .unwrap_or_default();
-
-        let peer_rates = &self.cached_peer_rates;
-
-        let mut scratch = Vec::with_capacity(64);
-        let mut slots_remaining = slots;
-
-        // Clone peer bitfield once before the loop — within a single actor
-        // call no other code can mutate it, so refreshing every iteration
-        // was pure overhead (a full bitfield clone per pick cycle).
-        let peer_bitfield = match self.peers.get(&peer_addr) {
-            Some(p) => p.bitfield.clone(),
-            None => return,
-        };
-
-        // Loop to fill all pipeline slots — pick_blocks returns blocks from a
-        // single piece (~34 blocks for 512 KiB pieces), but we may have 128+
-        // slots to fill.  Without looping, the pipeline runs at ~25% capacity.
-        loop {
-            if slots_remaining == 0 {
-                break;
-            }
-
-            // Verify peer still exists (channel may have been removed).
-            if !self.peers.contains_key(&peer_addr) {
-                break;
-            }
-
-            // Re-create closure each iteration so borrows don't conflict
-            // with the mutable access to in_flight_pieces/peers below.
-            let missing_chunks_fn = |piece: u32, buf: &mut Vec<(u32, u32)>| {
-                buf.clear();
-                if let Some(ct) = self.chunk_tracker.as_ref() {
-                    ct.missing_chunks_into(piece, buf);
-                }
-            };
-
-            let ctx = PickContext {
-                peer_addr,
-                peer_has: &peer_bitfield,
-                peer_speed,
-                peer_is_snubbed: is_snubbed,
-                peer_rate,
-                we_have: &we_have,
-                in_flight_pieces: &self.in_flight_pieces,
-                wanted: &self.wanted_pieces,
-                streaming_pieces: &self.streaming_pieces,
-                time_critical_pieces: &self.time_critical_pieces,
-                suggested_pieces: &suggested,
-                sequential_download: self.config.sequential_download,
-                completed_count,
-                initial_picker_threshold: self.config.initial_picker_threshold,
-                connected_peer_count: self.peers.len(),
-                whole_pieces_threshold: self.config.whole_pieces_threshold,
-                piece_size: self
-                    .lengths
-                    .as_ref()
-                    .map(|l| l.piece_length() as u32)
-                    .unwrap_or(262144),
-                chunk_size: self
-                    .lengths
-                    .as_ref()
-                    .map(|l| l.chunk_size())
-                    .unwrap_or(16384),
-                extent_affinity: self.config.piece_extent_affinity,
-                auto_sequential_active: self.config.auto_sequential
-                    && self.auto_sequential_active,
-                peer_rates,
-                steal_threshold_ratio: self.config.steal_threshold_ratio,
-                cap_reached: self.in_flight_pieces.len() >= self.config.max_in_flight_pieces,
-            };
-
-            if let Some(result) = self.piece_selector.pick_blocks(&ctx, &missing_chunks_fn, &mut scratch) {
-                debug!(%peer_addr, piece = result.piece, blocks = result.blocks.len(), slots = slots_remaining, "pick_blocks: sending requests");
-                // Use Lengths arithmetic instead of iterating chunk tracker
-                let total_blocks = self
-                    .lengths
-                    .as_ref()
-                    .map(|l| l.chunks_in_piece(result.piece))
-                    .unwrap_or(1);
-                let chunk_size = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                let mask = if !self.in_flight_pieces.contains_key(&result.piece) {
-                    if let Some(ct) = self.chunk_tracker.as_ref() {
-                        Self::build_chunk_mask(ct, result.piece, total_blocks, chunk_size)
-                    } else {
-                        ChunkMask::all(total_blocks)
-                    }
-                } else {
-                    ChunkMask::all(total_blocks) // won't be used — entry already exists
-                };
-                let ifp = self
-                    .in_flight_pieces
-                    .entry(result.piece)
-                    .or_insert_with(|| InFlightPiece::new(total_blocks, mask));
-
-                // Collect blocks for batch send
-                let mut batch_requests: Vec<(u32, u32, u32)> = Vec::new();
-                for (begin, length) in result.blocks.iter().take(slots_remaining) {
-                    if !self.download_bucket.is_unlimited() {
-                        let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
-                        if !is_local
-                            && let Some(ref global) = self.global_download_bucket
-                            && !global.lock().unwrap().try_consume(*length as u64)
-                        {
-                            break;
-                        }
-                        if !self.download_bucket.try_consume(*length as u64) {
-                            break;
-                        }
-                    }
-                    batch_requests.push((result.piece, *begin, *length));
-                }
-
-                // Send entire batch as single channel message
-                let mut sent = 0usize;
-                if !batch_requests.is_empty()
-                    && let Some(peer) = self.peers.get_mut(&peer_addr)
-                    && peer
-                        .cmd_tx
-                        .try_send(PeerCommand::RequestBatch {
-                            requests: batch_requests.clone(),
-                        })
-                        .is_ok()
-                {
-                    for &(index, begin, length) in &batch_requests {
-                        ifp.assigned_blocks
-                            .insert((index, begin), peer_addr);
-                        ifp.unassigned.clear(begin / chunk_size);
-                        peer.pipeline
-                            .request_sent(index, begin, std::time::Instant::now());
-                        peer.pending_requests.insert(index, begin, length);
-                    }
-                    sent = batch_requests.len();
-                }
-                if sent == 0 {
-                    break; // peer channel full or rate limited
-                }
-                slots_remaining -= sent;
-            } else {
-                self.check_end_game_activation();
-                break;
-            }
-        }
-    }
 
     /// Build a [`ChunkMask`] for a piece from the chunk tracker.
     ///
     /// Set bits = missing AND not-yet-assigned (initially all missing chunks).
     /// Called once when an `InFlightPiece` is first created.
+    #[allow(dead_code)] // M73: kept for endgame pathway and future use
     fn build_chunk_mask(ct: &ChunkTracker, piece: u32, num_chunks: u32, chunk_size: u32) -> ChunkMask {
         if ct.bitfield().get(piece) {
             return ChunkMask::empty();
@@ -5845,10 +5317,38 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
-            // Drain pre-computed queues — end-game has its own scheduling
+            // M73: Cancel all request drivers — endgame uses actor-based dispatch
             for peer in self.peers.values_mut() {
-                peer.block_queue.clear();
-                peer.needs_refill = false;
+                if let Some(cancel) = peer.driver_cancel.take() {
+                    cancel.cancel();
+                }
+                peer.driver_handle = None;
+                peer.semaphore = None;
+            }
+            if let Some(ref rs) = self.reservation_state {
+                rs.write().set_endgame(true);
+            }
+        }
+    }
+
+    /// M73: Respawn request drivers for all unchoked peers that don't already have one.
+    fn respawn_all_drivers(&mut self) {
+        let Some(ref rs) = self.reservation_state else { return };
+        let Some(ref notify) = self.reservation_notify else { return };
+        let addrs: Vec<SocketAddr> = self.peers.iter()
+            .filter(|(_, p)| !p.peer_choking && p.driver_cancel.is_none())
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in addrs {
+            if let Some(peer) = self.peers.get_mut(&addr) {
+                let queue_depth = self.config.initial_queue_depth;
+                let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
+                peer.semaphore = Some(sem.clone());
+                let (cancel, handle) = request_driver::spawn_driver(
+                    addr, sem, rs.clone(), notify.clone(), peer.cmd_tx.clone(),
+                );
+                peer.driver_cancel = Some(cancel);
+                peer.driver_handle = Some(handle);
             }
         }
     }
@@ -6082,17 +5582,17 @@ impl TorrentActor {
                 ss.peer_disconnected(addr);
             }
             if let Some(peer) = self.peers.remove(&addr) {
+                // M73: Cancel driver
+                if let Some(cancel) = peer.driver_cancel {
+                    cancel.cancel();
+                }
                 self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                 // Remove pieces that only this peer was downloading
-                let mut peer_pieces: HashSet<u32> = peer
+                let peer_pieces: HashSet<u32> = peer
                     .pending_requests
                     .iter()
                     .map(|(idx, _, _)| idx)
                     .collect();
-                // Also include pieces from pre-computed block_queue
-                for (idx, _, _) in &peer.block_queue {
-                    peer_pieces.insert(*idx);
-                }
                 for piece_idx in peer_pieces {
                     let other_has = self
                         .peers
@@ -6117,6 +5617,10 @@ impl TorrentActor {
                 // End-game cleanup
                 if self.end_game.is_active() {
                     self.end_game.peer_disconnected(addr);
+                }
+                // M73: Remove peer from shared state
+                if let Some(ref rs) = self.reservation_state {
+                    rs.write().remove_peer(addr);
                 }
                 // Send shutdown command (non-blocking — peer may have a full channel)
                 let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
@@ -6221,17 +5725,17 @@ impl TorrentActor {
                     ss.peer_disconnected(addr);
                 }
                 if let Some(peer) = self.peers.remove(&addr) {
+                    // M73: Cancel driver
+                    if let Some(cancel) = peer.driver_cancel {
+                        cancel.cancel();
+                    }
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
-                    let mut peer_pieces: HashSet<u32> = peer
+                    let peer_pieces: HashSet<u32> = peer
                         .pending_requests
                         .iter()
                         .map(|(idx, _, _)| idx)
                         .collect();
-                    // Also include pieces from pre-computed block_queue
-                    for (idx, _, _) in &peer.block_queue {
-                        peer_pieces.insert(*idx);
-                    }
                     for piece_idx in peer_pieces {
                         let other_has = self
                             .peers
@@ -6254,6 +5758,10 @@ impl TorrentActor {
                     }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(addr);
+                    }
+                    // M73: Remove peer from shared state
+                    if let Some(ref rs) = self.reservation_state {
+                        rs.write().remove_peer(addr);
                     }
                     let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                     post_alert(

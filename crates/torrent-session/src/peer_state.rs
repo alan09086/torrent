@@ -1,6 +1,6 @@
 use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -135,11 +135,12 @@ pub(crate) struct PeerState {
     pub appears_nated: bool,
     /// Transport protocol used for this peer connection.
     pub transport: Option<crate::rate_limiter::PeerTransport>,
-    /// Pre-computed block assignments waiting to be dispatched.
-    /// Filled by `batch_fill_all_peers()`, popped by `handle_piece_data()`.
-    pub block_queue: VecDeque<(u32, u32, u32)>,
-    /// Signals that this peer needs its block_queue refilled.
-    pub needs_refill: bool,
+    /// Semaphore for per-peer flow control (M73).
+    pub semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Cancellation token for the request driver task.
+    pub driver_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Join handle for the request driver task.
+    pub driver_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[allow(dead_code)]
@@ -185,8 +186,9 @@ impl PeerState {
             supports_holepunch: false,
             appears_nated: false,
             transport: None,
-            block_queue: VecDeque::new(),
-            needs_refill: true, // Start needing refill
+            semaphore: None,
+            driver_cancel: None,
+            driver_handle: None,
         }
     }
 }

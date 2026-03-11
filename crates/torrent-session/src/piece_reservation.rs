@@ -68,6 +68,7 @@ pub(crate) struct PieceReservationState {
     endgame_active: bool,
 }
 
+#[allow(dead_code)] // Some methods reserved for M74+ (streaming, priority, wanted updates)
 impl PieceReservationState {
     /// Create a new reservation state.
     ///
