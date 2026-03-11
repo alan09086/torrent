@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1392-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.71.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.72.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -238,6 +238,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.72.0 | M70 | Pre-computed block queues: O(1) per-block dispatch via per-peer VecDeque, shared-context batch fill, RequestBatch channel optimization, reactive `tokio::sync::Notify` refill, stale block cleanup, `max_in_flight_pieces` 20→40, pipeline tick 250ms→500ms |
 | 0.71.0 | M68+M69 | Pipeline optimization: dispatch threshold 32→4, fixed-depth pipeline (no BDP feedback loop), event channel 256→2048 with biased select, PreferPlaintext encryption mode, scratch buffer API (-88% temp allocs), stack-array `peer_count()`, `max_in_flight_pieces` 32→20 |
 | 0.70.0 | M67 | Crypto optimization: `ring` (BoringSSL AVX2 asm) replaces `sha1`/`sha2` crates (~4.6x SHA1 throughput on Broadwell), `target-cpu=native` codegen, RC4 write buffer reuse, default peers 200→128 |
 | 0.69.0 | M66 | Adaptive queue depth: per-peer BDP-based pipeline depth replaces fixed 128 slots — fast peers get deeper pipelines (up to 250), slow peers get shallower (floor 16) |

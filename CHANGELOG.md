@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.72.0] — 2026-03-10
+
+### Changed
+- **Pre-computed per-peer block queues**: Each peer gets a `VecDeque` of pre-assigned blocks filled
+  during batch passes. `handle_piece_data()` dispatch is now O(1) — pop from queue instead of running
+  the 5-layer picker on every block arrival (~91K invocations eliminated per 1.4 GiB download).
+- **Shared-context batch fill**: Pipeline tick clones `we_have` bitfield ONCE for all peers instead of
+  per-peer, with shared scratch buffer. Eliminates O(peers) redundant allocations per tick.
+- **RequestBatch channel optimization**: Batch block requests into a single `PeerCommand::RequestBatch`
+  channel message, reducing mpsc channel sends from N-per-peer to 1-per-peer per refill.
+- **Reactive dispatch via `tokio::sync::Notify`**: Actor wakes immediately when any peer's queue drops
+  below threshold, reducing worst-case dispatch latency from 250ms to ~1ms. Notify coalesces multiple
+  signals for efficient batch refill.
+- **Stale block cleanup**: Verified/failed pieces are swept from all peers' block_queues. End-game
+  activation drains all queues to prevent orphaned assignments.
+- **`max_in_flight_pieces` 20 → 40**: More concurrent pieces for better parallelism across peers.
+  Presets: `min_memory()` = 16, `high_performance()` = 80.
+- **Pipeline tick 250ms → 500ms**: Safety net only — Notify handles the fast path.
+- Test count: 1392
+
 ## [0.71.0] — 2026-03-10
 
 ### Changed
