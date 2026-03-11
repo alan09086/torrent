@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.74.0] — 2026-03-11
+
+### Changed
+- **Zero-alloc steal phase**: Rewrote `pick_partial` steal phase to iterate `assigned_blocks`
+  directly instead of calling `missing_chunks_into()` → `Vec::extend` → `Vec::retain`. Reduces
+  steal scan from O(total_chunks) to O(assigned_blocks) per in-flight piece, eliminating all
+  `chunk_info()` calls, Vec allocations, and HashMap probes from the steal path.
+- **Steal early-out**: Skip the O(pieces × blocks) steal scan entirely when no peer has a rate
+  below the steal threshold. O(peers) check via `peer_rates.values().any()`.
+- Test count: 1409
+
 ## [0.73.0] — 2026-03-11
 
 ### Added

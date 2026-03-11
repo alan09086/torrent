@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1405-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1409-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.73.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.74.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -238,6 +238,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.74.0 | M72 | Steal phase optimization: direct `assigned_blocks` iteration replaces `missing_chunks_into` → `Vec::retain` pattern, early-out when no slow peers exist. Eliminates O(total_chunks) per piece in steal scan |
 | 0.73.0 | M71 | Picker efficiency: ChunkMask 256-bit bitfield for zero-alloc block selection, two-phase `pick_partial` scoring (bit scan → enumerate winner), `#[inline]` on hot-path cross-crate functions. CPU time -23% (37.1s→28.7s) |
 | 0.72.0 | M70 | Pre-computed block queues: O(1) per-block dispatch via per-peer VecDeque, shared-context batch fill, RequestBatch channel optimization, reactive `tokio::sync::Notify` refill, stale block cleanup, `max_in_flight_pieces` 20→40, pipeline tick 250ms→500ms |
 | 0.71.0 | M68+M69 | Pipeline optimization: dispatch threshold 32→4, fixed-depth pipeline (no BDP feedback loop), event channel 256→2048 with biased select, PreferPlaintext encryption mode, scratch buffer API (-88% temp allocs), stack-array `peer_count()`, `max_in_flight_pieces` 32→20 |

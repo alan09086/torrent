@@ -30,7 +30,7 @@ cargo clippy --workspace -- -D warnings
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md`
 - M1-M53 complete. All 51 parity milestones done + M52 API documentation + TorrentStats full parity + M53 full torrent operations API parity.
-- Current: v0.73.0, 1405 tests. Post-parity: M55 (speed), M56 (DHT persistence/stealing), M61 (perf optimizations), M65-M71 (CPU efficiency, adaptive queue, crypto optimization, memory/allocation, pipeline optimization, picker efficiency). M62 (semaphore pipeline) reverted due to data corruption.
+- Current: v0.74.0, 1409 tests. Post-parity: M55 (speed), M56 (DHT persistence/stealing), M61 (perf optimizations), M65-M72 (CPU efficiency, adaptive queue, crypto optimization, memory/allocation, pipeline optimization, picker efficiency, steal phase optimization). M62 (semaphore pipeline) reverted due to data corruption.
 - Implementation plans exist for all remaining milestones (M40-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone

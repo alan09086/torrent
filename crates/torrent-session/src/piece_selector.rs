@@ -428,42 +428,50 @@ impl PieceSelector {
             }
         }
 
-        // Steal phase: if no unassigned blocks found, steal from slow peers
+        // Steal phase: if no unassigned blocks found, steal from slow peers.
+        // Iterates assigned_blocks directly — O(assigned) per piece instead of
+        // O(total_chunks) via missing_chunks_into + Vec::retain.
         if ctx.steal_threshold_ratio > 0.0 && !ctx.peer_is_snubbed {
             let my_rate = ctx.peer_rate;
             if my_rate > 0.0 {
                 let steal_threshold = my_rate / ctx.steal_threshold_ratio;
 
-                for (&piece, ifp) in ctx.in_flight_pieces {
-                    if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece)
-                    {
-                        continue;
-                    }
+                // Early-out: skip the O(pieces × blocks) scan if no peer is slow enough
+                let any_slow_peer = ctx.peer_rates.values().any(|&rate| rate < steal_threshold);
+                if any_slow_peer {
+                    for (&piece, ifp) in ctx.in_flight_pieces {
+                        if !ctx.peer_has.get(piece)
+                            || ctx.we_have.get(piece)
+                            || !ctx.wanted.get(piece)
+                        {
+                            continue;
+                        }
 
-                    // Get all missing blocks (includes assigned ones)
-                    missing_chunks(piece, scratch);
-
-                    // Filter to blocks assigned to slow peers
-                    scratch.retain(|&(begin, _len)| {
-                        if let Some(&assigned_peer) = ifp.assigned_blocks.get(&(piece, begin)) {
+                        scratch.clear();
+                        for (&(_p, begin), &assigned_peer) in &ifp.assigned_blocks {
                             if assigned_peer == ctx.peer_addr {
-                                return false;
+                                continue; // don't steal from ourselves
                             }
-                            ctx.peer_rates
+                            let is_slow = ctx
+                                .peer_rates
                                 .get(&assigned_peer)
                                 .map(|&rate| rate < steal_threshold)
-                                .unwrap_or(false)
-                        } else {
-                            false // unassigned blocks should have been picked already
+                                .unwrap_or(false);
+                            if is_slow {
+                                let length =
+                                    ctx.chunk_size.min(ctx.piece_size.saturating_sub(begin));
+                                if length > 0 {
+                                    scratch.push((begin, length));
+                                }
+                            }
                         }
-                    });
-
-                    if !scratch.is_empty() {
-                        return Some(PickResult {
-                            piece,
-                            blocks: std::mem::take(scratch),
-                            exclusive: false,
-                        });
+                        if !scratch.is_empty() {
+                            return Some(PickResult {
+                                piece,
+                                blocks: std::mem::take(scratch),
+                                exclusive: false,
+                            });
+                        }
                     }
                 }
             }
@@ -2059,5 +2067,205 @@ mod tests {
         let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
         // Should pick a new piece normally
         assert!(result.is_some());
+    }
+
+    // ── Steal phase tests ──────────────────────────────────────────────
+
+    #[test]
+    fn steal_from_slow_peer() {
+        // Piece 0 fully assigned to a slow peer. Our peer is fast → should steal.
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 { peer_has.set(i); }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 { wanted.set(i); }
+
+        // Piece 0 in-flight, 2 blocks, both assigned to slow_peer, ChunkMask empty
+        let slow_peer = addr(2000);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
+        ifp.assigned_blocks.insert((0, 0), slow_peer);
+        ifp.assigned_blocks.insert((0, 16384), slow_peer);
+        ifp.unassigned.clear(0);
+        ifp.unassigned.clear(1);
+        let mut in_flight = FxHashMap::default();
+        in_flight.insert(0u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        // Peer rates: our peer is fast, slow_peer is slow
+        let mut peer_rates = FxHashMap::default();
+        peer_rates.insert(slow_peer, 1000.0); // slow
+        peer_rates.insert(addr(3000), 100_000.0); // our peer rate (fast)
+
+        let mut ctx = default_pick_context(
+            addr(3000), &peer_has, &we_have, &wanted, &in_flight,
+            &streaming, &time_critical, &suggested,
+        );
+        ctx.peer_rate = 100_000.0;
+        ctx.steal_threshold_ratio = 10.0; // threshold = 100_000/10 = 10_000
+        ctx.peer_rates = &peer_rates;
+        ctx.cap_reached = true; // prevent picking new pieces
+
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
+        // Should steal from slow peer
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.piece, 0);
+        assert_eq!(r.blocks.len(), 2); // both blocks stealable
+    }
+
+    #[test]
+    fn no_steal_from_fast_peer() {
+        // Piece 0 fully assigned to a fast peer. Should NOT steal.
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 { peer_has.set(i); }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 { wanted.set(i); }
+
+        let fast_peer = addr(2000);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
+        ifp.assigned_blocks.insert((0, 0), fast_peer);
+        ifp.assigned_blocks.insert((0, 16384), fast_peer);
+        ifp.unassigned.clear(0);
+        ifp.unassigned.clear(1);
+        let mut in_flight = FxHashMap::default();
+        in_flight.insert(0u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        let mut peer_rates = FxHashMap::default();
+        peer_rates.insert(fast_peer, 50_000.0); // fast (above threshold)
+
+        let mut ctx = default_pick_context(
+            addr(3000), &peer_has, &we_have, &wanted, &in_flight,
+            &streaming, &time_critical, &suggested,
+        );
+        ctx.peer_rate = 50_000.0;
+        ctx.steal_threshold_ratio = 10.0; // threshold = 5_000
+        ctx.peer_rates = &peer_rates;
+        ctx.cap_reached = true;
+
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
+        // Should NOT steal — fast peer is above threshold
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn no_steal_from_self() {
+        // Piece 0 assigned to ourselves. Should NOT steal own blocks.
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 { peer_has.set(i); }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 { wanted.set(i); }
+
+        let our_addr = addr(3000);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
+        ifp.assigned_blocks.insert((0, 0), our_addr);
+        ifp.assigned_blocks.insert((0, 16384), our_addr);
+        ifp.unassigned.clear(0);
+        ifp.unassigned.clear(1);
+        let mut in_flight = FxHashMap::default();
+        in_flight.insert(0u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        let mut peer_rates = FxHashMap::default();
+        peer_rates.insert(our_addr, 100.0); // even if we're "slow"
+
+        let mut ctx = default_pick_context(
+            our_addr, &peer_has, &we_have, &wanted, &in_flight,
+            &streaming, &time_critical, &suggested,
+        );
+        ctx.peer_rate = 100_000.0;
+        ctx.steal_threshold_ratio = 10.0;
+        ctx.peer_rates = &peer_rates;
+        ctx.cap_reached = true;
+
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn steal_early_out_no_slow_peers() {
+        // All peers are fast → early-out should skip steal entirely
+        let mut sel = PieceSelector::new(4);
+        for i in 0..4 {
+            sel.availability[i] = 2;
+        }
+
+        let mut peer_has = Bitfield::new(4);
+        for i in 0..4 { peer_has.set(i); }
+        let we_have = Bitfield::new(4);
+        let mut wanted = Bitfield::new(4);
+        for i in 0..4 { wanted.set(i); }
+
+        let fast_peer = addr(2000);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
+        ifp.assigned_blocks.insert((0, 0), fast_peer);
+        ifp.assigned_blocks.insert((0, 16384), fast_peer);
+        ifp.unassigned.clear(0);
+        ifp.unassigned.clear(1);
+        let mut in_flight = FxHashMap::default();
+        in_flight.insert(0u32, ifp);
+
+        let streaming = BTreeSet::new();
+        let time_critical = BTreeSet::new();
+        let suggested = HashSet::new();
+
+        // All peers fast — steal_threshold = 10_000, all rates above
+        let mut peer_rates = FxHashMap::default();
+        peer_rates.insert(fast_peer, 50_000.0);
+        peer_rates.insert(addr(4000), 80_000.0);
+
+        let mut ctx = default_pick_context(
+            addr(3000), &peer_has, &we_have, &wanted, &in_flight,
+            &streaming, &time_critical, &suggested,
+        );
+        ctx.peer_rate = 100_000.0;
+        ctx.steal_threshold_ratio = 10.0;
+        ctx.peer_rates = &peer_rates;
+        ctx.cap_reached = true;
+
+        let chunks = |_piece: u32, buf: &mut Vec<(u32, u32)>| {
+            buf.clear();
+        };
+        let mut scratch = Vec::new();
+        let result = sel.pick_blocks(&ctx, &chunks, &mut scratch);
+        assert!(result.is_none());
     }
 }
