@@ -5342,7 +5342,8 @@ impl TorrentActor {
                         .entry(result.piece)
                         .or_insert_with(|| InFlightPiece::new(total_blocks));
 
-                    let mut sent = 0usize;
+                    // Collect blocks for batch send
+                    let mut batch_requests: Vec<(u32, u32, u32)> = Vec::new();
                     for (begin, length) in result.blocks.iter().take(slots_remaining) {
                         if !self.download_bucket.is_unlimited() {
                             let is_local =
@@ -5357,28 +5358,31 @@ impl TorrentActor {
                                 break;
                             }
                         }
+                        batch_requests.push((result.piece, *begin, *length));
+                    }
 
-                        if let Some(peer) = self.peers.get_mut(&peer_addr)
-                            && peer
-                                .cmd_tx
-                                .try_send(PeerCommand::Request {
-                                    index: result.piece,
-                                    begin: *begin,
-                                    length: *length,
-                                })
-                                .is_ok()
-                        {
+                    // Send entire batch as single channel message
+                    let mut sent = 0usize;
+                    if !batch_requests.is_empty()
+                        && let Some(peer) = self.peers.get_mut(&peer_addr)
+                        && peer
+                            .cmd_tx
+                            .try_send(PeerCommand::RequestBatch {
+                                requests: batch_requests.clone(),
+                            })
+                            .is_ok()
+                    {
+                        for &(index, begin, length) in &batch_requests {
                             ifp.assigned_blocks
-                                .insert((result.piece, *begin), peer_addr);
+                                .insert((index, begin), peer_addr);
                             peer.pipeline.request_sent(
-                                result.piece,
-                                *begin,
+                                index,
+                                begin,
                                 std::time::Instant::now(),
                             );
-                            peer.pending_requests
-                                .insert(result.piece, *begin, *length);
-                            sent += 1;
+                            peer.pending_requests.insert(index, begin, length);
                         }
+                        sent = batch_requests.len();
                     }
                     if sent == 0 {
                         break; // peer channel full or rate limited
@@ -5655,7 +5659,8 @@ impl TorrentActor {
                     .entry(result.piece)
                     .or_insert_with(|| InFlightPiece::new(total_blocks));
 
-                let mut sent = 0usize;
+                // Collect blocks for batch send
+                let mut batch_requests: Vec<(u32, u32, u32)> = Vec::new();
                 for (begin, length) in result.blocks.iter().take(slots_remaining) {
                     if !self.download_bucket.is_unlimited() {
                         let is_local = crate::rate_limiter::is_local_network(peer_addr.ip());
@@ -5669,24 +5674,28 @@ impl TorrentActor {
                             break;
                         }
                     }
+                    batch_requests.push((result.piece, *begin, *length));
+                }
 
-                    if let Some(peer) = self.peers.get_mut(&peer_addr)
-                        && peer
-                            .cmd_tx
-                            .try_send(PeerCommand::Request {
-                                index: result.piece,
-                                begin: *begin,
-                                length: *length,
-                            })
-                            .is_ok()
-                    {
+                // Send entire batch as single channel message
+                let mut sent = 0usize;
+                if !batch_requests.is_empty()
+                    && let Some(peer) = self.peers.get_mut(&peer_addr)
+                    && peer
+                        .cmd_tx
+                        .try_send(PeerCommand::RequestBatch {
+                            requests: batch_requests.clone(),
+                        })
+                        .is_ok()
+                {
+                    for &(index, begin, length) in &batch_requests {
                         ifp.assigned_blocks
-                            .insert((result.piece, *begin), peer_addr);
+                            .insert((index, begin), peer_addr);
                         peer.pipeline
-                            .request_sent(result.piece, *begin, std::time::Instant::now());
-                        peer.pending_requests.insert(result.piece, *begin, *length);
-                        sent += 1;
+                            .request_sent(index, begin, std::time::Instant::now());
+                        peer.pending_requests.insert(index, begin, length);
                     }
+                    sent = batch_requests.len();
                 }
                 if sent == 0 {
                     break; // peer channel full or rate limited

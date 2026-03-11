@@ -759,6 +759,10 @@ pub(crate) enum PeerCommand {
     SendHashReject(torrent_core::HashRequest),
     /// BEP 55: Send a holepunch message to this peer.
     SendHolepunch(torrent_wire::HolepunchMessage),
+    /// Batch of block requests — reduces channel sends from N to 1.
+    RequestBatch {
+        requests: Vec<(u32, u32, u32)>, // (piece_index, begin, length)
+    },
     /// Update the piece count after BEP 9 metadata assembly.
     UpdateNumPieces(u32),
     Shutdown,
