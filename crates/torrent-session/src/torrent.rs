@@ -3411,11 +3411,15 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.remove(&peer_addr) {
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
-                    let peer_pieces: HashSet<u32> = peer
+                    let mut peer_pieces: HashSet<u32> = peer
                         .pending_requests
                         .iter()
                         .map(|(idx, _, _)| idx)
                         .collect();
+                    // Also include pieces from pre-computed block_queue
+                    for (idx, _, _) in &peer.block_queue {
+                        peer_pieces.insert(*idx);
+                    }
                     let had_pending = !peer_pieces.is_empty();
                     for piece_idx in peer_pieces {
                         let other_has = self
@@ -3669,15 +3673,45 @@ impl TorrentActor {
             }
         }
 
-        // Only invoke the full picker when enough slots are free to justify
-        // the cost, or when end-game needs immediate block assignment.
-        let free_slots = if let Some(peer) = self.peers.get(&peer_addr) {
-            peer.pipeline.queue_depth().saturating_sub(peer.pending_requests.len())
+        // O(1) dispatch: pop pre-computed block from queue instead of running full picker
+        if !self.end_game.is_active() {
+            // Check rate limit before dispatching from queue
+            let rate_limited = !self.download_bucket.is_unlimited()
+                && self.download_bucket.available() == 0;
+            if !rate_limited
+                && let Some(peer) = self.peers.get_mut(&peer_addr)
+            {
+                if let Some((index_q, begin_q, length_q)) = peer.block_queue.pop_front() {
+                    // Send the pre-computed request — only register if send succeeds
+                    if peer
+                        .cmd_tx
+                        .try_send(PeerCommand::Request {
+                            index: index_q,
+                            begin: begin_q,
+                            length: length_q,
+                        })
+                        .is_ok()
+                    {
+                        peer.pipeline.request_sent(
+                            index_q,
+                            begin_q,
+                            std::time::Instant::now(),
+                        );
+                        peer.pending_requests.insert(index_q, begin_q, length_q);
+                    } else {
+                        // Send failed — push back to front of queue
+                        peer.block_queue.push_front((index_q, begin_q, length_q));
+                    }
+                }
+                // Signal refill when queue drops below half of queue_depth
+                let threshold = peer.pipeline.queue_depth() / 2;
+                if peer.block_queue.len() < threshold {
+                    peer.needs_refill = true;
+                }
+            }
         } else {
-            0
-        };
-        if self.end_game.is_active() || free_slots >= BATCH_DISPATCH_THRESHOLD {
-            self.request_pieces_from_peer(peer_addr).await;
+            // End-game still uses the dedicated end-game block requester
+            self.request_end_game_block(peer_addr).await;
         }
     }
 
@@ -5159,7 +5193,7 @@ impl TorrentActor {
         // Shared scratch buffer reused across peers
         let mut scratch = Vec::with_capacity(64);
 
-        // Collect qualifying peers: unchoked with free pipeline slots
+        // Collect qualifying peers: unchoked with free pipeline slots or needing refill
         let refill_peers: Vec<(SocketAddr, usize, PeerSpeed, f64, bool)> = self
             .peers
             .iter()
@@ -5169,12 +5203,11 @@ impl TorrentActor {
                 }
                 let depth = if p.snubbed { 1 } else { p.pipeline.queue_depth() };
                 let avail = depth.saturating_sub(p.pending_requests.len());
-                if avail == 0 {
+                if avail == 0 && !p.needs_refill {
                     return None;
                 }
-                // Match the pipeline tick's qualifying condition:
-                // fully idle OR enough free slots to justify the picker
-                if !p.pending_requests.is_empty() && avail < BATCH_DISPATCH_THRESHOLD {
+                // Qualify if: needs_refill, fully idle, or enough free slots
+                if !p.needs_refill && !p.pending_requests.is_empty() && avail < BATCH_DISPATCH_THRESHOLD {
                     return None;
                 }
                 let speed = PeerSpeed::from_rate(p.pipeline.ewma_rate());
@@ -5331,6 +5364,101 @@ impl TorrentActor {
                     self.check_end_game_activation();
                     break;
                 }
+            }
+
+            // Pre-fill block_queue for O(1) dispatch on future block arrivals
+            let queue_target = slots_remaining; // Fill queue with remaining slots after immediate dispatch
+            let mut queued = 0;
+            loop {
+                if queued >= queue_target {
+                    break;
+                }
+
+                if !self.peers.contains_key(&peer_addr) {
+                    break;
+                }
+
+                // Re-create closure each iteration so borrows don't conflict
+                let missing_chunks_fn = |piece: u32, buf: &mut Vec<(u32, u32)>| {
+                    buf.clear();
+                    if let Some(ct) = self.chunk_tracker.as_ref() {
+                        ct.missing_chunks_into(piece, buf);
+                    }
+                };
+
+                let ctx = PickContext {
+                    peer_addr,
+                    peer_has: &peer_bitfield,
+                    peer_speed,
+                    peer_is_snubbed: is_snubbed,
+                    peer_rate,
+                    we_have: &we_have,
+                    in_flight_pieces: &self.in_flight_pieces,
+                    wanted: &self.wanted_pieces,
+                    streaming_pieces: &self.streaming_pieces,
+                    time_critical_pieces: &self.time_critical_pieces,
+                    suggested_pieces: &suggested,
+                    sequential_download: self.config.sequential_download,
+                    completed_count,
+                    initial_picker_threshold: self.config.initial_picker_threshold,
+                    connected_peer_count: self.peers.len(),
+                    whole_pieces_threshold: self.config.whole_pieces_threshold,
+                    piece_size: self
+                        .lengths
+                        .as_ref()
+                        .map(|l| l.piece_length() as u32)
+                        .unwrap_or(262144),
+                    extent_affinity: self.config.piece_extent_affinity,
+                    auto_sequential_active: self.config.auto_sequential
+                        && self.auto_sequential_active,
+                    peer_rates: &self.cached_peer_rates,
+                    steal_threshold_ratio: self.config.steal_threshold_ratio,
+                    cap_reached: self.in_flight_pieces.len()
+                        >= self.config.max_in_flight_pieces,
+                };
+
+                scratch.clear();
+
+                if let Some(result) =
+                    self.piece_selector
+                        .pick_blocks(&ctx, &missing_chunks_fn, &mut scratch)
+                {
+                    let total_blocks = self
+                        .lengths
+                        .as_ref()
+                        .map(|l| l.chunks_in_piece(result.piece))
+                        .unwrap_or(1);
+                    let ifp = self
+                        .in_flight_pieces
+                        .entry(result.piece)
+                        .or_insert_with(|| InFlightPiece::new(total_blocks));
+
+                    let mut added = 0;
+                    for (begin, length) in &result.blocks {
+                        if queued + added >= queue_target {
+                            break;
+                        }
+                        // Register in in_flight_pieces but DON'T send to peer yet
+                        ifp.assigned_blocks
+                            .insert((result.piece, *begin), peer_addr);
+                        if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                            peer.block_queue
+                                .push_back((result.piece, *begin, *length));
+                            added += 1;
+                        }
+                    }
+                    if added == 0 {
+                        break;
+                    }
+                    queued += added;
+                } else {
+                    break;
+                }
+            }
+
+            // Clear needs_refill flag
+            if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                peer.needs_refill = false;
             }
         }
     }
@@ -5802,11 +5930,15 @@ impl TorrentActor {
             if let Some(peer) = self.peers.remove(&addr) {
                 self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                 // Remove pieces that only this peer was downloading
-                let peer_pieces: HashSet<u32> = peer
+                let mut peer_pieces: HashSet<u32> = peer
                     .pending_requests
                     .iter()
                     .map(|(idx, _, _)| idx)
                     .collect();
+                // Also include pieces from pre-computed block_queue
+                for (idx, _, _) in &peer.block_queue {
+                    peer_pieces.insert(*idx);
+                }
                 for piece_idx in peer_pieces {
                     let other_has = self
                         .peers
@@ -5929,11 +6061,15 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.remove(&addr) {
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
-                    let peer_pieces: HashSet<u32> = peer
+                    let mut peer_pieces: HashSet<u32> = peer
                         .pending_requests
                         .iter()
                         .map(|(idx, _, _)| idx)
                         .collect();
+                    // Also include pieces from pre-computed block_queue
+                    for (idx, _, _) in &peer.block_queue {
+                        peer_pieces.insert(*idx);
+                    }
                     for piece_idx in peer_pieces {
                         let other_has = self
                             .peers
