@@ -101,16 +101,31 @@ async fn run_driver(
                     "dispatching block request"
                 );
 
-                if cmd_tx
-                    .try_send(PeerCommand::Request {
-                        index: block.piece,
-                        begin: block.begin,
-                        length: block.length,
-                    })
-                    .is_err()
-                {
-                    // Channel full or closed — peer is overwhelmed or gone.
-                    debug!(%peer_addr, "peer command channel full/closed, driver exiting");
+                // Use send().await (not try_send) to apply backpressure when the
+                // peer command channel is full. try_send would exit the driver on
+                // a full channel, permanently leaking the forgotten permit and
+                // leaving the piece reserved but never requested (piece deadlock).
+                let cmd = PeerCommand::Request {
+                    index: block.piece,
+                    begin: block.begin,
+                    length: block.length,
+                };
+                let send_result = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        debug!(%peer_addr, "request driver cancelled during send");
+                        // Return the forgotten permit — we consumed it but never
+                        // sent the request, so the actor won't return it for us.
+                        semaphore.add_permits(1);
+                        return;
+                    }
+                    result = cmd_tx.send(cmd) => result,
+                };
+
+                if send_result.is_err() {
+                    // Channel closed — peer is gone. Return the permit.
+                    debug!(%peer_addr, "peer command channel closed, driver exiting");
+                    semaphore.add_permits(1);
                     return;
                 }
 

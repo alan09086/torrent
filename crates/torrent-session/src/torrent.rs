@@ -3607,8 +3607,15 @@ impl TorrentActor {
             PeerEvent::MseRetry { peer_addr, cmd_tx } => {
                 // MSE handshake failed, peer is retrying with plaintext.
                 // Update the peer state with the new command channel.
+                // Cancel any existing driver — it holds the old cmd_tx and would
+                // send requests to a stale channel (permit leak + piece deadlock).
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     debug!(%peer_addr, "MSE retry: updating cmd_tx for plaintext attempt");
+                    if let Some(cancel) = peer.driver_cancel.take() {
+                        cancel.cancel();
+                    }
+                    peer.driver_handle = None;
+                    peer.semaphore = None;
                     peer.cmd_tx = cmd_tx;
                 }
             }
@@ -6090,7 +6097,7 @@ impl TorrentActor {
                                         )
                                         .await
                                         {
-                                            let (retry_tx, retry_rx) = mpsc::channel(64);
+                                            let (retry_tx, retry_rx) = mpsc::channel(256);
                                             let _ = event_tx
                                                 .send(PeerEvent::MseRetry {
                                                     peer_addr: addr,
@@ -6276,7 +6283,7 @@ impl TorrentActor {
                                     if let Some(fallback_mode) = retry_mode {
                                         debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
                                         if let Ok(tcp2) = factory.connect_tcp(addr).await {
-                                            let (retry_tx, retry_rx) = mpsc::channel(64);
+                                            let (retry_tx, retry_rx) = mpsc::channel(256);
                                             let _ = event_tx
                                                 .send(PeerEvent::MseRetry {
                                                     peer_addr: addr,
