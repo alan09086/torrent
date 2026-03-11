@@ -40,6 +40,9 @@ ed25519-dalek = { version = "2" }
 # Cryptography (SHA1, SHA256 via BoringSSL)
 ring = "0.17"
 
+# Fast synchronization primitives
+parking_lot = "0.12"
+
 # Testing
 pretty_assertions = "1"
 

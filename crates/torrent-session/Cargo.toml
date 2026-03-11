@@ -31,6 +31,7 @@ rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 libc = "0.2"
 futures = "0.3"
+parking_lot = { workspace = true }
 url = "2"
 
 [dev-dependencies]
