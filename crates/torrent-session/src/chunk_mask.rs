@@ -88,7 +88,7 @@ impl ChunkMask {
 
     /// Returns `true` if the bit at `index` is set.
     #[inline]
-    #[allow(dead_code)] // Wired in Task 3 (picker rewrite).
+    #[allow(dead_code)]
     pub(crate) fn is_set(&self, index: u32) -> bool {
         debug_assert!(index < self.num_chunks);
         (self.bits[(index / 64) as usize] >> (index % 64)) & 1 == 1
@@ -96,14 +96,12 @@ impl ChunkMask {
 
     /// Returns the number of set bits (available chunks).
     #[inline]
-    #[allow(dead_code)] // Wired in Task 3 (picker rewrite).
     pub(crate) fn count_ones(&self) -> u32 {
         self.bits.iter().map(|w| w.count_ones()).sum()
     }
 
     /// Returns `true` if no bits are set.
     #[inline]
-    #[allow(dead_code)] // Wired in Task 3 (picker rewrite).
     pub(crate) fn is_empty(&self) -> bool {
         self.bits == [0u64; 4]
     }
@@ -122,7 +120,6 @@ impl ChunkMask {
 
     /// Returns an iterator over indices of all set bits, in ascending order.
     #[inline]
-    #[allow(dead_code)] // Wired in Task 3 (picker rewrite).
     pub(crate) fn iter_set_bits(&self) -> ChunkMaskIter {
         ChunkMaskIter {
             bits: self.bits,
@@ -141,7 +138,6 @@ impl ChunkMask {
 /// Iterator over the indices of set bits in a [`ChunkMask`].
 ///
 /// Uses the `trailing_zeros()` + clear-lowest-bit pattern for O(popcount) iteration.
-#[allow(dead_code)] // Wired in Task 3 (picker rewrite).
 pub(crate) struct ChunkMaskIter {
     bits: [u64; 4],
     word_idx: usize,

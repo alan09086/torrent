@@ -5363,6 +5363,11 @@ impl TorrentActor {
                         .as_ref()
                         .map(|l| l.piece_length() as u32)
                         .unwrap_or(262144),
+                    chunk_size: self
+                        .lengths
+                        .as_ref()
+                        .map(|l| l.chunk_size())
+                        .unwrap_or(16384),
                     extent_affinity: self.config.piece_extent_affinity,
                     auto_sequential_active: self.config.auto_sequential
                         && self.auto_sequential_active,
@@ -5494,6 +5499,11 @@ impl TorrentActor {
                         .as_ref()
                         .map(|l| l.piece_length() as u32)
                         .unwrap_or(262144),
+                    chunk_size: self
+                        .lengths
+                        .as_ref()
+                        .map(|l| l.chunk_size())
+                        .unwrap_or(16384),
                     extent_affinity: self.config.piece_extent_affinity,
                     auto_sequential_active: self.config.auto_sequential
                         && self.auto_sequential_active,
@@ -5707,6 +5717,11 @@ impl TorrentActor {
                     .as_ref()
                     .map(|l| l.piece_length() as u32)
                     .unwrap_or(262144),
+                chunk_size: self
+                    .lengths
+                    .as_ref()
+                    .map(|l| l.chunk_size())
+                    .unwrap_or(16384),
                 extent_affinity: self.config.piece_extent_affinity,
                 auto_sequential_active: self.config.auto_sequential
                     && self.auto_sequential_active,

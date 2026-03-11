@@ -69,6 +69,7 @@ impl InFlightPiece {
         }
     }
 
+    #[allow(dead_code)]
     pub fn unassigned_count(&self) -> u32 {
         self.total_blocks
             .saturating_sub(self.assigned_blocks.len() as u32)
@@ -118,6 +119,7 @@ pub(crate) struct PickContext<'a> {
     pub connected_peer_count: usize,
     pub whole_pieces_threshold: u32,
     pub piece_size: u32,
+    pub chunk_size: u32,
     pub extent_affinity: bool,
     /// Whether auto-sequential mode is currently active (managed by TorrentActor).
     pub auto_sequential_active: bool,
@@ -347,7 +349,13 @@ impl PieceSelector {
     }
 
     /// Get unassigned blocks for a piece that's already in-flight.
-    /// Results are written into `out`, which is cleared first by the closure.
+    ///
+    /// Fast path: when the piece is in-flight and the `ChunkMask` is empty,
+    /// returns immediately — zero allocation, no `retain` filtering.
+    /// When the mask is non-empty, enumerates missing chunks and filters
+    /// to only unassigned ones using the `ChunkMask` (replaces the old
+    /// `assigned_blocks.contains_key` retain with a cheap bit test).
+    /// Fallback: when the piece is not in-flight, uses `ChunkTracker` enumeration.
     fn unassigned_blocks<F>(
         &self,
         piece: u32,
@@ -358,50 +366,66 @@ impl PieceSelector {
     where
         F: Fn(u32, &mut Vec<(u32, u32)>),
     {
-        missing_chunks(piece, out);
+        out.clear();
         if let Some(ifp) = ctx.in_flight_pieces.get(&piece) {
-            out.retain(|&(begin, _len)| !ifp.assigned_blocks.contains_key(&(piece, begin)));
+            // Fast path: enumerate unassigned chunks directly from ChunkMask.
+            // No missing_chunks_into call, no Vec::extend, no retain — just bit iteration.
+            for chunk_idx in ifp.unassigned.iter_set_bits() {
+                let offset = chunk_idx * ctx.chunk_size;
+                let length = ctx.chunk_size.min(ctx.piece_size.saturating_sub(offset));
+                if length > 0 {
+                    out.push((offset, length));
+                }
+            }
+        } else {
+            // Piece not in-flight: fall back to ChunkTracker enumeration
+            missing_chunks(piece, out);
         }
     }
 
     /// Pick a partial piece (already in-flight) with speed affinity.
+    ///
+    /// Two-phase approach for zero-alloc scoring:
+    /// Phase 1: Score all in-flight pieces using ChunkMask metadata only (count_ones/is_empty).
+    /// Phase 2: Enumerate blocks only for the winning piece.
     fn pick_partial<F>(&self, ctx: &PickContext<'_>, missing_chunks: &F, scratch: &mut Vec<(u32, u32)>) -> Option<PickResult>
     where
         F: Fn(u32, &mut Vec<(u32, u32)>),
     {
+        // Phase 1: Score all in-flight pieces — zero alloc, just ChunkMask checks
         let mut best_piece: Option<u32> = None;
-        let mut best_buf: Vec<(u32, u32)> = Vec::new();
         let mut best_score: i32 = i32::MIN;
 
         for (&piece, ifp) in ctx.in_flight_pieces {
             if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece) {
                 continue;
             }
-            self.unassigned_blocks(piece, ctx, missing_chunks, scratch);
-            if scratch.is_empty() {
-                continue;
+            if ifp.unassigned.is_empty() {
+                continue; // No unassigned blocks — skip without any allocation
             }
-
             let score = if ctx.peer_is_snubbed {
                 // Snubbed peers avoid busy pieces
                 -(ifp.peer_count() as i32)
             } else {
                 // Prefer pieces with fewer unassigned blocks (closer to completion)
-                -(ifp.unassigned_count() as i32)
+                -(ifp.unassigned.count_ones() as i32)
             };
             if score > best_score {
                 best_score = score;
                 best_piece = Some(piece);
-                std::mem::swap(&mut best_buf, scratch);
             }
         }
 
-        if best_piece.is_some() {
-            return best_piece.map(|piece| PickResult {
-                piece,
-                blocks: best_buf,
-                exclusive: false,
-            });
+        // Phase 2: Only enumerate blocks for the winning piece
+        if let Some(piece) = best_piece {
+            self.unassigned_blocks(piece, ctx, missing_chunks, scratch);
+            if !scratch.is_empty() {
+                return Some(PickResult {
+                    piece,
+                    blocks: std::mem::take(scratch),
+                    exclusive: false,
+                });
+            }
         }
 
         // Steal phase: if no unassigned blocks found, steal from slow peers
@@ -1086,6 +1110,7 @@ mod tests {
             connected_peer_count: 10,
             whole_pieces_threshold: 20,
             piece_size: 262_144,
+            chunk_size: 16_384,
             extent_affinity: false,
             auto_sequential_active: false,
             peer_rates: &EMPTY_RATES,
@@ -1709,10 +1734,11 @@ mod tests {
             wanted.set(i);
         }
 
-        // Piece 10 in-flight in extent 0
+        // Piece 10 in-flight in extent 0 — fully assigned (no unassigned chunks)
         let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((10, 0), addr(9999));
         ifp.unassigned.clear(0);
+        ifp.unassigned.clear(1);
         let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
@@ -1763,9 +1789,11 @@ mod tests {
             wanted.set(i);
         }
 
+        // Piece 10 in-flight — fully assigned (no unassigned chunks)
         let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((10, 0), addr(9999));
         ifp.unassigned.clear(0);
+        ifp.unassigned.clear(1);
         let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
