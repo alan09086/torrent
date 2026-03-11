@@ -428,42 +428,50 @@ impl PieceSelector {
             }
         }
 
-        // Steal phase: if no unassigned blocks found, steal from slow peers
+        // Steal phase: if no unassigned blocks found, steal from slow peers.
+        // Iterates assigned_blocks directly — O(assigned) per piece instead of
+        // O(total_chunks) via missing_chunks_into + Vec::retain.
         if ctx.steal_threshold_ratio > 0.0 && !ctx.peer_is_snubbed {
             let my_rate = ctx.peer_rate;
             if my_rate > 0.0 {
                 let steal_threshold = my_rate / ctx.steal_threshold_ratio;
 
-                for (&piece, ifp) in ctx.in_flight_pieces {
-                    if !ctx.peer_has.get(piece) || ctx.we_have.get(piece) || !ctx.wanted.get(piece)
-                    {
-                        continue;
-                    }
+                // Early-out: skip the O(pieces × blocks) scan if no peer is slow enough
+                let any_slow_peer = ctx.peer_rates.values().any(|&rate| rate < steal_threshold);
+                if any_slow_peer {
+                    for (&piece, ifp) in ctx.in_flight_pieces {
+                        if !ctx.peer_has.get(piece)
+                            || ctx.we_have.get(piece)
+                            || !ctx.wanted.get(piece)
+                        {
+                            continue;
+                        }
 
-                    // Get all missing blocks (includes assigned ones)
-                    missing_chunks(piece, scratch);
-
-                    // Filter to blocks assigned to slow peers
-                    scratch.retain(|&(begin, _len)| {
-                        if let Some(&assigned_peer) = ifp.assigned_blocks.get(&(piece, begin)) {
+                        scratch.clear();
+                        for (&(_p, begin), &assigned_peer) in &ifp.assigned_blocks {
                             if assigned_peer == ctx.peer_addr {
-                                return false;
+                                continue; // don't steal from ourselves
                             }
-                            ctx.peer_rates
+                            let is_slow = ctx
+                                .peer_rates
                                 .get(&assigned_peer)
                                 .map(|&rate| rate < steal_threshold)
-                                .unwrap_or(false)
-                        } else {
-                            false // unassigned blocks should have been picked already
+                                .unwrap_or(false);
+                            if is_slow {
+                                let length =
+                                    ctx.chunk_size.min(ctx.piece_size.saturating_sub(begin));
+                                if length > 0 {
+                                    scratch.push((begin, length));
+                                }
+                            }
                         }
-                    });
-
-                    if !scratch.is_empty() {
-                        return Some(PickResult {
-                            piece,
-                            blocks: std::mem::take(scratch),
-                            exclusive: false,
-                        });
+                        if !scratch.is_empty() {
+                            return Some(PickResult {
+                                piece,
+                                blocks: std::mem::take(scratch),
+                                exclusive: false,
+                            });
+                        }
                     }
                 }
             }
