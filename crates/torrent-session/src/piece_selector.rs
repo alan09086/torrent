@@ -6,6 +6,8 @@ use std::net::SocketAddr;
 use torrent_core::{FilePriority, Lengths};
 use torrent_storage::Bitfield;
 
+use crate::chunk_mask::ChunkMask;
+
 /// Speed category for a peer based on download rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PeerSpeed {
@@ -55,13 +57,15 @@ impl PeerSpeedClassifier {
 pub(crate) struct InFlightPiece {
     pub assigned_blocks: FxHashMap<(u32, u32), SocketAddr>,
     pub total_blocks: u32,
+    pub unassigned: ChunkMask,
 }
 
 impl InFlightPiece {
-    pub fn new(total_blocks: u32) -> Self {
+    pub fn new(total_blocks: u32, unassigned: ChunkMask) -> Self {
         Self {
             assigned_blocks: FxHashMap::default(),
             total_blocks,
+            unassigned,
         }
     }
 
@@ -1134,9 +1138,11 @@ mod tests {
         assert_eq!(result_a.blocks.len(), 2);
 
         // Now record peer A's assignment in an InFlightPiece
-        let mut ifp = InFlightPiece::new(2);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((0, 0), addr(1000));
+        ifp.unassigned.clear(0);
         ifp.assigned_blocks.insert((0, 16384), addr(1000));
+        ifp.unassigned.clear(1);
         let mut in_flight2 = FxHashMap::default();
         in_flight2.insert(0u32, ifp);
 
@@ -1468,9 +1474,11 @@ mod tests {
         let suggested = HashSet::new();
 
         // Piece 0 is partially downloaded by a fast peer (2 blocks assigned out of 3)
-        let mut ifp0 = InFlightPiece::new(3);
+        let mut ifp0 = InFlightPiece::new(3, ChunkMask::all(3));
         ifp0.assigned_blocks.insert((0, 0), addr(9000));
+        ifp0.unassigned.clear(0);
         ifp0.assigned_blocks.insert((0, 16384), addr(9000));
+        ifp0.unassigned.clear(1);
 
         let mut in_flight = FxHashMap::default();
         in_flight.insert(0u32, ifp0);
@@ -1576,10 +1584,12 @@ mod tests {
         // 10 in-flight pieces with connected_peer_count=4 → 10 > 1.5*4=6
         let mut in_flight = FxHashMap::default();
         for i in 0..10 {
-            let mut ifp = InFlightPiece::new(2);
+            let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
             // All blocks assigned so partial won't find unassigned blocks
             ifp.assigned_blocks.insert((i, 0), addr(11000));
+            ifp.unassigned.clear(0);
             ifp.assigned_blocks.insert((i, 16384), addr(11000));
+            ifp.unassigned.clear(1);
             in_flight.insert(i, ifp);
         }
 
@@ -1700,8 +1710,9 @@ mod tests {
         }
 
         // Piece 10 in-flight in extent 0
-        let mut ifp = InFlightPiece::new(2);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((10, 0), addr(9999));
+        ifp.unassigned.clear(0);
         let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
@@ -1752,8 +1763,9 @@ mod tests {
             wanted.set(i);
         }
 
-        let mut ifp = InFlightPiece::new(2);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((10, 0), addr(9999));
+        ifp.unassigned.clear(0);
         let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
@@ -1805,8 +1817,9 @@ mod tests {
             wanted.set(i);
         }
 
-        let mut ifp = InFlightPiece::new(2);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((10, 0), addr(9999));
+        ifp.unassigned.clear(0);
         let mut in_flight = FxHashMap::default();
         in_flight.insert(10u32, ifp);
 
@@ -1891,8 +1904,9 @@ mod tests {
         let suggested = HashSet::new();
 
         // Piece 0 is in-flight with 1 unassigned block
-        let mut ifp = InFlightPiece::new(2);
+        let mut ifp = InFlightPiece::new(2, ChunkMask::all(2));
         ifp.assigned_blocks.insert((0, 0), addr(12000));
+        ifp.unassigned.clear(0);
         let mut in_flight = FxHashMap::default();
         in_flight.insert(0u32, ifp);
 
