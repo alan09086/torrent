@@ -340,6 +340,7 @@ impl TorrentHandle {
             end_game: EndGame::new(),
             peers: HashMap::new(),
             cached_peer_rates: FxHashMap::default(),
+            refill_notify: Arc::new(tokio::sync::Notify::new()),
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
             choker,
@@ -609,6 +610,7 @@ impl TorrentHandle {
             end_game: EndGame::new(),
             peers: HashMap::new(),
             cached_peer_rates: FxHashMap::default(),
+            refill_notify: Arc::new(tokio::sync::Notify::new()),
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
             choker,
@@ -1312,6 +1314,9 @@ struct TorrentActor {
     /// Cached peer download rates for piece stealing decisions.
     /// Refreshed on each periodic tick (~1s) instead of rebuilding per block.
     cached_peer_rates: FxHashMap<SocketAddr, f64>,
+    /// Notify handle for reactive queue refill — wakes the actor when
+    /// any peer's block_queue drops below threshold.
+    refill_notify: Arc<tokio::sync::Notify>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
     /// O(1) dedup set for available_peers — kept in sync with the Vec.
     available_peers_set: std::collections::HashSet<SocketAddr>,
@@ -2192,6 +2197,14 @@ impl TorrentActor {
                     // scratch/peer_rates once, then iterates all qualifying peers —
                     // avoiding redundant bitfield clones per peer.
                     self.batch_fill_all_peers().await;
+                }
+                // Reactive refill: wake immediately when any peer's queue runs low.
+                // Notify coalesces multiple signals — if 10 peers deplete their
+                // queues in the same window, the actor wakes once and refills all.
+                _ = self.refill_notify.notified() => {
+                    if self.state == TorrentState::Downloading && !self.end_game.is_active() {
+                        self.batch_fill_all_peers().await;
+                    }
                 }
                 // End-game refill tick (200ms) — replace reactive per-block cascade
                 // with periodic batch refill. All peers with available pipeline slots
@@ -3678,6 +3691,7 @@ impl TorrentActor {
             // Check rate limit before dispatching from queue
             let rate_limited = !self.download_bucket.is_unlimited()
                 && self.download_bucket.available() == 0;
+            let mut should_notify = false;
             if !rate_limited
                 && let Some(peer) = self.peers.get_mut(&peer_addr)
             {
@@ -3707,7 +3721,11 @@ impl TorrentActor {
                 let threshold = peer.pipeline.queue_depth() / 2;
                 if peer.block_queue.len() < threshold {
                     peer.needs_refill = true;
+                    should_notify = true;
                 }
+            }
+            if should_notify {
+                self.refill_notify.notify_one();
             }
         } else {
             // End-game still uses the dedicated end-game block requester
@@ -4270,6 +4288,7 @@ impl TorrentActor {
         // Remove stale pre-computed blocks for this piece from all peers' queues.
         // Without this, queued blocks would be requested, received, and discarded
         // by the has_chunk dedup check — wasting bandwidth.
+        let mut any_needs_refill = false;
         for peer in self.peers.values_mut() {
             let before = peer.block_queue.len();
             peer.block_queue.retain(|(idx, _, _)| *idx != index);
@@ -4277,8 +4296,12 @@ impl TorrentActor {
                 let threshold = peer.pipeline.queue_depth() / 2;
                 if peer.block_queue.len() < threshold {
                     peer.needs_refill = true;
+                    any_needs_refill = true;
                 }
             }
+        }
+        if any_needs_refill {
+            self.refill_notify.notify_one();
         }
         info!(index, "piece verified");
         post_alert(
@@ -4443,6 +4466,7 @@ impl TorrentActor {
         }
         self.in_flight_pieces.remove(&index);
         // Remove stale pre-computed blocks for this failed piece from all peers' queues.
+        let mut any_needs_refill = false;
         for peer in self.peers.values_mut() {
             let before = peer.block_queue.len();
             peer.block_queue.retain(|(idx, _, _)| *idx != index);
@@ -4450,8 +4474,12 @@ impl TorrentActor {
                 let threshold = peer.pipeline.queue_depth() / 2;
                 if peer.block_queue.len() < threshold {
                     peer.needs_refill = true;
+                    any_needs_refill = true;
                 }
             }
+        }
+        if any_needs_refill {
+            self.refill_notify.notify_one();
         }
         // Hash failure in end-game: deactivate and resume normal mode
         if self.end_game.is_active() {
