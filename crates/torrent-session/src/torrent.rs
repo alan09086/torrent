@@ -3465,6 +3465,13 @@ impl TorrentActor {
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.pending_requests.remove(index, begin);
+                    // M74: Return semaphore permit for rejected requests.
+                    // The driver consumed a permit when it sent this request;
+                    // without returning it, rejected requests permanently leak
+                    // permits and the driver eventually stalls.
+                    if let Some(ref sem) = peer.semaphore {
+                        sem.add_permits(1);
+                    }
                 }
                 debug!(index, %peer_addr, "request rejected by peer");
             }
@@ -3681,6 +3688,12 @@ impl TorrentActor {
                         .await
                     {
                         warn!(index, begin, "failed to write chunk: {e}");
+                        // M74: Return semaphore permit before early return
+                        if let Some(peer) = self.peers.get(&peer_addr)
+                            && let Some(ref sem) = peer.semaphore
+                        {
+                            sem.add_permits(1);
+                        }
                         return;
                     }
                 }
