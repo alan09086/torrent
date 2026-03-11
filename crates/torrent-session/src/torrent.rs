@@ -26,6 +26,7 @@ use torrent_core::{
 use torrent_dht::DhtHandle;
 use torrent_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
 
+use crate::chunk_mask::ChunkMask;
 use crate::choker::{Choker, PeerInfo as ChokerPeerInfo};
 use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
@@ -2179,8 +2180,16 @@ impl TorrentActor {
 
                     // Free assigned blocks from snubbed peers so pick_partial can reassign
                     if !snubbed_peers.is_empty() {
+                        let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
                         for ifp in self.in_flight_pieces.values_mut() {
+                            let freed: Vec<u32> = ifp.assigned_blocks.iter()
+                                .filter(|(_, addr)| snubbed_peers.contains(addr))
+                                .map(|(&(_, begin), _)| begin / chunk_size_val)
+                                .collect();
                             ifp.assigned_blocks.retain(|_, addr| !snubbed_peers.contains(addr));
+                            for chunk_idx in freed {
+                                ifp.unassigned.set(chunk_idx);
+                            }
                         }
                     }
 
@@ -3444,8 +3453,16 @@ impl TorrentActor {
                         }
                     }
                     // Clean up pipeline request tracking for disconnected peer
+                    let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
                     for ifp in self.in_flight_pieces.values_mut() {
+                        let freed: Vec<u32> = ifp.assigned_blocks.iter()
+                            .filter(|(_, addr)| **addr == peer_addr)
+                            .map(|(&(_, begin), _)| begin / chunk_size_val)
+                            .collect();
                         ifp.assigned_blocks.retain(|_, addr| *addr != peer_addr);
+                        for chunk_idx in freed {
+                            ifp.unassigned.set(chunk_idx);
+                        }
                     }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
@@ -3555,6 +3572,7 @@ impl TorrentActor {
             }
             if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
                 ifp.assigned_blocks.remove(&(index, begin));
+                // ChunkMask bit stays cleared — block already received, not available for re-assignment
             }
             // Remove from end-game tracker so pick_block won't return this
             // block again. The normal path calls block_received which does
@@ -3622,6 +3640,7 @@ impl TorrentActor {
         }
 
         // Remove block assignment from InFlightPiece
+        // ChunkMask bit stays cleared — block received, not available for re-assignment
         if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
             ifp.assigned_blocks.remove(&(index, begin));
         }
@@ -5344,6 +5363,11 @@ impl TorrentActor {
                         .as_ref()
                         .map(|l| l.piece_length() as u32)
                         .unwrap_or(262144),
+                    chunk_size: self
+                        .lengths
+                        .as_ref()
+                        .map(|l| l.chunk_size())
+                        .unwrap_or(16384),
                     extent_affinity: self.config.piece_extent_affinity,
                     auto_sequential_active: self.config.auto_sequential
                         && self.auto_sequential_active,
@@ -5365,10 +5389,20 @@ impl TorrentActor {
                         .as_ref()
                         .map(|l| l.chunks_in_piece(result.piece))
                         .unwrap_or(1);
+                    let chunk_size = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
+                    let mask = if !self.in_flight_pieces.contains_key(&result.piece) {
+                        if let Some(ct) = self.chunk_tracker.as_ref() {
+                            Self::build_chunk_mask(ct, result.piece, total_blocks, chunk_size)
+                        } else {
+                            ChunkMask::all(total_blocks)
+                        }
+                    } else {
+                        ChunkMask::all(total_blocks) // won't be used — entry already exists
+                    };
                     let ifp = self
                         .in_flight_pieces
                         .entry(result.piece)
-                        .or_insert_with(|| InFlightPiece::new(total_blocks));
+                        .or_insert_with(|| InFlightPiece::new(total_blocks, mask));
 
                     // Collect blocks for batch send
                     let mut batch_requests: Vec<(u32, u32, u32)> = Vec::new();
@@ -5403,6 +5437,7 @@ impl TorrentActor {
                         for &(index, begin, length) in &batch_requests {
                             ifp.assigned_blocks
                                 .insert((index, begin), peer_addr);
+                            ifp.unassigned.clear(begin / chunk_size);
                             peer.pipeline.request_sent(
                                 index,
                                 begin,
@@ -5464,6 +5499,11 @@ impl TorrentActor {
                         .as_ref()
                         .map(|l| l.piece_length() as u32)
                         .unwrap_or(262144),
+                    chunk_size: self
+                        .lengths
+                        .as_ref()
+                        .map(|l| l.chunk_size())
+                        .unwrap_or(16384),
                     extent_affinity: self.config.piece_extent_affinity,
                     auto_sequential_active: self.config.auto_sequential
                         && self.auto_sequential_active,
@@ -5484,10 +5524,20 @@ impl TorrentActor {
                         .as_ref()
                         .map(|l| l.chunks_in_piece(result.piece))
                         .unwrap_or(1);
+                    let chunk_size = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
+                    let mask = if !self.in_flight_pieces.contains_key(&result.piece) {
+                        if let Some(ct) = self.chunk_tracker.as_ref() {
+                            Self::build_chunk_mask(ct, result.piece, total_blocks, chunk_size)
+                        } else {
+                            ChunkMask::all(total_blocks)
+                        }
+                    } else {
+                        ChunkMask::all(total_blocks) // won't be used — entry already exists
+                    };
                     let ifp = self
                         .in_flight_pieces
                         .entry(result.piece)
-                        .or_insert_with(|| InFlightPiece::new(total_blocks));
+                        .or_insert_with(|| InFlightPiece::new(total_blocks, mask));
 
                     let mut added = 0;
                     for (begin, length) in &result.blocks {
@@ -5497,6 +5547,7 @@ impl TorrentActor {
                         // Register in in_flight_pieces but DON'T send to peer yet
                         ifp.assigned_blocks
                             .insert((result.piece, *begin), peer_addr);
+                        ifp.unassigned.clear(*begin / chunk_size);
                         if let Some(peer) = self.peers.get_mut(&peer_addr) {
                             peer.block_queue
                                 .push_back((result.piece, *begin, *length));
@@ -5666,6 +5717,11 @@ impl TorrentActor {
                     .as_ref()
                     .map(|l| l.piece_length() as u32)
                     .unwrap_or(262144),
+                chunk_size: self
+                    .lengths
+                    .as_ref()
+                    .map(|l| l.chunk_size())
+                    .unwrap_or(16384),
                 extent_affinity: self.config.piece_extent_affinity,
                 auto_sequential_active: self.config.auto_sequential
                     && self.auto_sequential_active,
@@ -5682,10 +5738,20 @@ impl TorrentActor {
                     .as_ref()
                     .map(|l| l.chunks_in_piece(result.piece))
                     .unwrap_or(1);
+                let chunk_size = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
+                let mask = if !self.in_flight_pieces.contains_key(&result.piece) {
+                    if let Some(ct) = self.chunk_tracker.as_ref() {
+                        Self::build_chunk_mask(ct, result.piece, total_blocks, chunk_size)
+                    } else {
+                        ChunkMask::all(total_blocks)
+                    }
+                } else {
+                    ChunkMask::all(total_blocks) // won't be used — entry already exists
+                };
                 let ifp = self
                     .in_flight_pieces
                     .entry(result.piece)
-                    .or_insert_with(|| InFlightPiece::new(total_blocks));
+                    .or_insert_with(|| InFlightPiece::new(total_blocks, mask));
 
                 // Collect blocks for batch send
                 let mut batch_requests: Vec<(u32, u32, u32)> = Vec::new();
@@ -5719,6 +5785,7 @@ impl TorrentActor {
                     for &(index, begin, length) in &batch_requests {
                         ifp.assigned_blocks
                             .insert((index, begin), peer_addr);
+                        ifp.unassigned.clear(begin / chunk_size);
                         peer.pipeline
                             .request_sent(index, begin, std::time::Instant::now());
                         peer.pending_requests.insert(index, begin, length);
@@ -5733,6 +5800,27 @@ impl TorrentActor {
                 self.check_end_game_activation();
                 break;
             }
+        }
+    }
+
+    /// Build a [`ChunkMask`] for a piece from the chunk tracker.
+    ///
+    /// Set bits = missing AND not-yet-assigned (initially all missing chunks).
+    /// Called once when an `InFlightPiece` is first created.
+    fn build_chunk_mask(ct: &ChunkTracker, piece: u32, num_chunks: u32, chunk_size: u32) -> ChunkMask {
+        if ct.bitfield().get(piece) {
+            return ChunkMask::empty();
+        }
+        let mut scratch = Vec::new();
+        ct.missing_chunks_into(piece, &mut scratch);
+        if scratch.len() as u32 == num_chunks {
+            ChunkMask::all(num_chunks)
+        } else {
+            let mut mask = ChunkMask::empty_with_capacity(num_chunks);
+            for &(offset, _) in &scratch {
+                mask.set(offset / chunk_size);
+            }
+            mask
         }
     }
 
@@ -6015,8 +6103,16 @@ impl TorrentActor {
                     }
                 }
                 // Clean up pipeline request tracking for disconnected peer
+                let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
                 for ifp in self.in_flight_pieces.values_mut() {
+                    let freed: Vec<u32> = ifp.assigned_blocks.iter()
+                        .filter(|(_, a)| **a == addr)
+                        .map(|(&(_, begin), _)| begin / chunk_size_val)
+                        .collect();
                     ifp.assigned_blocks.retain(|_, a| *a != addr);
+                    for chunk_idx in freed {
+                        ifp.unassigned.set(chunk_idx);
+                    }
                 }
                 // End-game cleanup
                 if self.end_game.is_active() {
@@ -6145,8 +6241,16 @@ impl TorrentActor {
                             self.in_flight_pieces.remove(&piece_idx);
                         }
                     }
+                    let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
                     for ifp in self.in_flight_pieces.values_mut() {
+                        let freed: Vec<u32> = ifp.assigned_blocks.iter()
+                            .filter(|(_, a)| **a == addr)
+                            .map(|(&(_, begin), _)| begin / chunk_size_val)
+                            .collect();
                         ifp.assigned_blocks.retain(|_, a| *a != addr);
+                        for chunk_idx in freed {
+                            ifp.unassigned.set(chunk_idx);
+                        }
                     }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(addr);

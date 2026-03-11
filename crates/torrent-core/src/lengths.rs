@@ -77,6 +77,7 @@ impl Lengths {
     }
 
     /// Actual length of a specific piece (last piece may be shorter).
+    #[inline]
     pub fn piece_size(&self, piece_index: u32) -> u32 {
         if piece_index >= self.num_pieces {
             0
@@ -88,6 +89,7 @@ impl Lengths {
     }
 
     /// Number of chunks in a specific piece.
+    #[inline]
     pub fn chunks_in_piece(&self, piece_index: u32) -> u32 {
         let piece_size = self.piece_size(piece_index) as u64;
         if piece_size == 0 {
@@ -99,6 +101,7 @@ impl Lengths {
     /// Offset and length of a specific chunk within a piece.
     ///
     /// Returns `(offset_within_piece, chunk_length)`.
+    #[inline]
     pub fn chunk_info(&self, piece_index: u32, chunk_index: u32) -> Option<(u32, u32)> {
         let piece_size = self.piece_size(piece_index);
         if piece_size == 0 {

@@ -9,6 +9,7 @@ mod settings;
 mod types;
 // These will be added as they're implemented:
 pub(crate) mod ban;
+pub(crate) mod chunk_mask;
 pub(crate) mod choker;
 /// Disk I/O manager: configuration, handles, and statistics.
 pub mod disk;
