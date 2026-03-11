@@ -30,6 +30,8 @@ mod persistence;
 pub(crate) mod pex;
 #[allow(dead_code)] // Wired in during Task 3/5 (concurrent dispatch integration).
 pub(crate) mod piece_reservation;
+#[allow(dead_code)] // Wired in during Task 5 (concurrent dispatch integration).
+pub(crate) mod request_driver;
 pub(crate) mod piece_selector;
 pub(crate) mod pipeline;
 #[allow(dead_code)] // Wired in during Step 5 (proxy integration).
