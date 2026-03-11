@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.76.0] — 2026-03-11
+
+### Fixed
+- **Semaphore permit leak on `try_send` failure**: Request driver replaced `try_send()`
+  with cancellation-aware `send().await` via `tokio::select!`. A full channel no longer
+  exits the driver (losing the permit forever); instead backpressure is applied naturally.
+  Permits are explicitly returned on both cancellation and channel close.
+- **Permit leak on rejected requests**: `RejectRequest` events from peers now return the
+  semaphore permit that the driver consumed when sending the request. Without this, each
+  rejection permanently reduces the driver's dispatch capacity.
+- **Permit leak on write failures**: Early returns from `handle_piece_data()` on disk
+  write errors now return the permit before bailing out.
+- **Stale driver on MSE retry**: When a peer retries with plaintext after MSE failure,
+  the old request driver (holding a stale `cmd_tx`) is now cancelled and cleaned up.
+  Previously the stale driver would send requests into a dead channel, leaking permits
+  and causing piece deadlocks.
+- **MSE retry channel capacity**: Increased from 64 → 256 to match the higher throughput
+  of per-peer autonomous dispatch.
+
+### Benchmark (Arch ISO ~1.4 GiB, 3 trials)
+- Pending — run after merge
+
 ## [0.75.0] — 2026-03-11
 
 ### Added
