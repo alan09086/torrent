@@ -4267,6 +4267,19 @@ impl TorrentActor {
         if self.end_game.is_active() {
             self.end_game.remove_piece(index);
         }
+        // Remove stale pre-computed blocks for this piece from all peers' queues.
+        // Without this, queued blocks would be requested, received, and discarded
+        // by the has_chunk dedup check — wasting bandwidth.
+        for peer in self.peers.values_mut() {
+            let before = peer.block_queue.len();
+            peer.block_queue.retain(|(idx, _, _)| *idx != index);
+            if peer.block_queue.len() < before {
+                let threshold = peer.pipeline.queue_depth() / 2;
+                if peer.block_queue.len() < threshold {
+                    peer.needs_refill = true;
+                }
+            }
+        }
         info!(index, "piece verified");
         post_alert(
             &self.alert_tx,
@@ -4429,6 +4442,17 @@ impl TorrentActor {
             ct.mark_failed(index);
         }
         self.in_flight_pieces.remove(&index);
+        // Remove stale pre-computed blocks for this failed piece from all peers' queues.
+        for peer in self.peers.values_mut() {
+            let before = peer.block_queue.len();
+            peer.block_queue.retain(|(idx, _, _)| *idx != index);
+            if peer.block_queue.len() < before {
+                let threshold = peer.pipeline.queue_depth() / 2;
+                if peer.block_queue.len() < threshold {
+                    peer.needs_refill = true;
+                }
+            }
+        }
         // Hash failure in end-game: deactivate and resume normal mode
         if self.end_game.is_active() {
             self.end_game.deactivate();
@@ -5696,6 +5720,11 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
+            // Drain pre-computed queues — end-game has its own scheduling
+            for peer in self.peers.values_mut() {
+                peer.block_queue.clear();
+                peer.needs_refill = false;
+            }
         }
     }
 
