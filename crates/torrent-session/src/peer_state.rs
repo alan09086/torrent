@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -135,12 +134,6 @@ pub(crate) struct PeerState {
     pub appears_nated: bool,
     /// Transport protocol used for this peer connection.
     pub transport: Option<crate::rate_limiter::PeerTransport>,
-    /// Semaphore for per-peer flow control (M73).
-    pub semaphore: Option<Arc<tokio::sync::Semaphore>>,
-    /// Cancellation token for the request driver task.
-    pub driver_cancel: Option<tokio_util::sync::CancellationToken>,
-    /// Join handle for the request driver task.
-    pub driver_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[allow(dead_code)]
@@ -186,9 +179,6 @@ impl PeerState {
             supports_holepunch: false,
             appears_nated: false,
             transport: None,
-            semaphore: None,
-            driver_cancel: None,
-            driver_handle: None,
         }
     }
 }

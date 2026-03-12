@@ -30,7 +30,6 @@ pub(crate) mod peer_priority;
 mod persistence;
 pub(crate) mod pex;
 pub(crate) mod piece_reservation;
-pub(crate) mod request_driver;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod piece_selector;
 pub(crate) mod pipeline;

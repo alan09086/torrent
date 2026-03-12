@@ -19,7 +19,6 @@ use tracing::{debug, error, info, trace, warn};
 use crate::alert::{Alert, AlertKind, post_alert};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
 use crate::piece_reservation::PieceReservationState;
-use crate::request_driver;
 
 use torrent_core::{
     DEFAULT_CHUNK_SIZE, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1,
@@ -2213,16 +2212,7 @@ impl TorrentActor {
                                 state.release_peer_pieces(*addr);
                             }
                         }
-                        // Cancel snubbed peers' drivers
-                        for addr in &snubbed_peers {
-                            if let Some(peer) = self.peers.get_mut(addr) {
-                                if let Some(cancel) = peer.driver_cancel.take() {
-                                    cancel.cancel();
-                                }
-                                peer.driver_handle = None;
-                                peer.semaphore = None;
-                            }
-                        }
+                        // M75: No driver to cancel — peer task handles its own dispatch
                     }
 
                     // Refresh cached peer rates for steal decisions (avoids
@@ -3274,22 +3264,8 @@ impl TorrentActor {
                 {
                     rs.write().add_peer(peer_addr, peer.bitfield.clone());
                 }
-                // If already unchoked, spawn driver now (bitfield arrived after unchoke)
-                let is_unchoked = self.peers.get(&peer_addr).is_some_and(|p| !p.peer_choking);
-                if is_unchoked
-                    && let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
-                    && let Some(peer) = self.peers.get_mut(&peer_addr)
-                    && peer.driver_cancel.is_none()
-                {
-                    let queue_depth = self.config.initial_queue_depth;
-                    let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
-                    peer.semaphore = Some(sem.clone());
-                    let (cancel, handle) = request_driver::spawn_driver(
-                        peer_addr, sem, rs.clone(), notify.clone(), peer.cmd_tx.clone(),
-                    );
-                    peer.driver_cancel = Some(cancel);
-                    peer.driver_handle = Some(handle);
-                }
+                // M75: Peer-integrated dispatch — no driver spawn needed here.
+                // The peer task's requester arm activates when unchoked + has reservation state.
                 // BEP 16: assign a piece in super-seed mode
                 self.assign_next_piece_for_peer(peer_addr).await;
                 // Check if we're interested in this peer
@@ -3324,37 +3300,9 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.peer_choking = choking;
                 }
-                if !choking {
-                    // Unchoked — spawn request driver (M73)
-                    if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
-                        && let Some(peer) = self.peers.get_mut(&peer_addr)
-                    {
-                        let queue_depth = self.config.initial_queue_depth;
-                        let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
-                        peer.semaphore = Some(sem.clone());
-                        let (cancel, handle) = request_driver::spawn_driver(
-                            peer_addr,
-                            sem,
-                            rs.clone(),
-                            notify.clone(),
-                            peer.cmd_tx.clone(),
-                        );
-                        peer.driver_cancel = Some(cancel);
-                        peer.driver_handle = Some(handle);
-                    }
-                } else {
-                    // Choked — cancel driver, release pieces
-                    if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                        if let Some(cancel) = peer.driver_cancel.take() {
-                            cancel.cancel();
-                        }
-                        peer.driver_handle = None;
-                        peer.semaphore = None;
-                    }
-                    if let Some(ref rs) = self.reservation_state {
-                        rs.write().release_peer_pieces(peer_addr);
-                    }
-                }
+                // M75: Peer-integrated dispatch — unchoke/choke tracked locally
+                // in the peer task via message interception. No driver to spawn/cancel.
+                // The peer task handles release_peer_pieces on choke.
             }
             PeerEvent::PeerInterested {
                 peer_addr,
@@ -3465,13 +3413,7 @@ impl TorrentActor {
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.pending_requests.remove(index, begin);
-                    // M74: Return semaphore permit for rejected requests.
-                    // The driver consumed a permit when it sent this request;
-                    // without returning it, rejected requests permanently leak
-                    // permits and the driver eventually stalls.
-                    if let Some(ref sem) = peer.semaphore {
-                        sem.add_permits(1);
-                    }
+                    // M75: Permit returned by peer task on RejectRequest receipt
                 }
                 debug!(index, %peer_addr, "request rejected by peer");
             }
@@ -3509,10 +3451,7 @@ impl TorrentActor {
                     ss.peer_disconnected(peer_addr);
                 }
                 if let Some(peer) = self.peers.remove(&peer_addr) {
-                    // M73: Cancel driver
-                    if let Some(cancel) = peer.driver_cancel {
-                        cancel.cancel();
-                    }
+                    // M75: No driver to cancel — peer task exits when cmd_tx is dropped
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
                     let peer_pieces: HashSet<u32> = peer
@@ -3614,16 +3553,19 @@ impl TorrentActor {
             PeerEvent::MseRetry { peer_addr, cmd_tx } => {
                 // MSE handshake failed, peer is retrying with plaintext.
                 // Update the peer state with the new command channel.
-                // Cancel any existing driver — it holds the old cmd_tx and would
-                // send requests to a stale channel (permit leak + piece deadlock).
+                // M75: No driver to cancel — peer task's cmd_rx will be the new one.
+                // Re-send StartRequesting to the new cmd_tx so the peer task gets
+                // the reservation state on the retry connection.
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     debug!(%peer_addr, "MSE retry: updating cmd_tx for plaintext attempt");
-                    if let Some(cancel) = peer.driver_cancel.take() {
-                        cancel.cancel();
-                    }
-                    peer.driver_handle = None;
-                    peer.semaphore = None;
                     peer.cmd_tx = cmd_tx;
+                    // Re-send reservation state to the new peer task
+                    if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify) {
+                        let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
+                            reservation_state: Arc::clone(rs),
+                            piece_notify: Arc::clone(notify),
+                        });
+                    }
                 }
             }
         }
@@ -3659,12 +3601,7 @@ impl TorrentActor {
             if self.end_game.is_active() {
                 self.end_game.block_received(index, begin, peer_addr);
             }
-            // M73: Return semaphore permit for duplicate blocks too
-            if let Some(peer) = self.peers.get(&peer_addr)
-                && let Some(ref sem) = peer.semaphore
-            {
-                sem.add_permits(1);
-            }
+            // M75: Permit already returned by peer task on Piece receipt
             return;
         }
 
@@ -3688,12 +3625,7 @@ impl TorrentActor {
                         .await
                     {
                         warn!(index, begin, "failed to write chunk: {e}");
-                        // M74: Return semaphore permit before early return
-                        if let Some(peer) = self.peers.get(&peer_addr)
-                            && let Some(ref sem) = peer.semaphore
-                        {
-                            sem.add_permits(1);
-                        }
+                        // M75: Permit already returned by peer task on Piece receipt
                         return;
                     }
                 }
@@ -3791,16 +3723,9 @@ impl TorrentActor {
             }
         }
 
-        // M73: Return semaphore permit to the peer's driver.
-        // The driver autonomously dispatches the next request.
-        if !self.end_game.is_active() {
-            if let Some(peer) = self.peers.get(&peer_addr)
-                && let Some(ref sem) = peer.semaphore
-            {
-                sem.add_permits(1);
-            }
-        } else {
-            // End-game: actor-based dispatch (drivers are cancelled)
+        // M75: Permit already returned by peer task on Piece receipt.
+        // End-game dispatch still happens here.
+        if self.end_game.is_active() {
             self.request_end_game_block(peer_addr).await;
         }
     }
@@ -4536,11 +4461,11 @@ impl TorrentActor {
         if self.end_game.is_active() {
             self.end_game.deactivate();
             info!(index, "end-game deactivated due to hash failure");
-            // Respawn drivers for unchoked peers
+            // M75: Clear endgame flag — peer tasks' requester arms will resume
+            // automatically on the next loop iteration when next_request returns blocks.
             if let Some(ref rs) = self.reservation_state {
                 rs.write().set_endgame(false);
             }
-            self.respawn_all_drivers();
         }
     }
 
@@ -4986,7 +4911,7 @@ impl TorrentActor {
                         self.assign_pieces_to_web_seeds();
 
                         // Kick-start piece requesting for all peers that connected during
-                        // metadata phase. Spawn drivers for unchoked peers.
+                        // metadata phase. Send StartRequesting to all connected peers.
                         let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
                         info!(
                             connected_peers = peer_addrs.len(),
@@ -5005,26 +4930,21 @@ impl TorrentActor {
                                 .unwrap_or(true);
                             debug!(%addr, has_bitfield, is_choking, "post-metadata peer state");
                             self.maybe_express_interest(addr).await;
-                            // Register peer in shared state and spawn driver if unchoked
+                            // Register peer in shared state
                             if let Some(ref rs) = self.reservation_state
                                 && let Some(peer) = self.peers.get(&addr)
                                 && peer.bitfield.count_ones() > 0
                             {
                                 rs.write().add_peer(addr, peer.bitfield.clone());
                             }
-                            if !is_choking
-                                && let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
-                                && let Some(peer) = self.peers.get_mut(&addr)
-                                && peer.driver_cancel.is_none()
-                            {
-                                let queue_depth = self.config.initial_queue_depth;
-                                let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
-                                peer.semaphore = Some(sem.clone());
-                                let (cancel, handle) = request_driver::spawn_driver(
-                                    addr, sem, rs.clone(), notify.clone(), peer.cmd_tx.clone(),
-                                );
-                                peer.driver_cancel = Some(cancel);
-                                peer.driver_handle = Some(handle);
+                        }
+                        // M75: Inform all connected peers about reservation state
+                        if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify) {
+                            for peer in self.peers.values() {
+                                let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
+                                    reservation_state: Arc::clone(rs),
+                                    piece_notify: Arc::clone(notify),
+                                });
                             }
                         }
                     }
@@ -5337,38 +5257,11 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
-            // M73: Cancel all request drivers — endgame uses actor-based dispatch
-            for peer in self.peers.values_mut() {
-                if let Some(cancel) = peer.driver_cancel.take() {
-                    cancel.cancel();
-                }
-                peer.driver_handle = None;
-                peer.semaphore = None;
-            }
+            // M75: Set endgame flag in reservation state — peer tasks will see
+            // no blocks available from next_request and their requester arms
+            // will idle. End-game dispatch is actor-driven via request_end_game_block.
             if let Some(ref rs) = self.reservation_state {
                 rs.write().set_endgame(true);
-            }
-        }
-    }
-
-    /// M73: Respawn request drivers for all unchoked peers that don't already have one.
-    fn respawn_all_drivers(&mut self) {
-        let Some(ref rs) = self.reservation_state else { return };
-        let Some(ref notify) = self.reservation_notify else { return };
-        let addrs: Vec<SocketAddr> = self.peers.iter()
-            .filter(|(_, p)| !p.peer_choking && p.driver_cancel.is_none())
-            .map(|(addr, _)| *addr)
-            .collect();
-        for addr in addrs {
-            if let Some(peer) = self.peers.get_mut(&addr) {
-                let queue_depth = self.config.initial_queue_depth;
-                let sem = Arc::new(tokio::sync::Semaphore::new(queue_depth));
-                peer.semaphore = Some(sem.clone());
-                let (cancel, handle) = request_driver::spawn_driver(
-                    addr, sem, rs.clone(), notify.clone(), peer.cmd_tx.clone(),
-                );
-                peer.driver_cancel = Some(cancel);
-                peer.driver_handle = Some(handle);
             }
         }
     }
@@ -5602,10 +5495,7 @@ impl TorrentActor {
                 ss.peer_disconnected(addr);
             }
             if let Some(peer) = self.peers.remove(&addr) {
-                // M73: Cancel driver
-                if let Some(cancel) = peer.driver_cancel {
-                    cancel.cancel();
-                }
+                // M75: No driver to cancel — peer task exits when cmd_tx is dropped
                 self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                 // Remove pieces that only this peer was downloading
                 let peer_pieces: HashSet<u32> = peer
@@ -5745,10 +5635,7 @@ impl TorrentActor {
                     ss.peer_disconnected(addr);
                 }
                 if let Some(peer) = self.peers.remove(&addr) {
-                    // M73: Cancel driver
-                    if let Some(cancel) = peer.driver_cancel {
-                        cancel.cancel();
-                    }
+                    // M75: No driver to cancel — peer task exits when cmd_tx is dropped
                     self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
                     let peer_pieces: HashSet<u32> = peer
@@ -6006,6 +5893,15 @@ impl TorrentActor {
                     addr,
                 },
             );
+            // M75: Send reservation state to peer for integrated dispatch
+            if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+                && let Some(peer) = self.peers.get(&addr)
+            {
+                let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
+                    reservation_state: Arc::clone(rs),
+                    piece_notify: Arc::clone(notify),
+                });
+            }
 
             let info_hash = self.info_hash;
             let peer_id = self.our_peer_id;
@@ -6497,6 +6393,15 @@ impl TorrentActor {
                 addr,
             },
         );
+        // M75: Send reservation state to peer for integrated dispatch
+        if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+            && let Some(peer) = self.peers.get(&addr)
+        {
+            let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
+                reservation_state: Arc::clone(rs),
+                piece_notify: Arc::clone(notify),
+            });
+        }
 
         let info_hash = self.info_hash;
         let peer_id = self.our_peer_id;
@@ -6677,6 +6582,15 @@ impl TorrentActor {
                 addr: target,
             },
         );
+        // M75: Send reservation state to peer for integrated dispatch
+        if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+            && let Some(peer) = self.peers.get(&target)
+        {
+            let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
+                reservation_state: Arc::clone(rs),
+                piece_notify: Arc::clone(notify),
+            });
+        }
 
         // Capture variables for the spawned task (mirrors try_connect_peers)
         let info_hash = self.info_hash;

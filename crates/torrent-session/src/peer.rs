@@ -19,7 +19,46 @@ use torrent_wire::{
 };
 
 use crate::pex::PexMessage;
+use crate::piece_reservation::{BlockRequest, PieceReservationState};
 use crate::types::{PeerCommand, PeerEvent};
+
+use tokio::sync::Semaphore;
+
+/// Per-peer request queue depth — matches rqbit's proven 128-permit model.
+const QUEUE_DEPTH: usize = 128;
+
+/// Acquire a semaphore permit and reserve the next block for this peer.
+///
+/// Returns when a block is available. If no block is available (all pieces
+/// reserved or end-game active), waits on `piece_notify` and retries.
+/// The permit is `forget()`-ed before returning — the caller is responsible
+/// for calling `semaphore.add_permits(1)` when the block data arrives.
+///
+/// **Cancellation safe**: if this future is dropped by `select!`, any
+/// acquired-but-not-forgotten permit is returned via `Drop`. No piece
+/// is reserved until `forget()` is called, which only happens atomically
+/// with the reservation.
+async fn acquire_and_reserve(
+    semaphore: &Semaphore,
+    state: &parking_lot::RwLock<PieceReservationState>,
+    piece_notify: &tokio::sync::Notify,
+    addr: SocketAddr,
+) -> BlockRequest {
+    loop {
+        let permit = semaphore
+            .acquire()
+            .await
+            .expect("peer semaphore closed unexpectedly");
+
+        if let Some(block) = state.write().next_request(addr) {
+            permit.forget();
+            return block;
+        }
+
+        drop(permit);
+        piece_notify.notified().await;
+    }
+}
 
 /// Total handshake size: 1 + 19 + 8 + 20 + 20 = 68 bytes.
 const HANDSHAKE_SIZE: usize = 68;
@@ -216,8 +255,25 @@ pub(crate) async fn run_peer(
 
     // --- Phase 5: Main loop ---
     debug!(%addr, num_pieces, "entering main loop");
+
+    // M75: Peer-integrated request dispatch
+    let semaphore = Semaphore::new(0); // Start empty, add permits on unchoke
+    let mut peer_choking = true; // Peers start in choked state
+    let mut reservation_state: Option<(
+        std::sync::Arc<parking_lot::RwLock<PieceReservationState>>,
+        std::sync::Arc<tokio::sync::Notify>,
+    )> = None;
+
     let disconnect_reason: Option<String> = loop {
+        // M75: Clone Arc references for requester arm (cheap Arc::clone)
+        let rs_clone = reservation_state
+            .as_ref()
+            .map(|(rs, n)| (std::sync::Arc::clone(rs), std::sync::Arc::clone(n)));
+        let can_request = !peer_choking && rs_clone.is_some();
+
         tokio::select! {
+            biased;
+
             frame = framed_read.next() => {
                 match frame {
                     Some(Ok(msg)) => {
@@ -242,6 +298,34 @@ pub(crate) async fn run_peer(
                                 }
                                 _ => {}
                             }
+                        }
+                        // M75: Intercept messages for permit management BEFORE handle_message.
+                        match &msg {
+                            Message::Piece { .. } => {
+                                if reservation_state.is_some() {
+                                    semaphore.add_permits(1);
+                                }
+                            }
+                            Message::Unchoke => {
+                                peer_choking = false;
+                                let available = semaphore.available_permits();
+                                let to_add = QUEUE_DEPTH.saturating_sub(available);
+                                if to_add > 0 {
+                                    semaphore.add_permits(to_add);
+                                }
+                            }
+                            Message::Choke => {
+                                peer_choking = true;
+                                if let Some((ref rs, _)) = reservation_state {
+                                    rs.write().release_peer_pieces(addr);
+                                }
+                            }
+                            Message::RejectRequest { .. } => {
+                                if reservation_state.is_some() {
+                                    semaphore.add_permits(1);
+                                }
+                            }
+                            _ => {}
                         }
                         match handle_message(
                             msg,
@@ -284,10 +368,15 @@ pub(crate) async fn run_peer(
                     }
                 }
             }
+
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(PeerCommand::Shutdown) => {
                         break None;
+                    }
+                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify }) => {
+                        reservation_state = Some((rs, piece_notify));
+                        // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
                         num_pieces = n;
@@ -349,6 +438,18 @@ pub(crate) async fn run_peer(
                         break None;
                     }
                 }
+            }
+
+            // M75: Block requesting arm
+            block = async {
+                let (rs, notify) = rs_clone.as_ref().unwrap();
+                acquire_and_reserve(&semaphore, rs, notify, addr).await
+            }, if can_request => {
+                framed_write.send(Message::Request {
+                    index: block.piece,
+                    begin: block.begin,
+                    length: block.length,
+                }).await.map_err(crate::Error::Wire)?;
             }
         }
     };
@@ -918,6 +1019,10 @@ async fn handle_command(
                     .await
                     .map_err(crate::Error::Wire)?;
             }
+            return Ok(());
+        }
+        PeerCommand::StartRequesting { .. } => {
+            // Handled in main loop, not here
             return Ok(());
         }
         PeerCommand::UpdateNumPieces(_) | PeerCommand::Shutdown => {

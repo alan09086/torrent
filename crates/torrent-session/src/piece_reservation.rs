@@ -25,6 +25,7 @@ pub(crate) struct BlockRequest {
 }
 
 /// Tracks which block a peer should request next within its reserved piece.
+#[derive(Debug)]
 struct PeerProgress {
     /// The piece this peer is downloading.
     piece: u32,
@@ -39,6 +40,7 @@ struct PeerProgress {
 /// Lives behind `Arc<parking_lot::RwLock<_>>`. Request drivers call
 /// [`next_request`] under a write lock; the `TorrentActor` calls mutation
 /// methods during event processing.
+#[derive(Debug)]
 pub(crate) struct PieceReservationState {
     /// Pieces we have verified and no longer need.
     we_have: Bitfield,

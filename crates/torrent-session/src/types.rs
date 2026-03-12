@@ -761,6 +761,12 @@ pub(crate) enum PeerCommand {
     SendHolepunch(torrent_wire::HolepunchMessage),
     /// Update the piece count after BEP 9 metadata assembly.
     UpdateNumPieces(u32),
+    /// M75: Actor sends reservation state to peer task for integrated dispatch.
+    /// Sent after metadata download (magnet) or at peer connection (non-magnet).
+    StartRequesting {
+        reservation_state: std::sync::Arc<parking_lot::RwLock<crate::piece_reservation::PieceReservationState>>,
+        piece_notify: std::sync::Arc<tokio::sync::Notify>,
+    },
     Shutdown,
 }
 
