@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.77.0] — 2026-03-12
+
+### Changed
+- **Peer-integrated request dispatch**: Moved block requesting from separate `request_driver`
+  tasks into each peer task's `tokio::select!` loop. Semaphore permits are now acquired and
+  returned within the same task, eliminating the cross-task handoff that caused permit leaks
+  in M73/M74. Architecture matches rqbit's proven single-task model.
+- **Local per-peer semaphore**: Each peer task owns a `Semaphore::new(0)` that receives 128
+  permits on unchoke (capped by `available_permits()`) and returns permits on Piece/RejectRequest
+  receipt. No more global permit coordination.
+- **End-game activation from reservation state**: `check_end_game_activation()` now uses
+  `PieceReservationState::in_flight_count()` and `in_flight_peers()` to build the end-game
+  block map, since the actor-side `in_flight_pieces` HashMap is no longer populated.
+
+### Removed
+- **`request_driver` module**: Deleted entirely (155 lines). Per-peer driver tasks, driver
+  spawn/cancel/respawn logic, and 6+ actor-side permit return sites all eliminated.
+- **`PeerState` driver fields**: Removed `semaphore`, `driver_cancel`, `driver_handle` from
+  actor-side peer tracking.
+
+### Benchmark (Arch ISO ~1.5 GiB, 3 trials)
+- Speed: 56.7±11.7 MB/s (4.6x improvement over M74's 12.2 MB/s)
+- CPU: 36–44% (down from M74's higher utilization)
+- RSS: 86–116 MiB, stable across trials (M74 showed 69→125 MiB growth)
+- rqbit reference: 82 MB/s (now at 69% of rqbit, was 15% in M74)
+- Test count: 1419
+
 ## [0.76.0] — 2026-03-11
 
 ### Fixed
