@@ -2224,7 +2224,7 @@ impl TorrentActor {
                         self.check_end_game_activation();
                     }
                 }
-                // (M73: refill_notify removed — drivers handle dispatch autonomously)
+                // (M75: peer tasks handle dispatch via integrated select! arm)
                 // End-game refill tick (200ms) — replace reactive per-block cascade
                 // with periodic batch refill. All peers with available pipeline slots
                 // get new end-game blocks, preventing idle stalls between ticks.
