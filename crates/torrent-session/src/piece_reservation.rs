@@ -229,8 +229,14 @@ impl PieceReservationState {
     }
 
     /// Enable or disable end-game mode.
+    ///
+    /// When deactivating (active=false), notifies waiters so peer tasks
+    /// blocked in `acquire_and_reserve` wake up and resume requesting.
     pub fn set_endgame(&mut self, active: bool) {
         self.endgame_active = active;
+        if !active {
+            self.piece_notify.notify_waiters();
+        }
     }
 
     /// Whether end-game mode is active.
