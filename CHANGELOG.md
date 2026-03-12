@@ -24,7 +24,11 @@ All notable changes to this project will be documented in this file.
   of per-peer autonomous dispatch.
 
 ### Benchmark (Arch ISO ~1.4 GiB, 3 trials)
-- Pending — run after merge
+- Speed: 12.2±5.6 MB/s (improved from M73's 10.8±6.2, still regressed from M72's 28.0)
+- CPU: 25.3±6.0s (up from M73's 19.3s — high variance suggests resource accumulation)
+- RSS: 87.5±30.2 MiB (up from M73's 67.6 MiB — trial 3 hit 125 MiB)
+- rqbit reference: 82.2 MB/s, 9.8s CPU, 39.4 MiB RSS (6.7x speed gap)
+- Test count: 1419
 
 ## [0.75.0] — 2026-03-11
 
