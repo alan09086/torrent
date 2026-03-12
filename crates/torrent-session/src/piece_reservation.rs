@@ -254,6 +254,12 @@ impl PieceReservationState {
         self.piece_owner.len()
     }
 
+    /// Iterate over in-flight pieces and their owning peers.
+    /// Used by the actor to build end-game block maps.
+    pub fn in_flight_peers(&self) -> impl Iterator<Item = (u32, SocketAddr)> + '_ {
+        self.piece_owner.iter().map(|(&piece, &addr)| (piece, addr))
+    }
+
     // ---- Core dispatch ----
 
     /// Get the next block request for a peer.

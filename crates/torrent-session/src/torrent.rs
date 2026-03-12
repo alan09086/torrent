@@ -5244,15 +5244,30 @@ impl TorrentActor {
             return;
         };
         let have = ct.bitfield().count_ones();
-        let in_flight = self.in_flight_pieces.len() as u32;
-        if have + in_flight >= self.num_pieces && !self.in_flight_pieces.is_empty() {
-            let pending: Vec<_> = self
-                .peers
-                .iter()
-                .map(|(addr, p)| (*addr, p.pending_requests.iter().collect::<Vec<_>>()))
-                .collect();
-            self.end_game
-                .activate_with_inflight(&self.in_flight_pieces, &pending);
+
+        // M75: in_flight_pieces is no longer populated (peer tasks handle dispatch).
+        // Use reservation_state's piece_owner for the in-flight count instead.
+        let Some(ref rs) = self.reservation_state else {
+            return;
+        };
+        let rs_guard = rs.read();
+        let in_flight = rs_guard.in_flight_count() as u32;
+        if have + in_flight >= self.num_pieces && in_flight > 0 {
+            // Build end-game block map from reservation state's piece_owner
+            // + chunk_tracker's missing chunks. Each in-flight piece's missing
+            // blocks are attributed to the owning peer.
+            use std::collections::HashMap;
+            let mut per_peer: HashMap<SocketAddr, Vec<(u32, u32, u32)>> = HashMap::new();
+            for (piece, addr) in rs_guard.in_flight_peers() {
+                let missing = ct.missing_chunks(piece);
+                for (begin, length) in missing {
+                    per_peer.entry(addr).or_default().push((piece, begin, length));
+                }
+            }
+            drop(rs_guard);
+
+            let pending: Vec<_> = per_peer.into_iter().collect();
+            self.end_game.activate(&pending);
             info!(
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"

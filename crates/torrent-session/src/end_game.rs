@@ -156,6 +156,7 @@ impl EndGame {
     ///
     /// This merges block-level tracking from `in_flight_pieces` with pending
     /// requests, ensuring all outstanding blocks are covered.
+    #[allow(dead_code)]
     pub fn activate_with_inflight(
         &mut self,
         in_flight_pieces: &FxHashMap<u32, InFlightPiece>,
