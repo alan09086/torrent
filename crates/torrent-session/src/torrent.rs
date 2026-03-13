@@ -1715,8 +1715,8 @@ impl TorrentActor {
                 event = self.event_rx.recv() => {
                     if let Some(event) = event {
                         self.handle_peer_event(event).await;
-                        // Drain up to 256 more ready events without re-entering select!
-                        for _ in 0..256 {
+                        // Drain up to 512 more ready events without re-entering select!
+                        for _ in 0..512 {
                             match self.event_rx.try_recv() {
                                 Ok(event) => self.handle_peer_event(event).await,
                                 Err(_) => break,
