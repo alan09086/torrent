@@ -27,52 +27,14 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 ---
 
-## 🚀 Getting Started
-
-Add torrent to your `Cargo.toml`:
-
-```toml
-[dependencies]
-torrent = "0.83.0"
-tokio = { version = "1", features = ["full"] }
-```
-
-Download a torrent from a magnet link:
-
-```rust,no_run
-use torrent::prelude::*;
-
-#[tokio::main]
-async fn main() -> torrent::Result<()> {
-    let session = ClientBuilder::new()
-        .download_dir("/tmp/downloads")
-        .start()
-        .await?;
-
-    let magnet = Magnet::parse("magnet:?xt=urn:btih:...").unwrap();
-    let info_hash = session.add_magnet(magnet).await?;
-
-    loop {
-        let stats = session.torrent_stats(info_hash).await?;
-        if matches!(stats.state, TorrentState::Seeding) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    session.shutdown().await
-}
-```
-
-See [`examples/`](crates/torrent/examples/) for more usage patterns including torrent creation, file streaming, and DHT lookups.
-
-### CLI
-
-Torrent ships a standalone CLI binary:
+## 🚀 Usage
 
 ```bash
-# Download a torrent
+# Download a torrent from a magnet link
 torrent download "magnet:?xt=urn:btih:..." -o /tmp/downloads
+
+# Download from a .torrent file
+torrent download ./ubuntu.torrent -o /tmp/downloads
 
 # Create a .torrent file
 torrent create ./my-file.tar.gz -t http://tracker.example.com/announce -o my-file.torrent
@@ -81,9 +43,19 @@ torrent create ./my-file.tar.gz -t http://tracker.example.com/announce -o my-fil
 torrent info my-file.torrent
 ```
 
-Build with `cargo build --release -p torrent-cli`.
+CLI options: `--sequential`, `--no-dht`, `--seed`, `--port`, `--quiet`, `--config` (JSON settings file), and `--log-level`.
 
-CLI options include `--sequential`, `--no-dht`, `--seed`, `--port`, `--quiet`, `--config` (JSON settings file), and `--log-level`.
+### 📚 Library
+
+To use torrent as a library in your own project, add it to your `Cargo.toml`:
+
+```toml
+[dependencies]
+torrent = "0.83.0"
+tokio = { version = "1", features = ["full"] }
+```
+
+See [`examples/`](crates/torrent/examples/) for usage patterns including downloading, torrent creation, file streaming, and DHT lookups.
 
 ---
 
@@ -202,12 +174,52 @@ Reference: rqbit achieves ~74.8 MB/s on the same workload (gap: 1.3x).
 
 ## 🏗️ Building
 
+### Prerequisites
+
+- **Rust 1.85+** (edition 2024) -- install via [rustup](https://rustup.rs/)
+- **C compiler** -- required by the `ring` cryptography crate (BoringSSL assembly)
+
+#### Linux
+
 ```bash
+# Debian / Ubuntu
+sudo apt install build-essential
+
+# Fedora / RHEL
+sudo dnf install gcc
+
+# Arch Linux
+sudo pacman -S base-devel
+```
+
+#### macOS
+
+```bash
+# Xcode command line tools (includes clang)
+xcode-select --install
+```
+
+#### Windows
+
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "C++ build tools" workload, or use the full Visual Studio installer. The MSVC toolchain (`x86_64-pc-windows-msvc`) is recommended.
+
+### Build
+
+```bash
+# Clone and build
+git clone https://codeberg.org/alan090/torrent.git
+cd torrent
+cargo build --release
+
+# Run the CLI
+cargo run --release -p torrent-cli -- download "magnet:?xt=urn:btih:..." -o /tmp/downloads
+
+# Run tests and lints
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-Requires Rust edition 2024 (**rustc 1.85+**).
+The release binary is at `target/release/torrent-cli`.
 
 ---
 
