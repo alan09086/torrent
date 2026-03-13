@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.0] — 2026-03-13
+
+### Changed
+- **Default encryption mode**: Changed from `PreferPlaintext` to `Disabled`. Eliminates
+  23.4% CPU overhead (RC4 21.5% + DH key exchange 1.9%) and removes 3 extra RTT MSE
+  handshake per connection. rqbit does not implement MSE at all — this matches its
+  behaviour. Users needing encryption can opt in via settings.
+
+### Fixed
+- **AIMD initial queue depth mismatch**: Peer task's `INITIAL_QUEUE_DEPTH` was hardcoded
+  to 32 while the settings default was 128. This forced 3 seconds of unnecessary AIMD
+  slow-start ramp (32→64→128) on every peer connection. Now starts at 128 immediately.
+- **CLI SIGTERM handling**: CLI only handled SIGINT (Ctrl+C) via `tokio::signal::ctrl_c()`.
+  Benchmarks using `timeout --signal=TERM` and systemd stops bypassed the shutdown flag
+  entirely — `save_session_state()` never ran, DHT nodes were lost. Now handles both
+  SIGINT and SIGTERM via `tokio::select!`, enabling DHT node persistence across all
+  termination scenarios.
+
+### Benchmark (Arch ISO 2026.03.01 ~1.45 GiB, 3 trials)
+- Speed: 56.8 MB/s avg (+47% over v0.82.0's 38.6 MB/s), peak 83.5 MB/s
+- CPU: 13.1s avg (-29% from v0.82.0's 18.4s — crypto overhead eliminated)
+- RSS: 68.8 MiB avg (-27% from v0.82.0's 94 MiB — no RC4 cipher buffers)
+- Gap to rqbit narrowed from 1.9x to 1.3x (74.8 MB/s)
+- Test count: 1442
+
 ## [0.82.0] — 2026-03-13
 
 ### Changed
