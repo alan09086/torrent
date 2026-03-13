@@ -369,7 +369,12 @@ pub(crate) async fn run_peer(
                                 // Late Piece arrivals after a Choke/Unchoke cycle would otherwise
                                 // add phantom permits (in_flight was reset to 0, so the absorption
                                 // guard passes for every late arrival).
-                                while semaphore.try_acquire().is_ok() {}
+                                // IMPORTANT: forget() prevents the RAII SemaphorePermit from
+                                // releasing the permit back on drop, which would cause an
+                                // infinite loop.
+                                while let Ok(permit) = semaphore.try_acquire() {
+                                    permit.forget();
+                                }
                                 semaphore.add_permits(current_effective_depth);
                             }
                             Message::Choke => {
@@ -564,7 +569,11 @@ pub(crate) async fn run_peer(
                     let wanted_idle = new_target.saturating_sub(in_flight);
                     let excess = semaphore.available_permits().saturating_sub(wanted_idle);
                     for _ in 0..excess {
-                        let _ = semaphore.try_acquire();
+                        if let Ok(permit) = semaphore.try_acquire() {
+                            permit.forget();
+                        } else {
+                            break;
+                        }
                     }
                 }
                 current_effective_depth = new_target;
