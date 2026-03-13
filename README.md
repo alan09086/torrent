@@ -1,39 +1,39 @@
-# 🧲 Torrent
+# Torrent
 
 A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** feature parity.
 
-Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
+Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1442-brightgreen)](#-testing)
-[![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.83.0-blue)](#-versioning)
-[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
-[![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
-
----
-
-## ✨ Highlights
-
-- 🏗️ **12-crate modular workspace** — each layer independently testable and reusable
-- 🔐 **Full BEP 52 support** — BitTorrent v2 metadata, wire protocol, storage, and hybrid v1+v2 torrents
-- ⚡ **Async everything** — tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
-- 🌐 **Complete networking** — MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
-- 📡 **27 BEPs implemented** — from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
-- 🔒 **Resource exhaustion hardening** — configurable limits on metadata, message, piece, and request queue sizes
-- 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
-- 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
-- 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1442 tests, zero clippy warnings**
+[![Tests](https://img.shields.io/badge/tests-1442-brightgreen)](#testing)
+[![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
+[![Version](https://img.shields.io/badge/version-0.83.0-blue)](#versioning)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
+[![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
 ---
 
-## 🚀 Getting Started
+## Highlights
+
+- **12-crate modular workspace** -- each layer independently testable and reusable
+- **Full BEP 52 support** -- BitTorrent v2 metadata, wire protocol, storage, and hybrid v1+v2 torrents
+- **Async everything** -- tokio-based actor model with async disk I/O, ARC cache, and parallel hashing
+- **Complete networking** -- MSE/PE encryption, uTP (LEDBAT), UPnP/NAT-PMP/PCP, dual-stack IPv6
+- **27 BEPs implemented** -- from base protocol (BEP 3) through BitTorrent v2 (BEP 52/53)
+- **56.8 MB/s average throughput** -- 1.3x gap to rqbit, AIMD pipeline, peer-integrated dispatch
+- **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
+- **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
+- **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
+- **1442 tests, zero clippy warnings**
+
+---
+
+## Getting Started
 
 Add torrent to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.67.0"
+torrent = "0.83.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -68,7 +68,7 @@ See [`examples/`](crates/torrent/examples/) for more usage patterns including to
 
 ### CLI
 
-Torrent also ships a standalone CLI binary:
+Torrent ships a standalone CLI binary:
 
 ```bash
 # Download a torrent
@@ -83,35 +83,37 @@ torrent info my-file.torrent
 
 Build with `cargo build --release -p torrent-cli`.
 
----
-
-## 🏛️ Architecture
-
-```
-torrent-bencode      🔤 Serde bencode codec (leaf, no deps)
-     │
-torrent-core         🔑 Hashes, metainfo (v1+v2), magnets, piece arithmetic
-     │
-     ├──▶ torrent-wire       🔌 Peer wire protocol, handshake, BEP 6/9/10/21/52, MSE/PE
-     ├──▶ torrent-tracker    📡 HTTP + UDP tracker announce/scrape
-     ├──▶ torrent-dht        🌐 Kademlia DHT (BEP 5/24), actor model
-     │
-torrent-storage      💾 Piece verification (SHA-1 + SHA-256), chunk tracking, mmap, ARC cache
-     │
-torrent-session      🎯 Session manager, torrent orchestration, disk I/O actor
-     │
-torrent-utp          🚀 uTP (BEP 29) micro transport protocol, LEDBAT congestion
-     │
-torrent-nat          🔓 PCP / NAT-PMP / UPnP IGD automatic port mapping
-     │
-torrent              📦 Public facade: ClientBuilder + prelude + unified error
-     │
-torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, virtual clock
-```
+CLI options include `--sequential`, `--no-dht`, `--seed`, `--port`, `--quiet`, `--config` (JSON settings file), and `--log-level`.
 
 ---
 
-## 📦 Crates
+## Architecture
+
+```
+torrent-bencode      Serde bencode codec (leaf, no deps)
+     |
+torrent-core         Hashes, metainfo (v1+v2), magnets, piece arithmetic
+     |
+     |--- torrent-wire       Peer wire protocol, handshake, BEP 6/9/10/21/52, MSE/PE
+     |--- torrent-tracker    HTTP + UDP tracker announce/scrape
+     |--- torrent-dht        Kademlia DHT (BEP 5/24), actor model
+     |
+torrent-storage      Piece verification (SHA-1 + SHA-256), chunk tracking, mmap, ARC cache
+     |
+torrent-session      Session manager, torrent orchestration, disk I/O actor
+     |
+torrent-utp          uTP (BEP 29) micro transport protocol, LEDBAT congestion
+     |
+torrent-nat          PCP / NAT-PMP / UPnP IGD automatic port mapping
+     |
+torrent              Public facade: ClientBuilder + prelude + unified error
+     |
+torrent-sim          In-process network simulation: SimNetwork, SimSwarm, virtual clock
+```
+
+---
+
+## Crates
 
 | Crate | Description | Tests |
 |-------|-------------|:-----:|
@@ -121,179 +123,137 @@ torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 | `torrent-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 40 |
 | `torrent-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 141 |
 | `torrent-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 66 |
-| `torrent-session` | Full session orchestration — see [Session Features](#-session-features) below | 672 |
+| `torrent-session` | Full session orchestration -- see [Session Features](#session-features) below | 672 |
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `torrent` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
 | `torrent-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
+| `torrent-cli` | CLI binary: download, create, info subcommands | 61 |
 
-### 🎯 Session Features
+### Session Features
 
 The `torrent-session` crate (672 tests) includes:
 
 | Category | Features |
 |----------|----------|
 | **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange (bidirectional), BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange, BEP 53 magnet `so=` file selection |
-| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode with batch refill, poll-based request pipeline (128-depth), file streaming (`AsyncRead` + `AsyncSeek`), sequential download, auto-sequential hysteresis, block-level picking, SuggestPiece, predictive announce |
+| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode with batch refill, AIMD pipeline with per-peer congestion control, file streaming (`AsyncRead` + `AsyncSeek`), sequential download, auto-sequential hysteresis, block-level picking, SuggestPiece, predictive announce |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode TCP/uTP algorithm, automatic upload slot optimization |
 | **Storage** | Pluggable DiskIoBackend trait (Posix/Mmap/Disabled), async DiskActor, ARC read cache, write buffering, parallel hashing, move storage |
 | **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport, pluggable transport (NetworkFactory) |
 | **Security** | SSRF mitigation (URL guard + redirect policy), IDNA/homograph rejection, HTTPS tracker validation, IP filtering (.dat parser), smart banning + parole |
-| **Management** | Unified Settings (102 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
+| **Management** | Unified Settings (106 fields, runtime updates), alerts/events system, queue management (auto-manage), peer turnover |
 | **Persistence** | FastResumeData (bencode), session state, DHT node cache |
 | **Extensibility** | Extension plugin trait, share mode, hybrid v1+v2 dual verification, dual-swarm announces, pure v2 torrent support |
 
 ---
 
-## 📋 BEP Coverage
+## BEP Coverage
 
 | BEP | Description | Status |
 |:---:|-------------|:------:|
-| 3 | The BitTorrent Protocol | ✅ |
-| 5 | DHT (Kademlia) | ✅ |
-| 6 | Fast Extension | ✅ |
-| 7 | IPv6 Tracker Extension | ✅ |
-| 9 | Extension for Peers to Send Metadata Files | ✅ |
-| 10 | Extension Protocol | ✅ |
-| 11 | Peer Exchange (PEX) | ✅ |
-| 12 | Multitracker Metadata Extension | ✅ |
-| 14 | Local Service Discovery | ✅ |
-| 15 | UDP Tracker Protocol | ✅ |
-| 16 | Super Seeding | ✅ |
-| 17 | HTTP Seeding (Hoffman-style) | ✅ |
-| 19 | WebSeed (GetRight-style) | ✅ |
-| 21 | Extension for Partial Seeds | ✅ |
-| 24 | Tracker Returns External IP / IPv6 DHT | ✅ |
-| 27 | Private Torrents | ✅ |
-| 29 | uTP (Micro Transport Protocol) | ✅ |
-| 40 | Canonical Peer Priority | ✅ |
-| 47 | Pad Files and File Attributes | ✅ |
-| 48 | Tracker Protocol Extension: Scrape | ✅ |
-| 52 | BitTorrent v2 (SHA-256 Merkle) | ✅ |
-| 53 | Magnet URI Extension (select-only) | ✅ |
-| 42 | DHT Security Extension | ✅ |
-| 44 | Storing Arbitrary Data in the DHT | ✅ |
-| 51 | DHT Infohash Indexing | ✅ |
-| 55 | Holepunch Extension | ✅ |
-| 35 | Torrent Signing / SSL Torrents | ✅ |
+| 3 | The BitTorrent Protocol | Done |
+| 5 | DHT (Kademlia) | Done |
+| 6 | Fast Extension | Done |
+| 7 | IPv6 Tracker Extension | Done |
+| 9 | Extension for Peers to Send Metadata Files | Done |
+| 10 | Extension Protocol | Done |
+| 11 | Peer Exchange (PEX) | Done |
+| 12 | Multitracker Metadata Extension | Done |
+| 14 | Local Service Discovery | Done |
+| 15 | UDP Tracker Protocol | Done |
+| 16 | Super Seeding | Done |
+| 17 | HTTP Seeding (Hoffman-style) | Done |
+| 19 | WebSeed (GetRight-style) | Done |
+| 21 | Extension for Partial Seeds | Done |
+| 24 | Tracker Returns External IP / IPv6 DHT | Done |
+| 27 | Private Torrents | Done |
+| 29 | uTP (Micro Transport Protocol) | Done |
+| 35 | Torrent Signing / SSL Torrents | Done |
+| 40 | Canonical Peer Priority | Done |
+| 42 | DHT Security Extension | Done |
+| 44 | Storing Arbitrary Data in the DHT | Done |
+| 47 | Pad Files and File Attributes | Done |
+| 48 | Tracker Protocol Extension: Scrape | Done |
+| 51 | DHT Infohash Indexing | Done |
+| 52 | BitTorrent v2 (SHA-256 Merkle) | Done |
+| 53 | Magnet URI Extension (select-only) | Done |
+| 55 | Holepunch Extension | Done |
 
-**27 BEPs implemented** — targeting full libtorrent-rasterbar parity.
+**27 BEPs implemented** -- targeting full libtorrent-rasterbar parity.
 
 ---
 
-## 🏗️ Building
+## Performance
+
+Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per version:
+
+| Version | Avg Speed | Peak | CPU Time | RSS | Notes |
+|---------|-----------|------|----------|-----|-------|
+| **0.83.0** | **56.8 MB/s** | 83.5 MB/s | 13.1s | 68.8 MiB | Encryption disabled, AIMD depth 128, SIGTERM handling |
+| 0.82.0 | 38.6 MB/s | 62.1 MB/s | 18.4s | 88.9 MiB | Adaptive max_in_flight, cached dispatch, AIMD pipeline |
+| 0.81.0 | -- | -- | -- | -- | Three-phase connect interval (100ms/500ms/5s) |
+| 0.77.0 | 54.2 MB/s | -- | -- | -- | Wake storm elimination, batch drain 512 |
+| 0.75.0 | 56.7 MB/s | -- | -- | -- | Peer-integrated dispatch (4.6x over M74) |
+
+Reference: rqbit achieves ~74.8 MB/s on the same workload (gap: 1.3x).
+
+---
+
+## Building
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-Requires Rust edition 2024 support (**rustc 1.85+**).
+Requires Rust edition 2024 (**rustc 1.85+**).
 
 ---
 
-## 🗺️ Roadmap
+## Design Decisions
 
-See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md) for the full 51-milestone roadmap to complete libtorrent-rasterbar parity. Implementation plans exist for every milestone.
+- **Modular crates** -- each layer is independently testable and reusable
+- **`thiserror` typed errors** per crate, no `anyhow` -- explicit error propagation
+- **Rust edition 2024** with workspace resolver 2
+- **`bytes::Bytes`** for zero-copy buffer sharing across the wire protocol
+- **Actor model** -- `SessionActor`/`TorrentActor`/`DhtActor` with `tokio::select!` loops and command channels
+- **Async disk I/O** -- central `DiskActor` with write buffering, ARC read cache, and semaphore-limited `spawn_blocking`
+- **Wire-compatible coordinates** -- `(piece, begin, length)` throughout, matching BEP 3 directly
+- **Binary search file lookup** -- O(log n) piece-to-file mapping via sorted `FileMap`
+- **`ring` cryptography** -- BoringSSL assembly for SHA-1/SHA-256 (~4.6x throughput over pure Rust crates)
+- **No `rand` dependency** -- thread-local xorshift64 seeded from `SystemTime`
+- **Deterministic serialization** -- `SortedMapSerializer` ensures BEP 3 dict key ordering
+- **AIMD pipeline** -- per-peer congestion control with slow-start, additive increase, multiplicative decrease
+
+---
+
+## Roadmap
+
+See [docs/plans/](docs/plans/) for the full milestone roadmap and per-milestone implementation plans.
+
+All 51 parity milestones are complete. Post-parity work focuses on performance optimization:
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
-| Foundation | M1–M10 | Bencode, core types, wire, tracker, DHT, storage, session, facade | ✅ Done |
-| 1: Desktop Essentials | M11–M16 | Resume data, selective download, end-game, bandwidth, alerts, queue | ✅ Done |
-| 2: Transport & Security | M17–M20 | MSE/PE encryption, uTP, NAT traversal | ✅ Done |
-| 3: Protocol Extensions | M21–M24 | IPv6, web seeding, super seeding, tracker scrape | ✅ Done |
-| 4: Performance | M25–M28 | Smart banning, async disk + ARC cache, parallel hashing, piece picker | ✅ Done |
-| 5: Network & Tools | M29–M32d | IP filter, torrent creation, settings, metadata serving, plugins | ✅ Done |
-| 6: BitTorrent v2 | M33–M35 | BEP 52 metadata, wire + storage, hybrid v1+v2 | ✅ Done |
-| 7: v2 Completion & DHT | M36–M39 | BEP 53, BEP 42/44/51 DHT hardening | ✅ Done |
-| 8: Connectivity & Privacy | M40–M42 | BEP 55 holepunch, I2P (SAM), SSL torrents | ✅ Done |
-| 9: Swarm Intelligence | M43–M46 | Choking algorithms, piece picker, mixed-mode, peer turnover | ✅ Done |
-| 10: Security & Hardening | M47–M48 | SSRF mitigation, DSCP, anonymous mode | ✅ Done |
-| 11: Pluggable Interfaces | M49–M50 | Pluggable disk I/O, session statistics (~100 counters) | ✅ Done |
-| 12: Simulation | M51 | In-process network simulation framework | ✅ Done |
-| 13: API Parity | M52–M53 | API documentation, full torrent operations API parity | ✅ Done |
-| 14: Performance | M55–M61 | Speed optimization, DHT persistence, piece stealing, perf optimizations | ✅ Done |
-| 15: CPU Efficiency | M65 | SHA hardware acceleration, batch dispatch threshold | ✅ Done |
-| 16: Speed & Pipeline | M66–M72 | Adaptive queue depth, crypto optimization, pipeline tuning, picker efficiency, steal optimization | ✅ Done |
-| 17: Autonomous Dispatch | M73–M75 | Per-peer request drivers, piece reservation, peer-integrated dispatch | ✅ Done |
-| 18: Memory & Wake Efficiency | M76–M77 | Memory consolidation, context switch reduction, wake storm elimination | ✅ Done |
-| 19: Actor Throughput | M78 | Completion notify reduction, two-phase dispatch, direct peer-to-disk writes | ✅ Done |
-| 20: Ramp-Up Speed | M81 | Three-phase connect interval for faster peer acquisition | ✅ Done |
-| 21: Sustained Throughput | M82 | Adaptive max_in_flight, cached dispatch, AIMD pipeline, permit absorption | ✅ Done |
+| Foundation | M1-M10 | Bencode, core types, wire, tracker, DHT, storage, session, facade | Done |
+| Desktop Essentials | M11-M16 | Resume data, selective download, end-game, bandwidth, alerts, queue | Done |
+| Transport & Security | M17-M20 | MSE/PE encryption, uTP, NAT traversal | Done |
+| Protocol Extensions | M21-M24 | IPv6, web seeding, super seeding, tracker scrape | Done |
+| Performance | M25-M28 | Smart banning, async disk + ARC cache, parallel hashing, piece picker | Done |
+| Network & Tools | M29-M32d | IP filter, torrent creation, settings, metadata serving, plugins | Done |
+| BitTorrent v2 | M33-M35 | BEP 52 metadata, wire + storage, hybrid v1+v2 | Done |
+| v2 Completion & DHT | M36-M39 | BEP 53, BEP 42/44/51 DHT hardening | Done |
+| Connectivity & Privacy | M40-M42 | BEP 55 holepunch, I2P (SAM), SSL torrents | Done |
+| Swarm Intelligence | M43-M46 | Choking algorithms, piece picker, mixed-mode, peer turnover | Done |
+| Security & Hardening | M47-M48 | SSRF mitigation, DSCP, anonymous mode | Done |
+| Pluggable Interfaces | M49-M50 | Pluggable disk I/O, session statistics (~100 counters) | Done |
+| Simulation | M51 | In-process network simulation framework | Done |
+| API Parity | M52-M53 | API documentation, full torrent operations API parity | Done |
+| Speed Optimization | M55-M83 | DHT persistence, dispatch architecture, pipeline tuning, CPU efficiency | Done |
 
 ---
 
-## 🎨 Design Decisions
+## License
 
-- **Modular crates** — each layer is independently testable and reusable
-- **`thiserror` typed errors** per crate, no `anyhow` — explicit error propagation
-- **Rust edition 2024** with workspace resolver 2
-- **`bytes::Bytes`** for zero-copy buffer sharing across the wire protocol
-- **Actor model** — `SessionActor`/`TorrentActor`/`DhtActor` with `tokio::select!` loops and command channels
-- **Async disk I/O** — central `DiskActor` with write buffering, ARC read cache, and semaphore-limited `spawn_blocking`
-- **Wire-compatible coordinates** — `(piece, begin, length)` throughout, matching BEP 3 directly
-- **Binary search file lookup** — O(log n) piece-to-file mapping via sorted `FileMap`
-- **No `rand` dependency** — thread-local xorshift64 seeded from `SystemTime`
-- **Deterministic serialization** — `SortedMapSerializer` ensures BEP 3 dict key ordering
-
----
-
-## 🔖 Versioning
-
-Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone bumps the version:
-
-| Version | Milestone | Highlights |
-|---------|-----------|------------|
-| 0.83.0 | M83 | Connection ramp-up elimination: default encryption Disabled (removes 23.4% CPU + 3 RTT/connection), AIMD initial depth 128→match settings (eliminates 3s slow-start), SIGTERM handling for DHT persistence. **56.8 MB/s avg (+47%)**, CPU 13.1s (-29%), RSS 68.8 MiB (-27%). Gap to rqbit: 1.3x. 1442 tests |
-| 0.82.0 | M82 | Sustained throughput: adaptive max_in_flight (scales with peer count), cached rarest-first dispatch (O(1) vs O(n)), AIMD pipeline (slow-start + congestion control), permit absorption for depth reduction. **38.6 MB/s avg (+31%)**, peak 62.1 MB/s, RSS 88.9 MiB (-28%). 1442 tests |
-| 0.81.0 | M81 | Ramp-up speed: three-phase connect interval (RampUp 100ms / Normal 500ms / Steady 5s) replaces binary burst_connect for 5× faster initial peer discovery |
-| 0.80.0 | M78 | Actor throughput: `notify_one()` replaces `notify_waiters()` in `complete_piece()`/`fail_piece()`, two-phase dispatch splits WRITE lock O(n) into READ scan + O(1) reservation (concurrent across 127 peers), direct peer-to-disk writes via `DiskHandle::enqueue_write()`. RSS -9% (81.2 MB). 1442 tests |
-| 0.79.0 | M77 | Context switch reduction: remove `notify_waiters()` wake storms from `add_peer()`/`peer_have()`, safety-net 1s periodic notification in `pipeline_tick`, batch drain 256→512, `MissedTickBehavior::Skip`. 54.2 MB/s (+3.2%) |
-| 0.78.0 | M76 | Memory consolidation & startup speed: remove `PieceSelector`/`in_flight_pieces` dead code, move `peer_bitfields` to peer-local state, burst-mode 500ms connect interval. RSS -17%, cache misses -19%, speed >50 MB/s |
-| 0.77.0 | M75 | Peer-integrated dispatch: move block requesting from separate driver tasks into peer task's `tokio::select!` loop, eliminating cross-task permit lifecycle. 56.7 MB/s avg (4.6x over M74), stable RSS |
-| 0.76.0 | M74 | Per-peer dispatch stabilization: fix semaphore permit leaks in request rejection, write failure, MSE retry, and driver cancellation paths. Backpressure-aware `send().await` replaces `try_send` |
-| 0.75.0 | M73 | Per-peer autonomous dispatch: `PieceReservationState` with piece-level exclusive ownership, per-peer request drivers with semaphore flow control. CPU -40%, RSS -29%, speed regression under investigation |
-| 0.74.0 | M72 | Steal phase optimization: direct `assigned_blocks` iteration replaces `missing_chunks_into` → `Vec::retain` pattern, early-out when no slow peers exist. Eliminates O(total_chunks) per piece in steal scan |
-| 0.73.0 | M71 | Picker efficiency: ChunkMask 256-bit bitfield for zero-alloc block selection, two-phase `pick_partial` scoring (bit scan → enumerate winner), `#[inline]` on hot-path cross-crate functions. CPU time -23% (37.1s→28.7s) |
-| 0.72.0 | M70 | Pre-computed block queues: O(1) per-block dispatch via per-peer VecDeque, shared-context batch fill, RequestBatch channel optimization, reactive `tokio::sync::Notify` refill, stale block cleanup, `max_in_flight_pieces` 20→40, pipeline tick 250ms→500ms |
-| 0.71.0 | M68+M69 | Pipeline optimization: dispatch threshold 32→4, fixed-depth pipeline (no BDP feedback loop), event channel 256→2048 with biased select, PreferPlaintext encryption mode, scratch buffer API (-88% temp allocs), stack-array `peer_count()`, `max_in_flight_pieces` 32→20 |
-| 0.70.0 | M67 | Crypto optimization: `ring` (BoringSSL AVX2 asm) replaces `sha1`/`sha2` crates (~4.6x SHA1 throughput on Broadwell), `target-cpu=native` codegen, RC4 write buffer reuse, default peers 200→128 |
-| 0.69.0 | M66 | Adaptive queue depth: per-peer BDP-based pipeline depth replaces fixed 128 slots — fast peers get deeper pipelines (up to 250), slow peers get shallower (floor 16) |
-| 0.68.0 | M65 | CPU efficiency: SHA-NI hardware acceleration via `asm` feature on sha1/sha2, batch dispatch threshold gates 5-layer picker behind 32 free slots (~97% reduction in picker invocations) |
-| 0.67.0 | M61 | Performance optimizations: O(1) pending requests, end-game refill tick, END_GAME_DEPTH 128, in-flight piece cap, benchmark tooling (M62 semaphore pipeline attempted and reverted due to data corruption) |
-| 0.65.0 | M60 | Rename ferrite → torrent, non-blocking disk I/O, async piece verification, resource exhaustion limits, cargo-fuzz scaffolding, workspace clippy lints |
-| 0.64.0 | — | TCP listener for incoming peers, UPnP gateway probe fallback + IGD v2, log spam cleanup |
-| 0.63.1 | — | Settings ↔ TorrentConfig wiring fix (13 fields), throughput fixes (try_send, phantom blocks, snub detection) |
-| 0.63.0 | M56 | Speed optimization — DHT persistence, piece stealing, initial queue depth 128 |
-| 0.62.0 | M55 | Download speed — immediate peer connection, max_peers 200, connect_interval 5s |
-| 0.61.0 | M53 | Full torrent operations API parity — 40+ SessionHandle methods, PeerInfo, TorrentFlags |
-| 0.59.0 | — | Full libtorrent `torrent_status` parity — ~55-field TorrentStats |
-| 0.58.0 | M52 | API documentation: `#![warn(missing_docs)]` on all 12 crates, example programs, `SessionHandle::open_file()` |
-| 0.57.0 | M51 | Network simulation: torrent-sim crate, NetworkFactory pluggable transport, SimNetwork/SimSwarm, 5 integration tests |
-| 0.56.0 | M50 | Session statistics: 70 atomic counters, periodic reporting, SessionStatsAlert, rate computation |
-| 0.55.0 | M49 | Pluggable disk I/O: DiskIoBackend trait, PosixDiskIo, MmapDiskIo, DisabledDiskIo, backend factory |
-| 0.54.0 | M48 | DSCP/ToS socket marking, anonymous mode hardening, ext handshake suppression |
-| 0.53.0 | M47 | SSRF mitigation, IDNA/homograph rejection, HTTPS tracker validation, URL guard module |
-| 0.52.0 | M46 | Peer turnover: periodic replacement of underperforming peers, peak rate cutoff, 4 exemptions |
-| 0.51.0 | M45 | Mixed-mode TCP/uTP bandwidth algorithm, auto-sequential hysteresis, peer transport tracking |
-| 0.50.0 | M44 | Piece picker: extent affinity, SuggestPiece mode, predictive announce, PeerSpeedClassifier |
-| 0.49.0 | M43 | Pluggable choking algorithms (FixedSlots/RateBased), seed-mode strategies (FastestUpload/RoundRobin/AntiLeech) |
-| 0.48.0 | M42 | BEP 35 SSL torrents, TLS transport, SNI-based routing, self-signed certs |
-| 0.47.0 | M41 | I2P anonymous network support via SAM v3.1 protocol |
-| 0.46.0 | M40 | BEP 55 holepunch extension, NAT traversal, relay logic |
-| 0.45.0 | M39 | BEP 51 DHT infohash indexing, `sample_infohashes` query/response |
-| 0.44.0 | M38 | BEP 44 DHT arbitrary data storage, immutable/mutable items, ed25519 |
-| 0.43.0 | M37 | BEP 42 DHT security extension, node ID verification, IP voting |
-| 0.42.0 | M36 | BEP 53 `so=`, dual-swarm announces, pure v2 support |
-| 0.41.0 | M35 | Hybrid v1+v2 torrents, `TorrentVersion` enum |
-| 0.40.0 | M34c | BEP 52 session integration, Merkle hash exchange |
-| 0.39.0 | M34b | v2 storage, per-block SHA-256 |
-| 0.38.0 | M34a | v2 wire protocol, `HashPicker` |
-| 0.37.0 | M33 | BEP 52 core, `Id32`, `TorrentMetaV2`, `MerkleTree` |
-| 0.36.0 | M32d | Extension plugin interface |
-
----
-
-## 📄 License
-
-GPL-3.0-or-later — see [LICENSE](LICENSE).
+GPL-3.0-or-later -- see [LICENSE](LICENSE).
