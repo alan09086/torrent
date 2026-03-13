@@ -66,8 +66,6 @@ pub(crate) struct PieceReservationState {
     max_in_flight: usize,
     /// Whether end-game mode is active (disables new reservations).
     endgame_active: bool,
-    /// Number of currently connected peers (used for adaptive max_in_flight).
-    connected_peers: usize,
 }
 
 #[allow(dead_code)] // Some methods reserved for M74+ (streaming, priority, wanted updates)
@@ -97,7 +95,6 @@ impl PieceReservationState {
             num_pieces,
             max_in_flight,
             endgame_active: false,
-            connected_peers: 0,
         };
         (state, notify)
     }
@@ -111,8 +108,7 @@ impl PieceReservationState {
     ///
     /// Formula: `max(256, connected_peers * 3)` capped at `num_pieces / 2`,
     /// with a floor of 256.
-    pub fn recalc_max_in_flight(&mut self, connected_peers: usize) {
-        self.connected_peers = connected_peers;
+    fn recalc_max_in_flight(&mut self, connected_peers: usize) {
         let calculated = 256usize.max(connected_peers * 3);
         self.max_in_flight = calculated.min(self.num_pieces as usize / 2).max(256);
     }
