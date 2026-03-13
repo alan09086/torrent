@@ -27,8 +27,9 @@ use crate::types::{PeerCommand, PeerEvent};
 
 use tokio::sync::Semaphore;
 
-/// M82: Initial per-peer queue depth for AIMD slow-start.
-const INITIAL_QUEUE_DEPTH: usize = 32;
+/// M83: Initial per-peer queue depth — matches settings default (128).
+/// AIMD slow-start still applies (can grow to 250, shrink to 8).
+const INITIAL_QUEUE_DEPTH: usize = 128;
 
 /// M78: State needed for direct peer-to-disk writes.
 /// Tuple: (reservation_state, piece_notify, disk_handle, write_error_tx)

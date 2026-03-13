@@ -86,11 +86,18 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         ih
     };
 
-    // Ctrl-C handler
+    // Shutdown on SIGINT (Ctrl-C) or SIGTERM (kill / systemd stop / benchmark timeout)
     let shutdown = Arc::new(AtomicBool::new(false));
     let s = shutdown.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
         s.store(true, Ordering::SeqCst);
     });
 

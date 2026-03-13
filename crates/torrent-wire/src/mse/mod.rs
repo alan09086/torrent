@@ -18,13 +18,13 @@ pub use stream::MseStream;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EncryptionMode {
     /// No encryption. Plain BitTorrent handshake.
+    #[default]
     Disabled,
     /// Offer both plaintext and RC4, let peer choose. Fallback to plain on MSE failure.
     Enabled,
     /// Offer plaintext-only first; if the peer rejects, retry offering both
     /// plaintext and RC4. This avoids unnecessary RC4 overhead when the peer
     /// accepts plaintext, while still connecting to RC4-only peers via retry.
-    #[default]
     PreferPlaintext,
     /// Encrypted only. Reject unencrypted peers.
     Forced,
@@ -35,7 +35,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encryption_mode_default_is_prefer_plaintext() {
-        assert_eq!(EncryptionMode::default(), EncryptionMode::PreferPlaintext);
+    fn encryption_mode_default_is_disabled() {
+        assert_eq!(EncryptionMode::default(), EncryptionMode::Disabled);
     }
 }

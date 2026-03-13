@@ -155,7 +155,7 @@ impl Default for TorrentConfig {
             strict_end_game: true,
             upload_rate_limit: 0,
             download_rate_limit: 0,
-            encryption_mode: torrent_wire::mse::EncryptionMode::PreferPlaintext,
+            encryption_mode: torrent_wire::mse::EncryptionMode::Disabled,
             enable_utp: true,
             enable_web_seed: true,
             enable_holepunch: true,
@@ -1164,7 +1164,7 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert_eq!(
             cfg.encryption_mode,
-            torrent_wire::mse::EncryptionMode::PreferPlaintext
+            torrent_wire::mse::EncryptionMode::Disabled
         );
     }
 
