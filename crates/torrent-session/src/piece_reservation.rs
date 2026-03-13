@@ -66,6 +66,8 @@ pub(crate) struct PieceReservationState {
     max_in_flight: usize,
     /// Whether end-game mode is active (disables new reservations).
     endgame_active: bool,
+    /// Number of currently connected peers (used for adaptive max_in_flight).
+    connected_peers: usize,
 }
 
 #[allow(dead_code)] // Some methods reserved for M74+ (streaming, priority, wanted updates)
@@ -95,6 +97,7 @@ impl PieceReservationState {
             num_pieces,
             max_in_flight,
             endgame_active: false,
+            connected_peers: 0,
         };
         (state, notify)
     }
@@ -102,6 +105,16 @@ impl PieceReservationState {
     /// Read-only access to per-piece availability counts.
     pub fn availability(&self) -> &[u32] {
         &self.availability
+    }
+
+    /// Recalculate `max_in_flight` based on the current number of connected peers.
+    ///
+    /// Formula: `max(256, connected_peers * 3)` capped at `num_pieces / 2`,
+    /// with a floor of 256.
+    pub fn recalc_max_in_flight(&mut self, connected_peers: usize) {
+        self.connected_peers = connected_peers;
+        let calculated = 256usize.max(connected_peers * 3);
+        self.max_in_flight = calculated.min(self.num_pieces as usize / 2).max(256);
     }
 
     // ---- Peer lifecycle ----
@@ -115,6 +128,7 @@ impl PieceReservationState {
             }
         }
         self.peer_pieces.entry(addr).or_default();
+        self.recalc_max_in_flight(self.peer_pieces.len());
         // M77: Removed immediate notify — safety-net tick in pipeline_tick handles this
         // to avoid waking all 128 peer tasks on every new peer connection.
     }
@@ -137,6 +151,7 @@ impl PieceReservationState {
             }
         }
 
+        self.recalc_max_in_flight(self.peer_pieces.len());
         self.piece_notify.notify_waiters();
     }
 
@@ -763,6 +778,8 @@ mod tests {
         let peer = addr(1000);
         let bf = peer_has_all(num_pieces);
         state.add_peer(peer, bf.clone());
+        // Override adaptive cap for this unit test (adaptive min is 256).
+        state.max_in_flight = 2;
 
         // Reserve piece 1: get both blocks.
         let r0 = state.next_request(peer, &bf).unwrap();
@@ -882,6 +899,8 @@ mod tests {
         let peer = addr(1000);
         let bf = peer_has_all(num_pieces);
         state.add_peer(peer, bf.clone());
+        // Override adaptive cap for this unit test (adaptive min is 256).
+        state.max_in_flight = 1;
 
         // Reserve the one allowed in-flight slot.
         let _req = state.next_request(peer, &bf).unwrap();
@@ -979,6 +998,8 @@ mod tests {
         let bf = peer_has_all(num_pieces);
         state.add_peer(peer_a, bf.clone());
         state.add_peer(peer_b, bf.clone());
+        // Override adaptive cap for this unit test (adaptive min is 256).
+        state.max_in_flight = 1;
 
         // Peer A fills the single in-flight slot.
         let _req_a = state.next_request(peer_a, &bf).unwrap();
@@ -1024,6 +1045,116 @@ mod tests {
         assert!(
             req2.is_some(),
             "peer should be able to reserve after release"
+        );
+    }
+
+    // ---- Adaptive max_in_flight tests ----
+
+    #[test]
+    fn adaptive_max_in_flight_scales_with_peers() {
+        // Use a large torrent so num_pieces/2 doesn't constrain us.
+        let lengths = Lengths::new(1024 * 1024 * 1024, 32768, 16384); // 1 GiB
+        let num_pieces = lengths.num_pieces();
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 256, we_have, wanted);
+
+        // Add 100 peers.
+        let bf = peer_has_all(num_pieces);
+        for i in 0..100u16 {
+            state.add_peer(addr(5000 + i), bf.clone());
+        }
+
+        // 100 peers * 3 = 300, which is > 256.
+        assert!(
+            state.max_in_flight > 256,
+            "max_in_flight should scale above 256 with 100 peers, got {}",
+            state.max_in_flight
+        );
+        assert_eq!(state.max_in_flight, 300);
+    }
+
+    #[test]
+    fn adaptive_max_in_flight_bounded() {
+        // Small torrent: 20 pieces → upper bound = 20 / 2 = 10, floor = 256.
+        let lengths = Lengths::new(20 * 32768, 32768, 16384);
+        let num_pieces = lengths.num_pieces();
+        assert_eq!(num_pieces, 20);
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 256, we_have, wanted);
+
+        // Add 200 peers → calculated = max(256, 600) = 600 → min(600, 10) = 10 → max(10, 256) = 256.
+        let bf = peer_has_all(num_pieces);
+        for i in 0..200u16 {
+            state.add_peer(addr(6000 + i), bf.clone());
+        }
+
+        // Lower bound of 256 should always hold.
+        assert_eq!(
+            state.max_in_flight, 256,
+            "max_in_flight should be floored at 256 for small torrents"
+        );
+
+        // Large torrent: verify upper bound caps at num_pieces / 2.
+        let lengths_large = Lengths::new(512 * 32768, 32768, 16384);
+        let num_pieces_large = lengths_large.num_pieces();
+        assert_eq!(num_pieces_large, 512);
+        let we_have_large = Bitfield::new(num_pieces_large);
+        let wanted_large = all_pieces_wanted(num_pieces_large);
+
+        let (mut state_large, _notify_large) =
+            PieceReservationState::new(num_pieces_large, lengths_large, 256, we_have_large, wanted_large);
+
+        // Add 200 peers → calculated = max(256, 600) = 600 → min(600, 256) = 256 → max(256, 256) = 256.
+        let bf_large = peer_has_all(num_pieces_large);
+        for i in 0..200u16 {
+            state_large.add_peer(addr(7000 + i), bf_large.clone());
+        }
+
+        assert_eq!(
+            state_large.max_in_flight, 256,
+            "max_in_flight should be capped at num_pieces/2 = 256"
+        );
+    }
+
+    #[test]
+    fn adaptive_max_in_flight_decreases_on_remove() {
+        // Large torrent so num_pieces/2 doesn't constrain.
+        let lengths = Lengths::new(1024 * 1024 * 1024, 32768, 16384);
+        let num_pieces = lengths.num_pieces();
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 256, we_have, wanted);
+
+        // Add 100 peers.
+        let bf = peer_has_all(num_pieces);
+        for i in 0..100u16 {
+            state.add_peer(addr(8000 + i), bf.clone());
+        }
+        let max_with_100 = state.max_in_flight;
+        assert_eq!(max_with_100, 300); // 100 * 3
+
+        // Remove 80 peers → 20 remain → max(256, 20*3=60) = 256.
+        for i in 0..80u16 {
+            state.remove_peer(addr(8000 + i), &bf);
+        }
+
+        assert!(
+            state.max_in_flight < max_with_100,
+            "max_in_flight should decrease after removing peers: was {}, now {}",
+            max_with_100,
+            state.max_in_flight
+        );
+        assert_eq!(
+            state.max_in_flight, 256,
+            "with 20 peers, max_in_flight should be 256 (floor)"
         );
     }
 }
