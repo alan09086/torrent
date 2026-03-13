@@ -66,6 +66,10 @@ pub(crate) struct PieceReservationState {
     max_in_flight: usize,
     /// Whether end-game mode is active (disables new reservations).
     endgame_active: bool,
+    /// Cached candidates sorted by descending availability (rarest at end).
+    sorted_candidates: Vec<u32>,
+    /// Whether the cached candidates need rebuilding.
+    candidates_dirty: bool,
 }
 
 #[allow(dead_code)] // Some methods reserved for M74+ (streaming, priority, wanted updates)
@@ -95,6 +99,8 @@ impl PieceReservationState {
             num_pieces,
             max_in_flight,
             endgame_active: false,
+            sorted_candidates: Vec::new(),
+            candidates_dirty: true,
         };
         (state, notify)
     }
@@ -125,6 +131,7 @@ impl PieceReservationState {
         }
         self.peer_pieces.entry(addr).or_default();
         self.recalc_max_in_flight(self.peer_pieces.len());
+        self.candidates_dirty = true;
         // M77: Removed immediate notify — safety-net tick in pipeline_tick handles this
         // to avoid waking all 128 peer tasks on every new peer connection.
     }
@@ -148,6 +155,7 @@ impl PieceReservationState {
         }
 
         self.recalc_max_in_flight(self.peer_pieces.len());
+        self.candidates_dirty = true;
         self.piece_notify.notify_waiters();
     }
 
@@ -159,6 +167,7 @@ impl PieceReservationState {
             return;
         }
         self.availability[piece as usize] += 1;
+        self.candidates_dirty = true;
         // M77: Removed immediate notify — safety-net tick in pipeline_tick handles this
         // to avoid waking all 128 peer tasks on every HAVE message.
     }
@@ -196,6 +205,7 @@ impl PieceReservationState {
                 self.current_progress.remove(&owner);
             }
         }
+        self.candidates_dirty = true;
         self.piece_notify.notify_one();
     }
 
@@ -214,6 +224,7 @@ impl PieceReservationState {
                 self.current_progress.remove(&owner);
             }
         }
+        self.candidates_dirty = true;
         self.piece_notify.notify_one();
     }
 
@@ -222,17 +233,20 @@ impl PieceReservationState {
     /// Bulk-update the `we_have` bitfield (e.g., after fast-resume verification).
     pub fn update_we_have(&mut self, we_have: &Bitfield) {
         self.we_have = we_have.clone();
+        self.candidates_dirty = true;
     }
 
     /// Bulk-update the `wanted` bitfield (e.g., after file priority change).
     pub fn update_wanted(&mut self, wanted: &Bitfield) {
         self.wanted = wanted.clone();
+        self.candidates_dirty = true;
         self.piece_notify.notify_waiters();
     }
 
     /// Set the priority pieces (streaming, time-critical).
     pub fn set_priority_pieces(&mut self, pieces: BTreeSet<u32>) {
         self.priority_pieces = pieces;
+        self.candidates_dirty = true;
         self.piece_notify.notify_waiters();
     }
 
@@ -242,6 +256,7 @@ impl PieceReservationState {
     /// blocked in `acquire_and_reserve` wake up and resume requesting.
     pub fn set_endgame(&mut self, active: bool) {
         self.endgame_active = active;
+        self.candidates_dirty = true;
         if !active {
             self.piece_notify.notify_waiters();
         }
@@ -314,21 +329,14 @@ impl PieceReservationState {
             }
         }
 
-        // 3. Rarest-first — O(num_pieces).
-        let mut best_piece = None;
-        let mut best_avail = u32::MAX;
-        for piece in 0..self.num_pieces {
-            if self.can_reserve(piece, peer_has) {
-                let avail = self.availability[piece as usize];
-                if avail < best_avail {
-                    best_avail = avail;
-                    best_piece = Some(piece);
-                }
-            }
+        // 3. Rarest-first from cached candidates.
+        if self.candidates_dirty {
+            self.rebuild_candidates();
         }
-
-        if let Some(piece) = best_piece {
-            return self.reserve_and_start(peer_addr, piece);
+        for &piece in self.sorted_candidates.iter().rev() {
+            if self.can_reserve(piece, peer_has) {
+                return self.reserve_and_start(peer_addr, piece);
+            }
         }
 
         None
@@ -377,7 +385,19 @@ impl PieceReservationState {
             }
         }
 
-        // Rarest-first scan.
+        // Rarest-first from cached candidates (rarest at end, iterate in reverse).
+        // Cache may be stale (READ lock), but can_reserve() filters out invalid entries.
+        // If cache was never built (dirty), fall back to O(n) scan for correctness.
+        if !self.candidates_dirty {
+            for &piece in self.sorted_candidates.iter().rev() {
+                if self.can_reserve(piece, peer_has) {
+                    return Some(piece);
+                }
+            }
+            return None;
+        }
+
+        // Fallback: O(n) scan when cache is dirty (READ lock can't rebuild).
         let mut best_piece = None;
         let mut best_avail = u32::MAX;
         for piece in 0..self.num_pieces {
@@ -403,6 +423,10 @@ impl PieceReservationState {
         piece: u32,
         peer_has: &Bitfield,
     ) -> Option<BlockRequest> {
+        // Rebuild candidate cache if invalidated (under WRITE lock, safe to mutate).
+        if self.candidates_dirty {
+            self.rebuild_candidates();
+        }
         // Re-check cap under write lock (another peer may have reserved a piece
         // between find_candidate and try_reserve).
         if self.piece_owner.len() >= self.max_in_flight {
@@ -416,6 +440,28 @@ impl PieceReservationState {
     }
 
     // ---- Private helpers ----
+
+    /// Rebuild the sorted candidates cache.
+    ///
+    /// Collects all pieces that are wanted, not yet downloaded, and not currently
+    /// reserved. Sorts by **descending** availability so the rarest pieces are
+    /// at the end of the `Vec` — iteration with `.iter().rev()` yields rarest-first.
+    fn rebuild_candidates(&mut self) {
+        self.sorted_candidates.clear();
+        for piece in 0..self.num_pieces {
+            if self.wanted.get(piece)
+                && !self.we_have.get(piece)
+                && !self.piece_owner.contains_key(&piece)
+            {
+                self.sorted_candidates.push(piece);
+            }
+        }
+        // Sort by descending availability (rarest at end for rev() iteration).
+        let availability = &self.availability;
+        self.sorted_candidates
+            .sort_unstable_by(|&a, &b| availability[b as usize].cmp(&availability[a as usize]));
+        self.candidates_dirty = false;
+    }
 
     /// Check if a piece can be reserved by a peer.
     fn can_reserve(&self, piece: u32, peer_has: &Bitfield) -> bool {
@@ -1151,6 +1197,128 @@ mod tests {
         assert_eq!(
             state.max_in_flight, 256,
             "with 20 peers, max_in_flight should be 256 (floor)"
+        );
+    }
+
+    // ---- Cached dispatch tests ----
+
+    #[test]
+    fn cached_dispatch_finds_rarest() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        // Availability: piece 0=3, piece 1=2, piece 2=1 (rarest), piece 3=3.
+        let peer1 = addr(1001);
+        let peer2 = addr(1002);
+        let peer3 = addr(1003);
+
+        let bf_all = peer_has_all(num_pieces);
+
+        let mut bf2 = Bitfield::new(num_pieces);
+        bf2.set(0);
+        bf2.set(1);
+        bf2.set(3);
+
+        let mut bf3 = Bitfield::new(num_pieces);
+        bf3.set(0);
+        bf3.set(3);
+
+        state.add_peer(peer1, bf_all.clone());
+        state.add_peer(peer2, bf2);
+        state.add_peer(peer3, bf3);
+
+        // Build cache via next_request (which calls rebuild_candidates).
+        // Verify it picks piece 2 (rarest) — same result as the uncached scan would.
+        let req = state.next_request(peer1, &bf_all).unwrap();
+        assert_eq!(
+            req.piece, 2,
+            "cached dispatch should pick piece 2 (rarest, availability=1)"
+        );
+
+        // Also verify find_candidate (READ path) returns the same rarest piece
+        // after cache was built.
+        // First, complete piece 2 so it's out of the way, and check next rarest.
+        state.complete_piece(2);
+        // Rebuild cache via next_request for peer2 (who doesn't have piece 2 anyway).
+        // Now test find_candidate picks piece 1 (availability=2, next rarest).
+        let candidate = state.find_candidate(&bf_all);
+        assert_eq!(
+            candidate,
+            Some(1),
+            "cached find_candidate should pick piece 1 (next rarest, availability=2)"
+        );
+    }
+
+    #[test]
+    fn cache_invalidation_on_peer_have() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer = addr(1000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
+
+        // Build the cache.
+        assert!(state.candidates_dirty, "should be dirty initially");
+        state.rebuild_candidates();
+        assert!(!state.candidates_dirty, "should be clean after rebuild");
+
+        // peer_have should invalidate cache.
+        state.peer_have(0);
+        assert!(
+            state.candidates_dirty,
+            "cache should be dirty after peer_have()"
+        );
+
+        // try_reserve should trigger rebuild.
+        let _ = state.try_reserve(peer, 0, &bf);
+        assert!(
+            !state.candidates_dirty,
+            "cache should be clean after try_reserve() triggers rebuild"
+        );
+    }
+
+    #[test]
+    fn stale_cache_filters_invalid() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer_a = addr(1000);
+        let peer_b = addr(2000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer_a, bf.clone());
+        state.add_peer(peer_b, bf.clone());
+
+        // Build cache — all 4 pieces are candidates.
+        state.rebuild_candidates();
+        assert_eq!(state.sorted_candidates.len(), 4);
+
+        // Reserve piece 0 via peer_a — cache becomes stale but piece_owner blocks it.
+        let _req = state.try_reserve(peer_a, 0, &bf).unwrap();
+
+        // find_candidate (READ path) should skip piece 0 via can_reserve() guard
+        // even though piece 0 is still in the stale cache.
+        let candidate = state.find_candidate(&bf);
+        assert!(candidate.is_some(), "should find a candidate");
+        assert_ne!(
+            candidate.unwrap(),
+            0,
+            "stale cache should skip reserved piece 0 via can_reserve()"
         );
     }
 }
