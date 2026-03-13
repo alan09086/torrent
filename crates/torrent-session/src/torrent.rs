@@ -365,6 +365,7 @@ impl TorrentHandle {
             seeding_duration: 0,
             active_since: Some(std::time::Instant::now()),
             state_duration_since: None,
+            started_at: std::time::Instant::now(),
             moving_storage: false,
             has_incoming: false,
             need_save_resume: false,
@@ -635,6 +636,7 @@ impl TorrentHandle {
             seeding_duration: 0,
             active_since: Some(std::time::Instant::now()),
             state_duration_since: None,
+            started_at: std::time::Instant::now(),
             moving_storage: false,
             has_incoming: false,
             need_save_resume: false,
@@ -1349,6 +1351,7 @@ struct TorrentActor {
     seeding_duration: i64,
     active_since: Option<std::time::Instant>,
     state_duration_since: Option<std::time::Instant>,
+    started_at: std::time::Instant,
     moving_storage: bool,
     has_incoming: bool,
     need_save_resume: bool,
@@ -1599,7 +1602,8 @@ impl TorrentActor {
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
-        let mut connect_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut connect_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut burst_connect = true;
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(
@@ -1988,6 +1992,11 @@ impl TorrentActor {
                 }
                 // Connect timer
                 _ = connect_interval.tick() => {
+                    if burst_connect && self.started_at.elapsed() >= Duration::from_secs(10) {
+                        burst_connect = false;
+                        connect_interval = tokio::time::interval(Duration::from_secs(5));
+                        connect_interval.reset();
+                    }
                     self.try_connect_peers();
                     self.assign_pieces_to_web_seeds();
                     // Re-trigger DHT search if no active search and we still need peers.
