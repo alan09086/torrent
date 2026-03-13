@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1427-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.80.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.81.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -218,6 +218,7 @@ See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 17: Autonomous Dispatch | M73–M75 | Per-peer request drivers, piece reservation, peer-integrated dispatch | ✅ Done |
 | 18: Memory & Wake Efficiency | M76–M77 | Memory consolidation, context switch reduction, wake storm elimination | ✅ Done |
 | 19: Actor Throughput | M78 | Completion notify reduction, two-phase dispatch, direct peer-to-disk writes | ✅ Done |
+| 20: Ramp-Up Speed | M81 | Three-phase connect interval for faster peer acquisition | ✅ Done |
 
 ---
 
@@ -242,6 +243,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.81.0 | M81 | Ramp-up speed: three-phase connect interval (RampUp 100ms / Normal 500ms / Steady 5s) replaces binary burst_connect for 5× faster initial peer discovery |
 | 0.80.0 | M78 | Actor throughput: `notify_one()` replaces `notify_waiters()` in `complete_piece()`/`fail_piece()`, two-phase dispatch splits WRITE lock O(n) into READ scan + O(1) reservation (concurrent across 127 peers), direct peer-to-disk writes via `DiskHandle::enqueue_write()`. RSS -9% (81.2 MB). 1427 tests |
 | 0.79.0 | M77 | Context switch reduction: remove `notify_waiters()` wake storms from `add_peer()`/`peer_have()`, safety-net 1s periodic notification in `pipeline_tick`, batch drain 256→512, `MissedTickBehavior::Skip`. 54.2 MB/s (+3.2%) |
 | 0.78.0 | M76 | Memory consolidation & startup speed: remove `PieceSelector`/`in_flight_pieces` dead code, move `peer_bitfields` to peer-local state, burst-mode 500ms connect interval. RSS -17%, cache misses -19%, speed >50 MB/s |

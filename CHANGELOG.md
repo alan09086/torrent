@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.81.0] — 2026-03-13
+
+### Changed
+- **Three-phase connect interval**: Replaced the binary `burst_connect` flag with a
+  `ConnectPhase` enum implementing three connection phases: RampUp (0–15s, 100ms interval),
+  Normal (15–60s, 500ms interval), and Steady (60s+, 5s interval). The old code used a
+  single transition from 500ms to 5s at 10s. The new three-phase approach gives 5× faster
+  initial peer discovery (100ms vs 500ms) over a longer ramp-up window (15s vs 10s),
+  with a gradual settling period before reaching the steady-state 5s interval.
+
 ## [0.80.0] — 2026-03-13
 
 ### Changed
