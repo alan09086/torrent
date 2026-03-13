@@ -43,9 +43,6 @@ enum Command {
         /// Quiet mode — suppress progress bar
         #[arg(short, long)]
         quiet: bool,
-        /// Write per-second stats CSV to this path
-        #[arg(long)]
-        stats_log: Option<PathBuf>,
     },
     /// Create a .torrent file
     Create {
@@ -93,7 +90,6 @@ async fn main() {
             seed,
             port,
             quiet,
-            stats_log,
         } => {
             download::run(download::DownloadOpts {
                 source: &source,
@@ -103,7 +99,6 @@ async fn main() {
                 seed,
                 port,
                 quiet,
-                stats_log: stats_log.as_deref(),
             })
             .await
         }

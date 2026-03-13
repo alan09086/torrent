@@ -735,7 +735,6 @@ pub(crate) enum PeerCommand {
     },
     SetChoking(bool),
     SetInterested(bool),
-    /// BEP 16 super-seed only — normal Have uses broadcast channel (M84).
     Have(u32),
     RequestMetadata {
         piece: u32,
@@ -777,8 +776,6 @@ pub(crate) enum PeerCommand {
         piece_notify: std::sync::Arc<tokio::sync::Notify>,
         disk_handle: Option<crate::disk::DiskHandle>,
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
-        /// M84: Broadcast receiver for Have messages — replaces per-peer try_send.
-        have_rx: tokio::sync::broadcast::Receiver<u32>,
     },
     Shutdown,
 }

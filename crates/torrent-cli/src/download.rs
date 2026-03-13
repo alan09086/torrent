@@ -1,10 +1,9 @@
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use torrent::core::{DEFAULT_CHUNK_SIZE, Lengths, TorrentMeta};
 use torrent::session::SessionState;
@@ -18,7 +17,6 @@ pub struct DownloadOpts<'a> {
     pub seed: bool,
     pub port: u16,
     pub quiet: bool,
-    pub stats_log: Option<&'a Path>,
 }
 
 pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
@@ -30,7 +28,6 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         seed,
         port,
         quiet,
-        stats_log,
     } = opts;
 
     // Global state file for DHT node persistence across sessions
@@ -117,26 +114,6 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         Some(pb)
     };
 
-    // Stats CSV writer (per-second logging when --stats-log is set)
-    let mut stats_writer: Option<std::io::BufWriter<std::fs::File>> = if let Some(path) = stats_log
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("failed to create stats log: {}", path.display()))?;
-        writeln!(
-            file,
-            "timestamp_ms,elapsed_s,speed_mbps,peers,pieces_done,total_pieces,in_flight"
-        )?;
-        Some(std::io::BufWriter::new(file))
-    } else {
-        None
-    };
-    let start_time = Instant::now();
-    let mut tick_count: u64 = 0;
-
     // Poll loop
     let mut finished = false;
     let mut peak_peers: usize = 0;
@@ -207,30 +184,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
                     stats.progress * 100.0,
                 ));
             }
-
-            // Write per-second stats CSV (every 2 ticks = ~1 second)
-            if let Some(ref mut writer) = stats_writer
-                && tick_count.is_multiple_of(2)
-            {
-                let elapsed = start_time.elapsed();
-                let timestamp_ms = elapsed.as_millis();
-                let elapsed_s = elapsed.as_secs_f64();
-                let speed_mbps = stats.download_rate as f64 / 1_048_576.0;
-                let peers = stats.peers_connected;
-                let pieces_done = stats.pieces_have;
-                let total_pieces = stats.pieces_total;
-                // in_flight not directly exposed in TorrentStats; use
-                // downloaded-minus-verified as a proxy (bytes in pipeline)
-                let in_flight_bytes =
-                    stats.total_payload_download.saturating_sub(stats.total_done);
-                let _ = writeln!(
-                    writer,
-                    "{timestamp_ms},{elapsed_s:.1},{speed_mbps:.3},{peers},{pieces_done},{total_pieces},{in_flight_bytes}"
-                );
-            }
         }
 
-        tick_count += 1;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 

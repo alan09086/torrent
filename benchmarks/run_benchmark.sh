@@ -99,15 +99,11 @@ run_trial() {
     sleep 1
 }
 
-STATS_LOG_DIR="$OUTPUT_DIR/stats-logs"
-mkdir -p "$STATS_LOG_DIR"
-
 for trial in $(seq 1 "$TRIALS"); do
     echo "=== Trial $trial/$TRIALS ==="
 
-    STATS_LOG_FILE="$STATS_LOG_DIR/torrent-stats-${trial}.csv"
     run_trial "torrent" "$trial" \
-        "$TORRENT download '$MAGNET' -o '$OUTPUT_DIR/torrent' -q --stats-log '$STATS_LOG_FILE'"
+        "$TORRENT download '$MAGNET' -o '$OUTPUT_DIR/torrent' -q"
 
     run_trial "rqbit" "$trial" \
         "rqbit download '$MAGNET' -o '$OUTPUT_DIR/rqbit' -e"
@@ -123,53 +119,3 @@ echo ""
 echo "Results saved to $RESULTS"
 echo ""
 python benchmarks/summarize.py "$RESULTS"
-
-# --- Ramp-up analysis from stats logs ---
-echo ""
-echo "=== Ramp-up Analysis ==="
-for stats_csv in "$STATS_LOG_DIR"/torrent-stats-*.csv; do
-    [ -f "$stats_csv" ] || continue
-    trial_num=$(basename "$stats_csv" | sed 's/torrent-stats-\([0-9]*\)\.csv/\1/')
-    echo "  Trial $trial_num:"
-    python3 -c "
-import csv, sys
-
-rows = []
-with open('$stats_csv') as f:
-    for row in csv.DictReader(f):
-        rows.append({
-            'elapsed_s': float(row['elapsed_s']),
-            'speed_mbps': float(row['speed_mbps']),
-            'peers': int(row['peers']),
-        })
-
-if not rows:
-    print('    (no data)')
-    sys.exit(0)
-
-peak_speed = max(r['speed_mbps'] for r in rows)
-if peak_speed == 0:
-    print('    (no throughput recorded)')
-    sys.exit(0)
-
-# Time to 50% and 90% of peak speed
-t50 = t90 = None
-for r in rows:
-    if t50 is None and r['speed_mbps'] >= peak_speed * 0.5:
-        t50 = r['elapsed_s']
-    if t90 is None and r['speed_mbps'] >= peak_speed * 0.9:
-        t90 = r['elapsed_s']
-
-# Avg speed in first 5s vs last 5s
-first_5 = [r['speed_mbps'] for r in rows if r['elapsed_s'] <= 5.0]
-last_5  = [r['speed_mbps'] for r in rows if r['elapsed_s'] >= rows[-1]['elapsed_s'] - 5.0]
-avg_first_5 = sum(first_5) / len(first_5) if first_5 else 0
-avg_last_5  = sum(last_5)  / len(last_5)  if last_5  else 0
-
-print(f'    Peak speed:      {peak_speed:.1f} MB/s')
-print(f'    Time to 50%:     {t50:.1f}s' if t50 is not None else '    Time to 50%:     N/A')
-print(f'    Time to 90%:     {t90:.1f}s' if t90 is not None else '    Time to 90%:     N/A')
-print(f'    Avg first 5s:    {avg_first_5:.1f} MB/s')
-print(f'    Avg last 5s:     {avg_last_5:.1f} MB/s')
-"
-done

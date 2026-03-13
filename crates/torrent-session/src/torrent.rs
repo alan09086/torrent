@@ -313,7 +313,6 @@ impl TorrentHandle {
         let is_share_mode = config.share_mode;
 
         let (piece_ready_tx, _) = broadcast::channel(64);
-        let (have_broadcast_tx, _) = broadcast::channel(256);
         let initial_have = chunk_tracker.bitfield().clone();
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(initial_have);
         let stream_read_semaphore =
@@ -415,7 +414,6 @@ impl TorrentHandle {
             web_seed_in_flight: HashMap::new(),
             super_seed,
             have_buffer,
-            have_broadcast_tx,
             suggested_to_peers: HashMap::new(),
             predictive_have_sent: HashSet::new(),
 
@@ -587,7 +585,6 @@ impl TorrentHandle {
         let info_hashes = magnet.info_hashes.clone();
 
         let (piece_ready_tx, _) = broadcast::channel(64);
-        let (have_broadcast_tx, _) = broadcast::channel(256);
         let (have_watch_tx, have_watch_rx) = tokio::sync::watch::channel(Bitfield::new(0));
         let stream_read_semaphore =
             crate::streaming::stream_read_semaphore(config.max_concurrent_stream_reads);
@@ -688,7 +685,6 @@ impl TorrentHandle {
             web_seed_in_flight: HashMap::new(),
             super_seed,
             have_buffer,
-            have_broadcast_tx,
             suggested_to_peers: HashMap::new(),
             predictive_have_sent: HashSet::new(),
 
@@ -1430,8 +1426,6 @@ struct TorrentActor {
     super_seed: Option<crate::super_seed::SuperSeedState>,
     // Batched Have (M23)
     have_buffer: crate::have_buffer::HaveBuffer,
-    /// M84: Broadcast channel for Have messages — one send reaches all peer tasks.
-    have_broadcast_tx: broadcast::Sender<u32>,
 
     /// M44: pieces we've suggested to each peer (avoid re-suggesting)
     suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
@@ -3565,7 +3559,6 @@ impl TorrentActor {
                             piece_notify: Arc::clone(notify),
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
-                            have_rx: self.have_broadcast_tx.subscribe(),
                         });
                     }
                 }
@@ -3687,8 +3680,11 @@ impl TorrentActor {
                 && !self.predictive_have_sent.contains(&index)
             {
                 self.predictive_have_sent.insert(index);
-                // M84: Single broadcast replaces per-peer try_send loop
-                let _ = self.have_broadcast_tx.send(index);
+                for peer in self.peers.values() {
+                    if !peer.bitfield.get(index) {
+                        let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
+                    }
+                }
             }
 
             match self.version {
@@ -3814,8 +3810,11 @@ impl TorrentActor {
                 && !self.predictive_have_sent.contains(&index)
             {
                 self.predictive_have_sent.insert(index);
-                // M84: Single broadcast replaces per-peer try_send loop
-                let _ = self.have_broadcast_tx.send(index);
+                for peer in self.peers.values() {
+                    if !peer.bitfield.get(index) {
+                        let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
+                    }
+                }
             }
 
             match self.version {
@@ -4441,8 +4440,13 @@ impl TorrentActor {
                 if self.have_buffer.is_enabled() {
                     self.have_buffer.push(index);
                 } else {
-                    // M84: Single broadcast replaces per-peer try_send loop
-                    let _ = self.have_broadcast_tx.send(index);
+                    // Immediate mode — with redundancy elimination
+                    // Use try_send to avoid blocking the actor if any peer's channel is full
+                    for peer in self.peers.values() {
+                        if !peer.bitfield.get(index) {
+                            let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
+                        }
+                    }
                 }
             }
         }
@@ -4789,9 +4793,12 @@ impl TorrentActor {
         let result = self.have_buffer.flush(ct.bitfield());
         match result {
             Some(crate::have_buffer::FlushResult::SendHaves(pieces)) => {
-                // M84: Broadcast each buffered Have index
-                for &idx in &pieces {
-                    let _ = self.have_broadcast_tx.send(idx);
+                for peer in self.peers.values() {
+                    for &idx in &pieces {
+                        if !peer.bitfield.get(idx) {
+                            let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));
+                        }
+                    }
                 }
             }
             Some(crate::have_buffer::FlushResult::SendBitfield(bf)) => {
@@ -5054,7 +5061,6 @@ impl TorrentActor {
                                     piece_notify: Arc::clone(notify),
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
-                                    have_rx: self.have_broadcast_tx.subscribe(),
                                 });
                             }
                         }
@@ -5949,7 +5955,6 @@ impl TorrentActor {
                     piece_notify: Arc::clone(notify),
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
-                    have_rx: self.have_broadcast_tx.subscribe(),
                 });
             }
 
@@ -6452,7 +6457,6 @@ impl TorrentActor {
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
-                have_rx: self.have_broadcast_tx.subscribe(),
             });
         }
 
@@ -6644,7 +6648,6 @@ impl TorrentActor {
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
-                have_rx: self.have_broadcast_tx.subscribe(),
             });
         }
 
