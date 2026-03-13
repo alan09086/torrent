@@ -181,8 +181,13 @@ pub(crate) async fn run_peer(
 
     // --- Phase 2: Wrap stream in framed codec ---
     let (reader, writer) = tokio::io::split(stream);
-    let mut framed_read =
-        FramedRead::new(reader, MessageCodec::new().with_max_size(max_message_size));
+    // M84: 32 KiB initial capacity (2× chunk size) avoids realloc cascade
+    // (8K→16K→32K→64K) across 128 peers, reducing minor page faults.
+    let mut framed_read = FramedRead::with_capacity(
+        reader,
+        MessageCodec::new().with_max_size(max_message_size),
+        32 * 1024,
+    );
     let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
 
     // --- Phase 3: BEP 10 Extension Handshake ---
@@ -289,6 +294,9 @@ pub(crate) async fn run_peer(
     let semaphore = Semaphore::new(0); // Start empty, add permits on unchoke
     let mut peer_choking = true; // Peers start in choked state
     let mut reservation_state: ReservationState = None;
+
+    // M84: Broadcast receiver for Have messages from actor
+    let mut have_rx: Option<tokio::sync::broadcast::Receiver<u32>> = None;
 
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
@@ -471,8 +479,9 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx }) => {
+                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx, have_rx: hrx }) => {
                         reservation_state = Some((rs, piece_notify, disk_handle, write_error_tx));
+                        have_rx = Some(hrx);
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
@@ -578,6 +587,30 @@ pub(crate) async fn run_peer(
                     }
                 }
                 current_effective_depth = new_target;
+            }
+
+            // M84: Receive Have broadcasts from actor — replaces per-peer PeerCommand::Have
+            result = async {
+                match have_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match result {
+                    Ok(index) => {
+                        if let Err(e) = framed_write.send(Message::Have { index }).await {
+                            debug!(%addr, "error sending Have: {e}");
+                            break Some(e.to_string());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!(%addr, missed = n, "have broadcast lagged, continuing");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Actor dropped the sender — torrent shutting down
+                        break None;
+                    }
+                }
             }
         }
     };

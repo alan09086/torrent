@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.84.0] — 2026-03-13
+
+### Changed
+- **Have broadcast channel**: Single `tokio::sync::broadcast` send per verified piece
+  replaces per-peer `try_send(PeerCommand::Have(index))` loop. Eliminates ~371K channel
+  operations (128 peers × 2.9K pieces → 2.9K broadcasts). Super-seed retains targeted
+  per-peer Have delivery.
+- **Pre-sized codec buffers**: `FramedRead::with_capacity(32 KiB)` eliminates the
+  8K→16K→32K→64K reallocation cascade across 128 peers, reducing minor page faults.
+
+### Added
+- **Per-second stats logging**: `--stats-log <path>` CLI flag writes CSV with columns
+  `timestamp_ms,elapsed_s,speed_mbps,peers,pieces_done,total_pieces,in_flight` for
+  ramp-up profile analysis. Benchmark script includes ramp-up metrics (time to 50%/90%
+  peak, first/last 5s averages).
+
+### Test count: 1442
+
 ## [0.83.0] — 2026-03-13
 
 ### Changed

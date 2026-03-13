@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1442-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.83.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.84.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -244,6 +244,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.84.0 | M84 | Have broadcast channel (371K→2.9K channel ops), pre-sized codec buffers (32 KiB eliminates realloc cascade), per-second stats logging (`--stats-log`). 1442 tests |
 | 0.83.0 | M83 | Connection ramp-up elimination: default encryption Disabled (removes 23.4% CPU + 3 RTT/connection), AIMD initial depth 128→match settings (eliminates 3s slow-start), SIGTERM handling for DHT persistence. **56.8 MB/s avg (+47%)**, CPU 13.1s (-29%), RSS 68.8 MiB (-27%). Gap to rqbit: 1.3x. 1442 tests |
 | 0.82.0 | M82 | Sustained throughput: adaptive max_in_flight (scales with peer count), cached rarest-first dispatch (O(1) vs O(n)), AIMD pipeline (slow-start + congestion control), permit absorption for depth reduction. **38.6 MB/s avg (+31%)**, peak 62.1 MB/s, RSS 88.9 MiB (-28%). 1442 tests |
 | 0.81.0 | M81 | Ramp-up speed: three-phase connect interval (RampUp 100ms / Normal 500ms / Steady 5s) replaces binary burst_connect for 5× faster initial peer discovery |
