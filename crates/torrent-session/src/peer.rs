@@ -18,6 +18,7 @@ use torrent_wire::{
     ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType,
 };
 
+use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
 use crate::pex::PexMessage;
 use crate::piece_reservation::{BlockRequest, PieceReservationState};
 use crate::types::{PeerCommand, PeerEvent};
@@ -278,6 +279,8 @@ pub(crate) async fn run_peer(
     let mut reservation_state: Option<(
         std::sync::Arc<parking_lot::RwLock<PieceReservationState>>,
         std::sync::Arc<tokio::sync::Notify>,
+        Option<DiskHandle>,
+        mpsc::Sender<DiskWriteError>,
     )> = None;
 
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
@@ -287,7 +290,7 @@ pub(crate) async fn run_peer(
         // M75: Clone Arc references for requester arm (cheap Arc::clone)
         let rs_clone = reservation_state
             .as_ref()
-            .map(|(rs, n)| (std::sync::Arc::clone(rs), std::sync::Arc::clone(n)));
+            .map(|(rs, n, _, _)| (std::sync::Arc::clone(rs), std::sync::Arc::clone(n)));
         let can_request = !peer_choking && rs_clone.is_some();
 
         tokio::select! {
@@ -321,9 +324,22 @@ pub(crate) async fn run_peer(
                         // M75: Intercept messages for permit management BEFORE handle_message.
                         // M76: Also update local_bitfield for dispatch.
                         match &msg {
-                            Message::Piece { .. } => {
+                            Message::Piece { index, begin, data } => {
                                 if reservation_state.is_some() {
                                     semaphore.add_permits(1);
+                                }
+                                // M78: Direct peer-to-disk write — bypass actor for disk I/O
+                                if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
+                                    match disk.enqueue_write(
+                                        *index, *begin, data.clone(),
+                                        DiskJobFlags::empty(), write_err_tx,
+                                    ) {
+                                        Ok(()) => {}
+                                        Err(returned_data) => {
+                                            disk.write_chunk(*index, *begin, returned_data, DiskJobFlags::empty()).await
+                                                .unwrap_or_else(|e| warn!(%addr, index, begin, "peer disk write failed: {e}"));
+                                        }
+                                    }
                                 }
                             }
                             Message::Unchoke => {
@@ -336,7 +352,7 @@ pub(crate) async fn run_peer(
                             }
                             Message::Choke => {
                                 peer_choking = true;
-                                if let Some((ref rs, _)) = reservation_state {
+                                if let Some((ref rs, ..)) = reservation_state {
                                     rs.write().release_peer_pieces(addr);
                                 }
                             }
@@ -363,6 +379,18 @@ pub(crate) async fn run_peer(
                                 local_bitfield = Bitfield::new(num_pieces);
                             }
                             _ => {}
+                        }
+                        // M78: If we did a direct disk write, send lightweight ChunkWritten
+                        // instead of PieceData (which carries the full Bytes payload)
+                        if let Message::Piece { index, begin, ref data } = msg {
+                            if let Some((_, _, Some(_), _)) = &reservation_state {
+                                event_tx.send(PeerEvent::ChunkWritten {
+                                    peer_addr: addr,
+                                    index, begin,
+                                    length: data.len() as u32,
+                                }).await.map_err(|_| crate::Error::Shutdown)?;
+                                continue; // skip handle_message for this message
+                            }
                         }
                         match handle_message(
                             msg,
@@ -411,8 +439,8 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle: _, write_error_tx: _ }) => {
-                        reservation_state = Some((rs, piece_notify));
+                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx }) => {
+                        reservation_state = Some((rs, piece_notify, disk_handle, write_error_tx));
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
