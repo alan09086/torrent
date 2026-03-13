@@ -68,6 +68,8 @@ Keep notifications for: `remove_peer()`, `release_peer_pieces()`, `complete_piec
 
 **Safety net:** Add a periodic `notify_waiters()` call on the pipeline_tick (every 1s) to prevent starvation. If a peer is blocked and a `peer_have()` made work available, it will be unblocked within 1s. This is cheap insurance — 1 broadcast/sec vs thousands.
 
+**Accepted trade-off:** In poorly-seeded swarms where a new peer is the ONLY source of certain pieces, removing `add_peer()` notification delays unblocking by up to 1 second. In well-seeded swarms (the common case and benchmark scenario), this is negligible since most connected peers are seeds.
+
 **Files:**
 - `crates/torrent-session/src/piece_reservation.rs` — Remove `notify_waiters()` from `add_peer()` and `peer_have()`
 - `crates/torrent-session/src/torrent.rs` — Add periodic `piece_notify.notify_waiters()` in pipeline_tick arm
@@ -76,7 +78,7 @@ Keep notifications for: `remove_peer()`, `release_peer_pieces()`, `complete_piec
 
 **Current state:** Event channel capacity is 2048. The actor drains up to 256 events per `select!` iteration using `try_recv()` after the first `recv()`. This is already efficient. However, each `send()` from a peer task still wakes the actor task if it was sleeping in `select!`.
 
-**Change:** Increase the batch drain limit from 256 to 512 or 1024. This reduces the number of `select!` loop iterations needed to process a burst of events, reducing the overhead of checking all other select! arms (9 timers + 7 other channels = 16 condition checks) between event batches.
+**Change:** Increase the batch drain limit from 256 to 512. This reduces the number of `select!` loop iterations needed to process a burst of events, reducing the overhead of checking all 21 other select! arms (11 timers, 4 channels, 2 accept, 4 DHT discovery) between event batches. Start at 512; if context switches remain above target, increase to 1024 in a follow-up.
 
 **Files:**
 - `crates/torrent-session/src/torrent.rs` — Increase batch drain constant
@@ -104,7 +106,7 @@ Move chunk-level tracking to the peer task: instead of sending `PeerEvent::Piece
 - Verify peers still receive work promptly
 
 ### Task 2: Increase event batch drain limit
-- Increase batch drain constant from 256 to 512+
+- Increase batch drain constant from 256 to 512
 - Benchmark to measure context switch reduction
 
 ### Task 3: Verification and benchmark
