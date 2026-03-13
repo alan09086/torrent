@@ -51,9 +51,24 @@ async fn acquire_and_reserve(
             .await
             .expect("peer semaphore closed unexpectedly");
 
-        if let Some(block) = state.write().next_request(addr, local_bitfield) {
+        // Phase 1: Current piece (WRITE lock, O(1)) — hot path, 15/16 calls
+        if let Some(block) = state.write().try_current_piece(addr) {
             permit.forget();
             return block;
+        }
+
+        // Phase 2: Find candidate (READ lock, O(n)) — concurrent
+        let candidate = state.read().find_candidate(local_bitfield);
+
+        // Phase 3: Reserve candidate (WRITE lock, O(1))
+        if let Some(piece) = candidate {
+            if let Some(block) = state.write().try_reserve(addr, piece, local_bitfield) {
+                permit.forget();
+                return block;
+            }
+            // Lost race — retry without sleeping
+            drop(permit);
+            continue;
         }
 
         drop(permit);
