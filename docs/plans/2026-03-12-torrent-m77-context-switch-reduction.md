@@ -4,99 +4,121 @@
 
 Torrent generates 3.7x more context switches than rqbit (412K vs 112K) for the same download. This contributes to the 1.9x CPU time gap. The actor model creates many cross-task wake-ups: each block received by a peer task triggers a channel send to the actor, which wakes the actor task, which processes the event, which may wake other peer tasks.
 
-## Benchmark Baseline (post-M76)
+## Benchmark Baseline
 
-Expected after M76: RSS ~70 MB, cache misses ~6M, wall time ~35s, context switches still ~400K.
+Must be re-measured after M76 ships. Success criteria are expressed as percentage improvements from actual post-M76 baseline, not absolute numbers. M77 depends on M76 completing first.
+
+**Expected post-M76 baseline (approximate):** RSS ~80 MB, cache misses ~7M, context switches ~400K.
 
 ## Analysis
 
-### Context Switch Sources
+### Context Switch Sources (ranked by frequency)
 
-1. **PeerEvent channel (peer → actor)**: Every block receipt, bitfield, have, choke/unchoke event sends a message through `event_rx`. At 100 MB/s with 16 KB blocks: ~6,250 blocks/sec = ~6,250 channel sends/sec across all peers.
+1. **PeerEvent channel (peer → actor)**: Every block receipt sends `PeerEvent::PieceData`. At 100 MB/s with 16 KB blocks: ~6,250 channel sends/sec across all peers. Event channel capacity is already 2048 (not 256 — previously corrected).
 
-2. **PeerCommand channel (actor → peer)**: End-game requests, Have broadcasts, shutdown signals. Lower frequency but still significant during end-game.
+2. **Notify wake storms (reservation state → peers)**: `piece_notify.notify_waiters()` wakes ALL 128 waiting peer tasks. Called from 9 sites in `piece_reservation.rs`:
+   - Line 117: `add_peer()` — new peer connects
+   - Line 141: `remove_peer()` — peer disconnects (releases pieces)
+   - Line 154: `peer_have()` — peer announces a new piece
+   - Line 169: `release_peer_pieces()` — peer choked/snubbed (releases pieces)
+   - Line 191: `complete_piece()` — piece verified
+   - Line 209: `fail_piece()` — piece hash failed (releases piece)
+   - Line 222: `update_wanted()` — file priorities changed
+   - Line 228: `set_priority_pieces()` — streaming/priority pieces changed
+   - Line 238: `set_endgame(false)` — end-game deactivated
 
-3. **Verify result channel (disk → actor)**: Each piece verification result wakes the actor. ~5-10/sec at full speed.
+3. **PeerCommand channel (actor → peer)**: End-game requests, Have broadcasts, shutdown. Lower frequency.
 
-4. **Notify signals (reservation state → peers)**: `piece_notify.notify_waiters()` wakes ALL peer tasks waiting for new work. Called on every piece completion, peer connect/disconnect, have message. At ~5-10 pieces/sec, this wakes 128 peers ~5-10 times/sec = 640-1280 wakes/sec.
+4. **Verify result channel (disk → actor)**: ~5-10 piece verifications/sec.
 
-5. **Tokio runtime overhead**: 160+ tasks competing for a thread pool (default: num_cpus threads).
+5. **Tokio runtime overhead**: 160+ tasks competing for thread pool.
 
 ### rqbit Comparison
 
 rqbit has fewer context switches because:
-- Peer tasks write directly to shared state (`DashMap`, `RwLock`) instead of channel-messaging an actor
-- No separate actor task processing events — peers are self-sufficient
-- `notify_waiters()` equivalent is less frequent (piece-tracker state changes)
+- Peer tasks write directly to shared state (`DashMap`, `RwLock`) — no actor channel
+- No broadcast notify — piece-tracker state changes are localized
+- Simpler task structure — fewer total tasks
 
 ## Changes
 
-### Part 1: Batch Event Coalescing
+### Part 1: Reduce Notify Wake Storms
 
-**Current state:** The actor's `event_rx` arm drains up to 256 events per select! iteration, but each event individually wakes the actor from `select!`. The tokio mpsc channel wakes the receiver on every send.
+**Current state:** `piece_notify.notify_waiters()` wakes ALL 128 waiting peer tasks on every call. Many calls are for events that don't unblock any peer:
+- `peer_have()` adds one piece of availability — unlikely to unblock peers blocked on OTHER pieces
+- `add_peer()` signals that a new peer exists — doesn't change available pieces
+- `update_wanted()` — only relevant if new files selected
 
-**Change:** Replace the bounded `mpsc::channel` for peer events with a coalescing pattern. Options:
-- **Option A**: Use `tokio::sync::mpsc` with a larger buffer (current: 256, increase to 2048) — reduces wake frequency since sends only wake when buffer was empty
-- **Option B**: Add a `tokio::time::interval(1ms)` coalescing timer — process events in 1ms batches instead of per-event wakes
-- **Option C**: Use `flume` or `crossbeam` channel which has different wake semantics
+**High-impact events (peers ARE waiting for these):**
+- `complete_piece()` — releases piece for re-reservation if hash failed, frees capacity
+- `fail_piece()` — piece becomes available for retry
+- `release_peer_pieces()` — choked/snubbed peer's pieces become available
+- `set_endgame(false)` — peers need to resume requesting
+- `remove_peer()` — peer's pieces become available for others
 
-**Recommended: Option A** — simplest, lowest risk. The channel already batches reads (drain up to 256), but a larger buffer means fewer wake-on-empty events. Combined with the existing `biased;` select, the actor will naturally batch-process events.
+**Low-impact events (peers NOT blocked on these):**
+- `add_peer()` — no new pieces available
+- `peer_have()` — single piece availability change, peers block on capacity/ownership not availability
+- `update_wanted()` — rare (user changes file selection mid-download)
+- `set_priority_pieces()` — rare (streaming cursor changes)
 
-**Files:**
-- `crates/torrent-session/src/torrent.rs` — Increase event channel capacity
-- `crates/torrent-session/src/session.rs` — If channel creation is there
+**Change:** Remove `notify_waiters()` from `add_peer()` and `peer_have()`. These are the two highest-frequency low-impact callers. `peer_have()` is called once per Have message — at 128 peers each announcing 2904 pieces, that's potentially thousands of broadcasts, each waking 128 tasks.
 
-### Part 2: Reduce Notify Wake Storm
+Keep notifications for: `remove_peer()`, `release_peer_pieces()`, `complete_piece()`, `fail_piece()`, `set_endgame(false)`, `update_wanted()`, `set_priority_pieces()`.
 
-**Current state:** `piece_notify.notify_waiters()` wakes ALL waiting peer tasks every time a piece completes, a peer connects, or a have message arrives. With 128 peers, each piece completion causes 128 task wakes — but only a few peers actually have new work available.
-
-**Change:** Replace the broadcast `notify_waiters()` with targeted notification. When a piece completes, only notify peers that were blocked on that specific piece or have exhausted their piece queue. Implementation options:
-- **Option A**: Per-peer Notify — each peer gets its own `Notify`, actor signals only relevant peers
-- **Option B**: `Notify::notify_one()` instead of `notify_waiters()` — one peer wakes, checks for work, wakes next if needed (chain reaction)
-- **Option C**: Conditional notify — only call `notify_waiters()` on high-impact events (piece complete, peer disconnect releasing pieces), skip low-impact events (individual have messages)
-
-**Recommended: Option C** — lowest risk, biggest win. Most `peer_have()` calls add availability for pieces that peers aren't blocked on. Only `complete_piece()`, `fail_piece()`, `release_peer_pieces()`, and `set_endgame(false)` meaningfully unblock waiting peers. Remove `notify_waiters()` from `add_peer()`, `peer_have()`, and `update_wanted()`.
-
-**Files:**
-- `crates/torrent-session/src/piece_reservation.rs` — Remove `notify_waiters()` from low-impact events
-
-### Part 3: Move Chunk Tracking to Peer Task (Stretch Goal)
-
-**Current state:** Every block received follows: peer task receives Piece message → sends `PeerEvent::PieceData` to actor → actor writes to disk → actor updates chunk tracker → actor checks piece completion. This is 2 context switches per block (peer→actor, then actor→disk).
-
-**Change:** Have the peer task update a shared chunk tracker directly, only notifying the actor when a piece is complete (all chunks received). This reduces actor wakes from ~6250/sec (per-block) to ~5-10/sec (per-piece).
-
-**Risk:** High — chunk tracker is currently not thread-safe, and piece verification must happen on the actor side. This would require making `ChunkTracker` thread-safe or using a per-piece lock. **Only attempt if Parts 1-2 don't achieve target.**
+**Safety net:** Add a periodic `notify_waiters()` call on the pipeline_tick (every 1s) to prevent starvation. If a peer is blocked and a `peer_have()` made work available, it will be unblocked within 1s. This is cheap insurance — 1 broadcast/sec vs thousands.
 
 **Files:**
-- `crates/torrent-storage/src/chunk_tracker.rs` — Add thread-safe wrapper
-- `crates/torrent-session/src/peer.rs` — Direct chunk tracking updates
-- `crates/torrent-session/src/torrent.rs` — Change to piece-complete-only events
+- `crates/torrent-session/src/piece_reservation.rs` — Remove `notify_waiters()` from `add_peer()` and `peer_have()`
+- `crates/torrent-session/src/torrent.rs` — Add periodic `piece_notify.notify_waiters()` in pipeline_tick arm
+
+### Part 2: Event Channel Batching Optimization
+
+**Current state:** Event channel capacity is 2048. The actor drains up to 256 events per `select!` iteration using `try_recv()` after the first `recv()`. This is already efficient. However, each `send()` from a peer task still wakes the actor task if it was sleeping in `select!`.
+
+**Change:** Increase the batch drain limit from 256 to 512 or 1024. This reduces the number of `select!` loop iterations needed to process a burst of events, reducing the overhead of checking all other select! arms (9 timers + 7 other channels = 16 condition checks) between event batches.
+
+**Files:**
+- `crates/torrent-session/src/torrent.rs` — Increase batch drain constant
+
+### Part 3: Verification and Benchmark
+
+- `cargo clippy --workspace -- -D warnings`
+- `cargo test --workspace`
+- 3-trial Arch ISO benchmark with `perf stat` comparing context switches, CPU time vs post-M76 baseline
+- Version bump to 0.79.0
+
+### Part 4 (Stretch): Move Block Tracking to Peer Task
+
+**Only attempt if Parts 1-2 don't achieve target context switch reduction.**
+
+Move chunk-level tracking to the peer task: instead of sending `PeerEvent::PieceData` for every block, the peer task writes the block to disk directly and only notifies the actor when a piece is complete (all chunks received). This reduces actor wakes from ~6,250/sec (per-block) to ~5-10/sec (per-piece).
+
+**Risk: HIGH.** Requires thread-safe chunk tracker, changes disk I/O ownership, and piece verification must still happen actor-side. Lock contention on shared chunk tracker with 128 peers is a concern. Only pursue if Parts 1-2 fall short.
 
 ## Task Breakdown
 
-### Task 1: Increase event channel capacity
-- Increase from 256 to 2048 (or higher)
+### Task 1: Reduce notify wake storms
+- Remove `notify_waiters()` from `add_peer()` and `peer_have()`
+- Add periodic safety-net notification in pipeline_tick (1s)
+- Verify peers still receive work promptly
+
+### Task 2: Increase event batch drain limit
+- Increase batch drain constant from 256 to 512+
 - Benchmark to measure context switch reduction
 
-### Task 2: Reduce notify wake storms
-- Remove `notify_waiters()` from `add_peer()`, `peer_have()`, `update_wanted()`
-- Keep only in `complete_piece()`, `fail_piece()`, `release_peer_pieces()`, `set_endgame(false)`
-- Verify peers still wake when they should
-
 ### Task 3: Verification and benchmark
-- `cargo clippy --workspace -- -D warnings`
-- `cargo test --workspace`
-- 3-trial Arch ISO benchmark comparing context switches, CPU time
+- clippy + tests
+- 3-trial perf stat benchmark
 - Version bump to 0.79.0
 
 ### Task 4 (Stretch): Shared chunk tracking
 - Only if Tasks 1-2 don't hit target
-- Make ChunkTracker thread-safe, move block tracking to peer task
+- Thread-safe ChunkTracker, per-block disk writes in peer task
 
-## Success Criteria
+## Success Criteria (relative to post-M76 baseline)
 
-- Context switches < 250K (down from 412K)
-- CPU time < 15s (down from 19.3s)
+- Context switches reduced by > 30% from post-M76 baseline
+- CPU time reduced by > 10% from post-M76 baseline
 - No speed regression
 - All tests pass, zero clippy warnings
