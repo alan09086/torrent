@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.82.0] — 2026-03-13
+
+### Changed
+- **Adaptive max_in_flight**: `max_in_flight` now scales dynamically with peer count
+  (`max(256, peers × 3)` capped at `num_pieces / 2`). More connected peers automatically
+  unlock more parallelism instead of being bottlenecked by a fixed 256 limit.
+- **Cached rarest-first dispatch**: Pre-sorted candidate cache eliminates O(n) full-piece
+  scans in `find_candidate()` and `next_request()`. Cache is invalidated on availability
+  changes and rebuilt lazily on WRITE-lock paths. READ-lock path uses stale cache with
+  `can_reserve()` guard for safe filtering.
+- **AIMD pipeline**: Replaced fixed queue depth (128) with AIMD (Additive Increase,
+  Multiplicative Decrease) congestion control. Slow-start doubles depth each second when
+  throughput increases; steady-state adds +4 blocks/s. After 3 consecutive throughput
+  decreases, depth halves. 4-tick cooldown prevents oscillation. Initial depth starts at
+  32 and ramps up per-peer based on actual throughput.
+- **Permit absorption for depth reduction**: When AIMD decreases target depth, excess
+  semaphore permits are absorbed by not returning them on block receive, plus active
+  draining of idle permits on the tick path. Unchoke handler drains stale permits before
+  refilling to prevent phantom permit accumulation after Choke/Unchoke cycles.
+
 ## [0.81.0] — 2026-03-13
 
 ### Changed
