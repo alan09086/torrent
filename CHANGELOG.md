@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.82.0] — 2026-03-13
+
+### Changed
+- **Adaptive max_in_flight**: `max_in_flight` now scales dynamically with peer count
+  (`max(256, peers × 3)` capped at `num_pieces / 2`). More connected peers automatically
+  unlock more parallelism instead of being bottlenecked by a fixed 256 limit.
+- **Cached rarest-first dispatch**: Pre-sorted candidate cache eliminates O(n) full-piece
+  scans in `find_candidate()` and `next_request()`. Cache is invalidated on availability
+  changes and rebuilt lazily on WRITE-lock paths. READ-lock path uses stale cache with
+  `can_reserve()` guard for safe filtering.
+- **AIMD pipeline**: Replaced fixed queue depth (128) with AIMD (Additive Increase,
+  Multiplicative Decrease) congestion control. Slow-start doubles depth each second when
+  throughput increases; steady-state adds +4 blocks/s. After 3 consecutive throughput
+  decreases, depth halves. 4-tick cooldown prevents oscillation. Initial depth starts at
+  32 and ramps up per-peer based on actual throughput.
+- **Permit absorption for depth reduction**: When AIMD decreases target depth, excess
+  semaphore permits are absorbed by not returning them on block receive, plus active
+  draining of idle permits on the tick path. Unchoke handler drains stale permits before
+  refilling to prevent phantom permit accumulation after Choke/Unchoke cycles.
+
+### Fixed
+- **Semaphore drain infinite loop**: The Unchoke handler's `while try_acquire().is_ok()`
+  loop was an infinite loop — `SemaphorePermit`'s RAII `Drop` released the permit back
+  immediately, so the count never reached zero. Same issue in pipeline tick depth-reduction
+  drain. Fixed with `permit.forget()` to permanently consume permits.
+
+### Benchmark (Arch ISO 2026.03.01 ~1.45 GiB, 3 trials)
+- Speed: 38.6 MB/s avg (+31% over v0.80.0's 29.5 MB/s), peak 62.1 MB/s
+- RSS: 88.9 MiB avg (-28% from v0.80.0's 123 MiB)
+- Faster than qbittorrent (32.0 MB/s), gap to rqbit (77.0 MB/s) narrowed
+- Test count: 1442 (+15 new tests)
+
+## [0.81.0] — 2026-03-13
+
+### Changed
+- **Three-phase connect interval**: Replaced the binary `burst_connect` flag with a
+  `ConnectPhase` enum implementing three connection phases: RampUp (0–15s, 100ms interval),
+  Normal (15–60s, 500ms interval), and Steady (60s+, 5s interval). The old code used a
+  single transition from 500ms to 5s at 10s. The new three-phase approach gives 5× faster
+  initial peer discovery (100ms vs 500ms) over a longer ramp-up window (15s vs 10s),
+  with a gradual settling period before reaching the steady-state 5s interval.
+
 ## [0.80.0] — 2026-03-13
 
 ### Changed

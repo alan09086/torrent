@@ -4,6 +4,7 @@
 //! and communicates with the TorrentActor via channels.
 
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -19,14 +20,15 @@ use torrent_wire::{
 };
 
 use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
+use crate::pipeline::PeerPipelineState;
 use crate::pex::PexMessage;
 use crate::piece_reservation::{BlockRequest, PieceReservationState};
 use crate::types::{PeerCommand, PeerEvent};
 
 use tokio::sync::Semaphore;
 
-/// Per-peer request queue depth — matches rqbit's proven 128-permit model.
-const QUEUE_DEPTH: usize = 128;
+/// M82: Initial per-peer queue depth for AIMD slow-start.
+const INITIAL_QUEUE_DEPTH: usize = 32;
 
 /// M78: State needed for direct peer-to-disk writes.
 /// Tuple: (reservation_state, piece_notify, disk_handle, write_error_tx)
@@ -290,6 +292,13 @@ pub(crate) async fn run_peer(
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
 
+    // M82: AIMD pipeline state for adaptive queue depth with permit absorption
+    let mut in_flight: usize = 0;
+    let mut peer_pipeline = PeerPipelineState::new(250, 3.0, INITIAL_QUEUE_DEPTH);
+    let mut current_effective_depth: usize = peer_pipeline.target_depth();
+    let mut pipeline_tick = tokio::time::interval(Duration::from_millis(1000));
+    pipeline_tick.tick().await; // skip initial tick
+
     let disconnect_reason: Option<String> = loop {
         // M75: Clone Arc references for requester arm (cheap Arc::clone)
         let rs_clone = reservation_state
@@ -330,7 +339,12 @@ pub(crate) async fn run_peer(
                         match &msg {
                             Message::Piece { index, begin, data } => {
                                 if reservation_state.is_some() {
-                                    semaphore.add_permits(1);
+                                    peer_pipeline.block_received(*index, *begin, data.len() as u32, Instant::now());
+                                    in_flight = in_flight.saturating_sub(1);
+                                    // M82: Permit absorption — only return permit if below target depth
+                                    if in_flight < current_effective_depth {
+                                        semaphore.add_permits(1);
+                                    }
                                 }
                                 // M78: Direct peer-to-disk write — bypass actor for disk I/O
                                 if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
@@ -348,11 +362,20 @@ pub(crate) async fn run_peer(
                             }
                             Message::Unchoke => {
                                 peer_choking = false;
-                                let available = semaphore.available_permits();
-                                let to_add = QUEUE_DEPTH.saturating_sub(available);
-                                if to_add > 0 {
-                                    semaphore.add_permits(to_add);
+                                peer_pipeline.reset_to_slow_start();
+                                current_effective_depth = peer_pipeline.target_depth();
+                                in_flight = 0;
+                                // M82: Drain stale permits from previous cycle before refilling.
+                                // Late Piece arrivals after a Choke/Unchoke cycle would otherwise
+                                // add phantom permits (in_flight was reset to 0, so the absorption
+                                // guard passes for every late arrival).
+                                // IMPORTANT: forget() prevents the RAII SemaphorePermit from
+                                // releasing the permit back on drop, which would cause an
+                                // infinite loop.
+                                while let Ok(permit) = semaphore.try_acquire() {
+                                    permit.forget();
                                 }
+                                semaphore.add_permits(current_effective_depth);
                             }
                             Message::Choke => {
                                 peer_choking = true;
@@ -362,7 +385,11 @@ pub(crate) async fn run_peer(
                             }
                             Message::RejectRequest { .. } => {
                                 if reservation_state.is_some() {
-                                    semaphore.add_permits(1);
+                                    in_flight = in_flight.saturating_sub(1);
+                                    // M82: Permit absorption — same logic as Piece handler
+                                    if in_flight < current_effective_depth {
+                                        semaphore.add_permits(1);
+                                    }
                                 }
                             }
                             Message::Bitfield(data) => {
@@ -518,11 +545,38 @@ pub(crate) async fn run_peer(
                 let (rs, notify) = rs_clone.as_ref().unwrap();
                 acquire_and_reserve(&semaphore, rs, notify, addr, &local_bitfield).await
             }, if can_request => {
+                // Pre-increment is safe: if the send below fails, the ? exits
+                // the loop entirely (peer disconnect), so stale state is harmless.
+                peer_pipeline.request_sent(block.piece, block.begin, Instant::now());
+                in_flight += 1;
                 framed_write.send(Message::Request {
                     index: block.piece,
                     begin: block.begin,
                     length: block.length,
                 }).await.map_err(crate::Error::Wire)?;
+            }
+
+            // M82: AIMD pipeline tick — adjusts queue depth periodically
+            _ = pipeline_tick.tick() => {
+                peer_pipeline.tick();
+                let new_target = peer_pipeline.target_depth();
+                if new_target > current_effective_depth {
+                    semaphore.add_permits(new_target - current_effective_depth);
+                } else if new_target < current_effective_depth {
+                    // Drain excess idle permits immediately. Absorption on block
+                    // receive only works when the pipe is busy; idle permits must
+                    // be removed here to honour the depth reduction.
+                    let wanted_idle = new_target.saturating_sub(in_flight);
+                    let excess = semaphore.available_permits().saturating_sub(wanted_idle);
+                    for _ in 0..excess {
+                        if let Ok(permit) = semaphore.try_acquire() {
+                            permit.forget();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                current_effective_depth = new_target;
             }
         }
     };
