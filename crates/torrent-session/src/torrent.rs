@@ -3255,12 +3255,14 @@ impl TorrentActor {
                 self.maybe_express_interest(peer_addr).await;
             }
             PeerEvent::Have { peer_addr, index } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                if let Some(peer) = self.peers.get_mut(&peer_addr)
+                    && !peer.bitfield.get(index)
+                {
                     peer.bitfield.set(index);
-                }
-                // M73: Update shared state
-                if let Some(ref rs) = self.reservation_state {
-                    rs.write().peer_have(peer_addr, index);
+                    // M76: Dedup at actor level — only update availability for new pieces
+                    if let Some(ref rs) = self.reservation_state {
+                        rs.write().peer_have(index);
+                    }
                 }
                 // BEP 16: Have-back detection in super-seed mode
                 if let Some(ref mut ss) = self.super_seed
@@ -3432,14 +3434,14 @@ impl TorrentActor {
                 if let Some(ref mut ss) = self.super_seed {
                     ss.peer_disconnected(peer_addr);
                 }
-                if let Some(_peer) = self.peers.remove(&peer_addr) {
+                if let Some(peer) = self.peers.remove(&peer_addr) {
                     // M75: No driver to cancel — peer task exits when cmd_tx is dropped
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
                     }
                     // M73: Remove peer from shared state (releases pieces for other drivers)
                     if let Some(ref rs) = self.reservation_state {
-                        rs.write().remove_peer(peer_addr);
+                        rs.write().remove_peer(peer_addr, &peer.bitfield);
                     }
                 }
                 self.suggested_to_peers.remove(&peer_addr);
@@ -5434,7 +5436,7 @@ impl TorrentActor {
                 }
                 // M73: Remove peer from shared state
                 if let Some(ref rs) = self.reservation_state {
-                    rs.write().remove_peer(addr);
+                    rs.write().remove_peer(addr, &peer.bitfield);
                 }
                 // Send shutdown command (non-blocking — peer may have a full channel)
                 let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
@@ -5545,7 +5547,7 @@ impl TorrentActor {
                     }
                     // M73: Remove peer from shared state
                     if let Some(ref rs) = self.reservation_state {
-                        rs.write().remove_peer(addr);
+                        rs.write().remove_peer(addr, &peer.bitfield);
                     }
                     let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                     post_alert(

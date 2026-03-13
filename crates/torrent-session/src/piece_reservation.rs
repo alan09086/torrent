@@ -52,8 +52,6 @@ pub(crate) struct PieceReservationState {
     peer_pieces: FxHashMap<SocketAddr, Vec<u32>>,
     /// Block-level progress for each peer's current piece.
     current_progress: FxHashMap<SocketAddr, PeerProgress>,
-    /// Each peer's bitfield (which pieces they have).
-    peer_bitfields: FxHashMap<SocketAddr, Bitfield>,
     /// Per-piece availability count (how many peers have each piece).
     availability: Vec<u32>,
     /// High-priority pieces (streaming, time-critical).
@@ -90,7 +88,6 @@ impl PieceReservationState {
             piece_owner: FxHashMap::default(),
             peer_pieces: FxHashMap::default(),
             current_progress: FxHashMap::default(),
-            peer_bitfields: FxHashMap::default(),
             availability: vec![0; num_pieces as usize],
             priority_pieces: BTreeSet::new(),
             piece_notify: Arc::clone(&notify),
@@ -117,14 +114,12 @@ impl PieceReservationState {
                 self.availability[piece as usize] += 1;
             }
         }
-        self.peer_bitfields.insert(addr, bitfield);
         self.peer_pieces.entry(addr).or_default();
         self.piece_notify.notify_waiters();
     }
 
-    /// Remove a peer entirely: release its pieces, remove its bitfield,
-    /// and update availability.
-    pub fn remove_peer(&mut self, addr: SocketAddr) {
+    /// Remove a peer entirely: release its pieces and update availability.
+    pub fn remove_peer(&mut self, addr: SocketAddr, bitfield: &Bitfield) {
         // Release all pieces owned by this peer.
         if let Some(pieces) = self.peer_pieces.remove(&addr) {
             for piece in pieces {
@@ -134,33 +129,28 @@ impl PieceReservationState {
         self.current_progress.remove(&addr);
 
         // Update availability for all pieces this peer had.
-        if let Some(bitfield) = self.peer_bitfields.remove(&addr) {
-            for piece in 0..self.num_pieces {
-                if bitfield.get(piece) {
-                    self.availability[piece as usize] =
-                        self.availability[piece as usize].saturating_sub(1);
-                }
+        for piece in 0..self.num_pieces {
+            if bitfield.get(piece) {
+                self.availability[piece as usize] =
+                    self.availability[piece as usize].saturating_sub(1);
             }
         }
 
         self.piece_notify.notify_waiters();
     }
 
-    /// Update a peer's bitfield when they announce a new piece (HAVE message).
-    pub fn peer_have(&mut self, addr: SocketAddr, piece: u32) {
+    /// Update availability when a peer announces a new piece (HAVE message).
+    ///
+    /// Dedup is handled by the caller (actor checks peer.bitfield before calling).
+    pub fn peer_have(&mut self, piece: u32) {
         if piece >= self.num_pieces {
             return;
         }
-        if let Some(bf) = self.peer_bitfields.get_mut(&addr)
-            && !bf.get(piece)
-        {
-            bf.set(piece);
-            self.availability[piece as usize] += 1;
-            self.piece_notify.notify_waiters();
-        }
+        self.availability[piece as usize] += 1;
+        self.piece_notify.notify_waiters();
     }
 
-    /// Release all pieces owned by a peer WITHOUT removing its bitfield entry.
+    /// Release all pieces owned by a peer without removing its peer_pieces tracking.
     ///
     /// Used when a peer chokes us: we lose the in-progress pieces but keep
     /// tracking what pieces the peer has.
@@ -280,7 +270,7 @@ impl PieceReservationState {
     /// 3. **Rarest-first** — unreserved piece with lowest availability.
     ///
     /// Returns `None` when end-game is active, or no suitable piece is available.
-    pub fn next_request(&mut self, peer_addr: SocketAddr) -> Option<BlockRequest> {
+    pub fn next_request(&mut self, peer_addr: SocketAddr, peer_has: &Bitfield) -> Option<BlockRequest> {
         if self.endgame_active {
             return None;
         }
@@ -303,8 +293,6 @@ impl PieceReservationState {
         if self.piece_owner.len() >= self.max_in_flight {
             return None;
         }
-
-        let peer_has = self.peer_bitfields.get(&peer_addr)?;
 
         // 2. Priority pieces — O(priority_count).
         for &piece in &self.priority_pieces {
@@ -420,15 +408,16 @@ mod tests {
 
         let peer_a = addr(1000);
         let peer_b = addr(2000);
-        state.add_peer(peer_a, peer_has_all(num_pieces));
-        state.add_peer(peer_b, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer_a, bf.clone());
+        state.add_peer(peer_b, bf.clone());
 
         // Peer A reserves a piece.
-        let req_a = state.next_request(peer_a).unwrap();
+        let req_a = state.next_request(peer_a, &bf).unwrap();
         let piece_a = req_a.piece;
 
         // Peer B should get a DIFFERENT piece.
-        let req_b = state.next_request(peer_b).unwrap();
+        let req_b = state.next_request(peer_b, &bf).unwrap();
         let piece_b = req_b.piece;
 
         assert_ne!(piece_a, piece_b, "two peers must not get the same piece");
@@ -445,15 +434,16 @@ mod tests {
             PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
 
         let peer = addr(1000);
-        state.add_peer(peer, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
 
         // First request: block 0 of some piece.
-        let req0 = state.next_request(peer).unwrap();
+        let req0 = state.next_request(peer, &bf).unwrap();
         assert_eq!(req0.begin, 0);
         assert_eq!(req0.length, 16384);
 
         // Second request: block 1 of the same piece.
-        let req1 = state.next_request(peer).unwrap();
+        let req1 = state.next_request(peer, &bf).unwrap();
         assert_eq!(req1.piece, req0.piece);
         assert_eq!(req1.begin, 16384);
         assert_eq!(req1.length, 16384);
@@ -470,12 +460,13 @@ mod tests {
             PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
 
         let peer = addr(1000);
-        state.add_peer(peer, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
 
         // Reserve a piece (consume both blocks).
-        let req0 = state.next_request(peer).unwrap();
+        let req0 = state.next_request(peer, &bf).unwrap();
         let piece = req0.piece;
-        let _req1 = state.next_request(peer).unwrap();
+        let _req1 = state.next_request(peer, &bf).unwrap();
 
         // Complete it.
         state.complete_piece(piece);
@@ -493,7 +484,7 @@ mod tests {
         );
 
         // Peer should be able to get a new piece.
-        let next = state.next_request(peer);
+        let next = state.next_request(peer, &bf);
         assert!(next.is_some(), "peer should get a new piece after completion");
     }
 
@@ -515,29 +506,25 @@ mod tests {
         let mut bf_b = Bitfield::new(num_pieces);
         bf_b.set(0);
 
-        state.add_peer(peer_a, peer_has_all(num_pieces));
-        state.add_peer(peer_b, bf_b);
+        // Peer A only has piece 0 (to force it to reserve piece 0).
+        let mut bf_a = Bitfield::new(num_pieces);
+        bf_a.set(0);
 
-        // Peer A reserves piece 0 (rarest for peer_b perspective — but
-        // rarest-first picks globally rarest unreserved). Let's force
-        // peer A to get piece 0 by giving it only piece 0.
-        state.peer_bitfields.insert(peer_a, {
-            let mut bf = Bitfield::new(num_pieces);
-            bf.set(0);
-            bf
-        });
+        state.add_peer(peer_a, bf_a.clone());
+        state.add_peer(peer_b, bf_b.clone());
 
-        let req_a = state.next_request(peer_a).unwrap();
+        // Pass the restricted bitfield directly to next_request.
+        let req_a = state.next_request(peer_a, &bf_a).unwrap();
         assert_eq!(req_a.piece, 0);
 
         // Peer B can't get anything (max_in_flight=1 and piece 0 is taken).
-        assert!(state.next_request(peer_b).is_none());
+        assert!(state.next_request(peer_b, &bf_b).is_none());
 
         // Fail piece 0.
         state.fail_piece(0);
 
         // Now peer B should be able to reserve piece 0.
-        let req_b = state.next_request(peer_b).unwrap();
+        let req_b = state.next_request(peer_b, &bf_b).unwrap();
         assert_eq!(req_b.piece, 0);
     }
 
@@ -553,15 +540,16 @@ mod tests {
 
         let peer_a = addr(1000);
         let peer_b = addr(2000);
-        state.add_peer(peer_a, peer_has_all(num_pieces));
-        state.add_peer(peer_b, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer_a, bf.clone());
+        state.add_peer(peer_b, bf.clone());
 
         // Peer A reserves a piece.
-        let req = state.next_request(peer_a).unwrap();
+        let req = state.next_request(peer_a, &bf).unwrap();
         let piece = req.piece;
 
         // Remove peer A.
-        state.remove_peer(peer_a);
+        state.remove_peer(peer_a, &bf);
 
         // The piece should no longer be owned.
         assert!(!state.piece_owner.contains_key(&piece));
@@ -571,13 +559,13 @@ mod tests {
         // We can verify by checking that peer B can reserve the piece.
         let mut got_piece = false;
         for _ in 0..num_pieces {
-            if let Some(r) = state.next_request(peer_b) {
+            if let Some(r) = state.next_request(peer_b, &bf) {
                 if r.piece == piece {
                     got_piece = true;
                     break;
                 }
                 // Consume the second block to move to next piece.
-                let _ = state.next_request(peer_b);
+                let _ = state.next_request(peer_b, &bf);
             }
         }
         assert!(got_piece, "peer B should be able to get the released piece");
@@ -618,12 +606,12 @@ mod tests {
         bf3.set(0);
         bf3.set(3);
 
-        state.add_peer(peer1, bf1);
+        state.add_peer(peer1, bf1.clone());
         state.add_peer(peer2, bf2);
         state.add_peer(peer3, bf3);
 
         // Peer1 has all pieces. Should pick piece 2 (rarest, availability=1).
-        let req = state.next_request(peer1).unwrap();
+        let req = state.next_request(peer1, &bf1).unwrap();
         assert_eq!(
             req.piece, 2,
             "should pick piece 2 (rarest with availability=1)"
@@ -641,7 +629,8 @@ mod tests {
             PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
 
         let peer = addr(1000);
-        state.add_peer(peer, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
 
         // Set piece 3 as high priority.
         let mut priority = BTreeSet::new();
@@ -649,7 +638,7 @@ mod tests {
         state.set_priority_pieces(priority);
 
         // Even though piece 0 might be rarest (equal availability), priority wins.
-        let req = state.next_request(peer).unwrap();
+        let req = state.next_request(peer, &bf).unwrap();
         assert_eq!(
             req.piece, 3,
             "priority piece should be selected over rarest-first"
@@ -667,12 +656,13 @@ mod tests {
             PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
 
         let peer = addr(1000);
-        state.add_peer(peer, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
 
         state.set_endgame(true);
         assert!(state.is_endgame());
 
-        let req = state.next_request(peer);
+        let req = state.next_request(peer, &bf);
         assert!(req.is_none(), "endgame should return None");
     }
 
@@ -688,26 +678,27 @@ mod tests {
             PieceReservationState::new(num_pieces, lengths, 2, we_have, wanted);
 
         let peer = addr(1000);
-        state.add_peer(peer, peer_has_all(num_pieces));
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
 
         // Reserve piece 1: get both blocks.
-        let r0 = state.next_request(peer).unwrap();
-        let _r1 = state.next_request(peer).unwrap();
+        let r0 = state.next_request(peer, &bf).unwrap();
+        let _r1 = state.next_request(peer, &bf).unwrap();
         let piece1 = r0.piece;
 
         // Reserve piece 2: get first block.
-        let r2 = state.next_request(peer).unwrap();
+        let r2 = state.next_request(peer, &bf).unwrap();
         assert_ne!(r2.piece, piece1, "should get a different piece");
-        let _r3 = state.next_request(peer).unwrap();
+        let _r3 = state.next_request(peer, &bf).unwrap();
 
         // Now 2 pieces are in flight → next_request should return None
         // (current piece is fully dispatched, and we can't reserve new ones).
-        let req = state.next_request(peer);
+        let req = state.next_request(peer, &bf);
         assert!(req.is_none(), "should be capped at max_in_flight=2");
     }
 
     #[test]
-    fn release_peer_pieces_keeps_bitfield() {
+    fn release_peer_pieces_allows_re_reservation() {
         let lengths = test_lengths();
         let num_pieces = 4;
         let we_have = Bitfield::new(num_pieces);
@@ -721,7 +712,7 @@ mod tests {
         state.add_peer(peer, bf.clone());
 
         // Reserve a piece.
-        let req = state.next_request(peer).unwrap();
+        let req = state.next_request(peer, &bf).unwrap();
         let piece = req.piece;
 
         // Release pieces (choke).
@@ -733,15 +724,9 @@ mod tests {
             "piece should be released after choke"
         );
 
-        // But the peer's bitfield should still be there.
-        assert_eq!(
-            state.peer_bitfields.get(&peer),
-            Some(&bf),
-            "peer bitfield should be preserved after release_peer_pieces"
-        );
-
-        // Peer should be able to reserve again (unchoked).
-        let req2 = state.next_request(peer);
+        // Peer should be able to reserve again (unchoked) — bitfield is
+        // passed as parameter, so release_peer_pieces doesn't affect it.
+        let req2 = state.next_request(peer, &bf);
         assert!(
             req2.is_some(),
             "peer should be able to reserve after release"

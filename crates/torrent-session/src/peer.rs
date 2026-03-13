@@ -43,6 +43,7 @@ async fn acquire_and_reserve(
     state: &parking_lot::RwLock<PieceReservationState>,
     piece_notify: &tokio::sync::Notify,
     addr: SocketAddr,
+    local_bitfield: &Bitfield,
 ) -> BlockRequest {
     loop {
         let permit = semaphore
@@ -50,7 +51,7 @@ async fn acquire_and_reserve(
             .await
             .expect("peer semaphore closed unexpectedly");
 
-        if let Some(block) = state.write().next_request(addr) {
+        if let Some(block) = state.write().next_request(addr, local_bitfield) {
             permit.forget();
             return block;
         }
@@ -264,6 +265,9 @@ pub(crate) async fn run_peer(
         std::sync::Arc<tokio::sync::Notify>,
     )> = None;
 
+    // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
+    let mut local_bitfield = Bitfield::new(num_pieces);
+
     let disconnect_reason: Option<String> = loop {
         // M75: Clone Arc references for requester arm (cheap Arc::clone)
         let rs_clone = reservation_state
@@ -300,6 +304,7 @@ pub(crate) async fn run_peer(
                             }
                         }
                         // M75: Intercept messages for permit management BEFORE handle_message.
+                        // M76: Also update local_bitfield for dispatch.
                         match &msg {
                             Message::Piece { .. } => {
                                 if reservation_state.is_some() {
@@ -324,6 +329,23 @@ pub(crate) async fn run_peer(
                                 if reservation_state.is_some() {
                                     semaphore.add_permits(1);
                                 }
+                            }
+                            Message::Bitfield(data) => {
+                                if let Ok(bf) = Bitfield::from_bytes(data.to_vec(), num_pieces) {
+                                    local_bitfield = bf;
+                                }
+                            }
+                            Message::Have { index } => {
+                                local_bitfield.set(*index);
+                            }
+                            Message::HaveAll => {
+                                local_bitfield = Bitfield::new(num_pieces);
+                                for i in 0..num_pieces {
+                                    local_bitfield.set(i);
+                                }
+                            }
+                            Message::HaveNone => {
+                                local_bitfield = Bitfield::new(num_pieces);
                             }
                             _ => {}
                         }
@@ -380,6 +402,8 @@ pub(crate) async fn run_peer(
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
                         num_pieces = n;
+                        // M76: Resize local bitfield for new piece count
+                        local_bitfield = Bitfield::new(n);
                         // Replay deferred bitfield/HaveAll/HaveNone now that
                         // we know num_pieces
                         if let Some(deferred) = deferred_bitfield.take() {
@@ -408,6 +432,8 @@ pub(crate) async fn run_peer(
                                 }
                             };
                             if let Some(bitfield) = bitfield {
+                                // M76: Copy replayed bitfield to local state
+                                local_bitfield = bitfield.clone();
                                 debug!(%addr, ones = bitfield.count_ones(), "deferred bitfield sent");
                                 if event_tx
                                     .send(PeerEvent::Bitfield {
@@ -443,7 +469,7 @@ pub(crate) async fn run_peer(
             // M75: Block requesting arm
             block = async {
                 let (rs, notify) = rs_clone.as_ref().unwrap();
-                acquire_and_reserve(&semaphore, rs, notify, addr).await
+                acquire_and_reserve(&semaphore, rs, notify, addr, &local_bitfield).await
             }, if can_request => {
                 framed_write.send(Message::Request {
                     index: block.piece,
