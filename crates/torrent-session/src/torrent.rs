@@ -56,6 +56,18 @@ enum HashResult {
     NotApplicable,
 }
 
+/// Three-phase connection interval for peer discovery.
+///
+/// - **RampUp** (0–15s): 100ms interval for aggressive initial peer discovery.
+/// - **Normal** (15–60s): 500ms interval once initial peers are connected.
+/// - **Steady** (60s+): 5s interval for long-running maintenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectPhase {
+    RampUp,
+    Normal,
+    Steady,
+}
+
 /// Relocate torrent files from `src_base` to `dst_base`.
 ///
 /// For each file, tries `rename` first (fast, same-filesystem), then falls
@@ -1602,8 +1614,8 @@ impl TorrentActor {
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
-        let mut connect_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut burst_connect = true;
+        let mut connect_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut connect_phase = ConnectPhase::RampUp;
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(
@@ -1994,10 +2006,18 @@ impl TorrentActor {
                 }
                 // Connect timer
                 _ = connect_interval.tick() => {
-                    if burst_connect && self.started_at.elapsed() >= Duration::from_secs(10) {
-                        burst_connect = false;
-                        connect_interval = tokio::time::interval(Duration::from_secs(5));
-                        connect_interval.reset();
+                    match connect_phase {
+                        ConnectPhase::RampUp if self.started_at.elapsed() >= Duration::from_secs(15) => {
+                            connect_phase = ConnectPhase::Normal;
+                            connect_interval = tokio::time::interval(Duration::from_millis(500));
+                            connect_interval.reset();
+                        }
+                        ConnectPhase::Normal if self.started_at.elapsed() >= Duration::from_secs(60) => {
+                            connect_phase = ConnectPhase::Steady;
+                            connect_interval = tokio::time::interval(Duration::from_secs(5));
+                            connect_interval.reset();
+                        }
+                        _ => {}
                     }
                     self.try_connect_peers();
                     self.assign_pieces_to_web_seeds();
