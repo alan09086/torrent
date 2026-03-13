@@ -323,6 +323,87 @@ impl PieceReservationState {
         None
     }
 
+    // ---- Two-phase dispatch methods ----
+
+    /// Phase 1 (WRITE lock, O(1)): Dispatch the next block from the peer's
+    /// currently reserved piece, if any remains.
+    ///
+    /// Removes `current_progress` when the piece is fully dispatched so the
+    /// caller can immediately proceed to [`find_candidate`] + [`try_reserve`].
+    pub fn try_current_piece(&mut self, peer_addr: SocketAddr) -> Option<BlockRequest> {
+        if let Some(progress) = self.current_progress.get(&peer_addr) {
+            if progress.next_block < progress.total_blocks {
+                let piece = progress.piece;
+                let block_idx = progress.next_block;
+                let request = self.make_block_request(piece, block_idx);
+                self.current_progress.get_mut(&peer_addr).unwrap().next_block += 1;
+                return Some(request);
+            }
+            // Piece fully dispatched — clear so the caller can reserve a new one.
+            self.current_progress.remove(&peer_addr);
+        }
+        None
+    }
+
+    /// Phase 2 (READ lock, O(n)): Find the best unreserved piece this peer can download.
+    ///
+    /// Returns `None` when end-game is active, the in-flight cap is reached, or
+    /// no suitable piece is available.  Returns a piece index (not a
+    /// `BlockRequest`) so the caller can upgrade to a WRITE lock and call
+    /// [`try_reserve`] only when a candidate actually exists.
+    pub fn find_candidate(&self, peer_has: &Bitfield) -> Option<u32> {
+        if self.endgame_active {
+            return None;
+        }
+        if self.piece_owner.len() >= self.max_in_flight {
+            return None;
+        }
+
+        // Priority pieces first.
+        for &piece in &self.priority_pieces {
+            if self.can_reserve(piece, peer_has) {
+                return Some(piece);
+            }
+        }
+
+        // Rarest-first scan.
+        let mut best_piece = None;
+        let mut best_avail = u32::MAX;
+        for piece in 0..self.num_pieces {
+            if self.can_reserve(piece, peer_has) {
+                let avail = self.availability[piece as usize];
+                if avail < best_avail {
+                    best_avail = avail;
+                    best_piece = Some(piece);
+                }
+            }
+        }
+        best_piece
+    }
+
+    /// Phase 3 (WRITE lock, O(1)): Claim a piece found by [`find_candidate`].
+    ///
+    /// Re-checks all invariants under the write lock (race guard): if the piece
+    /// was taken by another peer between the READ and WRITE lock acquisitions,
+    /// or the in-flight cap is now exceeded, returns `None`.
+    pub fn try_reserve(
+        &mut self,
+        peer_addr: SocketAddr,
+        piece: u32,
+        peer_has: &Bitfield,
+    ) -> Option<BlockRequest> {
+        // Re-check cap under write lock (another peer may have reserved a piece
+        // between find_candidate and try_reserve).
+        if self.piece_owner.len() >= self.max_in_flight {
+            return None;
+        }
+        // Re-check reservability (another peer may have claimed this exact piece).
+        if !self.can_reserve(piece, peer_has) {
+            return None;
+        }
+        self.reserve_and_start(peer_addr, piece)
+    }
+
     // ---- Private helpers ----
 
     /// Check if a piece can be reserved by a peer.
@@ -697,6 +778,217 @@ mod tests {
         // (current piece is fully dispatched, and we can't reserve new ones).
         let req = state.next_request(peer, &bf);
         assert!(req.is_none(), "should be capped at max_in_flight=2");
+    }
+
+    // ---- Two-phase dispatch tests ----
+
+    #[test]
+    fn try_current_piece_returns_next_block() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer = addr(1000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
+
+        // Reserve piece via next_request (gets block 0).
+        let req0 = state.next_request(peer, &bf).unwrap();
+        assert_eq!(req0.begin, 0);
+
+        // try_current_piece should return block 1 of the same piece.
+        let req1 = state.try_current_piece(peer).unwrap();
+        assert_eq!(req1.piece, req0.piece);
+        assert_eq!(req1.begin, 16384);
+    }
+
+    #[test]
+    fn try_current_piece_clears_finished_piece() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer = addr(1000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
+
+        // Reserve a piece and consume both blocks.
+        let _req0 = state.next_request(peer, &bf).unwrap();
+        let _req1 = state.next_request(peer, &bf).unwrap(); // block 1 via current_progress
+
+        // All blocks dispatched; try_current_piece should return None and clear progress.
+        let result = state.try_current_piece(peer);
+        assert!(result.is_none(), "should be None when piece is fully dispatched");
+
+        // current_progress entry should be cleared.
+        assert!(
+            !state.current_progress.contains_key(&peer),
+            "current_progress should be cleared after all blocks dispatched"
+        );
+    }
+
+    #[test]
+    fn find_candidate_returns_rarest() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        // Availability: piece 0=3, piece 1=2, piece 2=1 (rarest), piece 3=3.
+        let peer1 = addr(1001);
+        let peer2 = addr(1002);
+        let peer3 = addr(1003);
+
+        let bf_all = peer_has_all(num_pieces);
+
+        let mut bf2 = Bitfield::new(num_pieces);
+        bf2.set(0);
+        bf2.set(1);
+        bf2.set(3);
+
+        let mut bf3 = Bitfield::new(num_pieces);
+        bf3.set(0);
+        bf3.set(3);
+
+        state.add_peer(peer1, bf_all.clone());
+        state.add_peer(peer2, bf2);
+        state.add_peer(peer3, bf3);
+
+        let candidate = state.find_candidate(&bf_all).unwrap();
+        assert_eq!(candidate, 2, "should pick piece 2 (rarest, availability=1)");
+    }
+
+    #[test]
+    fn find_candidate_respects_max_in_flight() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 1, we_have, wanted);
+
+        let peer = addr(1000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
+
+        // Reserve the one allowed in-flight slot.
+        let _req = state.next_request(peer, &bf).unwrap();
+
+        // find_candidate should see cap reached.
+        let candidate = state.find_candidate(&bf);
+        assert!(candidate.is_none(), "should be None when at max_in_flight");
+    }
+
+    #[test]
+    fn find_candidate_prefers_priority() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer = addr(1000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
+
+        let mut priority = BTreeSet::new();
+        priority.insert(3);
+        state.set_priority_pieces(priority);
+
+        let candidate = state.find_candidate(&bf).unwrap();
+        assert_eq!(candidate, 3, "priority piece should be chosen over rarest-first");
+    }
+
+    #[test]
+    fn find_candidate_returns_none_in_endgame() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer = addr(1000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer, bf.clone());
+
+        state.set_endgame(true);
+
+        let candidate = state.find_candidate(&bf);
+        assert!(candidate.is_none(), "find_candidate should return None in endgame");
+    }
+
+    #[test]
+    fn try_reserve_race_condition() {
+        // Two peers both "found" the same piece via find_candidate; only the
+        // first try_reserve should succeed; the second must return None.
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 10, we_have, wanted);
+
+        let peer_a = addr(1000);
+        let peer_b = addr(2000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer_a, bf.clone());
+        state.add_peer(peer_b, bf.clone());
+
+        // Both peers "found" piece 0 via find_candidate.
+        let contested_piece = 0u32;
+
+        // Peer A claims it first.
+        let req_a = state.try_reserve(peer_a, contested_piece, &bf);
+        assert!(req_a.is_some(), "peer A should succeed");
+
+        // Peer B tries the same piece — must fail (race condition guard).
+        let req_b = state.try_reserve(peer_b, contested_piece, &bf);
+        assert!(req_b.is_none(), "peer B should get None (piece already taken)");
+    }
+
+    #[test]
+    fn try_reserve_rechecks_max_in_flight() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        // cap = 1
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 1, we_have, wanted);
+
+        let peer_a = addr(1000);
+        let peer_b = addr(2000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer_a, bf.clone());
+        state.add_peer(peer_b, bf.clone());
+
+        // Peer A fills the single in-flight slot.
+        let _req_a = state.next_request(peer_a, &bf).unwrap();
+
+        // Peer B calls try_reserve (as if it found a candidate before the cap was hit).
+        let req_b = state.try_reserve(peer_b, 1, &bf);
+        assert!(
+            req_b.is_none(),
+            "try_reserve should return None when max_in_flight is already reached"
+        );
     }
 
     #[test]
