@@ -1,11 +1,13 @@
-use std::collections::HashSet;
-
-use rustc_hash::FxHashMap;
-use std::net::SocketAddr;
-
 use torrent_core::{FilePriority, Lengths};
 use torrent_storage::Bitfield;
 
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::net::SocketAddr;
+#[cfg(test)]
+use rustc_hash::FxHashMap;
+#[cfg(test)]
 use crate::chunk_mask::ChunkMask;
 
 #[cfg(test)]
@@ -60,6 +62,7 @@ impl PeerSpeedClassifier {
     }
 }
 
+#[cfg(test)]
 /// Tracks which blocks of an in-flight piece are assigned to which peer.
 #[derive(Debug, Clone)]
 pub(crate) struct InFlightPiece {
@@ -68,6 +71,7 @@ pub(crate) struct InFlightPiece {
     pub unassigned: ChunkMask,
 }
 
+#[cfg(test)]
 impl InFlightPiece {
     pub fn new(total_blocks: u32, unassigned: ChunkMask) -> Self {
         Self {

@@ -27,13 +27,11 @@ use torrent_core::{
 use torrent_dht::DhtHandle;
 use torrent_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
 
-use crate::chunk_mask::ChunkMask;
 use crate::choker::{Choker, PeerInfo as ChokerPeerInfo};
 use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::{PeerSource, PeerState};
-use crate::piece_selector::InFlightPiece;
 use crate::tracker_manager::TrackerManager;
 use crate::types::{
     PartialPieceInfo, PeerCommand, PeerEvent, PeerInfo, TorrentCommand, TorrentConfig,
@@ -327,7 +325,6 @@ impl TorrentHandle {
             chunk_tracker: Some(chunk_tracker),
             lengths: Some(lengths),
             num_pieces,
-            in_flight_pieces: FxHashMap::default(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
             streaming_cursors: Vec::new(),
@@ -598,7 +595,6 @@ impl TorrentHandle {
             chunk_tracker: None,
             lengths: None,
             num_pieces: 0,
-            in_flight_pieces: FxHashMap::default(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
             streaming_cursors: Vec::new(),
@@ -1297,7 +1293,6 @@ struct TorrentActor {
     num_pieces: u32,
 
     // Piece management
-    in_flight_pieces: FxHashMap<u32, InFlightPiece>,
     file_priorities: Vec<FilePriority>,
     wanted_pieces: Bitfield,
     end_game: EndGame,
@@ -2190,25 +2185,11 @@ impl TorrentActor {
                     }
 
                     // M73: Release pieces from snubbed peers in shared state and cancel their drivers
-                    if !snubbed_peers.is_empty() {
-                        let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                        for ifp in self.in_flight_pieces.values_mut() {
-                            let freed: Vec<u32> = ifp.assigned_blocks.iter()
-                                .filter(|(_, addr)| snubbed_peers.contains(addr))
-                                .map(|(&(_, begin), _)| begin / chunk_size_val)
-                                .collect();
-                            ifp.assigned_blocks.retain(|_, addr| !snubbed_peers.contains(addr));
-                            for chunk_idx in freed {
-                                ifp.unassigned.set(chunk_idx);
-                            }
+                    if !snubbed_peers.is_empty() && let Some(ref rs) = self.reservation_state {
+                        let mut state = rs.write();
+                        for addr in &snubbed_peers {
+                            state.release_peer_pieces(*addr);
                         }
-                        if let Some(ref rs) = self.reservation_state {
-                            let mut state = rs.write();
-                            for addr in &snubbed_peers {
-                                state.release_peer_pieces(*addr);
-                            }
-                        }
-                        // M75: No driver to cancel — peer task handles its own dispatch
                     }
 
                     // Refresh cached peer rates for steal decisions (avoids
@@ -2244,7 +2225,7 @@ impl TorrentActor {
                     }
                     if self.state == TorrentState::Downloading {
                         let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
-                        let in_flight = self.in_flight_pieces.len();
+                        let in_flight = self.reservation_state.as_ref().map(|rs| rs.read().in_flight_count()).unwrap_or(0);
                         let unchoked = self.peers.values().filter(|p| !p.peer_choking).count();
                         info!(have, in_flight, total = self.num_pieces,
                               downloaded_mb = self.downloaded / (1024 * 1024),
@@ -2650,12 +2631,19 @@ impl TorrentActor {
     }
 
     fn build_download_queue(&self) -> Vec<PartialPieceInfo> {
-        self.in_flight_pieces
-            .iter()
-            .map(|(&piece_index, ifp)| PartialPieceInfo {
-                piece_index,
-                blocks_in_piece: ifp.total_blocks,
-                blocks_assigned: ifp.assigned_blocks.len() as u32,
+        let Some(ref rs) = self.reservation_state else { return Vec::new() };
+        let state = rs.read();
+        state.in_flight_peers()
+            .map(|(piece_index, _addr)| {
+                let blocks_in_piece = self.lengths
+                    .as_ref()
+                    .map(|l| l.piece_size(piece_index).div_ceil(l.chunk_size()))
+                    .unwrap_or(0);
+                PartialPieceInfo {
+                    piece_index,
+                    blocks_in_piece,
+                    blocks_assigned: 0,
+                }
             })
             .collect()
     }
@@ -3444,35 +3432,8 @@ impl TorrentActor {
                 if let Some(ref mut ss) = self.super_seed {
                     ss.peer_disconnected(peer_addr);
                 }
-                if let Some(peer) = self.peers.remove(&peer_addr) {
+                if let Some(_peer) = self.peers.remove(&peer_addr) {
                     // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                    // Remove pieces that only this peer was downloading
-                    let peer_pieces: HashSet<u32> = peer
-                        .pending_requests
-                        .iter()
-                        .map(|(idx, _, _)| idx)
-                        .collect();
-                    for piece_idx in peer_pieces {
-                        let other_has = self
-                            .peers
-                            .values()
-                            .any(|p| p.pending_requests.iter().any(|(i, _, _)| i == piece_idx));
-                        if !other_has {
-                            self.in_flight_pieces.remove(&piece_idx);
-                        }
-                    }
-                    // Clean up pipeline request tracking for disconnected peer
-                    let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                    for ifp in self.in_flight_pieces.values_mut() {
-                        let freed: Vec<u32> = ifp.assigned_blocks.iter()
-                            .filter(|(_, addr)| **addr == peer_addr)
-                            .map(|(&(_, begin), _)| begin / chunk_size_val)
-                            .collect();
-                        ifp.assigned_blocks.retain(|_, addr| *addr != peer_addr);
-                        for chunk_idx in freed {
-                            ifp.unassigned.set(chunk_idx);
-                        }
-                    }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
                     }
@@ -3584,10 +3545,6 @@ impl TorrentActor {
             if let Some(peer) = self.peers.get_mut(&peer_addr) {
                 peer.pending_requests.remove(index, begin);
             }
-            if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
-                ifp.assigned_blocks.remove(&(index, begin));
-                // ChunkMask bit stays cleared — block already received, not available for re-assignment
-            }
             // Remove from end-game tracker so pick_block won't return this
             // block again. The normal path calls block_received which does
             // this, but we skip that path for duplicates.
@@ -3648,12 +3605,6 @@ impl TorrentActor {
                 peer.snubbed = false;
                 peer.pipeline.reset_to_slow_start();
             }
-        }
-
-        // Remove block assignment from InFlightPiece
-        // ChunkMask bit stays cleared — block received, not available for re-assignment
-        if let Some(ifp) = self.in_flight_pieces.get_mut(&index) {
-            ifp.assigned_blocks.remove(&(index, begin));
         }
 
         // End-game: cancel this block on all other peers. The 200ms end-game
@@ -4271,7 +4222,6 @@ impl TorrentActor {
         if let Some(ref mut ct) = self.chunk_tracker {
             ct.mark_verified(index);
         }
-        self.in_flight_pieces.remove(&index);
         self.piece_contributors.remove(&index);
         // Remove stale end-game blocks for this piece. Without this,
         // pick_block() returns these blocks, peers request them, has_chunk
@@ -4445,7 +4395,6 @@ impl TorrentActor {
         if let Some(ref mut ct) = self.chunk_tracker {
             ct.mark_failed(index);
         }
-        self.in_flight_pieces.remove(&index);
         // M73: Mark piece failed in shared reservation state
         if let Some(ref rs) = self.reservation_state {
             rs.write().fail_piece(index);
@@ -5090,11 +5039,11 @@ impl TorrentActor {
         };
 
         for url in idle_urls {
-            // Find lowest-index piece that is: not verified, not in peer in_flight,
+            // Find lowest-index piece that is: not verified, not reserved by a peer,
             // not in web_seed_in_flight, and wanted.
             let piece = (0..self.num_pieces).find(|&i| {
                 !ct.has_piece(i)
-                    && !self.in_flight_pieces.contains_key(&i)
+                    && !self.reservation_state.as_ref().is_some_and(|rs| rs.read().is_piece_in_flight(i))
                     && !self.web_seed_in_flight.contains_key(&i)
                     && self.wanted_pieces.get(i)
             });
@@ -5205,29 +5154,6 @@ impl TorrentActor {
         }
     }
 
-
-    /// Build a [`ChunkMask`] for a piece from the chunk tracker.
-    ///
-    /// Set bits = missing AND not-yet-assigned (initially all missing chunks).
-    /// Called once when an `InFlightPiece` is first created.
-    #[allow(dead_code)] // M73: kept for endgame pathway and future use
-    fn build_chunk_mask(ct: &ChunkTracker, piece: u32, num_chunks: u32, chunk_size: u32) -> ChunkMask {
-        if ct.bitfield().get(piece) {
-            return ChunkMask::empty();
-        }
-        let mut scratch = Vec::new();
-        ct.missing_chunks_into(piece, &mut scratch);
-        if scratch.len() as u32 == num_chunks {
-            ChunkMask::all(num_chunks)
-        } else {
-            let mut mask = ChunkMask::empty_with_capacity(num_chunks);
-            for &(offset, _) in &scratch {
-                mask.set(offset / chunk_size);
-            }
-            mask
-        }
-    }
-
     fn check_end_game_activation(&mut self) {
         if self.end_game.is_active() || self.state != TorrentState::Downloading {
             return;
@@ -5237,8 +5163,7 @@ impl TorrentActor {
         };
         let have = ct.bitfield().count_ones();
 
-        // M75: in_flight_pieces is no longer populated (peer tasks handle dispatch).
-        // Use reservation_state's piece_owner for the in-flight count instead.
+        // Use reservation_state's piece_owner for the in-flight count.
         let Some(ref rs) = self.reservation_state else {
             return;
         };
@@ -5503,33 +5428,6 @@ impl TorrentActor {
             }
             if let Some(peer) = self.peers.remove(&addr) {
                 // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                // Remove pieces that only this peer was downloading
-                let peer_pieces: HashSet<u32> = peer
-                    .pending_requests
-                    .iter()
-                    .map(|(idx, _, _)| idx)
-                    .collect();
-                for piece_idx in peer_pieces {
-                    let other_has = self
-                        .peers
-                        .values()
-                        .any(|p| p.pending_requests.iter().any(|(i, _, _)| i == piece_idx));
-                    if !other_has {
-                        self.in_flight_pieces.remove(&piece_idx);
-                    }
-                }
-                // Clean up pipeline request tracking for disconnected peer
-                let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                for ifp in self.in_flight_pieces.values_mut() {
-                    let freed: Vec<u32> = ifp.assigned_blocks.iter()
-                        .filter(|(_, a)| **a == addr)
-                        .map(|(&(_, begin), _)| begin / chunk_size_val)
-                        .collect();
-                    ifp.assigned_blocks.retain(|_, a| *a != addr);
-                    for chunk_idx in freed {
-                        ifp.unassigned.set(chunk_idx);
-                    }
-                }
                 // End-game cleanup
                 if self.end_game.is_active() {
                     self.end_game.peer_disconnected(addr);
@@ -5642,32 +5540,6 @@ impl TorrentActor {
                 }
                 if let Some(peer) = self.peers.remove(&addr) {
                     // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                    // Remove pieces that only this peer was downloading
-                    let peer_pieces: HashSet<u32> = peer
-                        .pending_requests
-                        .iter()
-                        .map(|(idx, _, _)| idx)
-                        .collect();
-                    for piece_idx in peer_pieces {
-                        let other_has = self
-                            .peers
-                            .values()
-                            .any(|p| p.pending_requests.iter().any(|(i, _, _)| i == piece_idx));
-                        if !other_has {
-                            self.in_flight_pieces.remove(&piece_idx);
-                        }
-                    }
-                    let chunk_size_val = self.lengths.as_ref().map(|l| l.chunk_size()).unwrap_or(16384);
-                    for ifp in self.in_flight_pieces.values_mut() {
-                        let freed: Vec<u32> = ifp.assigned_blocks.iter()
-                            .filter(|(_, a)| **a == addr)
-                            .map(|(&(_, begin), _)| begin / chunk_size_val)
-                            .collect();
-                        ifp.assigned_blocks.retain(|_, a| *a != addr);
-                        for chunk_idx in freed {
-                            ifp.unassigned.set(chunk_idx);
-                        }
-                    }
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(addr);
                     }

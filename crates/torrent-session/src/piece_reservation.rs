@@ -259,6 +259,11 @@ impl PieceReservationState {
         self.piece_owner.len()
     }
 
+    /// Check if a specific piece is currently in flight (reserved by a peer).
+    pub fn is_piece_in_flight(&self, piece: u32) -> bool {
+        self.piece_owner.contains_key(&piece)
+    }
+
     /// Iterate over in-flight pieces and their owning peers.
     /// Used by the actor to build end-game block maps.
     pub fn in_flight_peers(&self) -> impl Iterator<Item = (u32, SocketAddr)> + '_ {
