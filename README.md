@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1419-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.78.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.79.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1392 tests, zero clippy warnings**
+- 📊 **1419 tests, zero clippy warnings**
 
 ---
 
@@ -216,6 +216,7 @@ See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 15: CPU Efficiency | M65 | SHA hardware acceleration, batch dispatch threshold | ✅ Done |
 | 16: Speed & Pipeline | M66–M72 | Adaptive queue depth, crypto optimization, pipeline tuning, picker efficiency, steal optimization | ✅ Done |
 | 17: Autonomous Dispatch | M73–M75 | Per-peer request drivers, piece reservation, peer-integrated dispatch | ✅ Done |
+| 18: Memory & Wake Efficiency | M76–M77 | Memory consolidation, context switch reduction, wake storm elimination | ✅ Done |
 
 ---
 
@@ -240,6 +241,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.79.0 | M77 | Context switch reduction: remove `notify_waiters()` wake storms from `add_peer()`/`peer_have()`, safety-net 1s periodic notification in `pipeline_tick`, batch drain 256→512, `MissedTickBehavior::Skip`. 54.2 MB/s (+3.2%) |
 | 0.78.0 | M76 | Memory consolidation & startup speed: remove `PieceSelector`/`in_flight_pieces` dead code, move `peer_bitfields` to peer-local state, burst-mode 500ms connect interval. RSS -17%, cache misses -19%, speed >50 MB/s |
 | 0.77.0 | M75 | Peer-integrated dispatch: move block requesting from separate driver tasks into peer task's `tokio::select!` loop, eliminating cross-task permit lifecycle. 56.7 MB/s avg (4.6x over M74), stable RSS |
 | 0.76.0 | M74 | Per-peer dispatch stabilization: fix semaphore permit leaks in request rejection, write failure, MSE retry, and driver cancellation paths. Backpressure-aware `send().await` replaces `try_send` |

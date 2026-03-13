@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.79.0] — 2026-03-13
+
+### Added
+- **Safety-net periodic notification**: Added a 1-second `notify_waiters()` call in the
+  `pipeline_tick` arm of `TorrentActor`'s select loop. Ensures request waiters are never
+  permanently starved if a high-frequency notify path is removed or silent.
+
+### Changed
+- **Remove `notify_waiters()` from `add_peer()` and `peer_have()`**: These high-frequency
+  methods in `piece_reservation.rs` were triggering wake storms — up to 128 context switches
+  per call as all waiting peers woke simultaneously. Notifications are now consolidated into
+  the periodic safety-net tick.
+- **Increase event batch drain limit 256 → 512**: The event processing loop now drains up to
+  512 events per iteration, reducing the frequency at which the actor yields back to the
+  executor under high event throughput.
+- **`pipeline_tick` uses `MissedTickBehavior::Skip`**: Prevents burst wake storms when the
+  actor falls behind; missed ticks are discarded instead of firing in rapid succession.
+
+### Benchmark (Arch ISO ~1.5 GiB, 3 trials)
+- Speed: 54.2 MB/s avg (+3.2% over M76's 52.5 MB/s)
+- RSS: 88 MB avg
+- Test count: 1419
+
 ## [0.78.0] — 2026-03-13
 
 ### Changed
