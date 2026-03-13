@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.78.0] — 2026-03-13
+
+### Changed
+- **Remove `PieceSelector` from production code**: Gated `PieceSelector` (2,271 lines) and 5
+  related types (`PeerSpeed`, `PeerSpeedClassifier`, `InFlightPiece`, `PickContext`, `PickResult`)
+  behind `#[cfg(test)]`. Availability reads now go through `PieceReservationState::availability()`.
+- **Remove `in_flight_pieces` dead code**: Eliminated the never-populated
+  `FxHashMap<u32, InFlightPiece>` field and all 21 reference sites from `TorrentActor`. Diagnostic
+  and web-seed queries now use `PieceReservationState` methods (`in_flight_count()`,
+  `in_flight_peers()`, `is_piece_in_flight()`).
+- **Move `peer_bitfields` to peer-local state**: Removed duplicate `FxHashMap<SocketAddr, Bitfield>`
+  from `PieceReservationState`. Bitfield data is now passed as parameters to `remove_peer()`,
+  `peer_have()`, and `next_request()`. Each peer task maintains its own `local_bitfield` for
+  dispatch decisions. Have message dedup moved from shared state to actor level.
+- **Burst-mode connection interval**: Start with 500ms connect interval for the first 10 seconds,
+  then transition to 5s steady-state. Reduces startup/ramp-up overhead.
+- **Fix `evaluate_auto_sequential`**: Now uses `reservation_state.in_flight_count()` instead of
+  the always-zero `in_flight_pieces.len()`, allowing auto-sequential mode to actually activate.
+
+### Benchmark (Arch ISO ~1.5 GiB, 3 trials)
+- Speed: 52.5 MB/s median (no regression from M75's 56.7)
+- RSS: 81 MB median (down from M75's 98 MB, -17%)
+- Cache misses: 7.4M median (down from M75's 9.1M, -19%)
+- Test count: 1419
+
 ## [0.77.0] — 2026-03-12
 
 ### Changed
