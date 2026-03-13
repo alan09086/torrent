@@ -183,6 +183,7 @@ impl PieceReservationState {
             }
         }
         self.current_progress.remove(&addr);
+        self.candidates_dirty = true;
         self.piece_notify.notify_waiters();
     }
 
@@ -1320,5 +1321,42 @@ mod tests {
             0,
             "stale cache should skip reserved piece 0 via can_reserve()"
         );
+    }
+
+    #[test]
+    fn release_peer_pieces_invalidates_cache() {
+        let lengths = test_lengths();
+        let num_pieces = 4;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        // Only 1 in-flight to control reservation.
+        let (mut state, _notify) =
+            PieceReservationState::new(num_pieces, lengths, 1, we_have, wanted);
+
+        let peer_a = addr(1000);
+        let peer_b = addr(2000);
+        let bf = peer_has_all(num_pieces);
+        state.add_peer(peer_a, bf.clone());
+        state.add_peer(peer_b, bf.clone());
+        // Override adaptive max_in_flight for this test.
+        state.max_in_flight = 1;
+
+        // Peer A reserves piece 0.
+        let req = state.next_request(peer_a, &bf).unwrap();
+        let piece = req.piece;
+
+        // Peer B can't get anything (max_in_flight=1).
+        assert!(state.find_candidate(&bf).is_none());
+
+        // Choke peer A — releases piece back.
+        state.release_peer_pieces(peer_a);
+
+        // Cache must be dirty so find_candidate picks up the released piece.
+        assert!(state.candidates_dirty, "release_peer_pieces should invalidate cache");
+
+        // Peer B should now find the released piece.
+        let candidate = state.find_candidate(&bf);
+        assert!(candidate.is_some(), "released piece should be available");
     }
 }
