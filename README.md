@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [magnetor](https://codeberg.org/alan090/magnetor) — a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1419-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1427-brightgreen)](#-testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#-testing)
-[![Version](https://img.shields.io/badge/version-0.79.0-blue)](#-versioning)
+[![Version](https://img.shields.io/badge/version-0.80.0-blue)](#-versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#-license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#-building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** — unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** — pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** — trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1419 tests, zero clippy warnings**
+- 📊 **1427 tests, zero clippy warnings**
 
 ---
 
@@ -217,6 +217,7 @@ See [docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md](docs/plans/2026-03
 | 16: Speed & Pipeline | M66–M72 | Adaptive queue depth, crypto optimization, pipeline tuning, picker efficiency, steal optimization | ✅ Done |
 | 17: Autonomous Dispatch | M73–M75 | Per-peer request drivers, piece reservation, peer-integrated dispatch | ✅ Done |
 | 18: Memory & Wake Efficiency | M76–M77 | Memory consolidation, context switch reduction, wake storm elimination | ✅ Done |
+| 19: Actor Throughput | M78 | Completion notify reduction, two-phase dispatch, direct peer-to-disk writes | ✅ Done |
 
 ---
 
@@ -241,6 +242,7 @@ Torrent uses workspace-level versioning in the root `Cargo.toml`. Each milestone
 
 | Version | Milestone | Highlights |
 |---------|-----------|------------|
+| 0.80.0 | M78 | Actor throughput: `notify_one()` replaces `notify_waiters()` in `complete_piece()`/`fail_piece()`, two-phase dispatch splits WRITE lock O(n) into READ scan + O(1) reservation (concurrent across 127 peers), direct peer-to-disk writes via `DiskHandle::enqueue_write()`. RSS -9% (81.2 MB). 1427 tests |
 | 0.79.0 | M77 | Context switch reduction: remove `notify_waiters()` wake storms from `add_peer()`/`peer_have()`, safety-net 1s periodic notification in `pipeline_tick`, batch drain 256→512, `MissedTickBehavior::Skip`. 54.2 MB/s (+3.2%) |
 | 0.78.0 | M76 | Memory consolidation & startup speed: remove `PieceSelector`/`in_flight_pieces` dead code, move `peer_bitfields` to peer-local state, burst-mode 500ms connect interval. RSS -17%, cache misses -19%, speed >50 MB/s |
 | 0.77.0 | M75 | Peer-integrated dispatch: move block requesting from separate driver tasks into peer task's `tokio::select!` loop, eliminating cross-task permit lifecycle. 56.7 MB/s avg (4.6x over M74), stable RSS |

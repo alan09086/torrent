@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.80.0] — 2026-03-13
+
+### Changed
+- **`notify_one()` replaces `notify_waiters()` in piece completion**: `complete_piece()` and
+  `fail_piece()` in `piece_reservation.rs` now call `notify_one()` instead of `notify_waiters()`.
+  Each completion frees exactly one slot — waking all 127 waiting peers simultaneously was
+  wasteful. The safety-net periodic tick (added in M77) catches any missed wakeups.
+- **Two-phase dispatch for `next_request()`**: Split the monolithic single-WRITE-lock O(n) scan
+  into three phases: `try_current_piece()` (WRITE lock, O(1) hot path, ~15/16 calls),
+  `find_candidate()` (READ lock, O(n) scan — runs concurrently across all peers), and
+  `try_reserve()` (WRITE lock, O(1) race-guarded reservation). Allows 127 peers to scan the
+  piece list simultaneously instead of serializing behind one writer.
+- **Direct peer-to-disk writes**: Peer tasks now write block data directly to disk via
+  `DiskHandle::enqueue_write()` instead of routing the full data payload through the actor's
+  event channel. The actor receives lightweight `ChunkWritten` events (metadata only: piece
+  index, begin offset, length) for bookkeeping. Removes ~1.45 GB of data transit through the
+  event channel per download.
+
+### Benchmark (Arch ISO 2026.03.01 ~1.45 GiB)
+- Speed: 46.8 MB/s avg (3 trials) — flat vs M77's 48.2 MB/s (~3% delta, within swarm noise)
+- RSS: 81.2 MB avg (down from M77's 89.4 MB, -9%)
+- Test count: 1427 (+8 new dispatch tests)
+
 ## [0.79.0] — 2026-03-13
 
 ### Added
