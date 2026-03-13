@@ -39,7 +39,7 @@ pub(crate) struct PeerPipelineState {
     queue_depth: usize,
     /// Hard ceiling on queue depth.
     max_queue_depth: usize,
-    /// Request queue time in seconds (kept for API compatibility, unused in fixed-depth model).
+    /// Request queue time in seconds (kept for API compatibility, unused in AIMD model).
     request_queue_time: f64,
     /// Initial queue depth for reset_to_slow_start().
     initial_queue_depth: usize,
