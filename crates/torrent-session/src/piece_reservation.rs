@@ -185,7 +185,7 @@ impl PieceReservationState {
                 self.current_progress.remove(&owner);
             }
         }
-        self.piece_notify.notify_waiters();
+        self.piece_notify.notify_one();
     }
 
     /// Mark a piece as failed (hash check failed). Removes the owner without
@@ -203,7 +203,7 @@ impl PieceReservationState {
                 self.current_progress.remove(&owner);
             }
         }
-        self.piece_notify.notify_waiters();
+        self.piece_notify.notify_one();
     }
 
     // ---- State updates ----
