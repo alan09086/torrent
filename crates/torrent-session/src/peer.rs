@@ -411,7 +411,7 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify }) => {
+                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle: _, write_error_tx: _ }) => {
                         reservation_state = Some((rs, piece_notify));
                         // Requester arm activates on next loop iteration if unchoked
                     }

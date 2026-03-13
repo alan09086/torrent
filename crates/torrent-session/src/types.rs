@@ -603,6 +603,14 @@ pub(crate) enum PeerEvent {
         begin: u32,
         data: Bytes,
     },
+    /// M78: Lightweight event for peer-side disk writes — carries only metadata,
+    /// not the full Bytes payload (which was already written to disk by the peer task).
+    ChunkWritten {
+        peer_addr: SocketAddr,
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
     PeerChoking {
         peer_addr: SocketAddr,
         choking: bool,
@@ -766,6 +774,8 @@ pub(crate) enum PeerCommand {
     StartRequesting {
         reservation_state: std::sync::Arc<parking_lot::RwLock<crate::piece_reservation::PieceReservationState>>,
         piece_notify: std::sync::Arc<tokio::sync::Notify>,
+        disk_handle: Option<crate::disk::DiskHandle>,
+        write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
     },
     Shutdown,
 }

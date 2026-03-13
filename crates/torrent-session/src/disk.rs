@@ -272,7 +272,7 @@ impl DiskManagerHandle {
 // ---------------------------------------------------------------------------
 
 /// Per-torrent handle for async disk I/O.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DiskHandle {
     tx: mpsc::Sender<DiskJob>,
     info_hash: Id20,

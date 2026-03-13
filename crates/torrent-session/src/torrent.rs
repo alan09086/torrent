@@ -3537,9 +3537,16 @@ impl TorrentActor {
                         let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
                             reservation_state: Arc::clone(rs),
                             piece_notify: Arc::clone(notify),
+                            disk_handle: self.disk.clone(),
+                            write_error_tx: self.write_error_tx.clone(),
                         });
                     }
                 }
+            }
+            PeerEvent::ChunkWritten { peer_addr, index, begin, length } => {
+                // M78: Peer task wrote chunk directly to disk.
+                // TODO: Implement M78 handler — mark chunk as verified or queue for verification.
+                let _ = (peer_addr, index, begin, length);
             }
         }
     }
@@ -4904,6 +4911,8 @@ impl TorrentActor {
                                 let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
                                     reservation_state: Arc::clone(rs),
                                     piece_notify: Arc::clone(notify),
+                                    disk_handle: self.disk.clone(),
+                                    write_error_tx: self.write_error_tx.clone(),
                                 });
                             }
                         }
@@ -5796,6 +5805,8 @@ impl TorrentActor {
                 let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
                     reservation_state: Arc::clone(rs),
                     piece_notify: Arc::clone(notify),
+                    disk_handle: self.disk.clone(),
+                    write_error_tx: self.write_error_tx.clone(),
                 });
             }
 
@@ -6296,6 +6307,8 @@ impl TorrentActor {
             let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
                 reservation_state: Arc::clone(rs),
                 piece_notify: Arc::clone(notify),
+                disk_handle: self.disk.clone(),
+                write_error_tx: self.write_error_tx.clone(),
             });
         }
 
@@ -6485,6 +6498,8 @@ impl TorrentActor {
             let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
                 reservation_state: Arc::clone(rs),
                 piece_notify: Arc::clone(notify),
+                disk_handle: self.disk.clone(),
+                write_error_tx: self.write_error_tx.clone(),
             });
         }
 
