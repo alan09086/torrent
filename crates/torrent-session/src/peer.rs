@@ -365,12 +365,12 @@ pub(crate) async fn run_peer(
                                 peer_pipeline.reset_to_slow_start();
                                 current_effective_depth = peer_pipeline.target_depth();
                                 in_flight = 0;
-                                // M82: Fill semaphore to initial target depth
-                                let available = semaphore.available_permits();
-                                let to_add = current_effective_depth.saturating_sub(available);
-                                if to_add > 0 {
-                                    semaphore.add_permits(to_add);
-                                }
+                                // M82: Drain stale permits from previous cycle before refilling.
+                                // Late Piece arrivals after a Choke/Unchoke cycle would otherwise
+                                // add phantom permits (in_flight was reset to 0, so the absorption
+                                // guard passes for every late arrival).
+                                while semaphore.try_acquire().is_ok() {}
+                                semaphore.add_permits(current_effective_depth);
                             }
                             Message::Choke => {
                                 peer_choking = true;
@@ -540,6 +540,8 @@ pub(crate) async fn run_peer(
                 let (rs, notify) = rs_clone.as_ref().unwrap();
                 acquire_and_reserve(&semaphore, rs, notify, addr, &local_bitfield).await
             }, if can_request => {
+                // Pre-increment is safe: if the send below fails, the ? exits
+                // the loop entirely (peer disconnect), so stale state is harmless.
                 peer_pipeline.request_sent(block.piece, block.begin, Instant::now());
                 in_flight += 1;
                 framed_write.send(Message::Request {
@@ -555,8 +557,16 @@ pub(crate) async fn run_peer(
                 let new_target = peer_pipeline.target_depth();
                 if new_target > current_effective_depth {
                     semaphore.add_permits(new_target - current_effective_depth);
+                } else if new_target < current_effective_depth {
+                    // Drain excess idle permits immediately. Absorption on block
+                    // receive only works when the pipe is busy; idle permits must
+                    // be removed here to honour the depth reduction.
+                    let wanted_idle = new_target.saturating_sub(in_flight);
+                    let excess = semaphore.available_permits().saturating_sub(wanted_idle);
+                    for _ in 0..excess {
+                        let _ = semaphore.try_acquire();
+                    }
                 }
-                // Decrease handled by permit absorption on block receive
                 current_effective_depth = new_target;
             }
         }
