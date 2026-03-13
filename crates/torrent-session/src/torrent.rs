@@ -33,7 +33,7 @@ use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
 use crate::peer_state::{PeerSource, PeerState};
-use crate::piece_selector::{InFlightPiece, PieceSelector};
+use crate::piece_selector::InFlightPiece;
 use crate::tracker_manager::TrackerManager;
 use crate::types::{
     PartialPieceInfo, PeerCommand, PeerEvent, PeerInfo, TorrentCommand, TorrentConfig,
@@ -180,7 +180,6 @@ impl TorrentHandle {
             DEFAULT_CHUNK_SIZE,
         );
         let chunk_tracker = ChunkTracker::new(lengths.clone());
-        let piece_selector = PieceSelector::new(num_pieces);
         let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
         let file_priorities = vec![FilePriority::Normal; file_lengths.len()];
         let wanted_pieces =
@@ -328,7 +327,6 @@ impl TorrentHandle {
             chunk_tracker: Some(chunk_tracker),
             lengths: Some(lengths),
             num_pieces,
-            piece_selector,
             in_flight_pieces: FxHashMap::default(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
@@ -600,7 +598,6 @@ impl TorrentHandle {
             chunk_tracker: None,
             lengths: None,
             num_pieces: 0,
-            piece_selector: PieceSelector::new(0),
             in_flight_pieces: FxHashMap::default(),
             streaming_pieces: BTreeSet::new(),
             time_critical_pieces: BTreeSet::new(),
@@ -1300,7 +1297,6 @@ struct TorrentActor {
     num_pieces: u32,
 
     // Piece management
-    piece_selector: PieceSelector,
     in_flight_pieces: FxHashMap<u32, InFlightPiece>,
     file_priorities: Vec<FilePriority>,
     wanted_pieces: Bitfield,
@@ -1895,7 +1891,7 @@ impl TorrentActor {
                             let _ = reply.send(has);
                         }
                         Some(TorrentCommand::PieceAvailability { reply }) => {
-                            let avail = self.piece_selector.availability().to_vec();
+                            let avail = self.reservation_state.as_ref().map(|rs| rs.read().availability().to_vec()).unwrap_or_default();
                             let _ = reply.send(avail);
                         }
                         Some(TorrentCommand::FileProgress { reply }) => {
@@ -1985,7 +1981,7 @@ impl TorrentActor {
                     // Update auto-sequential hysteresis (M45)
                     if self.config.auto_sequential {
                         self.auto_sequential_active = crate::piece_selector::evaluate_auto_sequential(
-                            self.in_flight_pieces.len(),
+                            self.reservation_state.as_ref().map(|rs| rs.read().in_flight_count()).unwrap_or(0),
                             self.peers.len(),
                             self.auto_sequential_active,
                         );
@@ -3251,7 +3247,6 @@ impl TorrentActor {
                     .map(|p| p.peer_choking)
                     .unwrap_or(true);
                 debug!(%peer_addr, ones, is_choking, state = ?self.state, "bitfield event received");
-                self.piece_selector.add_peer_bitfield(&bitfield);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield = bitfield;
                     if self.num_pieces > 0 && peer.bitfield.count_ones() == self.num_pieces {
@@ -3272,7 +3267,6 @@ impl TorrentActor {
                 self.maybe_express_interest(peer_addr).await;
             }
             PeerEvent::Have { peer_addr, index } => {
-                self.piece_selector.increment(index);
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     peer.bitfield.set(index);
                 }
@@ -3452,7 +3446,6 @@ impl TorrentActor {
                 }
                 if let Some(peer) = self.peers.remove(&peer_addr) {
                     // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                    self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
                     let peer_pieces: HashSet<u32> = peer
                         .pending_requests
@@ -4808,7 +4801,6 @@ impl TorrentActor {
                                 .cmd_tx
                                 .try_send(PeerCommand::UpdateNumPieces(num_pieces));
                         }
-                        self.piece_selector = PieceSelector::new(num_pieces);
                         let file_lengths: Vec<u64> =
                             meta.info.files().iter().map(|f| f.length).collect();
                         let mut meta = meta;
@@ -5511,7 +5503,6 @@ impl TorrentActor {
             }
             if let Some(peer) = self.peers.remove(&addr) {
                 // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                 // Remove pieces that only this peer was downloading
                 let peer_pieces: HashSet<u32> = peer
                     .pending_requests
@@ -5651,7 +5642,6 @@ impl TorrentActor {
                 }
                 if let Some(peer) = self.peers.remove(&addr) {
                     // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                    self.piece_selector.remove_peer_bitfield(&peer.bitfield);
                     // Remove pieces that only this peer was downloading
                     let peer_pieces: HashSet<u32> = peer
                         .pending_requests
@@ -5838,8 +5828,8 @@ impl TorrentActor {
             None => return,
         };
 
-        let availability = self.piece_selector.availability();
-        if let Some(idx) = ss.assign_piece(peer_addr, &peer_bitfield, availability, self.num_pieces)
+        let availability = self.reservation_state.as_ref().map(|rs| rs.read().availability().to_vec()).unwrap_or_default();
+        if let Some(idx) = ss.assign_piece(peer_addr, &peer_bitfield, &availability, self.num_pieces)
             && let Some(peer) = self.peers.get(&peer_addr)
         {
             let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));

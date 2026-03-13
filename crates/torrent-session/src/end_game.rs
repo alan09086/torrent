@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 
 use torrent_storage::Bitfield;
 
+#[cfg(test)]
 use crate::piece_selector::InFlightPiece;
 
 /// Block requests for a given (piece, offset) pair.
@@ -152,6 +153,32 @@ impl EndGame {
         self.blocks.retain(|&(pi, _), _| pi != index);
     }
 
+    /// Pick a block with streaming priority: try streaming pieces first,
+    /// then fall back to regular pick.
+    pub fn pick_block_streaming(
+        &self,
+        peer_addr: SocketAddr,
+        peer_has: &Bitfield,
+        streaming_pieces: &BTreeSet<u32>,
+    ) -> Option<(u32, u32, u32)> {
+        // First try streaming pieces
+        for &piece in streaming_pieces {
+            if !peer_has.get(piece) {
+                continue;
+            }
+            for (&(idx, begin), entry) in &self.blocks {
+                if idx == piece && !entry.peers.contains(&peer_addr) {
+                    return Some((idx, begin, entry.length));
+                }
+            }
+        }
+        // Fall back to regular pick
+        self.pick_block(peer_addr, peer_has)
+    }
+}
+
+#[cfg(test)]
+impl EndGame {
     /// Activate end-game using InFlightPiece data in addition to pending requests.
     ///
     /// This merges block-level tracking from `in_flight_pieces` with pending
@@ -192,29 +219,6 @@ impl EndGame {
                 }
             }
         }
-    }
-
-    /// Pick a block with streaming priority: try streaming pieces first,
-    /// then fall back to regular pick.
-    pub fn pick_block_streaming(
-        &self,
-        peer_addr: SocketAddr,
-        peer_has: &Bitfield,
-        streaming_pieces: &BTreeSet<u32>,
-    ) -> Option<(u32, u32, u32)> {
-        // First try streaming pieces
-        for &piece in streaming_pieces {
-            if !peer_has.get(piece) {
-                continue;
-            }
-            for (&(idx, begin), entry) in &self.blocks {
-                if idx == piece && !entry.peers.contains(&peer_addr) {
-                    return Some((idx, begin, entry.length));
-                }
-            }
-        }
-        // Fall back to regular pick
-        self.pick_block(peer_addr, peer_has)
     }
 }
 

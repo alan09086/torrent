@@ -102,6 +102,11 @@ impl PieceReservationState {
         (state, notify)
     }
 
+    /// Read-only access to per-piece availability counts.
+    pub fn availability(&self) -> &[u32] {
+        &self.availability
+    }
+
     // ---- Peer lifecycle ----
 
     /// Register a peer and update piece availability.

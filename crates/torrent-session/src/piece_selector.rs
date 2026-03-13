@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use rustc_hash::FxHashMap;
 use std::net::SocketAddr;
@@ -8,6 +8,10 @@ use torrent_storage::Bitfield;
 
 use crate::chunk_mask::ChunkMask;
 
+#[cfg(test)]
+use std::collections::BTreeSet;
+
+#[cfg(test)]
 /// Speed category for a peer based on download rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PeerSpeed {
@@ -16,12 +20,14 @@ pub(crate) enum PeerSpeed {
     Fast,
 }
 
+#[cfg(test)]
 impl PeerSpeed {
     pub fn from_rate(bytes_per_sec: f64) -> Self {
         PeerSpeedClassifier::default().classify(bytes_per_sec)
     }
 }
 
+#[cfg(test)]
 /// Configurable speed classifier with adjustable thresholds.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -30,6 +36,7 @@ pub(crate) struct PeerSpeedClassifier {
     pub fast_threshold: f64,
 }
 
+#[cfg(test)]
 impl Default for PeerSpeedClassifier {
     fn default() -> Self {
         Self {
@@ -39,6 +46,7 @@ impl Default for PeerSpeedClassifier {
     }
 }
 
+#[cfg(test)]
 #[allow(dead_code)]
 impl PeerSpeedClassifier {
     pub fn classify(&self, bytes_per_sec: f64) -> PeerSpeed {
@@ -99,6 +107,7 @@ impl InFlightPiece {
     }
 }
 
+#[cfg(test)]
 /// Context for a single peer's pick cycle.
 pub(crate) struct PickContext<'a> {
     pub peer_addr: SocketAddr,
@@ -132,6 +141,7 @@ pub(crate) struct PickContext<'a> {
     pub cap_reached: bool,
 }
 
+#[cfg(test)]
 /// Result of a pick: which piece and blocks to request.
 #[derive(Debug)]
 pub(crate) struct PickResult {
@@ -141,6 +151,7 @@ pub(crate) struct PickResult {
     pub exclusive: bool,
 }
 
+#[cfg(test)]
 /// Rarest-first piece selector with per-piece availability tracking.
 ///
 /// Tracks how many peers have each piece and selects the rarest piece
@@ -152,6 +163,7 @@ pub(crate) struct PieceSelector {
     seed_count: u32,
 }
 
+#[cfg(test)]
 impl PieceSelector {
     /// Create a new selector with all availability counts at zero.
     pub fn new(num_pieces: u32) -> Self {
