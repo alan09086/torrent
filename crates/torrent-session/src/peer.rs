@@ -28,6 +28,15 @@ use tokio::sync::Semaphore;
 /// Per-peer request queue depth — matches rqbit's proven 128-permit model.
 const QUEUE_DEPTH: usize = 128;
 
+/// M78: State needed for direct peer-to-disk writes.
+/// Tuple: (reservation_state, piece_notify, disk_handle, write_error_tx)
+type ReservationState = Option<(
+    std::sync::Arc<parking_lot::RwLock<PieceReservationState>>,
+    std::sync::Arc<tokio::sync::Notify>,
+    Option<DiskHandle>,
+    mpsc::Sender<DiskWriteError>,
+)>;
+
 /// Acquire a semaphore permit and reserve the next block for this peer.
 ///
 /// Returns when a block is available. If no block is available (all pieces
@@ -276,12 +285,7 @@ pub(crate) async fn run_peer(
     // M75: Peer-integrated request dispatch
     let semaphore = Semaphore::new(0); // Start empty, add permits on unchoke
     let mut peer_choking = true; // Peers start in choked state
-    let mut reservation_state: Option<(
-        std::sync::Arc<parking_lot::RwLock<PieceReservationState>>,
-        std::sync::Arc<tokio::sync::Notify>,
-        Option<DiskHandle>,
-        mpsc::Sender<DiskWriteError>,
-    )> = None;
+    let mut reservation_state: ReservationState = None;
 
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
@@ -382,15 +386,15 @@ pub(crate) async fn run_peer(
                         }
                         // M78: If we did a direct disk write, send lightweight ChunkWritten
                         // instead of PieceData (which carries the full Bytes payload)
-                        if let Message::Piece { index, begin, ref data } = msg {
-                            if let Some((_, _, Some(_), _)) = &reservation_state {
-                                event_tx.send(PeerEvent::ChunkWritten {
-                                    peer_addr: addr,
-                                    index, begin,
-                                    length: data.len() as u32,
-                                }).await.map_err(|_| crate::Error::Shutdown)?;
-                                continue; // skip handle_message for this message
-                            }
+                        if let Message::Piece { index, begin, ref data } = msg
+                            && let Some((_, _, Some(_), _)) = &reservation_state
+                        {
+                            event_tx.send(PeerEvent::ChunkWritten {
+                                peer_addr: addr,
+                                index, begin,
+                                length: data.len() as u32,
+                            }).await.map_err(|_| crate::Error::Shutdown)?;
+                            continue; // skip handle_message for this message
                         }
                         match handle_message(
                             msg,

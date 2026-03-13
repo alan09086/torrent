@@ -3544,9 +3544,7 @@ impl TorrentActor {
                 }
             }
             PeerEvent::ChunkWritten { peer_addr, index, begin, length } => {
-                // M78: Peer task wrote chunk directly to disk.
-                // TODO: Implement M78 handler — mark chunk as verified or queue for verification.
-                let _ = (peer_addr, index, begin, length);
+                self.handle_chunk_written(peer_addr, index, begin, length).await;
             }
         }
     }
@@ -3694,6 +3692,136 @@ impl TorrentActor {
         }
 
         // M75: Permit already returned by peer task on Piece receipt.
+        // End-game dispatch still happens here.
+        if self.end_game.is_active() {
+            self.request_end_game_block(peer_addr).await;
+        }
+    }
+
+    /// M78: Actor-side handler for the direct peer-to-disk path.
+    /// Called when a peer task has already written the chunk to disk and sends
+    /// ChunkWritten (metadata-only) instead of PieceData (full Bytes payload).
+    /// Performs all the same bookkeeping as handle_piece_data — stats, smart
+    /// banning, peer tracking, end-game cancels, chunk tracking, piece
+    /// verification — without the disk write.
+    async fn handle_chunk_written(
+        &mut self,
+        peer_addr: SocketAddr,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) {
+        // Skip duplicate blocks — in end-game mode or after timeout re-requests,
+        // the same block may arrive from multiple peers. Writing it to the store
+        // buffer would overwrite valid data that's pending verification.
+        if let Some(ref ct) = self.chunk_tracker
+            && ct.has_chunk(index, begin)
+        {
+            self.total_download += length as u64 + 13;
+            // Remove from pending_requests to free pipeline slots. Without this,
+            // the peer accumulates phantom entries from already-verified pieces
+            // and eventually has zero available pipeline slots — permanent stall.
+            if let Some(peer) = self.peers.get_mut(&peer_addr) {
+                peer.pending_requests.remove(index, begin);
+            }
+            // Remove from end-game tracker so pick_block won't return this
+            // block again. The normal path calls block_received which does
+            // this, but we skip that path for duplicates.
+            if self.end_game.is_active() {
+                self.end_game.block_received(index, begin, peer_addr);
+            }
+            // Peer task already returned its permit on direct write
+            return;
+        }
+
+        // NOTE: No disk write here — the peer task has already written to disk.
+
+        self.downloaded += length as u64;
+        self.total_download += length as u64 + 13; // payload + message header
+        self.last_download = now_unix();
+        self.need_save_resume = true;
+
+        // Smart banning: track which peers contribute to each piece
+        self.piece_contributors
+            .entry(index)
+            .or_default()
+            .insert(peer_addr.ip());
+
+        let now = std::time::Instant::now();
+        if let Some(peer) = self.peers.get_mut(&peer_addr) {
+            peer.pending_requests.remove(index, begin);
+            peer.download_bytes_window += length as u64;
+            peer.pipeline
+                .block_received(index, begin, length, now);
+            peer.last_data_received = Some(now);
+            // Clear snub if snubbed
+            if peer.snubbed {
+                peer.snubbed = false;
+                peer.pipeline.reset_to_slow_start();
+            }
+        }
+
+        // End-game: cancel this block on all other peers. The 200ms end-game
+        // refill tick will re-stock freed peers — no reactive cascade needed.
+        if self.end_game.is_active() {
+            let cancels = self.end_game.block_received(index, begin, peer_addr);
+            for (cancel_addr, ci, cb, cl) in cancels {
+                if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
+                    let _ = cancel_peer.cmd_tx.try_send(PeerCommand::Cancel {
+                        index: ci,
+                        begin: cb,
+                        length: cl,
+                    });
+                    cancel_peer.pending_requests.remove(ci, cb);
+                }
+            }
+        }
+
+        // Track chunk completion
+        let piece_complete = if let Some(ref mut ct) = self.chunk_tracker {
+            ct.chunk_received(index, begin)
+        } else {
+            false
+        };
+
+        if piece_complete && !self.pending_verify.contains(&index) {
+            // M44: Predictive piece announce — send Have before verification
+            if self.config.predictive_piece_announce_ms > 0
+                && !self.predictive_have_sent.contains(&index)
+            {
+                self.predictive_have_sent.insert(index);
+                for peer in self.peers.values() {
+                    if !peer.bitfield.get(index) {
+                        let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
+                    }
+                }
+            }
+
+            match self.version {
+                torrent_core::TorrentVersion::V1Only => {
+                    // Async: fire-and-forget, result via verify_result_rx
+                    if let Some(ref disk) = self.disk
+                        && let Some(expected) = self
+                            .meta
+                            .as_ref()
+                            .and_then(|m| m.info.piece_hash(index as usize))
+                    {
+                        self.pending_verify.insert(index);
+                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
+                    }
+                }
+                torrent_core::TorrentVersion::V2Only => {
+                    // Blocking: needs mutable hash_picker for Merkle tree
+                    self.verify_and_mark_piece_v2(index).await;
+                }
+                torrent_core::TorrentVersion::Hybrid => {
+                    // Blocking: needs both v1+v2 decision matrix
+                    self.verify_and_mark_piece_hybrid(index).await;
+                }
+            }
+        }
+
+        // Peer task already returned its permit on direct write.
         // End-game dispatch still happens here.
         if self.end_game.is_active() {
             self.request_end_game_block(peer_addr).await;
