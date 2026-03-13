@@ -115,7 +115,8 @@ impl PieceReservationState {
             }
         }
         self.peer_pieces.entry(addr).or_default();
-        self.piece_notify.notify_waiters();
+        // M77: Removed immediate notify — safety-net tick in pipeline_tick handles this
+        // to avoid waking all 128 peer tasks on every new peer connection.
     }
 
     /// Remove a peer entirely: release its pieces and update availability.
@@ -147,7 +148,8 @@ impl PieceReservationState {
             return;
         }
         self.availability[piece as usize] += 1;
-        self.piece_notify.notify_waiters();
+        // M77: Removed immediate notify — safety-net tick in pipeline_tick handles this
+        // to avoid waking all 128 peer tasks on every HAVE message.
     }
 
     /// Release all pieces owned by a peer without removing its peer_pieces tracking.

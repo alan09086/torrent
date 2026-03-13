@@ -1625,6 +1625,8 @@ impl TorrentActor {
             None
         };
         let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(1000));
+        // M77: Skip missed ticks — safety-net notify should fire at most once/second
+        pipeline_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
@@ -2208,6 +2210,12 @@ impl TorrentActor {
                     // M73: Periodic endgame activation check (was in batch_fill_all_peers)
                     if !self.end_game.is_active() {
                         self.check_end_game_activation();
+                    }
+
+                    // M77: Safety-net periodic notification — catches availability
+                    // changes from add_peer()/peer_have() that no longer notify immediately.
+                    if let Some(ref notify) = self.reservation_notify {
+                        notify.notify_waiters();
                     }
                 }
                 // (M75: peer tasks handle dispatch via integrated select! arm)
