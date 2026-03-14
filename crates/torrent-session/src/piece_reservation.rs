@@ -997,4 +997,144 @@ mod tests {
         assert_eq!(reserved.len(), 2, "two peers should get two different pieces");
         assert_ne!(b1.piece, b2.piece);
     }
+
+    #[test]
+    fn integration_multi_peer_concurrent_dispatch() {
+        use std::sync::Arc;
+
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![2u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        // Simulate 4 peer tasks each trying to get a piece
+        let reserved_pieces: Vec<u32> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let st = Arc::clone(&states);
+                    let sn = Arc::clone(&snap);
+                    let bf = peer_bf.clone();
+                    let l = lengths.clone();
+                    s.spawn(move || {
+                        let mut ds = PeerDispatchState::new(sn, l);
+                        ds.next_block(&bf, &st).map(|b| b.piece)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().unwrap())
+                .collect()
+        });
+
+        // All 4 pieces should be reserved by exactly one peer each
+        let unique: std::collections::HashSet<u32> = reserved_pieces.iter().copied().collect();
+        assert_eq!(unique.len(), 4, "all 4 pieces should be uniquely reserved");
+        assert_eq!(reserved_pieces.len(), 4);
+    }
+
+    #[test]
+    fn integration_snapshot_rebuild_during_dispatch() {
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap1 = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap1), lengths.clone());
+
+        // Get first piece
+        let b0 = ds.next_block(&peer_bf, &states).unwrap();
+        let first_piece = b0.piece;
+        // Consume remaining block
+        ds.next_block(&peer_bf, &states).unwrap();
+
+        // Simulate: first piece completes, actor marks it Complete
+        states.mark_complete(first_piece);
+
+        // Actor rebuilds snapshot (Complete pieces excluded)
+        let snap2 = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            2,
+        ));
+        ds.update_snapshot(snap2);
+
+        // Peer should be able to continue dispatching remaining pieces
+        let mut remaining = Vec::new();
+        while let Some(b) = ds.next_block(&peer_bf, &states) {
+            if b.begin == 0 {
+                remaining.push(b.piece);
+            }
+        }
+
+        // Should get the 3 remaining pieces (first_piece was Completed)
+        assert_eq!(remaining.len(), 3);
+        assert!(!remaining.contains(&first_piece));
+    }
+
+    #[test]
+    fn integration_endgame_multi_reservation() {
+        let lengths = test_lengths();
+        let num_pieces = 2u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![3u32; num_pieces as usize];
+
+        // Peer 1 reserves piece 0 normally
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+        let mut ds1 = PeerDispatchState::new(Arc::clone(&snap), lengths.clone());
+        let b1 = ds1.next_block(&peer_bf, &states).unwrap();
+        assert_eq!(states.get(b1.piece), PieceState::Reserved);
+
+        // Actor transitions to endgame
+        states.transition_to_endgame(b1.piece);
+
+        // Rebuild snapshot (Endgame pieces are included)
+        let snap2 = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            2,
+        ));
+
+        // Peer 2 can also "reserve" the endgame piece
+        let mut ds2 = PeerDispatchState::new(snap2, lengths.clone());
+        let b2 = ds2.next_block(&peer_bf, &states).unwrap();
+
+        // Both peers got pieces (peer 2 might get the endgame piece or the other one)
+        // The key invariant: no deadlock, no panic, both get blocks
+        assert!(b2.length > 0);
+    }
 }
