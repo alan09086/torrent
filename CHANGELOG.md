@@ -28,6 +28,11 @@ All notable changes to this project will be documented in this file.
 - Default `queries_per_second` increased from 50 to 250 (both IPv4 and IPv6 configs).
 - `worst_node()` eviction now correctly evicts the oldest node on tied fail counts
   (was incorrectly evicting the newest).
+- `PendingQueryKind::FindNode` and `SampleInfohashes` simplified to unit variants (dead
+  `target` fields removed — the target is in the KRPC message, not needed in pending state).
+- `ItemLookupState`: removed dead `closest` fields (never iterated for advancement) and
+  `public_key` from `Mutable` variant (comes from the response, not lookup state).
+- Zero `#[allow(dead_code)]` annotations remain in the DHT actor.
 
 ### Fixed
 - Dead nodes no longer occupy routing table slots forever — the `pending_node_id()` stub
