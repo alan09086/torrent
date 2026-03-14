@@ -18,7 +18,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::alert::{Alert, AlertKind, post_alert};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
-use crate::piece_reservation::PieceReservationState;
+use crate::piece_reservation::{AtomicPieceStates, AvailabilitySnapshot, PieceState};
 
 use torrent_core::{
     DEFAULT_CHUNK_SIZE, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1,
@@ -355,7 +355,14 @@ impl TorrentHandle {
             peers: HashMap::new(),
             cached_peer_rates: FxHashMap::default(),
             refill_notify: Arc::new(tokio::sync::Notify::new()),
-            reservation_state: None, // Initialized after verify_existing_pieces
+            atomic_states: None,
+            availability_snapshot: None,
+            snapshot_generation: 0,
+            piece_owner: Vec::new(),
+            peer_slab: crate::piece_reservation::PeerSlab::new(),
+            availability: Vec::new(),
+            priority_pieces: BTreeSet::new(),
+            max_in_flight: 256,
             reservation_notify: None,
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
@@ -633,7 +640,14 @@ impl TorrentHandle {
             peers: HashMap::new(),
             cached_peer_rates: FxHashMap::default(),
             refill_notify: Arc::new(tokio::sync::Notify::new()),
-            reservation_state: None, // Initialized after metadata arrives
+            atomic_states: None,
+            availability_snapshot: None,
+            snapshot_generation: 0,
+            piece_owner: Vec::new(),
+            peer_slab: crate::piece_reservation::PeerSlab::new(),
+            availability: Vec::new(),
+            priority_pieces: BTreeSet::new(),
+            max_in_flight: 256,
             reservation_notify: None,
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
@@ -1342,8 +1356,22 @@ struct TorrentActor {
     /// Notify handle for reactive queue refill (legacy, unused in M73).
     #[allow(dead_code)]
     refill_notify: Arc<tokio::sync::Notify>,
-    /// Shared piece reservation state (M73: concurrent dispatch).
-    reservation_state: Option<Arc<parking_lot::RwLock<crate::piece_reservation::PieceReservationState>>>,
+    /// M93: Lock-free piece states (shared with peers via Arc).
+    atomic_states: Option<Arc<crate::piece_reservation::AtomicPieceStates>>,
+    /// M93: Current availability snapshot (shared with peers via Arc).
+    availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
+    /// M93: Snapshot generation counter.
+    snapshot_generation: u64,
+    /// M93: Maps piece index -> peer slab slot that owns it.
+    piece_owner: Vec<Option<u16>>,
+    /// M93: Arena-allocated peer tracking: slot <-> SocketAddr.
+    peer_slab: crate::piece_reservation::PeerSlab,
+    /// M93: Per-piece availability count.
+    availability: Vec<u32>,
+    /// M93: Priority pieces (streaming, time-critical).
+    priority_pieces: BTreeSet<u32>,
+    /// M93: Maximum in-flight pieces.
+    max_in_flight: usize,
     /// Piece notify handle (for driver spawning).
     reservation_notify: Option<Arc<tokio::sync::Notify>>,
     available_peers: Vec<(SocketAddr, PeerSource)>,
@@ -1612,18 +1640,30 @@ impl TorrentActor {
         // Verify existing pieces on startup (resume support)
         self.verify_existing_pieces().await;
 
-        // M73: Initialize shared piece reservation state after verification
+        // M93: Initialize lock-free piece states after verification
         // so we_have reflects already-verified pieces.
-        if let (Some(ct), Some(lengths)) = (&self.chunk_tracker, &self.lengths) {
-            let (reservation, reservation_notify) = PieceReservationState::new(
+        if let Some(ct) = &self.chunk_tracker {
+            let atomic_states = Arc::new(AtomicPieceStates::new(
                 self.num_pieces,
-                lengths.clone(),
-                self.config.max_in_flight_pieces,
-                ct.bitfield().clone(),
-                self.wanted_pieces.clone(),
-            );
-            self.reservation_state = Some(Arc::new(parking_lot::RwLock::new(reservation)));
-            self.reservation_notify = Some(reservation_notify);
+                ct.bitfield(),
+                &self.wanted_pieces,
+            ));
+            self.atomic_states = Some(Arc::clone(&atomic_states));
+            self.availability = vec![0u32; self.num_pieces as usize];
+            self.piece_owner = vec![None; self.num_pieces as usize];
+            self.max_in_flight = self.config.max_in_flight_pieces;
+
+            let snapshot = Arc::new(AvailabilitySnapshot::build(
+                &self.availability,
+                &atomic_states,
+                &self.priority_pieces,
+                0,
+            ));
+            self.availability_snapshot = Some(snapshot);
+            self.snapshot_generation = 0;
+
+            let notify = Arc::new(tokio::sync::Notify::new());
+            self.reservation_notify = Some(notify);
         }
 
         // Spawn web seeds if not already seeding
@@ -1662,6 +1702,7 @@ impl TorrentActor {
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut snapshot_rebuild_interval = tokio::time::interval(Duration::from_millis(500));
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
@@ -1677,6 +1718,7 @@ impl TorrentActor {
         pipeline_tick_interval.tick().await;
         end_game_tick_interval.tick().await;
         diag_interval.tick().await;
+        snapshot_rebuild_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
         // DHT announce (v4 + v6) — dual-swarm for hybrid torrents
@@ -1924,7 +1966,7 @@ impl TorrentActor {
                             let _ = reply.send(has);
                         }
                         Some(TorrentCommand::PieceAvailability { reply }) => {
-                            let avail = self.reservation_state.as_ref().map(|rs| rs.read().availability().to_vec()).unwrap_or_default();
+                            let avail = self.availability.clone();
                             let _ = reply.send(avail);
                         }
                         Some(TorrentCommand::FileProgress { reply }) => {
@@ -2014,7 +2056,7 @@ impl TorrentActor {
                     // Update auto-sequential hysteresis (M45)
                     if self.config.auto_sequential {
                         self.auto_sequential_active = crate::piece_selector::evaluate_auto_sequential(
-                            self.reservation_state.as_ref().map(|rs| rs.read().in_flight_count()).unwrap_or(0),
+                            self.piece_owner.iter().filter(|o| o.is_some()).count(),
                             self.peers.len(),
                             self.auto_sequential_active,
                         );
@@ -2243,11 +2285,23 @@ impl TorrentActor {
                         }
                     }
 
-                    // M73: Release pieces from snubbed peers in shared state and cancel their drivers
-                    if !snubbed_peers.is_empty() && let Some(ref rs) = self.reservation_state {
-                        let mut state = rs.write();
-                        for addr in &snubbed_peers {
-                            state.release_peer_pieces(*addr);
+                    // M93: Release pieces from snubbed peers
+                    if !snubbed_peers.is_empty() {
+                        for snubbed_addr in &snubbed_peers {
+                            if let Some(slab_idx) = self.peer_slab.slot_of(snubbed_addr) {
+                                for piece in 0..self.num_pieces {
+                                    if self.piece_owner[piece as usize] == Some(slab_idx) {
+                                        self.piece_owner[piece as usize] = None;
+                                        if let Some(ref states) = self.atomic_states {
+                                            states.release(piece);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.rebuild_availability_snapshot();
+                        if let Some(ref notify) = self.reservation_notify {
+                            notify.notify_waiters();
                         }
                     }
 
@@ -2290,7 +2344,7 @@ impl TorrentActor {
                     }
                     if self.state == TorrentState::Downloading {
                         let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
-                        let in_flight = self.reservation_state.as_ref().map(|rs| rs.read().in_flight_count()).unwrap_or(0);
+                        let in_flight = self.piece_owner.iter().filter(|o| o.is_some()).count();
                         let unchoked = self.peers.values().filter(|p| !p.peer_choking).count();
                         info!(have, in_flight, total = self.num_pieces,
                               downloaded_mb = self.downloaded / (1024 * 1024),
@@ -2308,6 +2362,10 @@ impl TorrentActor {
                                    "peer state");
                         }
                     }
+                }
+                // M93: Periodic availability snapshot rebuild (500ms)
+                _ = snapshot_rebuild_interval.tick() => {
+                    self.rebuild_availability_snapshot();
                 }
                 // Rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
@@ -2696,19 +2754,22 @@ impl TorrentActor {
     }
 
     fn build_download_queue(&self) -> Vec<PartialPieceInfo> {
-        let Some(ref rs) = self.reservation_state else { return Vec::new() };
-        let state = rs.read();
-        state.in_flight_peers()
-            .map(|(piece_index, _addr)| {
-                let blocks_in_piece = self.lengths
-                    .as_ref()
-                    .map(|l| l.piece_size(piece_index).div_ceil(l.chunk_size()))
-                    .unwrap_or(0);
-                PartialPieceInfo {
-                    piece_index,
-                    blocks_in_piece,
-                    blocks_assigned: 0,
-                }
+        self.piece_owner
+            .iter()
+            .enumerate()
+            .filter_map(|(piece_index, owner)| {
+                owner.map(|_| {
+                    let piece_index = piece_index as u32;
+                    let blocks_in_piece = self.lengths
+                        .as_ref()
+                        .map(|l| l.piece_size(piece_index).div_ceil(l.chunk_size()))
+                        .unwrap_or(0);
+                    PartialPieceInfo {
+                        piece_index,
+                        blocks_in_piece,
+                        blocks_assigned: 0,
+                    }
+                })
             })
             .collect()
     }
@@ -3306,11 +3367,16 @@ impl TorrentActor {
                         self.last_seen_complete = now_unix();
                     }
                 }
-                // M73: Register peer bitfield in shared reservation state
-                if let Some(ref rs) = self.reservation_state
-                    && let Some(peer) = self.peers.get(&peer_addr)
-                {
-                    rs.write().add_peer(peer_addr, peer.bitfield.clone());
+                // M93: Update availability from peer bitfield
+                if let Some(peer) = self.peers.get(&peer_addr) {
+                    for piece in 0..self.num_pieces {
+                        if peer.bitfield.get(piece) {
+                            self.availability[piece as usize] += 1;
+                        }
+                    }
+                    let _slot = self.peer_slab.insert(peer_addr);
+                    self.recalc_max_in_flight();
+                    self.rebuild_availability_snapshot();
                 }
                 // M75: Peer-integrated dispatch — no driver spawn needed here.
                 // The peer task's requester arm activates when unchoked + has reservation state.
@@ -3324,9 +3390,9 @@ impl TorrentActor {
                     && !peer.bitfield.get(index)
                 {
                     peer.bitfield.set(index);
-                    // M76: Dedup at actor level — only update availability for new pieces
-                    if let Some(ref rs) = self.reservation_state {
-                        rs.write().peer_have(index);
+                    // M93: Update availability for this piece
+                    if (index as usize) < self.availability.len() {
+                        self.availability[index as usize] += 1;
                     }
                 }
                 // BEP 16: Have-back detection in super-seed mode
@@ -3504,9 +3570,28 @@ impl TorrentActor {
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(peer_addr);
                     }
-                    // M73: Remove peer from shared state (releases pieces for other drivers)
-                    if let Some(ref rs) = self.reservation_state {
-                        rs.write().remove_peer(peer_addr, &peer.bitfield);
+                    // M93: Release all pieces owned by this peer
+                    if let Some(slab_idx) = self.peer_slab.remove_by_addr(&peer_addr) {
+                        for piece in 0..self.num_pieces {
+                            if self.piece_owner[piece as usize] == Some(slab_idx) {
+                                self.piece_owner[piece as usize] = None;
+                                if let Some(ref states) = self.atomic_states {
+                                    states.release(piece);
+                                }
+                            }
+                        }
+                    }
+                    // Update availability
+                    for piece in 0..self.num_pieces {
+                        if peer.bitfield.get(piece) {
+                            self.availability[piece as usize] =
+                                self.availability[piece as usize].saturating_sub(1);
+                        }
+                    }
+                    self.recalc_max_in_flight();
+                    self.rebuild_availability_snapshot();
+                    if let Some(ref notify) = self.reservation_notify {
+                        notify.notify_waiters();
                     }
                 }
                 self.suggested_to_peers.remove(&peer_addr);
@@ -3581,16 +3666,32 @@ impl TorrentActor {
                 if let Some(peer) = self.peers.get_mut(&peer_addr) {
                     debug!(%peer_addr, "MSE retry: updating cmd_tx for plaintext attempt");
                     peer.cmd_tx = cmd_tx;
-                    // Re-send reservation state to the new peer task
-                    if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify) {
+                    // M93: Re-send lock-free dispatch state to the new peer task
+                    if let (Some(atomic_states), Some(snapshot), Some(notify)) =
+                        (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
+                        && let Some(ref lengths) = self.lengths
+                    {
                         let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                            reservation_state: Arc::clone(rs),
+                            atomic_states: Arc::clone(atomic_states),
+                            availability_snapshot: Arc::clone(snapshot),
                             piece_notify: Arc::clone(notify),
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
-                            lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
+                            lengths: lengths.clone(),
                         });
                     }
+                }
+            }
+            PeerEvent::PieceReleased { peer_addr, piece } => {
+                // M93: Actor-side piece_owner cleanup after peer released a piece
+                if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr) {
+                    if self.piece_owner.get(piece as usize) == Some(&Some(slab_idx)) {
+                        self.piece_owner[piece as usize] = None;
+                    }
+                }
+                // Snapshot will be rebuilt on next timer tick; notify waiting peers now
+                if let Some(ref notify) = self.reservation_notify {
+                    notify.notify_one();
                 }
             }
             PeerEvent::PieceBlocksBatch { peer_addr, blocks } => {
@@ -3660,6 +3761,13 @@ impl TorrentActor {
         self.total_download += data_len as u64 + 13; // payload + message header
         self.last_download = now_unix();
         self.need_save_resume = true;
+
+        // M93: Track piece ownership (actor learns about peer's CAS reservation via chunk arrival)
+        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr) {
+            if self.piece_owner.get(index as usize) == Some(&None) {
+                self.piece_owner[index as usize] = Some(slab_idx);
+            }
+        }
 
         // Smart banning: track which peers contribute to each piece
         self.piece_contributors
@@ -3811,6 +3919,13 @@ impl TorrentActor {
         self.total_download += length as u64 + 13; // payload + message header
         self.last_download = now_unix();
         self.need_save_resume = true;
+
+        // M93: Track piece ownership (actor learns about peer's CAS reservation via chunk arrival)
+        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr) {
+            if self.piece_owner.get(index as usize) == Some(&None) {
+                self.piece_owner[index as usize] = Some(slab_idx);
+            }
+        }
 
         // Smart banning: track which peers contribute to each piece
         self.piece_contributors
@@ -4083,9 +4198,16 @@ impl TorrentActor {
         // Run the full verification pipeline (transitions through Checking)
         self.verify_existing_pieces().await;
 
-        // M73: Update reservation state with verified bitfield
-        if let (Some(rs), Some(ct)) = (&self.reservation_state, &self.chunk_tracker) {
-            rs.write().update_we_have(ct.bitfield());
+        // M93: Rebuild atomic states after recheck
+        if let Some(ct) = &self.chunk_tracker {
+            let atomic_states = Arc::new(AtomicPieceStates::new(
+                self.num_pieces,
+                ct.bitfield(),
+                &self.wanted_pieces,
+            ));
+            self.atomic_states = Some(Arc::clone(&atomic_states));
+            self.piece_owner = vec![None; self.num_pieces as usize];
+            self.rebuild_availability_snapshot();
         }
 
         let _ = reply.send(Ok(()));
@@ -4457,10 +4579,11 @@ impl TorrentActor {
         if self.end_game.is_active() {
             self.end_game.remove_piece(index);
         }
-        // M73: Mark piece complete in shared reservation state
-        if let Some(ref rs) = self.reservation_state {
-            rs.write().complete_piece(index);
+        // M93: Mark piece complete atomically
+        if let Some(ref states) = self.atomic_states {
+            states.mark_complete(index);
         }
+        self.piece_owner[index as usize] = None;
         info!(index, "piece verified");
         post_alert(
             &self.alert_tx,
@@ -4622,18 +4745,33 @@ impl TorrentActor {
         if let Some(ref mut ct) = self.chunk_tracker {
             ct.mark_failed(index);
         }
-        // M73: Mark piece failed in shared reservation state
-        if let Some(ref rs) = self.reservation_state {
-            rs.write().fail_piece(index);
+        // M93: Release piece back to Available
+        if let Some(ref states) = self.atomic_states {
+            states.release(index);
+        }
+        self.piece_owner[index as usize] = None;
+        self.rebuild_availability_snapshot();
+        if let Some(ref notify) = self.reservation_notify {
+            notify.notify_one();
         }
         // Hash failure in end-game: deactivate and resume normal mode
         if self.end_game.is_active() {
             self.end_game.deactivate();
             info!(index, "end-game deactivated due to hash failure");
-            // M75: Clear endgame flag — peer tasks' requester arms will resume
-            // automatically on the next loop iteration when next_request returns blocks.
-            if let Some(ref rs) = self.reservation_state {
-                rs.write().set_endgame(false);
+            // M93: Transition Endgame pieces back
+            if let Some(ref atomic_states) = self.atomic_states {
+                for piece in 0..self.num_pieces {
+                    if atomic_states.get(piece) == PieceState::Endgame {
+                        if self.piece_owner[piece as usize].is_some() {
+                            atomic_states.force_reserved(piece);
+                        } else {
+                            atomic_states.release(piece);
+                        }
+                    }
+                }
+            }
+            if let Some(ref notify) = self.reservation_notify {
+                notify.notify_waiters();
             }
         }
     }
@@ -5067,17 +5205,29 @@ impl TorrentActor {
                         );
                         info!("metadata assembled, switching to Downloading");
 
-                        // M73: Initialize shared piece reservation state after metadata
-                        if let (Some(ct), Some(lengths)) = (&self.chunk_tracker, &self.lengths) {
-                            let (reservation, reservation_notify) = PieceReservationState::new(
+                        // M93: Initialize lock-free piece states after metadata
+                        if let Some(ct) = &self.chunk_tracker {
+                            let atomic_states = Arc::new(AtomicPieceStates::new(
                                 self.num_pieces,
-                                lengths.clone(),
-                                self.config.max_in_flight_pieces,
-                                ct.bitfield().clone(),
-                                self.wanted_pieces.clone(),
-                            );
-                            self.reservation_state = Some(Arc::new(parking_lot::RwLock::new(reservation)));
-                            self.reservation_notify = Some(reservation_notify);
+                                ct.bitfield(),
+                                &self.wanted_pieces,
+                            ));
+                            self.atomic_states = Some(Arc::clone(&atomic_states));
+                            self.availability = vec![0u32; self.num_pieces as usize];
+                            self.piece_owner = vec![None; self.num_pieces as usize];
+                            self.max_in_flight = self.config.max_in_flight_pieces;
+
+                            let snapshot = Arc::new(AvailabilitySnapshot::build(
+                                &self.availability,
+                                &atomic_states,
+                                &self.priority_pieces,
+                                0,
+                            ));
+                            self.availability_snapshot = Some(snapshot);
+                            self.snapshot_generation = 0;
+
+                            let notify = Arc::new(tokio::sync::Notify::new());
+                            self.reservation_notify = Some(notify);
                         }
 
                         // Start web seeds now that we have metadata
@@ -5104,23 +5254,33 @@ impl TorrentActor {
                                 .unwrap_or(true);
                             debug!(%addr, has_bitfield, is_choking, "post-metadata peer state");
                             self.maybe_express_interest(addr).await;
-                            // Register peer in shared state
-                            if let Some(ref rs) = self.reservation_state
-                                && let Some(peer) = self.peers.get(&addr)
+                            // M93: Update availability from pre-connected peer
+                            if let Some(peer) = self.peers.get(&addr)
                                 && peer.bitfield.count_ones() > 0
                             {
-                                rs.write().add_peer(addr, peer.bitfield.clone());
+                                for piece in 0..self.num_pieces {
+                                    if peer.bitfield.get(piece) {
+                                        self.availability[piece as usize] += 1;
+                                    }
+                                }
+                                let _slot = self.peer_slab.insert(addr);
                             }
                         }
-                        // M75: Inform all connected peers about reservation state
-                        if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify) {
+                        self.recalc_max_in_flight();
+                        self.rebuild_availability_snapshot();
+                        // M93: Inform all connected peers about lock-free dispatch state
+                        if let (Some(atomic_states), Some(snapshot), Some(notify)) =
+                            (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
+                            && let Some(ref lengths) = self.lengths
+                        {
                             for peer in self.peers.values() {
                                 let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                                    reservation_state: Arc::clone(rs),
+                                    atomic_states: Arc::clone(atomic_states),
+                                    availability_snapshot: Arc::clone(snapshot),
                                     piece_notify: Arc::clone(notify),
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
-                                    lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
+                                    lengths: lengths.clone(),
                                 });
                             }
                         }
@@ -5279,7 +5439,7 @@ impl TorrentActor {
             // not in web_seed_in_flight, and wanted.
             let piece = (0..self.num_pieces).find(|&i| {
                 !ct.has_piece(i)
-                    && !self.reservation_state.as_ref().is_some_and(|rs| rs.read().is_piece_in_flight(i))
+                    && !self.piece_owner.get(i as usize).is_some_and(|o| o.is_some())
                     && !self.web_seed_in_flight.contains_key(&i)
                     && self.wanted_pieces.get(i)
             });
@@ -5390,6 +5550,33 @@ impl TorrentActor {
         }
     }
 
+    /// M93: Rebuild the availability snapshot and broadcast to all peers.
+    fn rebuild_availability_snapshot(&mut self) {
+        let Some(ref atomic_states) = self.atomic_states else { return };
+        self.snapshot_generation += 1;
+        let snapshot = Arc::new(AvailabilitySnapshot::build(
+            &self.availability,
+            atomic_states,
+            &self.priority_pieces,
+            self.snapshot_generation,
+        ));
+        self.availability_snapshot = Some(Arc::clone(&snapshot));
+
+        // Broadcast new snapshot to all peer tasks
+        for peer in self.peers.values() {
+            let _ = peer.cmd_tx.try_send(PeerCommand::SnapshotUpdate {
+                snapshot: Arc::clone(&snapshot),
+            });
+        }
+    }
+
+    /// M93: Recalculate max_in_flight based on connected peer count.
+    fn recalc_max_in_flight(&mut self) {
+        let connected = self.peers.len();
+        let calculated = 256usize.max(connected * 3);
+        self.max_in_flight = calculated.min(self.num_pieces as usize / 2).max(256);
+    }
+
     fn check_end_game_activation(&mut self) {
         if self.end_game.is_active() || self.state != TorrentState::Downloading {
             return;
@@ -5399,25 +5586,23 @@ impl TorrentActor {
         };
         let have = ct.bitfield().count_ones();
 
-        // Use reservation_state's piece_owner for the in-flight count.
-        let Some(ref rs) = self.reservation_state else {
+        let Some(ref atomic_states) = self.atomic_states else {
             return;
         };
-        let rs_guard = rs.read();
-        let in_flight = rs_guard.in_flight_count() as u32;
+        let in_flight = self.piece_owner.iter().filter(|o| o.is_some()).count() as u32;
         if have + in_flight >= self.num_pieces && in_flight > 0 {
-            // Build end-game block map from reservation state's piece_owner
-            // + chunk_tracker's missing chunks. Each in-flight piece's missing
-            // blocks are attributed to the owning peer.
             use std::collections::HashMap;
             let mut per_peer: HashMap<SocketAddr, Vec<(u32, u32, u32)>> = HashMap::new();
-            for (piece, addr) in rs_guard.in_flight_peers() {
-                let missing = ct.missing_chunks(piece);
-                for (begin, length) in missing {
-                    per_peer.entry(addr).or_default().push((piece, begin, length));
+            for piece in 0..self.num_pieces {
+                if let Some(slab_idx) = self.piece_owner[piece as usize] {
+                    if let Some(&addr) = self.peer_slab.get(slab_idx) {
+                        let missing = ct.missing_chunks(piece);
+                        for (begin, length) in missing {
+                            per_peer.entry(addr).or_default().push((piece, begin, length));
+                        }
+                    }
                 }
             }
-            drop(rs_guard);
 
             let pending: Vec<_> = per_peer.into_iter().collect();
             self.end_game.activate(&pending);
@@ -5425,11 +5610,11 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
-            // M75: Set endgame flag in reservation state — peer tasks will see
-            // no blocks available from next_request and their requester arms
-            // will idle. End-game dispatch is actor-driven via request_end_game_block.
-            if let Some(ref rs) = self.reservation_state {
-                rs.write().set_endgame(true);
+            // M93: Transition in-flight pieces to Endgame state
+            for piece in 0..self.num_pieces {
+                if self.piece_owner[piece as usize].is_some() {
+                    atomic_states.transition_to_endgame(piece);
+                }
             }
         }
     }
@@ -5668,9 +5853,23 @@ impl TorrentActor {
                 if self.end_game.is_active() {
                     self.end_game.peer_disconnected(addr);
                 }
-                // M73: Remove peer from shared state
-                if let Some(ref rs) = self.reservation_state {
-                    rs.write().remove_peer(addr, &peer.bitfield);
+                // M93: Release all pieces owned by this peer
+                if let Some(slab_idx) = self.peer_slab.remove_by_addr(&addr) {
+                    for piece in 0..self.num_pieces {
+                        if self.piece_owner[piece as usize] == Some(slab_idx) {
+                            self.piece_owner[piece as usize] = None;
+                            if let Some(ref states) = self.atomic_states {
+                                states.release(piece);
+                            }
+                        }
+                    }
+                }
+                // Update availability
+                for piece in 0..self.num_pieces {
+                    if peer.bitfield.get(piece) {
+                        self.availability[piece as usize] =
+                            self.availability[piece as usize].saturating_sub(1);
+                    }
                 }
                 // Send shutdown command (non-blocking — peer may have a full channel)
                 let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
@@ -5687,6 +5886,8 @@ impl TorrentActor {
             // Suggest tracking cleanup (outside if-let, matching disconnect handler)
             self.suggested_to_peers.remove(&addr);
         }
+        self.recalc_max_in_flight();
+        self.rebuild_availability_snapshot();
 
         // Connect replacements
         let peers_before = self.peers.len();
@@ -5769,7 +5970,7 @@ impl TorrentActor {
                 .map(|p| p.addr)
                 .collect();
 
-            for addr in zombies {
+            for &addr in &zombies {
                 debug!(%addr, "disconnecting zombie peer (empty bitfield after 30s)");
                 if let Some(ref mut ss) = self.super_seed {
                     ss.peer_disconnected(addr);
@@ -5779,9 +5980,23 @@ impl TorrentActor {
                     if self.end_game.is_active() {
                         self.end_game.peer_disconnected(addr);
                     }
-                    // M73: Remove peer from shared state
-                    if let Some(ref rs) = self.reservation_state {
-                        rs.write().remove_peer(addr, &peer.bitfield);
+                    // M93: Release all pieces owned by this peer
+                    if let Some(slab_idx) = self.peer_slab.remove_by_addr(&addr) {
+                        for piece in 0..self.num_pieces {
+                            if self.piece_owner[piece as usize] == Some(slab_idx) {
+                                self.piece_owner[piece as usize] = None;
+                                if let Some(ref states) = self.atomic_states {
+                                    states.release(piece);
+                                }
+                            }
+                        }
+                    }
+                    // Update availability
+                    for piece in 0..self.num_pieces {
+                        if peer.bitfield.get(piece) {
+                            self.availability[piece as usize] =
+                                self.availability[piece as usize].saturating_sub(1);
+                        }
                     }
                     let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                     post_alert(
@@ -5795,6 +6010,10 @@ impl TorrentActor {
                     );
                 }
                 self.suggested_to_peers.remove(&addr);
+            }
+            if !zombies.is_empty() {
+                self.recalc_max_in_flight();
+                self.rebuild_availability_snapshot();
             }
         }
     }
@@ -5936,7 +6155,7 @@ impl TorrentActor {
             None => return,
         };
 
-        let availability = self.reservation_state.as_ref().map(|rs| rs.read().availability().to_vec()).unwrap_or_default();
+        let availability = self.availability.clone();
         if let Some(idx) = ss.assign_piece(peer_addr, &peer_bitfield, &availability, self.num_pieces)
             && let Some(peer) = self.peers.get(&peer_addr)
         {
@@ -6006,16 +6225,19 @@ impl TorrentActor {
                     addr,
                 },
             );
-            // M75: Send reservation state to peer for integrated dispatch
-            if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+            // M93: Send lock-free dispatch state to peer for integrated dispatch
+            if let (Some(atomic_states), Some(snapshot), Some(notify)) =
+                (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
                 && let Some(peer) = self.peers.get(&addr)
+                && let Some(ref lengths) = self.lengths
             {
                 let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                    reservation_state: Arc::clone(rs),
+                    atomic_states: Arc::clone(atomic_states),
+                    availability_snapshot: Arc::clone(snapshot),
                     piece_notify: Arc::clone(notify),
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
-                    lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
+                    lengths: lengths.clone(),
                 });
             }
 
@@ -6644,16 +6866,19 @@ impl TorrentActor {
                 addr,
             },
         );
-        // M75: Send reservation state to peer for integrated dispatch
-        if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+        // M93: Send lock-free dispatch state to peer for integrated dispatch
+        if let (Some(atomic_states), Some(snapshot), Some(notify)) =
+            (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
             && let Some(peer) = self.peers.get(&addr)
+            && let Some(ref lengths) = self.lengths
         {
             let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                reservation_state: Arc::clone(rs),
+                atomic_states: Arc::clone(atomic_states),
+                availability_snapshot: Arc::clone(snapshot),
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
-                lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
+                lengths: lengths.clone(),
             });
         }
 
@@ -6836,16 +7061,19 @@ impl TorrentActor {
                 addr: target,
             },
         );
-        // M75: Send reservation state to peer for integrated dispatch
-        if let (Some(rs), Some(notify)) = (&self.reservation_state, &self.reservation_notify)
+        // M93: Send lock-free dispatch state to peer for integrated dispatch
+        if let (Some(atomic_states), Some(snapshot), Some(notify)) =
+            (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
             && let Some(peer) = self.peers.get(&target)
+            && let Some(ref lengths) = self.lengths
         {
             let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                reservation_state: Arc::clone(rs),
+                atomic_states: Arc::clone(atomic_states),
+                availability_snapshot: Arc::clone(snapshot),
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
-                lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
+                lengths: lengths.clone(),
             });
         }
 
