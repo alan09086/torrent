@@ -396,7 +396,6 @@ pub enum AlertKind {
     },
 
     // ── BEP 44 DHT storage (M38) ──
-    // TODO: Wire DHT item alerts when session-level dht_put/dht_get is added
     /// An immutable DHT put completed.
     DhtPutComplete {
         /// SHA-1 target hash of the stored item.

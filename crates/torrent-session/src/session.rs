@@ -5301,4 +5301,81 @@ mod tests {
 
         session.shutdown().await.unwrap();
     }
+
+    // ---- BEP 44 session API tests ----
+
+    fn test_settings_with_dht() -> Settings {
+        let mut s = test_settings();
+        s.enable_dht = true;
+        s
+    }
+
+    #[tokio::test]
+    async fn test_dht_disabled_returns_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+
+        // All 4 methods should fail with DhtDisabled when DHT is off
+        let err = session.dht_put_immutable(b"test".to_vec()).await.unwrap_err();
+        assert!(format!("{err:?}").contains("DhtDisabled"), "expected DhtDisabled, got {err:?}");
+
+        let target = Id20::from([0u8; 20]);
+        let err = session.dht_get_immutable(target).await.unwrap_err();
+        assert!(format!("{err:?}").contains("DhtDisabled"), "expected DhtDisabled, got {err:?}");
+
+        let err = session
+            .dht_put_mutable([42u8; 32], b"val".to_vec(), 1, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("DhtDisabled"), "expected DhtDisabled, got {err:?}");
+
+        let err = session
+            .dht_get_mutable([42u8; 32], Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("DhtDisabled"), "expected DhtDisabled, got {err:?}");
+
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_dht_put_get_immutable_round_trip() {
+        let session = SessionHandle::start(test_settings_with_dht()).await.unwrap();
+
+        // Give DHT a moment to bootstrap (it won't find real nodes, but the handle should work)
+        let value = b"hello BEP 44".to_vec();
+        let target = session.dht_put_immutable(value.clone()).await.unwrap();
+
+        // The target should be the SHA-1 of the bencoded value
+        // Try to get it back — since we're the only node, the local store should have it
+        let got = session.dht_get_immutable(target).await.unwrap();
+        assert_eq!(got, Some(value));
+
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_dht_put_immutable_fires_alert() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let session = SessionHandle::start(test_settings_with_dht()).await.unwrap();
+        let mut alerts = session.subscribe_filtered(AlertCategory::DHT);
+
+        let value = b"alert test".to_vec();
+        let target = session.dht_put_immutable(value).await.unwrap();
+
+        // Should receive DhtPutComplete alert
+        let alert = tokio::time::timeout(Duration::from_secs(5), alerts.recv())
+            .await
+            .expect("timeout waiting for alert")
+            .expect("alert channel closed");
+
+        match alert.kind {
+            AlertKind::DhtPutComplete { target: t } => {
+                assert_eq!(t, target);
+            }
+            other => panic!("expected DhtPutComplete, got {other:?}"),
+        }
+
+        session.shutdown().await.unwrap();
+    }
 }
