@@ -4,7 +4,7 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1460-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1461-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
 [![Version](https://img.shields.io/badge/version-0.85.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1460 tests, zero clippy warnings**
+- 📊 **1461 tests, zero clippy warnings**
 
 ---
 

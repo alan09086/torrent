@@ -38,6 +38,21 @@ All notable changes to this project will be documented in this file.
 - Dead nodes no longer occupy routing table slots forever — the `pending_node_id()` stub
   that returned `Id20::ZERO` (never matching any node) has been replaced with actual node
   ID tracking in `PendingQuery`.
+- **DHT node ID persistence**: BEP 42-compliant node ID now saved in session state and
+  restored on startup. Previously, every session generated a random ID that BEP 42
+  immediately replaced, causing ~50% of saved routing table nodes to be lost on reload.
+  Routing table now accumulates across sessions (17 → 100+ nodes after 2 runs).
+- **Re-bootstrap after BEP 42 regeneration**: When BEP 42 prunes the routing table after
+  node ID regeneration, a fresh iterative bootstrap now runs targeting the new ID. Without
+  this, the table stayed pruned at ~16 nodes.
+- **V6 DHT give-up**: Stop retrying V6 DHT get_peers after 30 consecutive empty-table
+  rejections (~3 seconds). Previously retried every 100ms forever, producing ~100 lines
+  of log spam per session when the V6 bootstrap node was unreachable.
+- **M86**: Removed dead `DiskIoBackend::move_storage()` trait method and all plumbing
+  (3 stub impls, `DiskJob::MoveStorage`, `DiskHandle::move_storage()`). The actual move
+  operation is handled by `TorrentActor::handle_move_storage()` via `relocate_files()`.
+- **M89**: NAT port mapping cleanup (`do_unmap()`) now logs deletion failures at debug
+  level instead of silently discarding them with `let _ =`.
 
 ## [0.84.0] — 2026-03-13
 
