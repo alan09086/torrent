@@ -30,7 +30,6 @@ use tokio::sync::Semaphore;
 
 /// M92: Accumulates block completions for batched delivery to TorrentActor.
 /// Lives in the peer task's stack — no shared state, no locking.
-#[allow(dead_code)] // consumed in Task 6 when integrated into peer select! loop
 struct PendingBatch {
     /// Block completions awaiting flush.
     blocks: Vec<BlockEntry>,
@@ -41,7 +40,6 @@ struct PendingBatch {
     lengths: Lengths,
 }
 
-#[allow(dead_code)] // consumed in Task 6 when integrated into peer select! loop
 impl PendingBatch {
     fn new(lengths: &Lengths) -> Self {
         Self {
@@ -349,6 +347,12 @@ pub(crate) async fn run_peer(
     let mut pipeline_tick = tokio::time::interval(Duration::from_millis(1000));
     pipeline_tick.tick().await; // skip initial tick
 
+    // M92: Pending batch for accumulating block completions
+    let mut pending_batch: Option<PendingBatch> = None;
+    // M92: 25ms flush interval — ticks only when batch has pending blocks
+    let mut flush_interval = tokio::time::interval(Duration::from_millis(25));
+    flush_interval.tick().await; // skip initial immediate tick
+
     let disconnect_reason: Option<String> = loop {
         // M75: Clone Arc references for requester arm (cheap Arc::clone)
         let rs_clone = reservation_state
@@ -461,20 +465,32 @@ pub(crate) async fn run_peer(
                             }
                             _ => {}
                         }
-                        // M92: If we did a direct disk write, send batched PieceBlocksBatch
-                        // instead of PieceData (which carries the full Bytes payload).
-                        // Currently sends single-element batches; Task 6 adds real batching.
+                        // M92: Accumulate block in PendingBatch.
+                        // Flush immediately on piece completion (when all blocks arrive within
+                        // one batch window); otherwise the 25ms timer flushes partial batches.
                         if let Message::Piece { index, begin, ref data } = msg
                             && let Some((_, _, Some(_), _)) = &reservation_state
                         {
-                            event_tx.send(PeerEvent::PieceBlocksBatch {
-                                peer_addr: addr,
-                                blocks: vec![BlockEntry {
-                                    index, begin,
-                                    length: data.len() as u32,
-                                }],
-                            }).await.map_err(|_| crate::Error::Shutdown)?;
-                            continue; // skip handle_message for this message
+                            if let Some(ref mut batch) = pending_batch {
+                                let piece_complete = batch.push(index, begin, data.len() as u32);
+                                if piece_complete {
+                                    let blocks = batch.take();
+                                    event_tx.send(PeerEvent::PieceBlocksBatch {
+                                        peer_addr: addr,
+                                        blocks,
+                                    }).await.map_err(|_| crate::Error::Shutdown)?;
+                                }
+                            } else {
+                                // No batch yet (StartRequesting not received) — send single block
+                                event_tx.send(PeerEvent::PieceBlocksBatch {
+                                    peer_addr: addr,
+                                    blocks: vec![BlockEntry {
+                                        index, begin,
+                                        length: data.len() as u32,
+                                    }],
+                                }).await.map_err(|_| crate::Error::Shutdown)?;
+                            }
+                            continue; // skip handle_message
                         }
                         match handle_message(
                             msg,
@@ -523,8 +539,12 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx }) => {
+                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx, lengths }) => {
                         reservation_state = Some((rs, piece_notify, disk_handle, write_error_tx));
+                        // M92: Create PendingBatch for block batching
+                        if pending_batch.is_none() {
+                            pending_batch = Some(PendingBatch::new(&lengths));
+                        }
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
@@ -631,12 +651,36 @@ pub(crate) async fn run_peer(
                 }
                 current_effective_depth = new_target;
             }
+
+            // M92: 25ms batch flush timer — sends partial batches for stats/UI/endgame
+            _ = flush_interval.tick(), if pending_batch.as_ref().is_some_and(|b| !b.is_empty()) => {
+                if let Some(ref mut batch) = pending_batch {
+                    let blocks = batch.take();
+                    let _ = event_tx.send(PeerEvent::PieceBlocksBatch {
+                        peer_addr: addr,
+                        blocks,
+                    }).await;
+                }
+            }
         }
     };
 
     // Notify plugins that a peer disconnected
     for plugin in plugins.iter() {
         plugin.on_peer_disconnected(&info_hash, addr);
+    }
+
+    // M92: Flush remaining blocks before disconnect
+    if let Some(ref mut batch) = pending_batch
+        && !batch.is_empty()
+    {
+        let blocks = batch.take();
+        let _ = event_tx
+            .send(PeerEvent::PieceBlocksBatch {
+                peer_addr: addr,
+                blocks,
+            })
+            .await;
     }
 
     // Send disconnect event (best-effort)

@@ -3588,6 +3588,7 @@ impl TorrentActor {
                             piece_notify: Arc::clone(notify),
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
+                            lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
                         });
                     }
                 }
@@ -5138,6 +5139,7 @@ impl TorrentActor {
                                     piece_notify: Arc::clone(notify),
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
+                                    lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
                                 });
                             }
                         }
@@ -6032,6 +6034,7 @@ impl TorrentActor {
                     piece_notify: Arc::clone(notify),
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
+                    lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
                 });
             }
 
@@ -6669,6 +6672,7 @@ impl TorrentActor {
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
+                lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
             });
         }
 
@@ -6860,6 +6864,7 @@ impl TorrentActor {
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
+                lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
             });
         }
 

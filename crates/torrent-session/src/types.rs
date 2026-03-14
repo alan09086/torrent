@@ -784,6 +784,8 @@ pub(crate) enum PeerCommand {
         piece_notify: std::sync::Arc<tokio::sync::Notify>,
         disk_handle: Option<crate::disk::DiskHandle>,
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
+        /// M92: Piece/chunk arithmetic for PendingBatch piece-completion detection.
+        lengths: torrent_core::Lengths,
     },
     Shutdown,
 }
