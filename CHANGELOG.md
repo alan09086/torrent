@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
+
+## Quick Reference
+
+| Version | Milestone | Description |
+|---------|-----------|-------------|
+| 0.90.0 | M90 | I2P session integration — outbound SAM connects, BEP 7 tracker announces, PEX filtering |
+| 0.88.0 | M88 | BEP 44 session API — DHT storage put/get through SessionHandle |
+| 0.87.0 | M87 | BEP 52 hash serving — v2/hybrid seeders serve Merkle hashes |
+| 0.85.0 | M85/M86/M89 | DHT routing table overhaul, dead code removal, NAT cleanup logging |
+| 0.84.0 | M84 | AWS-LC crypto backend (replaces ring) — pluggable crypto feature flags |
+| 0.83.0 | M83 | Connection ramp-up elimination — 56.8 MB/s (+47%) |
+| 0.82.0 | M82 | Sustained throughput — adaptive pipeline, AIMD, 38.6 MB/s (+31%) |
+| 0.81.0 | M81 | Ramp-up speed — three-phase connect interval |
+| 0.78.0 | M78 | Actor throughput — two-phase dispatch, direct peer-to-disk writes |
+| 0.77.0 | M77 | Context switch reduction — wake storm elimination |
+| 0.76.0 | M76 | Memory consolidation — removed PieceSelector, RSS -17% |
+| 0.75.0 | M75 | Peer-integrated dispatch — 56.7 MB/s (4.6x over M74) |
+| 0.74.0 | M74 | Dispatch stabilization — permit leak fixes |
+| 0.73.0 | M73 | Per-peer autonomous dispatch — CPU halved |
+| 0.72.0 | M72 | Steal phase optimization |
+| 0.71.0 | M71 | Picker efficiency — ChunkMask bitfield, two-phase pick |
+| 0.70.0 | M70 | Pre-computed block queues, shared-context batch fill |
+| 0.68.0 | M68+M69 | Pipeline optimization — batch dispatch, fixed-depth model |
+| 0.67.0 | M67 | Crypto optimization — BoringSSL via ring |
+| 0.66.0 | M66 | Adaptive queue depth — BDP model |
+| 0.65.0 | M65 | CPU efficiency — SHA-NI hardware acceleration |
+| 0.61.0 | M61 | O(1) pending requests, end-game refill — 20.7 MB/s |
+| 0.58.1 | — | Performance tuning, store buffer race fix, DHT fixes |
+| 0.58.0 | M58 | Rename ferrite→torrent, non-blocking pipeline |
+| 0.57.0 | M57 | TCP listener, UPnP gateway probe |
+| 0.56.1 | — | Settings wiring, throughput fixes |
+| 0.56.0 | M56 | DHT persistence, piece stealing — 15 MB/s |
+| 0.55.0 | M55 | Immediate peer connection, max_peers 200 |
+| 0.54.0 | M54 | CLI binary and benchmarking harness |
+| 0.53.0 | M53 | Full torrent operations API parity |
+| 0.52.0 | M52 | API documentation and examples |
+| 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
+
 ## [Unreleased]
 
 ## [0.90.0] — 2026-03-14
