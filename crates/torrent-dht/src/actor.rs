@@ -558,6 +558,8 @@ struct PutItemParams {
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 /// Interval for peer store cleanup.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Interval for pinging questionable nodes.
+const PING_INTERVAL: Duration = Duration::from_secs(225); // 3.75 minutes
 
 impl DhtActor {
     fn new(
@@ -606,6 +608,7 @@ impl DhtActor {
         let mut maintenance_tick = tokio::time::interval(MAINTENANCE_INTERVAL);
         let mut cleanup_tick = tokio::time::interval(CLEANUP_INTERVAL);
         let mut query_timeout_tick = tokio::time::interval(self.config.query_timeout);
+        let mut ping_tick = tokio::time::interval(PING_INTERVAL);
 
         loop {
             tokio::select! {
@@ -684,6 +687,11 @@ impl DhtActor {
                     self.item_store.expire(
                         Duration::from_secs(self.config.dht_item_lifetime_secs)
                     );
+                }
+
+                // Ping questionable nodes to verify liveness
+                _ = ping_tick.tick() => {
+                    self.ping_questionable_nodes().await;
                 }
             }
         }
@@ -1840,6 +1848,39 @@ impl DhtActor {
                 },
             );
             self.stats.total_queries_sent += 1;
+        }
+    }
+
+    async fn send_ping(&mut self, addr: SocketAddr, node_id: Option<Id20>) {
+        if !self.rate_limiter.try_acquire() {
+            return;
+        }
+        let txn = self.next_transaction_id();
+        let own_id = *self.routing_table.own_id();
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(txn),
+            body: KrpcBody::Query(KrpcQuery::Ping { id: own_id }),
+            sender_ip: None,
+        };
+        if let Ok(bytes) = msg.to_bytes() {
+            let _ = self.socket.send_to(&bytes, addr).await;
+            self.pending.insert(
+                txn,
+                PendingQuery {
+                    sent_at: Instant::now(),
+                    addr,
+                    node_id,
+                    kind: PendingQueryKind::Ping,
+                },
+            );
+            self.stats.total_queries_sent += 1;
+        }
+    }
+
+    async fn ping_questionable_nodes(&mut self) {
+        let nodes = self.routing_table.questionable_nodes();
+        for (id, addr) in nodes {
+            self.send_ping(addr, Some(id)).await;
         }
     }
 
