@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use torrent_sim::{SimSwarmBuilder, make_seeded_storage, make_test_torrent};
+use torrent_sim::{LinkConfig, SimSwarmBuilder, make_seeded_storage, make_test_torrent};
 
 /// Build a swarm, add a torrent to one node as seed, add as leecher to another,
 /// introduce peers, and verify the leecher eventually learns about peers.
@@ -331,6 +331,62 @@ async fn test_partition_recovery_transfer() {
         final_stats.total_done,
         data.len() as u64,
         "leecher should have downloaded all data after partition recovery"
+    );
+
+    swarm.shutdown().await;
+}
+
+/// 2-node swarm with latency/bandwidth LinkConfig set.
+/// Verifies that transfer completes when config is applied (latency/bandwidth
+/// aren't enforced yet — this proves the transport works with config set).
+#[tokio::test]
+async fn test_link_config_transfer() {
+    let config = LinkConfig {
+        latency: Duration::from_millis(50),
+        bandwidth: 1_000_000,
+        loss_rate: 0.0,
+    };
+    let swarm = SimSwarmBuilder::new(2).link_config(config).build().await;
+
+    // 32 KiB of test data = 2 pieces at 16384 bytes each
+    let data = vec![0xCC; 32768];
+    let (meta, _bytes) = make_test_torrent(&data, 16384);
+    let seeded_storage = make_seeded_storage(&data, 16384);
+
+    // Node 0 is the seeder (with pre-populated storage)
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
+
+    // Node 1 is the leecher (empty storage)
+    let _ih2 = swarm.add_torrent(1, meta.into(), None).await;
+
+    // Introduce peers so nodes know about each other
+    swarm.introduce_peers(info_hash).await;
+
+    // Poll leecher stats until download completes, with 30s timeout
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+        if leecher_stats.total_done == data.len() as u64 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for leecher to complete download with link config; \
+             total_done={}, expected={}",
+            leecher_stats.total_done,
+            data.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Verify leecher has all the data
+    let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+    assert_eq!(
+        leecher_stats.total_done,
+        data.len() as u64,
+        "leecher should have downloaded all data with link config set"
     );
 
     swarm.shutdown().await;
