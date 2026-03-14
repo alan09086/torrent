@@ -725,6 +725,11 @@ pub(crate) enum PeerEvent {
         peer_addr: SocketAddr,
         cmd_tx: tokio::sync::mpsc::Sender<PeerCommand>,
     },
+    /// Peer released a piece it was downloading (choke, error, disconnect).
+    PieceReleased {
+        peer_addr: SocketAddr,
+        piece: u32,
+    },
 }
 
 /// Commands sent from the `TorrentActor` to a `PeerTask`.
@@ -780,12 +785,17 @@ pub(crate) enum PeerCommand {
     /// M75: Actor sends reservation state to peer task for integrated dispatch.
     /// Sent after metadata download (magnet) or at peer connection (non-magnet).
     StartRequesting {
-        reservation_state: std::sync::Arc<parking_lot::RwLock<crate::piece_reservation::PieceReservationState>>,
+        atomic_states: std::sync::Arc<crate::piece_reservation::AtomicPieceStates>,
+        availability_snapshot: std::sync::Arc<crate::piece_reservation::AvailabilitySnapshot>,
         piece_notify: std::sync::Arc<tokio::sync::Notify>,
         disk_handle: Option<crate::disk::DiskHandle>,
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
         /// M92: Piece/chunk arithmetic for PendingBatch piece-completion detection.
         lengths: torrent_core::Lengths,
+    },
+    /// Actor sends an updated availability snapshot to the peer task.
+    SnapshotUpdate {
+        snapshot: std::sync::Arc<crate::piece_reservation::AvailabilitySnapshot>,
     },
     Shutdown,
 }
