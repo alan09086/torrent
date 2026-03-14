@@ -187,6 +187,70 @@ async fn test_basic_seeder_leecher_transfer() {
     swarm.shutdown().await;
 }
 
+/// 4-node swarm: 1 seeder + 3 leechers. 128 KiB torrent (8 pieces at 16384).
+/// Introduce all peers, poll until all 3 leechers complete, 60s timeout.
+#[tokio::test]
+async fn test_multi_peer_swarm_transfer() {
+    let swarm = SimSwarmBuilder::new(4).build().await;
+
+    // 128 KiB of test data = 8 pieces at 16384 bytes each
+    let data = vec![0xBF; 131072];
+    let (meta, _bytes) = make_test_torrent(&data, 16384);
+    let seeded_storage = make_seeded_storage(&data, 16384);
+
+    // Node 0 is the seeder (with pre-populated storage)
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
+
+    // Nodes 1, 2, 3 are leechers (empty storage)
+    let _ih1 = swarm.add_torrent(1, meta.clone().into(), None).await;
+    let _ih2 = swarm.add_torrent(2, meta.clone().into(), None).await;
+    let _ih3 = swarm.add_torrent(3, meta.into(), None).await;
+
+    // Introduce peers so all nodes know about each other
+    swarm.introduce_peers(info_hash).await;
+
+    // Poll all 3 leechers until download completes, with 60s timeout
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let stats1 = swarm.torrent_stats(1, info_hash).await;
+        let stats2 = swarm.torrent_stats(2, info_hash).await;
+        let stats3 = swarm.torrent_stats(3, info_hash).await;
+
+        let all_done = stats1.total_done == data.len() as u64
+            && stats2.total_done == data.len() as u64
+            && stats3.total_done == data.len() as u64;
+
+        if all_done {
+            break;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for all leechers to complete download; \
+             node1 total_done={}, node2 total_done={}, node3 total_done={}, expected={}",
+            stats1.total_done,
+            stats2.total_done,
+            stats3.total_done,
+            data.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Verify all 3 leechers have all the data
+    for i in 1..=3 {
+        let stats = swarm.torrent_stats(i, info_hash).await;
+        assert_eq!(
+            stats.total_done,
+            data.len() as u64,
+            "leecher node {i} should have downloaded all data"
+        );
+    }
+
+    swarm.shutdown().await;
+}
+
 /// Verify make_seeded_storage produces storage with correct data.
 #[test]
 fn test_make_seeded_storage_roundtrip() {
