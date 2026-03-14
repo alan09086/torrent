@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.88.0] — 2026-03-14
+
+### Added
+- **I2P session integration (M90)**: Outbound I2P peer connects routed through SAM
+  session with timeout and transport identification. I2P destination tracking via
+  synthetic 240.0.0.0/4 address mapping. HTTP tracker announces include I2P
+  destination per BEP 7. Mixed-mode PEX filtering prevents I2P/clearnet address
+  leakage. Ignored integration test for environments with SAM bridge.
+
 ## [0.87.0] — 2026-03-14
 
 ### Added
