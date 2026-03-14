@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.85.0] — 2026-03-13
+
+### Added
+- **Iterative bootstrap**: DHT now performs multi-round `find_node` queries during
+  bootstrap, converging on the closest nodes to our own ID. Previously, bootstrap
+  sent one-shot queries to 3 DNS-resolved nodes with no follow-up — now it iterates
+  through returned nodes (alpha=3, up to 6 rounds) to rapidly populate the routing table.
+- **Node liveness tracking**: `NodeStatus` enum (Good/Questionable/Bad) per BEP 5 §4.1.
+  Nodes that respond or query us within 15 minutes are Good; silent nodes are Questionable;
+  nodes with 2+ consecutive failures are Bad and eligible for eviction.
+- **Background pinger**: Questionable nodes are pinged every 3.75 minutes. Nodes that
+  respond become Good again; those that don't accumulate failures and get evicted.
+- **Query rate limiter**: Token-bucket rate limiter (250 queries/sec default) guards all
+  outgoing KRPC queries, preventing UDP flood during rapid bootstrap or large lookups.
+- **Periodic DHT persistence**: Session state (DHT nodes) saved every 60 seconds with
+  atomic write-then-rename, not just on shutdown. Crash recovery now preserves recent state.
+- **Proper failure tracking**: `PendingQuery` now stores the remote node's ID, so timed-out
+  queries correctly increment `fail_count` on the actual node (previously used a stub that
+  never marked any node as failed).
+
+### Changed
+- Default `queries_per_second` increased from 50 to 250 (both IPv4 and IPv6 configs).
+- `worst_node()` eviction now correctly evicts the oldest node on tied fail counts
+  (was incorrectly evicting the newest).
+
+### Fixed
+- Dead nodes no longer occupy routing table slots forever — the `pending_node_id()` stub
+  that returned `Id20::ZERO` (never matching any node) has been replaced with actual node
+  ID tracking in `PendingQuery`.
+
 ## [0.84.0] — 2026-03-13
 
 ### Changed

@@ -30,7 +30,7 @@ cargo clippy --workspace -- -D warnings
 
 - 51-milestone roadmap: `docs/plans/2026-03-01-torrent-roadmap-v3-full-parity.md`
 - M1-M53 complete. All 51 parity milestones done + M52 API documentation + TorrentStats full parity + M53 full torrent operations API parity.
-- Current: v0.84.0, 1442 tests. M84: aws-lc-rs crypto backend (replaces ring) — pluggable crypto feature flags (crypto-ring, crypto-aws-lc, crypto-openssl). User CPU -28%, RSS -23%, page faults -25% vs ring. M83: connection ramp-up elimination — default encryption Disabled, AIMD initial depth 128, SIGTERM handling. 56.8 MB/s (+47%), CPU 13.1s (-29%), RSS 68.8 MiB (-27%).
+- Current: v0.85.0, 1460 tests. M85: DHT routing table overhaul — iterative bootstrap (FindNodeLookup), node liveness tracking (Good/Questionable/Bad), background pinger, query rate limiter (250/s), periodic state persistence (60s atomic writes), proper mark_failed via PendingQuery node_id. M84: aws-lc-rs crypto backend (replaces ring) — pluggable crypto feature flags. M83: connection ramp-up elimination — default encryption Disabled, AIMD initial depth 128. 56.8 MB/s (+47%).
 - Implementation plans exist for all remaining milestones (M40-M51) in `docs/plans/`
 - Commit format: `feat: description (M24)` — milestone tag in parentheses
 - Version bumps: workspace version in root `Cargo.toml`, bump with each milestone
