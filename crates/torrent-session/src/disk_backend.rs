@@ -5,7 +5,6 @@
 //! [`DisabledDiskIo`] is a no-op backend useful for network throughput benchmarking.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
 use bytes::Bytes;
@@ -88,9 +87,6 @@ pub trait DiskIoBackend: Send + Sync {
     /// Flush all buffered writes across all torrents.
     fn flush_all(&self) -> crate::Result<()>;
 
-    /// Move a torrent's data files to a new directory.
-    fn move_storage(&self, info_hash: Id20, new_path: &Path) -> crate::Result<()>;
-
     /// Return piece indices currently held in cache (for SuggestPiece, M44).
     fn cached_pieces(&self, info_hash: Id20) -> Vec<u32>;
 
@@ -165,10 +161,6 @@ impl DiskIoBackend for DisabledDiskIo {
     }
 
     fn flush_all(&self) -> crate::Result<()> {
-        Ok(())
-    }
-
-    fn move_storage(&self, _info_hash: Id20, _new_path: &Path) -> crate::Result<()> {
         Ok(())
     }
 
@@ -391,11 +383,6 @@ impl DiskIoBackend for PosixDiskIo {
         Ok(())
     }
 
-    fn move_storage(&self, _info_hash: Id20, _new_path: &Path) -> crate::Result<()> {
-        // TODO: implement in future milestone
-        Ok(())
-    }
-
     fn cached_pieces(&self, info_hash: Id20) -> Vec<u32> {
         let cache = self.cache.lock().unwrap();
         cache
@@ -532,11 +519,6 @@ impl DiskIoBackend for MmapDiskIo {
 
     fn flush_all(&self) -> crate::Result<()> {
         // No-op: no write buffer
-        Ok(())
-    }
-
-    fn move_storage(&self, _info_hash: Id20, _new_path: &Path) -> crate::Result<()> {
-        // TODO: implement in future milestone
         Ok(())
     }
 
