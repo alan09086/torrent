@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -33,6 +34,111 @@ struct PeerProgress {
     next_block: u32,
     /// Total blocks in this piece.
     total_blocks: u32,
+}
+
+/// Piece-level state for lock-free CAS reservation.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PieceState {
+    Available = 0,
+    Reserved = 1,
+    Complete = 2,
+    Unwanted = 3,
+    Endgame = 4,
+}
+
+impl PieceState {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Available,
+            1 => Self::Reserved,
+            2 => Self::Complete,
+            3 => Self::Unwanted,
+            4 => Self::Endgame,
+            _ => Self::Available, // defensive fallback
+        }
+    }
+}
+
+/// Lock-free per-piece state array. Shared across all peer tasks via `Arc`.
+///
+/// Each piece occupies one `AtomicU8`. Peers reserve pieces via CAS
+/// (compare-and-swap) without any mutex or RwLock.
+pub(crate) struct AtomicPieceStates {
+    states: Vec<AtomicU8>,
+}
+
+impl AtomicPieceStates {
+    pub fn new(num_pieces: u32, we_have: &Bitfield, wanted: &Bitfield) -> Self {
+        let states: Vec<AtomicU8> = (0..num_pieces)
+            .map(|i| {
+                let val = if we_have.get(i) {
+                    PieceState::Complete as u8
+                } else if !wanted.get(i) {
+                    PieceState::Unwanted as u8
+                } else {
+                    PieceState::Available as u8
+                };
+                AtomicU8::new(val)
+            })
+            .collect();
+        Self { states }
+    }
+
+    /// Attempt to reserve a piece via CAS.
+    pub fn try_reserve(&self, index: u32) -> bool {
+        let atom = &self.states[index as usize];
+        if atom
+            .compare_exchange(
+                PieceState::Available as u8,
+                PieceState::Reserved as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+        let current = atom.load(Ordering::Relaxed);
+        current == PieceState::Endgame as u8
+    }
+
+    pub fn mark_complete(&self, index: u32) {
+        self.states[index as usize].store(PieceState::Complete as u8, Ordering::Relaxed);
+    }
+
+    pub fn release(&self, index: u32) {
+        self.states[index as usize].store(PieceState::Available as u8, Ordering::Relaxed);
+    }
+
+    pub fn transition_to_endgame(&self, index: u32) {
+        self.states[index as usize].store(PieceState::Endgame as u8, Ordering::Relaxed);
+    }
+
+    pub fn mark_unwanted(&self, index: u32) {
+        self.states[index as usize].store(PieceState::Unwanted as u8, Ordering::Relaxed);
+    }
+
+    pub fn mark_available(&self, index: u32) {
+        let _ = self.states[index as usize].compare_exchange(
+            PieceState::Unwanted as u8,
+            PieceState::Available as u8,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn get(&self, index: u32) -> PieceState {
+        PieceState::from_u8(self.states[index as usize].load(Ordering::Relaxed))
+    }
+
+    pub fn force_reserved(&self, index: u32) {
+        self.states[index as usize].store(PieceState::Reserved as u8, Ordering::Relaxed);
+    }
+
+    pub fn len(&self) -> u32 {
+        self.states.len() as u32
+    }
 }
 
 /// Shared state for concurrent per-peer piece dispatch.
@@ -1358,5 +1464,96 @@ mod tests {
         // Peer B should now find the released piece.
         let candidate = state.find_candidate(&bf);
         assert!(candidate.is_some(), "released piece should be available");
+    }
+
+    #[test]
+    fn atomic_reserve_release_cycle() {
+        let num_pieces = 8u32;
+        let we_have = Bitfield::new(num_pieces);
+        let wanted = all_pieces_wanted(num_pieces);
+        let states = AtomicPieceStates::new(num_pieces, &we_have, &wanted);
+
+        // All pieces start Available
+        for i in 0..num_pieces {
+            assert_eq!(states.get(i), PieceState::Available);
+        }
+
+        // Reserve piece 3
+        assert!(states.try_reserve(3));
+        assert_eq!(states.get(3), PieceState::Reserved);
+
+        // Second reserve on same piece fails
+        assert!(!states.try_reserve(3));
+
+        // Release piece 3
+        states.release(3);
+        assert_eq!(states.get(3), PieceState::Available);
+
+        // Can reserve again after release
+        assert!(states.try_reserve(3));
+        assert_eq!(states.get(3), PieceState::Reserved);
+
+        // Mark complete — try_reserve fails
+        states.mark_complete(3);
+        assert_eq!(states.get(3), PieceState::Complete);
+        assert!(!states.try_reserve(3));
+
+        // force_reserved works
+        states.force_reserved(3);
+        assert_eq!(states.get(3), PieceState::Reserved);
+    }
+
+    #[test]
+    fn atomic_unwanted_transitions() {
+        let num_pieces = 4u32;
+        let we_have = Bitfield::new(num_pieces);
+        let mut wanted = Bitfield::new(num_pieces);
+        wanted.set(0);
+        wanted.set(1);
+        // pieces 2,3 are unwanted
+
+        let states = AtomicPieceStates::new(num_pieces, &we_have, &wanted);
+
+        assert_eq!(states.get(0), PieceState::Available);
+        assert_eq!(states.get(1), PieceState::Available);
+        assert_eq!(states.get(2), PieceState::Unwanted);
+        assert_eq!(states.get(3), PieceState::Unwanted);
+
+        // Cannot reserve unwanted pieces
+        assert!(!states.try_reserve(2));
+
+        // mark_available only transitions Unwanted -> Available
+        states.mark_available(2);
+        assert_eq!(states.get(2), PieceState::Available);
+        assert!(states.try_reserve(2));
+
+        // mark_available on Reserved is a no-op (CAS fails safely)
+        states.mark_available(2);
+        assert_eq!(states.get(2), PieceState::Reserved);
+    }
+
+    #[test]
+    fn atomic_we_have_initialized_complete() {
+        let num_pieces = 4u32;
+        let mut we_have = Bitfield::new(num_pieces);
+        we_have.set(0);
+        we_have.set(2);
+        let wanted = all_pieces_wanted(num_pieces);
+
+        let states = AtomicPieceStates::new(num_pieces, &we_have, &wanted);
+
+        assert_eq!(states.get(0), PieceState::Complete);
+        assert_eq!(states.get(1), PieceState::Available);
+        assert_eq!(states.get(2), PieceState::Complete);
+        assert_eq!(states.get(3), PieceState::Available);
+
+        assert!(!states.try_reserve(0));
+        assert!(states.try_reserve(1));
+    }
+
+    #[test]
+    fn atomic_len() {
+        let states = AtomicPieceStates::new(42, &Bitfield::new(42), &all_pieces_wanted(42));
+        assert_eq!(states.len(), 42);
     }
 }
