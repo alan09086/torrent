@@ -141,6 +141,76 @@ impl AtomicPieceStates {
     }
 }
 
+/// Pre-computed rarest-first ordering, cheaply cloneable via `Arc`.
+///
+/// Built by TorrentActor on a 500ms timer (or significant events like
+/// peer join/leave). Uses bucket sort -- O(n) where n = num_pieces.
+pub(crate) struct AvailabilitySnapshot {
+    /// Pieces ordered rarest-first. Walk from index 0 for rarest pieces.
+    pub order: Vec<u32>,
+    /// Monotonically increasing counter. Peer tasks compare against their
+    /// cached generation to detect when the snapshot was rebuilt.
+    pub generation: u64,
+}
+
+impl AvailabilitySnapshot {
+    /// Build a new snapshot using bucket sort.
+    ///
+    /// `availability[i]` = number of peers that have piece `i`.
+    /// `atomic_states` is consulted to skip Complete/Unwanted/Reserved pieces.
+    /// `priority_pieces` are placed at the front regardless of availability.
+    ///
+    /// Bucket sort is O(n + max_avail) -- much cheaper than the O(n log n)
+    /// sort in the old `rebuild_candidates()`.
+    pub fn build(
+        availability: &[u32],
+        atomic_states: &AtomicPieceStates,
+        priority_pieces: &BTreeSet<u32>,
+        generation: u64,
+    ) -> Self {
+        let num_pieces = availability.len();
+        if num_pieces == 0 {
+            return Self {
+                order: Vec::new(),
+                generation,
+            };
+        }
+
+        // Find max availability for bucket allocation.
+        let max_avail = availability.iter().copied().max().unwrap_or(0) as usize;
+
+        // Bucket sort: buckets[a] = list of pieces with availability `a`.
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); max_avail + 1];
+        for piece in 0..num_pieces {
+            let state = atomic_states.get(piece as u32);
+            match state {
+                PieceState::Complete | PieceState::Unwanted | PieceState::Reserved => continue,
+                PieceState::Available | PieceState::Endgame => {}
+            }
+            let avail = availability[piece] as usize;
+            buckets[avail].push(piece as u32);
+        }
+
+        // Flatten buckets: rarest (lowest availability) first.
+        // Priority pieces go to the very front.
+        let mut order = Vec::with_capacity(num_pieces);
+        let mut non_priority = Vec::with_capacity(num_pieces);
+
+        for bucket in &buckets {
+            for &piece in bucket {
+                if priority_pieces.contains(&piece) {
+                    order.push(piece);
+                } else {
+                    non_priority.push(piece);
+                }
+            }
+        }
+        order.append(&mut non_priority);
+
+        Self { order, generation }
+    }
+}
+
 use slab::Slab;
 
 /// Arena-allocated peer index for compact piece tracking.
@@ -1742,5 +1812,101 @@ mod tests {
         let s2 = slab.insert(a2);
         assert_eq!(s2, s1); // same slot index reused
         assert_eq!(slab.get(s2), Some(&a2));
+    }
+
+    #[test]
+    fn snapshot_bucket_sort_rarest_first() {
+        let num_pieces = 5u32;
+        // availability: piece 0=3, piece 1=1, piece 2=2, piece 3=1, piece 4=3
+        let availability = vec![3u32, 1, 2, 1, 3];
+        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+        let priority = BTreeSet::new();
+
+        let snap = AvailabilitySnapshot::build(&availability, &states, &priority, 1);
+
+        assert_eq!(snap.generation, 1);
+        // Rarest pieces (availability=1) should come first: pieces 1 and 3
+        // Then availability=2: piece 2
+        // Then availability=3: pieces 0 and 4
+        assert_eq!(snap.order.len(), 5);
+        // First two must be the rarest (1 and 3 in some order)
+        let first_two: std::collections::HashSet<u32> = snap.order[..2].iter().copied().collect();
+        assert!(first_two.contains(&1));
+        assert!(first_two.contains(&3));
+        // Third must be piece 2 (availability=2)
+        assert_eq!(snap.order[2], 2);
+        // Last two are pieces 0 and 4 (availability=3)
+        let last_two: std::collections::HashSet<u32> = snap.order[3..].iter().copied().collect();
+        assert!(last_two.contains(&0));
+        assert!(last_two.contains(&4));
+    }
+
+    #[test]
+    fn snapshot_skips_complete_reserved_unwanted() {
+        let num_pieces = 5u32;
+        let availability = vec![1u32; 5];
+        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+
+        // Mark some pieces with non-Available states
+        states.mark_complete(0);
+        assert!(states.try_reserve(2)); // Reserved
+        states.mark_unwanted(4);
+
+        let snap = AvailabilitySnapshot::build(&availability, &states, &BTreeSet::new(), 1);
+
+        // Only pieces 1 and 3 should be in the snapshot (Available)
+        assert_eq!(snap.order.len(), 2);
+        assert!(snap.order.contains(&1));
+        assert!(snap.order.contains(&3));
+    }
+
+    #[test]
+    fn snapshot_includes_endgame_pieces() {
+        let num_pieces = 3u32;
+        let availability = vec![1u32; 3];
+        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+
+        assert!(states.try_reserve(1));
+        states.transition_to_endgame(1);
+
+        let snap = AvailabilitySnapshot::build(&availability, &states, &BTreeSet::new(), 1);
+
+        // Pieces 0 (Available) and 1 (Endgame) should be included, piece 2 (Available) too
+        assert_eq!(snap.order.len(), 3);
+        assert!(snap.order.contains(&0));
+        assert!(snap.order.contains(&1));
+        assert!(snap.order.contains(&2));
+    }
+
+    #[test]
+    fn snapshot_empty_torrent() {
+        let snap = AvailabilitySnapshot::build(
+            &[],
+            &AtomicPieceStates::new(0, &Bitfield::new(0), &Bitfield::new(0)),
+            &BTreeSet::new(),
+            0,
+        );
+        assert!(snap.order.is_empty());
+        assert_eq!(snap.generation, 0);
+    }
+
+    #[test]
+    fn snapshot_priority_pieces_sort_first() {
+        let num_pieces = 5u32;
+        // piece 2 has the HIGHEST availability (least rare)
+        let availability = vec![2u32, 3, 10, 1, 5];
+        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+        let mut priority = BTreeSet::new();
+        priority.insert(2); // piece 2 is priority despite high availability
+
+        let snap = AvailabilitySnapshot::build(&availability, &states, &priority, 1);
+
+        // Piece 2 must be at the very front despite availability=10
+        assert_eq!(snap.order[0], 2, "priority piece should be first");
+        // Remaining pieces in rarest-first order: 3 (avail=1), 0 (avail=2), 1 (avail=3), 4 (avail=5)
+        assert_eq!(snap.order[1], 3); // avail=1
+        assert_eq!(snap.order[2], 0); // avail=2
+        assert_eq!(snap.order[3], 1); // avail=3
+        assert_eq!(snap.order[4], 4); // avail=5
     }
 }
