@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn layer_extraction() {
-        let leaves: Vec<Id32> = (0..4).map(|i| leaf(i)).collect();
+        let leaves: Vec<Id32> = (0..4).map(leaf).collect();
         let tree = MerkleTree::from_leaves(&leaves);
         assert_eq!(tree.depth(), 2);
 
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn piece_layer_extraction() {
         // 8 block-level leaves, 2 blocks per piece → piece layer at depth 2 (4 nodes)
-        let leaves: Vec<Id32> = (0..8).map(|i| leaf(i)).collect();
+        let leaves: Vec<Id32> = (0..8).map(leaf).collect();
         let tree = MerkleTree::from_leaves(&leaves);
         assert_eq!(tree.depth(), 3);
 
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn root_from_piece_layer_round_trip() {
-        let leaves: Vec<Id32> = (0..8).map(|i| leaf(i)).collect();
+        let leaves: Vec<Id32> = (0..8).map(leaf).collect();
         let tree = MerkleTree::from_leaves(&leaves);
         let pieces = tree.piece_layer(2);
         // Rebuilding from piece layer should give the same root
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn proof_path_generation() {
-        let leaves: Vec<Id32> = (0..4).map(|i| leaf(i)).collect();
+        let leaves: Vec<Id32> = (0..4).map(leaf).collect();
         let tree = MerkleTree::from_leaves(&leaves);
 
         let proof = tree.proof_path(0);
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn proof_verification_success() {
-        let leaves: Vec<Id32> = (0..4).map(|i| leaf(i)).collect();
+        let leaves: Vec<Id32> = (0..4).map(leaf).collect();
         let tree = MerkleTree::from_leaves(&leaves);
 
         for i in 0..4 {
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn proof_verification_failure() {
-        let leaves: Vec<Id32> = (0..4).map(|i| leaf(i)).collect();
+        let leaves: Vec<Id32> = (0..4).map(leaf).collect();
         let tree = MerkleTree::from_leaves(&leaves);
 
         let proof = tree.proof_path(0);
