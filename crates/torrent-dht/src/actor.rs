@@ -146,6 +146,8 @@ impl DhtConfig {
 /// Runtime statistics for the DHT.
 #[derive(Debug, Clone)]
 pub struct DhtStats {
+    /// Our current node ID (may differ from startup ID after BEP 42 regeneration).
+    pub node_id: Id20,
     /// Number of nodes in the routing table.
     pub routing_table_size: usize,
     /// Number of k-buckets in use.
@@ -2305,11 +2307,36 @@ impl DhtActor {
             inserted,
             "BEP 42: node ID regeneration complete"
         );
+
+        // Re-trigger iterative bootstrap with the new node ID.
+        // The first bootstrap targeted the old ID, so the discovered nodes
+        // are in the wrong neighbourhood. A fresh find_node cascade targeting
+        // the new ID fills the home bucket properly.
+        let initial_closest: Vec<CompactNodeInfo> = self
+            .routing_table
+            .closest(&new_id, K)
+            .into_iter()
+            .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+            .collect();
+        if !initial_closest.is_empty() {
+            debug!(
+                seed_nodes = initial_closest.len(),
+                "BEP 42: re-bootstrapping with new node ID"
+            );
+            self.bootstrap_lookup = Some(FindNodeLookup {
+                target: new_id,
+                closest: initial_closest,
+                queried: std::collections::HashSet::new(),
+                round: 0,
+                max_rounds: 6,
+            });
+        }
     }
 
     fn make_stats(&self) -> DhtStats {
         let (immutable, mutable) = self.item_store.count();
         DhtStats {
+            node_id: *self.routing_table.own_id(),
             routing_table_size: self.routing_table.len(),
             bucket_count: self.routing_table.bucket_count(),
             peer_store_info_hashes: self.peer_store.info_hash_count(),
