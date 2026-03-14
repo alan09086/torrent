@@ -39,15 +39,12 @@ pub struct AddHashesResult {
 
 struct PieceHashRequest {
     last_request: Option<Instant>,
-    _num_requests: u32,
     have: bool,
 }
 
 struct BlockHashRequest {
     file_index: usize,
     piece: u32,
-    _last_request: Option<Instant>,
-    _num_requests: u32,
 }
 
 /// Coordinates which Merkle hash requests to send to peers.
@@ -81,7 +78,6 @@ impl HashPicker {
                 (0..chunks)
                     .map(|_| PieceHashRequest {
                         last_request: None,
-                        _num_requests: 0,
                         have: false,
                     })
                     .collect()
@@ -293,8 +289,6 @@ impl HashPicker {
             self.block_requests.push(BlockHashRequest {
                 file_index,
                 piece,
-                _last_request: None,
-                _num_requests: 0,
             });
         }
     }
