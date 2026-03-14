@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.93.0 | M93 | Lock-free piece dispatch — atomic CAS reservation, AvailabilitySnapshot, PeerSlab, zero locks on hot path |
 | 0.92.0 | M92 | Peer event batching — PendingBatch, 25ms flush timer, ~3x context switch reduction |
 | 0.91.0 | M91 | SimTransport integration tests — end-to-end transfer, multi-peer, partition recovery, dead code cleanup |
 | 0.90.0 | M90 | I2P session integration — outbound SAM connects, BEP 7 tracker announces, PEX filtering |
@@ -44,6 +45,42 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.93.0] — 2026-03-14
+
+### Added
+- **Lock-free piece dispatch (M93)**: Replaced `Arc<parking_lot::RwLock<PieceReservationState>>`
+  with atomic CAS-based dispatch. Peer tasks CAS-reserve pieces directly via `AtomicPieceStates`
+  (`Vec<AtomicU8>`) — zero locks on the hot path. The hot path for subsequent blocks of the
+  same already-reserved piece involves zero atomic operations.
+- `PieceState` — `repr(u8)` enum encoding the three dispatch states (Free/Reserved/Complete)
+  for use in `AtomicU8` CAS operations.
+- `AtomicPieceStates` — `Vec<AtomicU8>` wrapper providing CAS-based piece reservation with
+  `try_reserve()`, `release()`, and `mark_complete()` operations.
+- `AvailabilitySnapshot` — O(n) bucket-sorted rarest-first ordering rebuilt every 500ms by the
+  actor and broadcast to all peer tasks via `PeerCommand::SnapshotUpdate`.
+- `PeerDispatchState` — per-peer cursor into the snapshot with hot/cold path distinction:
+  hot path (next block of owned piece) skips all atomics; cold path CAS-races against peers.
+- `PeerSlab` — arena-allocated peer index (`slab` crate) for O(1) insert/remove of peer state
+  without hash-map overhead.
+- `PeerCommand::SnapshotUpdate` — carries updated `AvailabilitySnapshot` to peer tasks on
+  the 500ms rebuild timer.
+- `PeerEvent::PieceReleased` — sent when a peer disconnects mid-piece, allowing the actor to
+  free the reservation for other peers.
+- 25 new unit tests covering CAS reservation races, snapshot rebuild, hot/cold path dispatch,
+  and release-on-disconnect.
+
+### Changed
+- Actor now manages `availability` and `piece_owner` as plain `Vec` fields (single-threaded
+  actor context), eliminating all lock overhead from the actor side.
+- Added `slab` crate dependency to `torrent-session` for arena-allocated peer tracking.
+
+### Removed
+- `PieceReservationState` struct — replaced by `AtomicPieceStates` + actor-owned plain fields.
+- `PeerProgress` struct — per-peer progress tracking subsumed into `PeerDispatchState`.
+- `parking_lot` dependency removed from `torrent-session` (lock-free dispatch eliminated the
+  last `RwLock` use in that crate).
+- 28 unit tests made redundant by the new atomic dispatch model.
 
 ## [0.92.0] — 2026-03-14
 
