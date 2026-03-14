@@ -2308,6 +2308,38 @@ impl DhtActor {
             "BEP 42: node ID regeneration complete"
         );
 
+        // Invalidate all active get_peers lookups. The lookup `closest` lists
+        // were computed using the old routing table topology and may reference
+        // nodes that are no longer closest under the new ID. Dropping the
+        // lookups closes the mpsc senders, which makes the session detect
+        // `dht_peers_rx = None` and re-issue `get_peers()` against the fresh
+        // routing table.
+        if !self.lookups.is_empty() {
+            // Also remove pending queries for the cleared lookups. Without this,
+            // stale queries expire later and call mark_failed() on nodes that the
+            // NEW lookup might want to query, degrading their routing table status.
+            let cleared_hashes: std::collections::HashSet<Id20> =
+                self.lookups.keys().copied().collect();
+            let stale_txns: Vec<u16> = self
+                .pending
+                .iter()
+                .filter(|(_, p)| {
+                    matches!(p.kind, PendingQueryKind::GetPeers { info_hash }
+                        if cleared_hashes.contains(&info_hash))
+                })
+                .map(|(txn, _)| *txn)
+                .collect();
+            debug!(
+                active_lookups = self.lookups.len(),
+                stale_pending = stale_txns.len(),
+                "BEP 42: invalidating active get_peers lookups (will be re-issued by session)"
+            );
+            for txn in stale_txns {
+                self.pending.remove(&txn);
+            }
+            self.lookups.clear();
+        }
+
         // Re-trigger iterative bootstrap with the new node ID.
         // The first bootstrap targeted the old ID, so the discovered nodes
         // are in the wrong neighbourhood. A fresh find_node cascade targeting
