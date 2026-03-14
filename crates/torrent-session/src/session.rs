@@ -379,6 +379,7 @@ enum SessionCommand {
         salt: Vec<u8>,
         reply: oneshot::Sender<crate::Result<Id20>>,
     },
+    #[allow(clippy::type_complexity)]
     DhtGetMutable {
         public_key: [u8; 32],
         salt: Vec<u8>,
@@ -2357,17 +2358,21 @@ impl SessionActor {
                             };
                             let _ = reply.send(result);
                         }
-                        Some(SessionCommand::DhtPutImmutable { reply, .. }) => {
-                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        Some(SessionCommand::DhtPutImmutable { value, reply }) => {
+                            let result = self.handle_dht_put_immutable(value).await;
+                            let _ = reply.send(result);
                         }
-                        Some(SessionCommand::DhtGetImmutable { reply, .. }) => {
-                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        Some(SessionCommand::DhtGetImmutable { target, reply }) => {
+                            let result = self.handle_dht_get_immutable(target).await;
+                            let _ = reply.send(result);
                         }
-                        Some(SessionCommand::DhtPutMutable { reply, .. }) => {
-                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        Some(SessionCommand::DhtPutMutable { keypair_bytes, value, seq, salt, reply }) => {
+                            let result = self.handle_dht_put_mutable(keypair_bytes, value, seq, salt).await;
+                            let _ = reply.send(result);
                         }
-                        Some(SessionCommand::DhtGetMutable { reply, .. }) => {
-                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        Some(SessionCommand::DhtGetMutable { public_key, salt, reply }) => {
+                            let result = self.handle_dht_get_mutable(public_key, salt).await;
+                            let _ = reply.send(result);
                         }
                         Some(SessionCommand::PostSessionStats) => {
                             self.fire_stats_alert();
@@ -3319,6 +3324,130 @@ impl SessionActor {
 
         // Route to the torrent actor via SpawnSslPeer command
         let _ = torrent.handle.spawn_ssl_peer(addr, tls_stream).await;
+    }
+
+    async fn handle_dht_put_immutable(&self, value: Vec<u8>) -> crate::Result<Id20> {
+        let dht = self.dht_v4.as_ref().ok_or(crate::Error::DhtDisabled)?;
+        match dht.put_immutable(value.clone()).await {
+            Ok(target) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtPutComplete { target },
+                );
+                Ok(target)
+            }
+            Err(e) => {
+                let target = torrent_core::sha1(&value);
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtItemError {
+                        target,
+                        message: e.to_string(),
+                    },
+                );
+                Err(crate::Error::Dht(e))
+            }
+        }
+    }
+
+    async fn handle_dht_get_immutable(&self, target: Id20) -> crate::Result<Option<Vec<u8>>> {
+        let dht = self.dht_v4.as_ref().ok_or(crate::Error::DhtDisabled)?;
+        match dht.get_immutable(target).await {
+            Ok(value) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtGetResult {
+                        target,
+                        value: value.clone(),
+                    },
+                );
+                Ok(value)
+            }
+            Err(e) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtItemError {
+                        target,
+                        message: e.to_string(),
+                    },
+                );
+                Err(crate::Error::Dht(e))
+            }
+        }
+    }
+
+    async fn handle_dht_put_mutable(
+        &self,
+        keypair_bytes: [u8; 32],
+        value: Vec<u8>,
+        seq: i64,
+        salt: Vec<u8>,
+    ) -> crate::Result<Id20> {
+        let dht = self.dht_v4.as_ref().ok_or(crate::Error::DhtDisabled)?;
+        match dht.put_mutable(keypair_bytes, value, seq, salt).await {
+            Ok(target) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtMutablePutComplete { target, seq },
+                );
+                Ok(target)
+            }
+            Err(e) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtItemError {
+                        target: Id20::from([0u8; 20]),
+                        message: e.to_string(),
+                    },
+                );
+                Err(crate::Error::Dht(e))
+            }
+        }
+    }
+
+    async fn handle_dht_get_mutable(
+        &self,
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+    ) -> crate::Result<Option<(Vec<u8>, i64)>> {
+        let dht = self.dht_v4.as_ref().ok_or(crate::Error::DhtDisabled)?;
+        let target = torrent_dht::compute_mutable_target(&public_key, &salt);
+        match dht.get_mutable(public_key, salt).await {
+            Ok(result) => {
+                let (value, seq) = match &result {
+                    Some((v, s)) => (Some(v.clone()), Some(*s)),
+                    None => (None, None),
+                };
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtMutableGetResult {
+                        target,
+                        value,
+                        seq,
+                        public_key,
+                    },
+                );
+                Ok(result)
+            }
+            Err(e) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtItemError {
+                        target,
+                        message: e.to_string(),
+                    },
+                );
+                Err(crate::Error::Dht(e))
+            }
+        }
     }
 
     async fn shutdown_all(&mut self) {
