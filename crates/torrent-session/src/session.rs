@@ -364,6 +364,26 @@ enum SessionCommand {
         addr: SocketAddr,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    DhtPutImmutable {
+        value: Vec<u8>,
+        reply: oneshot::Sender<crate::Result<Id20>>,
+    },
+    DhtGetImmutable {
+        target: Id20,
+        reply: oneshot::Sender<crate::Result<Option<Vec<u8>>>>,
+    },
+    DhtPutMutable {
+        keypair_bytes: [u8; 32],
+        value: Vec<u8>,
+        seq: i64,
+        salt: Vec<u8>,
+        reply: oneshot::Sender<crate::Result<Id20>>,
+    },
+    DhtGetMutable {
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+        reply: oneshot::Sender<crate::Result<Option<(Vec<u8>, i64)>>>,
+    },
     /// Trigger an immediate session stats snapshot and alert (M50).
     PostSessionStats,
     Shutdown,
@@ -1744,6 +1764,74 @@ impl SessionHandle {
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
     }
+
+    /// Store an immutable item in the DHT (BEP 44).
+    ///
+    /// Returns the SHA-1 target hash of the stored value.
+    pub async fn dht_put_immutable(&self, value: Vec<u8>) -> crate::Result<Id20> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::DhtPutImmutable { value, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Retrieve an immutable item from the DHT (BEP 44).
+    ///
+    /// Returns `Some(value)` if found, `None` otherwise.
+    pub async fn dht_get_immutable(&self, target: Id20) -> crate::Result<Option<Vec<u8>>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::DhtGetImmutable { target, reply: tx })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Store a mutable item in the DHT (BEP 44).
+    ///
+    /// `keypair_bytes` is a 32-byte Ed25519 seed. Returns the target hash.
+    pub async fn dht_put_mutable(
+        &self,
+        keypair_bytes: [u8; 32],
+        value: Vec<u8>,
+        seq: i64,
+        salt: Vec<u8>,
+    ) -> crate::Result<Id20> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::DhtPutMutable {
+                keypair_bytes,
+                value,
+                seq,
+                salt,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    /// Retrieve a mutable item from the DHT (BEP 44).
+    ///
+    /// Returns `Some((value, seq))` if found, `None` otherwise.
+    pub async fn dht_get_mutable(
+        &self,
+        public_key: [u8; 32],
+        salt: Vec<u8>,
+    ) -> crate::Result<Option<(Vec<u8>, i64)>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::DhtGetMutable {
+                public_key,
+                salt,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::Shutdown)?;
+        rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2268,6 +2356,18 @@ impl SessionActor {
                                 Err(crate::Error::TorrentNotFound(info_hash))
                             };
                             let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::DhtPutImmutable { reply, .. }) => {
+                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        }
+                        Some(SessionCommand::DhtGetImmutable { reply, .. }) => {
+                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        }
+                        Some(SessionCommand::DhtPutMutable { reply, .. }) => {
+                            let _ = reply.send(Err(crate::Error::DhtDisabled));
+                        }
+                        Some(SessionCommand::DhtGetMutable { reply, .. }) => {
+                            let _ = reply.send(Err(crate::Error::DhtDisabled));
                         }
                         Some(SessionCommand::PostSessionStats) => {
                             self.fire_stats_alert();
