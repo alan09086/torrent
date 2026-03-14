@@ -142,9 +142,9 @@ pub struct DiskConfig {
     pub io_threads: usize,
     /// Storage allocation mode. Default: Auto.
     pub storage_mode: torrent_core::StorageMode,
-    /// Total cache size in bytes (read + write). Default: 64 MiB.
+    /// Total cache size in bytes (read + write). Default: 16 MiB.
     pub cache_size: usize,
-    /// Fraction of cache_size reserved for write buffering. Default: 0.25.
+    /// Fraction of cache_size reserved for write buffering. Default: 0.5.
     pub write_cache_ratio: f32,
     /// Bounded channel capacity. Default: 512.
     pub channel_capacity: usize,
@@ -155,8 +155,8 @@ impl Default for DiskConfig {
         DiskConfig {
             io_threads: 4,
             storage_mode: torrent_core::StorageMode::Auto,
-            cache_size: 64 * 1024 * 1024,
-            write_cache_ratio: 0.25,
+            cache_size: 16 * 1024 * 1024,
+            write_cache_ratio: 0.5,
             channel_capacity: 512,
         }
     }

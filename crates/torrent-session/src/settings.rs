@@ -80,10 +80,10 @@ fn default_storage_mode() -> StorageMode {
     StorageMode::Auto
 }
 fn default_disk_cache_size() -> usize {
-    64 * 1024 * 1024
+    16 * 1024 * 1024
 }
 fn default_disk_write_cache_ratio() -> f32 {
-    0.25
+    0.5
 }
 fn default_disk_channel_capacity() -> usize {
     512
@@ -413,10 +413,10 @@ pub struct Settings {
     /// Storage allocation mode: Auto, FullPreallocate, or SparseFile (default: Auto).
     #[serde(default = "default_storage_mode")]
     pub storage_mode: StorageMode,
-    /// Total ARC disk cache size in bytes (default: 64 MiB, minimum: 1 MiB).
+    /// Total ARC disk cache size in bytes (default: 16 MiB, minimum: 1 MiB).
     #[serde(default = "default_disk_cache_size")]
     pub disk_cache_size: usize,
-    /// Fraction of disk cache reserved for write buffering (0.0–1.0, default: 0.25).
+    /// Fraction of disk cache reserved for write buffering (0.0–1.0, default: 0.5).
     #[serde(default = "default_disk_write_cache_ratio")]
     pub disk_write_cache_ratio: f32,
     /// Capacity of the async disk I/O command channel (default: 512).
@@ -743,8 +743,8 @@ impl Default for Settings {
             // Disk I/O
             disk_io_threads: default_disk_io_threads(),
             storage_mode: StorageMode::Auto,
-            disk_cache_size: 64 * 1024 * 1024,
-            disk_write_cache_ratio: 0.25,
+            disk_cache_size: 16 * 1024 * 1024,
+            disk_write_cache_ratio: 0.5,
             disk_channel_capacity: 512,
             // Hashing & piece picking
             hashing_threads: default_hashing_threads(),
@@ -1227,8 +1227,8 @@ mod tests {
         assert!(s.smart_ban_parole);
         assert_eq!(s.disk_io_threads, default_disk_io_threads());
         assert_eq!(s.storage_mode, StorageMode::Auto);
-        assert_eq!(s.disk_cache_size, 64 * 1024 * 1024);
-        assert!((s.disk_write_cache_ratio - 0.25).abs() < f32::EPSILON);
+        assert_eq!(s.disk_cache_size, 16 * 1024 * 1024);
+        assert!((s.disk_write_cache_ratio - 0.5).abs() < f32::EPSILON);
         assert_eq!(s.disk_channel_capacity, 512);
         assert_eq!(s.hashing_threads, default_hashing_threads());
         assert_eq!(s.max_request_queue_depth, 250);
@@ -1341,8 +1341,8 @@ mod tests {
         let dc = crate::disk::DiskConfig::from(&s);
         assert_eq!(dc.io_threads, default_disk_io_threads());
         assert_eq!(dc.storage_mode, StorageMode::Auto);
-        assert_eq!(dc.cache_size, 64 * 1024 * 1024);
-        assert!((dc.write_cache_ratio - 0.25).abs() < f32::EPSILON);
+        assert_eq!(dc.cache_size, 16 * 1024 * 1024);
+        assert!((dc.write_cache_ratio - 0.5).abs() < f32::EPSILON);
         assert_eq!(dc.channel_capacity, 512);
     }
 
