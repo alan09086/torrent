@@ -647,12 +647,11 @@ pub(crate) async fn run_peer(
     };
 
     // M93: Release held piece on disconnect
-    if let Some(ref ds) = dispatch_state {
-        if let Some(piece) = ds.current_piece_index() {
-            if let Some((ref atomic_states, ..)) = reservation_state {
-                atomic_states.release(piece);
-            }
-        }
+    if let Some(ref ds) = dispatch_state
+        && let Some(piece) = ds.current_piece_index()
+        && let Some((ref atomic_states, ..)) = reservation_state
+    {
+        atomic_states.release(piece);
     }
 
     // Notify plugins that a peer disconnected

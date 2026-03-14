@@ -3684,10 +3684,10 @@ impl TorrentActor {
             }
             PeerEvent::PieceReleased { peer_addr, piece } => {
                 // M93: Actor-side piece_owner cleanup after peer released a piece
-                if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr) {
-                    if self.piece_owner.get(piece as usize) == Some(&Some(slab_idx)) {
-                        self.piece_owner[piece as usize] = None;
-                    }
+                if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr)
+                    && self.piece_owner.get(piece as usize) == Some(&Some(slab_idx))
+                {
+                    self.piece_owner[piece as usize] = None;
                 }
                 // Snapshot will be rebuilt on next timer tick; notify waiting peers now
                 if let Some(ref notify) = self.reservation_notify {
@@ -3763,10 +3763,10 @@ impl TorrentActor {
         self.need_save_resume = true;
 
         // M93: Track piece ownership (actor learns about peer's CAS reservation via chunk arrival)
-        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr) {
-            if self.piece_owner.get(index as usize) == Some(&None) {
-                self.piece_owner[index as usize] = Some(slab_idx);
-            }
+        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr)
+            && self.piece_owner.get(index as usize) == Some(&None)
+        {
+            self.piece_owner[index as usize] = Some(slab_idx);
         }
 
         // Smart banning: track which peers contribute to each piece
@@ -3921,10 +3921,10 @@ impl TorrentActor {
         self.need_save_resume = true;
 
         // M93: Track piece ownership (actor learns about peer's CAS reservation via chunk arrival)
-        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr) {
-            if self.piece_owner.get(index as usize) == Some(&None) {
-                self.piece_owner[index as usize] = Some(slab_idx);
-            }
+        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr)
+            && self.piece_owner.get(index as usize) == Some(&None)
+        {
+            self.piece_owner[index as usize] = Some(slab_idx);
         }
 
         // Smart banning: track which peers contribute to each piece
@@ -5594,12 +5594,12 @@ impl TorrentActor {
             use std::collections::HashMap;
             let mut per_peer: HashMap<SocketAddr, Vec<(u32, u32, u32)>> = HashMap::new();
             for piece in 0..self.num_pieces {
-                if let Some(slab_idx) = self.piece_owner[piece as usize] {
-                    if let Some(&addr) = self.peer_slab.get(slab_idx) {
-                        let missing = ct.missing_chunks(piece);
-                        for (begin, length) in missing {
-                            per_peer.entry(addr).or_default().push((piece, begin, length));
-                        }
+                if let Some(slab_idx) = self.piece_owner[piece as usize]
+                    && let Some(&addr) = self.peer_slab.get(slab_idx)
+                {
+                    let missing = ct.missing_chunks(piece);
+                    for (begin, length) in missing {
+                        per_peer.entry(addr).or_default().push((piece, begin, length));
                     }
                 }
             }
