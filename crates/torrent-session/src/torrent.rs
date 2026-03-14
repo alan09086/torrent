@@ -4686,9 +4686,14 @@ impl TorrentActor {
             None => return,
         };
 
-        // Reject if we don't have a hash picker (v1 torrent or no metadata yet)
-        // TODO(M35): serve hashes from our Merkle tree state when seeding v2
-        let _ = peer.cmd_tx.try_send(PeerCommand::SendHashReject(request));
+        match serve_hashes(self.meta_v2.as_ref(), self.version, self.lengths.as_ref(), &request) {
+            Some(hashes) => {
+                let _ = peer.cmd_tx.try_send(PeerCommand::SendHashes { request, hashes });
+            }
+            None => {
+                let _ = peer.cmd_tx.try_send(PeerCommand::SendHashReject(request));
+            }
+        }
     }
 
     // ── Smart banning helpers (M25) ────────────────────────────────────
@@ -6874,6 +6879,82 @@ async fn accept_i2p(
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
+}
+
+// ============================================================================
+// BEP 52 hash serving (M87)
+// ============================================================================
+
+/// Determine what to serve for a BEP 52 hash request.
+///
+/// Returns `Some(hashes)` to serve, or `None` to reject.
+/// Only serves piece-layer hashes (the layer stored in `piece_layers`).
+/// Block-layer or other layer requests are rejected since we don't store
+/// the full Merkle tree.
+fn serve_hashes(
+    meta_v2: Option<&torrent_core::TorrentMetaV2>,
+    version: torrent_core::TorrentVersion,
+    lengths: Option<&Lengths>,
+    request: &torrent_core::HashRequest,
+) -> Option<Vec<torrent_core::Id32>> {
+    // Reject if v1-only or no v2 metadata
+    let meta_v2 = match meta_v2 {
+        Some(m) if version != torrent_core::TorrentVersion::V1Only => m,
+        _ => return None,
+    };
+
+    // Look up piece-layer hashes for the requested file root
+    let piece_hashes = meta_v2.file_piece_hashes(&request.file_root)?;
+
+    // We need lengths to validate the request geometry
+    let lengths = lengths?;
+
+    // Compute per-file block count from piece hashes and piece/chunk sizes.
+    // Each piece hash covers `piece_length / chunk_size` blocks, except the
+    // last piece which may cover fewer. For validation purposes we use the
+    // padded count that `validate_hash_request` expects.
+    let blocks_per_piece = (meta_v2.info.piece_length / lengths.chunk_size() as u64) as u32;
+    let num_pieces = piece_hashes.len() as u32;
+    let num_blocks = num_pieces.saturating_mul(blocks_per_piece);
+
+    if !torrent_core::validate_hash_request(request, num_blocks, num_pieces) {
+        return None;
+    }
+
+    // We only have piece-layer hashes. The piece layer is at
+    // base = log2(blocks_per_piece). Reject requests for other layers.
+    let piece_layer_base = blocks_per_piece.trailing_zeros();
+    if request.base != piece_layer_base {
+        return None;
+    }
+
+    // Extract requested hashes from the piece layer
+    let start = request.index as usize;
+    let end = (start + request.count as usize).min(piece_hashes.len());
+    let mut hashes: Vec<torrent_core::Id32> = piece_hashes[start..end].to_vec();
+
+    // Compute proof (uncle) hashes if requested.
+    //
+    // BEP 52 specifies a single subtree proof for the entire batch, not
+    // per-leaf proofs. The receiver rebuilds the subtree root from the
+    // base hashes itself, so we skip the first `log2(count)` levels of
+    // the proof path (those are internal to the requested subtree) and
+    // only send the uncle hashes above it.
+    if request.proof_layers > 0 && !piece_hashes.is_empty() {
+        let tree = torrent_core::MerkleTree::from_leaves(&piece_hashes);
+        let full_proof = tree.proof_path(start);
+        // Skip levels internal to the requested subtree
+        let subtree_depth = if request.count > 1 {
+            (request.count as usize).next_power_of_two().trailing_zeros() as usize
+        } else {
+            0
+        };
+        let available = full_proof.len().saturating_sub(subtree_depth);
+        let proof_count = (request.proof_layers as usize).min(available);
+        hashes.extend_from_slice(&full_proof[subtree_depth..subtree_depth + proof_count]);
+    }
+
+    Some(hashes)
 }
 
 // ============================================================================
@@ -11788,5 +11869,236 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         handle.shutdown().await.unwrap();
+    }
+
+    // ---- BEP 52 hash serving tests (M87) ----
+
+    /// Build a minimal TorrentMetaV2 with piece-layer hashes for testing.
+    fn make_test_meta_v2(
+        piece_hashes: &[torrent_core::Id32],
+        file_root: torrent_core::Id32,
+        piece_length: u64,
+        file_length: u64,
+    ) -> torrent_core::TorrentMetaV2 {
+        use std::collections::BTreeMap;
+
+        // Concatenate piece hashes into raw bytes
+        let mut layer_bytes = Vec::with_capacity(piece_hashes.len() * 32);
+        for h in piece_hashes {
+            layer_bytes.extend_from_slice(&h.0);
+        }
+
+        let mut piece_layers = BTreeMap::new();
+        piece_layers.insert(file_root, layer_bytes);
+
+        let file_tree = torrent_core::FileTreeNode::Directory({
+            let mut children = BTreeMap::new();
+            children.insert(
+                "test.dat".to_string(),
+                torrent_core::FileTreeNode::File(torrent_core::V2FileAttr {
+                    length: file_length,
+                    pieces_root: Some(file_root),
+                }),
+            );
+            children
+        });
+
+        torrent_core::TorrentMetaV2 {
+            info_hashes: torrent_core::InfoHashes::v2_only(torrent_core::Id32::ZERO),
+            info_bytes: None,
+            announce: None,
+            announce_list: None,
+            comment: None,
+            created_by: None,
+            creation_date: None,
+            info: torrent_core::InfoDictV2 {
+                name: "test".to_string(),
+                piece_length,
+                meta_version: 2,
+                file_tree,
+                ssl_cert: None,
+            },
+            piece_layers,
+            ssl_cert: None,
+        }
+    }
+
+    #[test]
+    fn test_serve_hashes_v2_piece_layer() {
+        // 4 piece hashes, piece_length = 16384, chunk_size = 16384
+        // => blocks_per_piece = 1, piece_layer_base = 0
+        let hashes: Vec<torrent_core::Id32> = (0..4u8)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = i;
+                torrent_core::Id32(h)
+            })
+            .collect();
+        let file_root = torrent_core::Id32([0xAA; 32]);
+        let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 4);
+        let lengths = Lengths::new(16384 * 4, 16384, DEFAULT_CHUNK_SIZE);
+
+        let request = torrent_core::HashRequest {
+            file_root,
+            base: 0, // piece layer when blocks_per_piece = 1
+            index: 0,
+            count: 4,
+            proof_layers: 0,
+        };
+
+        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let served = result.expect("should serve hashes");
+        assert_eq!(served.len(), 4);
+        for (i, h) in served.iter().enumerate() {
+            assert_eq!(h.0[0], i as u8);
+        }
+    }
+
+    #[test]
+    fn test_serve_hashes_rejects_v1_only() {
+        let hashes: Vec<torrent_core::Id32> = vec![torrent_core::Id32([0xBB; 32])];
+        let file_root = torrent_core::Id32([0xAA; 32]);
+        let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384);
+        let lengths = Lengths::new(16384, 16384, DEFAULT_CHUNK_SIZE);
+
+        let request = torrent_core::HashRequest {
+            file_root,
+            base: 0,
+            index: 0,
+            count: 1,
+            proof_layers: 0,
+        };
+
+        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V1Only, Some(&lengths), &request);
+        assert!(result.is_none(), "V1Only should reject hash requests");
+    }
+
+    #[test]
+    fn test_serve_hashes_rejects_unknown_root() {
+        let hashes: Vec<torrent_core::Id32> = vec![torrent_core::Id32([0xBB; 32])];
+        let file_root = torrent_core::Id32([0xAA; 32]);
+        let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384);
+        let lengths = Lengths::new(16384, 16384, DEFAULT_CHUNK_SIZE);
+
+        // Request a different file root that doesn't exist
+        let unknown_root = torrent_core::Id32([0xFF; 32]);
+        let request = torrent_core::HashRequest {
+            file_root: unknown_root,
+            base: 0,
+            index: 0,
+            count: 1,
+            proof_layers: 0,
+        };
+
+        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        assert!(result.is_none(), "unknown file_root should reject");
+    }
+
+    #[test]
+    fn test_serve_hashes_rejects_out_of_bounds() {
+        // 2 piece hashes, piece_length = 16384, chunk_size = 16384
+        let hashes: Vec<torrent_core::Id32> = (0..2u8)
+            .map(|i| torrent_core::Id32([i; 32]))
+            .collect();
+        let file_root = torrent_core::Id32([0xAA; 32]);
+        let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 2);
+        let lengths = Lengths::new(16384 * 2, 16384, DEFAULT_CHUNK_SIZE);
+
+        // Request starting at index 5, which is beyond the 2 available hashes
+        let request = torrent_core::HashRequest {
+            file_root,
+            base: 0,
+            index: 5,
+            count: 1,
+            proof_layers: 0,
+        };
+
+        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        assert!(result.is_none(), "out-of-bounds index should reject");
+    }
+
+    #[test]
+    fn test_serve_hashes_includes_proofs() {
+        // 4 piece hashes, piece_length = 16384, chunk_size = 16384
+        // => blocks_per_piece = 1, tree has 4 leaves => depth 2
+        let hashes: Vec<torrent_core::Id32> = (0..4u8)
+            .map(|i| torrent_core::Id32([i; 32]))
+            .collect();
+        let file_root = torrent_core::Id32([0xAA; 32]);
+        let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 4);
+        let lengths = Lengths::new(16384 * 4, 16384, DEFAULT_CHUNK_SIZE);
+
+        // Request 1 hash with 1 proof layer
+        let request = torrent_core::HashRequest {
+            file_root,
+            base: 0,
+            index: 0,
+            count: 1,
+            proof_layers: 1,
+        };
+
+        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let served = result.expect("should serve hashes with proofs");
+        // 1 requested hash + 1 proof hash (sibling of leaf 0) = 2 total
+        assert_eq!(served.len(), 2, "should have 1 data hash + 1 proof hash");
+        // First hash is the requested piece hash
+        assert_eq!(served[0], hashes[0]);
+        // Second hash is the sibling (proof) — which is hashes[1]
+        assert_eq!(served[1], hashes[1]);
+    }
+
+    #[test]
+    fn test_serve_hashes_proof_with_batch() {
+        // 4 piece hashes, piece_length = 16384, chunk_size = 16384
+        // => blocks_per_piece = 1, tree has 4 leaves => depth 2
+        //
+        // Tree layout (1-indexed heap):
+        //          [1] root
+        //        /          \
+        //     [2]            [3]
+        //    /    \         /    \
+        //  [4]h0  [5]h1  [6]h2  [7]h3
+        //
+        // Request count=2 at index=0 => subtree rooted at [2] (h0, h1).
+        // subtree_depth = log2(2) = 1, so we skip 1 level of the proof path.
+        // proof_path(0) = [h1, hash(h2,h3)] — h1 is internal to subtree,
+        // hash(h2,h3) is the uncle above. We skip h1 and send hash(h2,h3).
+        let hashes: Vec<torrent_core::Id32> = (0..4u8)
+            .map(|i| torrent_core::Id32([i; 32]))
+            .collect();
+        let file_root = torrent_core::Id32([0xAA; 32]);
+        let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 4);
+        let lengths = Lengths::new(16384 * 4, 16384, DEFAULT_CHUNK_SIZE);
+
+        let request = torrent_core::HashRequest {
+            file_root,
+            base: 0,
+            index: 0,
+            count: 2,
+            proof_layers: 1,
+        };
+
+        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let served = result.expect("should serve hashes with batch proof");
+        // 2 base hashes + 1 uncle hash = 3 total
+        assert_eq!(served.len(), 3, "should have 2 data hashes + 1 uncle hash");
+        // First two are the requested piece hashes
+        assert_eq!(served[0], hashes[0]);
+        assert_eq!(served[1], hashes[1]);
+        // Third is the uncle: sibling of the subtree root at [2],
+        // which is the node at [3] = hash(h2, h3)
+        let tree = torrent_core::MerkleTree::from_leaves(&hashes);
+        let expected_uncle = tree.layer(1)[1]; // layer 1 has 2 nodes; index 1 is the right one
+        assert_eq!(served[2], expected_uncle);
+
+        // Verify the proof is valid: reconstruct subtree root from base hashes,
+        // then verify against the tree root using the uncle hash
+        let sub_root = torrent_core::MerkleTree::root_from_hashes(&served[..2]);
+        let uncle_hashes = &served[2..];
+        let leaf_index = request.index as usize / 2; // 0 / 2 = 0
+        assert!(
+            torrent_core::MerkleTree::verify_proof(tree.root(), sub_root, leaf_index, uncle_hashes),
+            "subtree proof should verify against tree root"
+        );
     }
 }
