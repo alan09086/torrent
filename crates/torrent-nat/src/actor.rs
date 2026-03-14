@@ -502,32 +502,42 @@ impl NatActor {
             if self.config.enable_natpmp
                 && let Some(gw) = self.gateway
             {
-                let _ = crate::natpmp::delete_tcp_mapping(gw, tcp_port).await;
-                if let Some(udp_port) = self.active_udp_port {
-                    let _ = crate::natpmp::delete_udp_mapping(gw, udp_port).await;
+                if let Err(e) = crate::natpmp::delete_tcp_mapping(gw, tcp_port).await {
+                    debug!("failed to delete NAT-PMP TCP mapping on port {tcp_port}: {e}");
+                }
+                if let Some(udp_port) = self.active_udp_port
+                    && let Err(e) = crate::natpmp::delete_udp_mapping(gw, udp_port).await
+                {
+                    debug!("failed to delete NAT-PMP UDP mapping on port {udp_port}: {e}");
                 }
             }
 
             // Try UPnP deletion.
             if let Some((ref control_url, ref service_type)) = self.upnp_control {
                 let body = crate::upnp::soap::format_delete_port_mapping(tcp_port, "TCP");
-                let _ = crate::upnp::soap::soap_request(
+                if let Err(e) = crate::upnp::soap::soap_request(
                     control_url,
                     service_type,
                     "DeletePortMapping",
                     &body,
                 )
-                .await;
+                .await
+                {
+                    debug!("failed to delete UPnP TCP mapping on port {tcp_port}: {e}");
+                }
 
                 if let Some(udp_port) = self.active_udp_port {
                     let body = crate::upnp::soap::format_delete_port_mapping(udp_port, "UDP");
-                    let _ = crate::upnp::soap::soap_request(
+                    if let Err(e) = crate::upnp::soap::soap_request(
                         control_url,
                         service_type,
                         "DeletePortMapping",
                         &body,
                     )
-                    .await;
+                    .await
+                    {
+                        debug!("failed to delete UPnP UDP mapping on port {udp_port}: {e}");
+                    }
                 }
             }
         }
