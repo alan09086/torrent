@@ -465,10 +465,7 @@ struct PendingQuery {
 #[derive(Debug)]
 enum PendingQueryKind {
     Ping,
-    FindNode {
-        #[allow(dead_code)]
-        target: Id20,
-    },
+    FindNode,
     GetPeers {
         info_hash: Id20,
     },
@@ -480,10 +477,7 @@ enum PendingQueryKind {
     /// BEP 44: outgoing put item query.
     PutItem,
     /// BEP 51: outgoing sample_infohashes query.
-    SampleInfohashes {
-        #[allow(dead_code)]
-        target: Id20,
-    },
+    SampleInfohashes,
 }
 
 struct LookupState {
@@ -506,23 +500,19 @@ struct FindNodeLookup {
 }
 
 /// State for an active BEP 44 get lookup.
-#[allow(dead_code)]
 enum ItemLookupState {
     Immutable {
         #[allow(clippy::type_complexity)]
         reply: Option<oneshot::Sender<Result<Option<Vec<u8>>>>>,
         queried: std::collections::HashSet<Id20>,
-        closest: Vec<CompactNodeInfo>,
     },
     Mutable {
-        public_key: [u8; 32],
         salt: Vec<u8>,
         #[allow(clippy::type_complexity)]
         reply: Option<oneshot::Sender<Result<Option<(Vec<u8>, i64)>>>>,
         best_seq: i64,
         best_value: Option<Vec<u8>>,
         queried: std::collections::HashSet<Id20>,
-        closest: Vec<CompactNodeInfo>,
     },
 }
 
@@ -1177,7 +1167,7 @@ impl DhtActor {
 
         match (&pending.kind, resp) {
             (
-                PendingQueryKind::FindNode { target: _ },
+                PendingQueryKind::FindNode,
                 KrpcResponse::FindNode { nodes, nodes6, .. },
             ) => {
                 for node in nodes {
@@ -1351,7 +1341,7 @@ impl DhtActor {
                 // Announce response — success
             }
             (
-                PendingQueryKind::SampleInfohashes { target: _ },
+                PendingQueryKind::SampleInfohashes,
                 KrpcResponse::SampleInfohashes(si),
             ) => {
                 // Add discovered nodes to routing table (Gap 6: use checked_insert for BEP 42)
@@ -1685,7 +1675,7 @@ impl DhtActor {
                 if let Some(nid) = pending.node_id {
                     self.routing_table.mark_failed(&nid);
                 }
-                if matches!(pending.kind, PendingQueryKind::SampleInfohashes { .. })
+                if matches!(pending.kind, PendingQueryKind::SampleInfohashes)
                     && let Some(reply) = self.sample_replies.remove(&txn)
                 {
                     let _ = reply.send(Err(Error::Timeout));
@@ -1693,7 +1683,7 @@ impl DhtActor {
                 if let PendingQueryKind::GetPeers { info_hash } = pending.kind {
                     stalled_lookups.push(info_hash);
                 }
-                if matches!(pending.kind, PendingQueryKind::FindNode { .. }) {
+                if matches!(pending.kind, PendingQueryKind::FindNode) {
                     find_node_timed_out = true;
                 }
             }
@@ -1842,7 +1832,7 @@ impl DhtActor {
                 PendingQuery {
                     sent_at: Instant::now(),
                     addr,
-                    kind: PendingQueryKind::FindNode { target },
+                    kind: PendingQueryKind::FindNode,
                     node_id,
                 },
             );
@@ -1942,13 +1932,6 @@ impl DhtActor {
             ItemLookupState::Immutable {
                 reply: Some(reply),
                 queried: closest.iter().map(|n| n.id).collect(),
-                closest: closest
-                    .into_iter()
-                    .map(|n| CompactNodeInfo {
-                        id: n.id,
-                        addr: n.addr,
-                    })
-                    .collect(),
             },
         );
     }
@@ -2020,19 +2003,11 @@ impl DhtActor {
         self.item_lookups.insert(
             target,
             ItemLookupState::Mutable {
-                public_key,
                 salt,
                 reply: Some(reply),
                 best_seq: i64::MIN,
                 best_value: None,
                 queried: closest.iter().map(|n| n.id).collect(),
-                closest: closest
-                    .into_iter()
-                    .map(|n| CompactNodeInfo {
-                        id: n.id,
-                        addr: n.addr,
-                    })
-                    .collect(),
             },
         );
     }
@@ -2261,7 +2236,7 @@ impl DhtActor {
                 PendingQuery {
                     sent_at: Instant::now(),
                     addr,
-                    kind: PendingQueryKind::SampleInfohashes { target },
+                    kind: PendingQueryKind::SampleInfohashes,
                     node_id: Some(closest_node_id),
                 },
             );
