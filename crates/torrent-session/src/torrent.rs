@@ -3901,25 +3901,6 @@ impl TorrentActor {
         piece_complete
     }
 
-    /// M78: Actor-side handler for the direct peer-to-disk path.
-    /// Called when a peer task has already written the chunk to disk and sends
-    /// ChunkWritten (metadata-only) instead of PieceData (full Bytes payload).
-    /// Performs all the same bookkeeping as handle_piece_data — stats, smart
-    /// banning, peer tracking, end-game cancels, chunk tracking, piece
-    /// verification — without the disk write.
-    ///
-    /// M92: Now delegates to `process_block_completion()`. Will be removed in Task 8.
-    #[allow(dead_code)] // M92 Task 8 will remove this method entirely
-    async fn handle_chunk_written(
-        &mut self,
-        peer_addr: SocketAddr,
-        index: u32,
-        begin: u32,
-        length: u32,
-    ) {
-        self.process_block_completion(peer_addr, index, begin, length).await;
-    }
-
     async fn verify_existing_pieces(&mut self) {
         let disk = match &self.disk {
             Some(d) => d.clone(),
