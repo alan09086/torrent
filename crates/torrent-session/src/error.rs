@@ -120,6 +120,10 @@ pub enum Error {
     #[error("session shutting down")]
     Shutdown,
 
+    /// DHT is disabled in session settings.
+    #[error("DHT is disabled")]
+    DhtDisabled,
+
     /// I2P SAM protocol error.
     #[error("I2P: {0}")]
     I2p(#[from] crate::i2p::SamError),
