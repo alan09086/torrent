@@ -128,6 +128,65 @@ async fn test_num_nodes() {
     swarm.shutdown().await;
 }
 
+/// Build a 2-node swarm (seeder + leecher), transfer 64 KiB of data
+/// (4 pieces at 16384), and verify the leecher downloads everything
+/// and the seeder records upload.
+#[tokio::test]
+async fn test_basic_seeder_leecher_transfer() {
+    let swarm = SimSwarmBuilder::new(2).build().await;
+
+    // 64 KiB of test data = 4 pieces at 16384 bytes each
+    let data = vec![0xDE; 65536];
+    let (meta, _bytes) = make_test_torrent(&data, 16384);
+    let seeded_storage = make_seeded_storage(&data, 16384);
+
+    // Node 0 is the seeder (with pre-populated storage)
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
+
+    // Node 1 is the leecher (empty storage)
+    let _ih2 = swarm.add_torrent(1, meta.into(), None).await;
+
+    // Introduce peers so nodes know about each other
+    swarm.introduce_peers(info_hash).await;
+
+    // Poll leecher stats until download completes, with 30s timeout
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+        if leecher_stats.total_done == data.len() as u64 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for leecher to complete download; \
+             total_done={}, expected={}",
+            leecher_stats.total_done,
+            data.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Verify leecher has all the data
+    let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+    assert_eq!(
+        leecher_stats.total_done,
+        data.len() as u64,
+        "leecher should have downloaded all data"
+    );
+
+    // Verify seeder recorded upload
+    let seed_stats = swarm.torrent_stats(0, info_hash).await;
+    assert!(
+        seed_stats.total_upload > 0,
+        "seeder should have total_upload > 0, got {}",
+        seed_stats.total_upload,
+    );
+
+    swarm.shutdown().await;
+}
+
 /// Verify make_seeded_storage produces storage with correct data.
 #[test]
 fn test_make_seeded_storage_roundtrip() {
