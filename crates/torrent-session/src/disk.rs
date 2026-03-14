@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
@@ -118,11 +117,6 @@ pub(crate) enum DiskJob {
     FlushWriteBuffer {
         info_hash: Id20,
         piece: u32,
-        reply: oneshot::Sender<torrent_storage::Result<()>>,
-    },
-    MoveStorage {
-        info_hash: Id20,
-        new_path: PathBuf,
         reply: oneshot::Sender<torrent_storage::Result<()>>,
     },
 
@@ -467,24 +461,6 @@ impl DiskHandle {
     pub async fn flush_cache(&self) -> torrent_storage::Result<()> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(DiskJob::FlushAll { reply: tx }).await;
-        rx.await
-            .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "disk actor gone",
-            ))))
-    }
-
-    /// Move a torrent's storage to a new directory.
-    pub async fn move_storage(&self, new_path: PathBuf) -> torrent_storage::Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(DiskJob::MoveStorage {
-                info_hash: self.info_hash,
-                new_path,
-                reply: tx,
-            })
-            .await;
         rx.await
             .unwrap_or(Err(torrent_storage::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -882,25 +858,6 @@ impl DiskActor {
                     let permit = semaphore.acquire_owned().await.unwrap();
                     let result =
                         tokio::task::spawn_blocking(move || backend.flush_piece(info_hash, piece))
-                            .await
-                            .unwrap();
-                    drop(permit);
-                    let _ = reply.send(to_storage_result(result));
-                });
-            }
-
-            // --- Move storage ---
-            DiskJob::MoveStorage {
-                info_hash,
-                new_path,
-                reply,
-            } => {
-                let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
-                tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result =
-                        tokio::task::spawn_blocking(move || backend.move_storage(info_hash, &new_path))
                             .await
                             .unwrap();
                     drop(permit);
