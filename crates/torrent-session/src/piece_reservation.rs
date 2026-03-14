@@ -141,6 +141,77 @@ impl AtomicPieceStates {
     }
 }
 
+use slab::Slab;
+
+/// Arena-allocated peer index for compact piece tracking.
+///
+/// Maps between dense u16 slot indices and SocketAddr values.
+/// Managed by TorrentActor (single-threaded, no lock needed).
+pub(crate) struct PeerSlab {
+    inner: Slab<SocketAddr>,
+    addr_to_slot: FxHashMap<SocketAddr, u16>,
+}
+
+impl PeerSlab {
+    pub fn new() -> Self {
+        PeerSlab {
+            inner: Slab::with_capacity(64),
+            addr_to_slot: FxHashMap::default(),
+        }
+    }
+
+    /// Insert a peer, returning its compact slot index.
+    ///
+    /// Panics if the slab exceeds u16::MAX entries (65535 peers).
+    pub fn insert(&mut self, addr: SocketAddr) -> u16 {
+        let key = self.inner.insert(addr);
+        assert!(
+            key <= u16::MAX as usize,
+            "peer slab overflow: {key} > u16::MAX"
+        );
+        let slot = key as u16;
+        self.addr_to_slot.insert(addr, slot);
+        slot
+    }
+
+    /// Remove a peer by slot index.
+    pub fn remove(&mut self, slot: u16) -> SocketAddr {
+        let addr = self.inner.remove(slot as usize);
+        self.addr_to_slot.remove(&addr);
+        addr
+    }
+
+    /// Remove a peer by address. Returns the slot if found.
+    pub fn remove_by_addr(&mut self, addr: &SocketAddr) -> Option<u16> {
+        if let Some(slot) = self.addr_to_slot.remove(addr) {
+            self.inner.remove(slot as usize);
+            Some(slot)
+        } else {
+            None
+        }
+    }
+
+    /// Look up peer address by slot index.
+    pub fn get(&self, slot: u16) -> Option<&SocketAddr> {
+        self.inner.get(slot as usize)
+    }
+
+    /// Look up slot index by peer address.
+    pub fn slot_of(&self, addr: &SocketAddr) -> Option<u16> {
+        self.addr_to_slot.get(addr).copied()
+    }
+
+    /// Check if a slot is occupied.
+    pub fn contains(&self, slot: u16) -> bool {
+        self.inner.contains(slot as usize)
+    }
+
+    /// Number of active peers.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
 /// Shared state for concurrent per-peer piece dispatch.
 ///
 /// Lives behind `Arc<parking_lot::RwLock<_>>`. Request drivers call
@@ -1623,5 +1694,53 @@ mod tests {
         // release from Endgame (for pieces without an owner)
         states.release(1);
         assert_eq!(states.get(1), PieceState::Available);
+    }
+
+    #[test]
+    fn peer_slab_insert_remove_lookup() {
+        let mut slab = PeerSlab::new();
+        let a1 = addr(1000);
+        let a2 = addr(2000);
+        let a3 = addr(3000);
+
+        let s1 = slab.insert(a1);
+        let s2 = slab.insert(a2);
+        let s3 = slab.insert(a3);
+
+        assert_eq!(slab.len(), 3);
+        assert_eq!(slab.get(s1), Some(&a1));
+        assert_eq!(slab.get(s2), Some(&a2));
+        assert_eq!(slab.slot_of(&a2), Some(s2));
+        assert!(slab.contains(s1));
+
+        // Remove by slot
+        let removed = slab.remove(s2);
+        assert_eq!(removed, a2);
+        assert_eq!(slab.len(), 2);
+        assert_eq!(slab.get(s2), None);
+        assert_eq!(slab.slot_of(&a2), None);
+
+        // Remove by addr
+        let slot = slab.remove_by_addr(&a3);
+        assert_eq!(slot, Some(s3));
+        assert_eq!(slab.len(), 1);
+
+        // Remove nonexistent
+        assert_eq!(slab.remove_by_addr(&a3), None);
+    }
+
+    #[test]
+    fn peer_slab_slot_reuse() {
+        let mut slab = PeerSlab::new();
+        let a1 = addr(1000);
+        let a2 = addr(2000);
+
+        let s1 = slab.insert(a1);
+        slab.remove(s1);
+
+        // Slab reuses freed slot
+        let s2 = slab.insert(a2);
+        assert_eq!(s2, s1); // same slot index reused
+        assert_eq!(slab.get(s2), Some(&a2));
     }
 }

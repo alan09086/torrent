@@ -43,6 +43,9 @@ ring = "0.17"
 # Fast synchronization primitives
 parking_lot = "0.12"
 
+# Arena-allocated slot map
+slab = "0.4"
+
 # Testing
 pretty_assertions = "1"
 
