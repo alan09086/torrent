@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.92.0 | M92 | Peer event batching — PendingBatch, 25ms flush timer, ~3x context switch reduction |
 | 0.91.0 | M91 | SimTransport integration tests — end-to-end transfer, multi-peer, partition recovery, dead code cleanup |
 | 0.90.0 | M90 | I2P session integration — outbound SAM connects, BEP 7 tracker announces, PEX filtering |
 | 0.88.0 | M88 | BEP 44 session API — DHT storage put/get through SessionHandle |
@@ -43,6 +44,26 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.92.0] — 2026-03-14
+
+### Added
+- **Peer event batching (M92)**: Replaced per-block `PeerEvent::ChunkWritten` channel sends
+  with batched `PieceBlocksBatch` to reduce context switches. Each peer task accumulates
+  block completions in a `PendingBatch` struct, flushing immediately on piece completion
+  or every 25ms via a timer. Targets ~3x context switch reduction (462K → ~150K).
+- `BlockEntry` struct — lightweight record of block write completions for batch transport.
+- `PendingBatch` struct — per-peer block accumulator with piece-completion detection via
+  `Lengths::chunks_in_piece()`, 25ms flush timer arm in the `tokio::select!` loop, and
+  flush-on-disconnect to prevent block loss.
+- 8 unit tests for `PendingBatch` covering full-piece completion, timer flush, last-piece
+  edge case, multi-piece interleaving, cross-piece boundary reset, and disconnect flush.
+
+### Changed
+- Extracted `process_block_completion()` from `handle_chunk_written()` — identical logic,
+  now returns `bool` for piece completion signalling in batch iteration.
+- `PeerCommand::StartRequesting` now carries `Lengths` for `PendingBatch` construction.
+- Removed dead `handle_chunk_written()` method (replaced by `process_block_completion()`).
 
 ## [0.91.0] — 2026-03-14
 
