@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1476-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1480-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.90.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.91.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1476 tests, zero clippy warnings**
+- 📊 **1480 tests, zero clippy warnings**
 
 ---
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.90.0"
+torrent = "0.91.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -99,7 +99,7 @@ torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `torrent` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
-| `torrent-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 26 |
+| `torrent-sim` | In-process network simulation: SimClock, SimNetwork, SimTransport, SimSwarm harness | 30 |
 | `torrent-cli` | CLI binary: download, create, info subcommands | 61 |
 
 ### 🎯 Session Features
@@ -162,7 +162,8 @@ Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per ve
 
 | Version | Avg Speed | Peak | CPU Time | RSS | Notes |
 |---------|-----------|------|----------|-----|-------|
-| **0.90.0** | — | — | — | — | I2P session integration: outbound SAM connects, BEP 7 tracker announces, PEX filtering |
+| **0.91.0** | — | — | — | — | SimTransport integration tests: end-to-end transfer, multi-peer, partition recovery |
+| 0.90.0 | — | — | — | — | I2P session integration: outbound SAM connects, BEP 7 tracker announces, PEX filtering |
 | 0.88.0 | — | — | — | — | BEP 44 session API (DHT storage put/get through SessionHandle) |
 | 0.87.0 | — | — | — | — | BEP 52 hash serving for v2/hybrid seeders |
 | 0.85.0 | — | — | — | — | DHT routing table overhaul: iterative bootstrap, node liveness, background pinger, periodic persistence |
@@ -273,6 +274,7 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Audit Remediation | M86–M87 | Dead code removal, BEP 52 hash serving for v2/hybrid seeders | ✅ |
 | BEP 44 Session API | M88 | DHT storage put/get through SessionHandle with alert firing | ✅ |
 | I2P Integration | M90 | Outbound SAM connects, BEP 7 tracker announces, PEX mixed-mode filtering | ✅ |
+| Sim Integration Tests | M91 | End-to-end SimTransport transfer tests, partition recovery, dead code cleanup | ✅ |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 

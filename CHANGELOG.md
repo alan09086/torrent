@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.91.0 | M91 | SimTransport integration tests — end-to-end transfer, multi-peer, partition recovery, dead code cleanup |
 | 0.90.0 | M90 | I2P session integration — outbound SAM connects, BEP 7 tracker announces, PEX filtering |
 | 0.88.0 | M88 | BEP 44 session API — DHT storage put/get through SessionHandle |
 | 0.87.0 | M87 | BEP 52 hash serving — v2/hybrid seeders serve Merkle hashes |
@@ -42,6 +43,19 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.91.0] — 2026-03-14
+
+### Added
+- **SimTransport integration tests (M91)**: 4 end-to-end transfer tests validating
+  actual data flow through the simulated network — basic seeder-to-leecher (64 KiB),
+  multi-peer swarm (4 nodes, 128 KiB), network partition recovery with heal/re-introduce,
+  and link config transfer (latency/bandwidth config set without crash).
+
+### Changed
+- **Removed stale `#[allow(dead_code)]` annotations** from `SimConnection`, `NetworkInner`,
+  `register_listener()`, and `connect_tcp()` in `torrent-sim` — now exercised by transfer tests.
+  Retained annotations on `unregister_listener()` (test-only) and `factories` field (Arc lifetime).
 
 ## [0.90.0] — 2026-03-14
 
