@@ -110,6 +110,30 @@ mod tests {
     }
 
     #[test]
+    fn session_state_with_node_id_round_trip() {
+        let state = SessionState {
+            dht_nodes: vec![DhtNodeEntry {
+                host: "1.2.3.4".into(),
+                port: 6881,
+            }],
+            dht_node_id: Some("26d8457c04424098fd9e615b297745c772f49706".into()),
+            torrents: vec![],
+            banned_peers: vec![],
+            peer_strikes: vec![],
+        };
+
+        let encoded = torrent_bencode::to_bytes(&state).unwrap();
+        let encoded_str = String::from_utf8_lossy(&encoded);
+        assert!(
+            encoded_str.contains("dht-node-id"),
+            "encoded bencode should contain dht-node-id key: {encoded_str}"
+        );
+
+        let decoded: SessionState = torrent_bencode::from_bytes(&encoded).unwrap();
+        assert_eq!(state.dht_node_id, decoded.dht_node_id);
+    }
+
+    #[test]
     fn empty_session_state_round_trip() {
         let state = SessionState::new();
 
