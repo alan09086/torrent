@@ -122,7 +122,7 @@ pub struct SimSwarm {
     network: SimNetwork,
     sessions: Vec<SessionHandle>,
     node_ips: Vec<IpAddr>,
-    #[allow(dead_code)] // Retained for future use (e.g., manual connect calls)
+    #[allow(dead_code)] // Retained: needed to keep Arc<NetworkFactory> alive for sessions
     factories: Vec<Arc<NetworkFactory>>,
 }
 

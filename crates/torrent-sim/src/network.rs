@@ -45,8 +45,6 @@ impl Default for LinkConfig {
 }
 
 /// A pending TCP connection delivered to a listener.
-// Fields and struct used by SimTransport (Task 5); suppress until then.
-#[allow(dead_code)]
 pub(crate) struct SimConnection {
     /// The connecting peer's address.
     pub remote_addr: SocketAddr,
@@ -67,8 +65,6 @@ pub struct SimNetwork {
     clock: SimClock,
 }
 
-// Used by SimTransport (Task 5); suppress dead_code until then.
-#[allow(dead_code)]
 struct NetworkInner {
     /// Next IP octet to assign (starts at 1).
     next_ip: u8,
@@ -175,7 +171,6 @@ impl SimNetwork {
     ///
     /// Returns a receiver that will get incoming [`SimConnection`]s when
     /// remote nodes connect to this address.
-    #[allow(dead_code)] // Used by SimTransport (Task 5)
     pub(crate) fn register_listener(&self, addr: SocketAddr) -> mpsc::Receiver<SimConnection> {
         let (tx, rx) = mpsc::channel(64);
         let mut inner = self.inner.lock().unwrap();
@@ -184,7 +179,7 @@ impl SimNetwork {
     }
 
     /// Remove a TCP listener registration.
-    #[allow(dead_code)] // Used by SimTransport (Task 5)
+    #[allow(dead_code)] // Used in tests; will be used by SimTransport drop logic
     pub(crate) fn unregister_listener(&self, addr: &SocketAddr) {
         let mut inner = self.inner.lock().unwrap();
         inner.listeners.remove(addr);
@@ -201,7 +196,6 @@ impl SimNetwork {
     /// - The two addresses are separated by a network partition
     /// - No listener is registered at `to_addr`
     /// - The listener's accept channel is full or closed
-    #[allow(dead_code)] // Used by SimTransport (Task 5)
     pub(crate) async fn connect_tcp(
         &self,
         from_addr: SocketAddr,
