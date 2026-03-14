@@ -2305,6 +2305,30 @@ impl DhtActor {
             inserted,
             "BEP 42: node ID regeneration complete"
         );
+
+        // Re-trigger iterative bootstrap with the new node ID.
+        // The first bootstrap targeted the old ID, so the discovered nodes
+        // are in the wrong neighbourhood. A fresh find_node cascade targeting
+        // the new ID fills the home bucket properly.
+        let initial_closest: Vec<CompactNodeInfo> = self
+            .routing_table
+            .closest(&new_id, K)
+            .into_iter()
+            .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+            .collect();
+        if !initial_closest.is_empty() {
+            debug!(
+                seed_nodes = initial_closest.len(),
+                "BEP 42: re-bootstrapping with new node ID"
+            );
+            self.bootstrap_lookup = Some(FindNodeLookup {
+                target: new_id,
+                closest: initial_closest,
+                queried: std::collections::HashSet::new(),
+                round: 0,
+                max_rounds: 6,
+            });
+        }
     }
 
     fn make_stats(&self) -> DhtStats {
