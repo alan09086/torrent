@@ -3150,5 +3150,38 @@ mod tests {
             let blocks = batch.take();
             assert!(blocks.is_empty());
         }
+
+        #[test]
+        fn pending_batch_cross_piece_boundary() {
+            // 4 pieces, 64 KiB each (4 blocks per piece), 16 KiB chunks
+            let lengths = Lengths::new(4 * 64 * 1024, 64 * 1024, 16384);
+            let mut batch = PendingBatch::new(&lengths);
+
+            assert_eq!(lengths.chunks_in_piece(0), 4);
+            assert_eq!(lengths.chunks_in_piece(3), 4); // last piece, exact fit
+
+            // Complete piece 0
+            for i in 0..3 {
+                assert!(!batch.push(0, i * 16384, 16384));
+            }
+            assert!(batch.push(0, 3 * 16384, 16384)); // piece 0 complete
+
+            // Flush piece 0
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 4);
+
+            // Start piece 1, then flush via "timer" (take without completion)
+            assert!(!batch.push(1, 0, 16384));
+            assert!(!batch.push(1, 16384, 16384));
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 2);
+            assert!(batch.is_empty());
+
+            // Verify counts were reset — pushing the same blocks again should
+            // not trigger false completion (only 2 blocks in this batch, not 4)
+            assert!(!batch.push(1, 2 * 16384, 16384));
+            assert!(!batch.push(1, 3 * 16384, 16384)); // only 2 in this batch
+            assert_eq!(batch.blocks.len(), 2);
+        }
     }
 }
