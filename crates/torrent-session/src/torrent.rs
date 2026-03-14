@@ -400,6 +400,7 @@ impl TorrentHandle {
             dht_v6: if enable_dht { dht_v6 } else { None },
             dht_peers_rx,
             dht_v6_peers_rx,
+            dht_v6_empty_count: 0,
             alert_tx,
             alert_mask,
             upload_bucket,
@@ -671,6 +672,7 @@ impl TorrentHandle {
             dht_v6: if enable_dht { dht_v6 } else { None },
             dht_peers_rx,
             dht_v6_peers_rx,
+            dht_v6_empty_count: 0,
             alert_tx,
             alert_mask,
             upload_bucket,
@@ -1400,6 +1402,9 @@ struct TorrentActor {
     dht_v6: Option<DhtHandle>,
     dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
     dht_v6_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    /// Consecutive times the V6 DHT returned an empty table.
+    /// After 30 failures (~3s at 100ms), stop retrying to avoid log spam.
+    dht_v6_empty_count: u32,
 
     // Alert system (M15)
     alert_tx: broadcast::Sender<Alert>,
@@ -2037,6 +2042,7 @@ impl TorrentActor {
                             }
                         }
                         if self.dht_v6_peers_rx.is_none()
+                            && self.dht_v6_empty_count < 30
                             && let Some(ref dht6) = self.dht_v6
                         {
                             match dht6.get_peers(self.info_hash).await {
@@ -2058,6 +2064,7 @@ impl TorrentActor {
                                 }
                             }
                             if self.dht_v6_v2_peers_rx.is_none()
+                                && self.dht_v6_empty_count < 30
                                 && let Some(ref dht6) = self.dht_v6
                             {
                                 match dht6.get_peers(v2_as_v1).await {
@@ -2119,12 +2126,18 @@ impl TorrentActor {
                     match result {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v6 returned peers");
+                            self.dht_v6_empty_count = 0; // V6 is working, reset
                             self.handle_add_peers(peers, PeerSource::Dht);
                             self.try_connect_peers();
                         }
                         None => {
-                            debug!("DHT v6 peer search exhausted");
                             self.dht_v6_peers_rx = None;
+                            self.dht_v6_empty_count += 1;
+                            if self.dht_v6_empty_count == 30 {
+                                debug!("DHT v6 routing table persistently empty, giving up");
+                            } else if self.dht_v6_empty_count < 30 {
+                                debug!("DHT v6 peer search exhausted");
+                            }
                         }
                     }
                 }
@@ -4983,6 +4996,7 @@ impl TorrentActor {
                                             self.dht_v2_peers_rx = Some(rx);
                                         }
                                         if self.dht_v6_v2_peers_rx.is_none()
+                                            && self.dht_v6_empty_count < 30
                                             && let Some(ref dht6) = self.dht_v6
                                             && let Ok(rx) = dht6.get_peers(v2_as_v1).await
                                         {
