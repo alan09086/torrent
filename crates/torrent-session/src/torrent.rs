@@ -3748,15 +3748,22 @@ impl TorrentActor {
     }
 
     /// M92: Process a batch of block completions from a single peer.
-    /// Each block is processed identically to the former per-block handle_chunk_written().
+    /// Iterates blocks, calling `process_block_completion()` for each.
+    /// Piece verifications are triggered inline as pieces complete
+    /// (same as the former per-block path).
     async fn handle_piece_blocks_batch(
         &mut self,
         peer_addr: SocketAddr,
         blocks: Vec<crate::types::BlockEntry>,
     ) {
-        // Temporary stub: delegate to handle_chunk_written for each block
-        for block in blocks {
-            self.handle_chunk_written(peer_addr, block.index, block.begin, block.length).await;
+        for block in &blocks {
+            self.process_block_completion(
+                peer_addr,
+                block.index,
+                block.begin,
+                block.length,
+            )
+            .await;
         }
     }
 
@@ -3901,6 +3908,7 @@ impl TorrentActor {
     /// verification — without the disk write.
     ///
     /// M92: Now delegates to `process_block_completion()`. Will be removed in Task 8.
+    #[allow(dead_code)] // M92 Task 8 will remove this method entirely
     async fn handle_chunk_written(
         &mut self,
         peer_addr: SocketAddr,
