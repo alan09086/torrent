@@ -134,19 +134,29 @@ Higher-level abstractions like "publish a torrent to the DHT." This is raw BEP 4
 
 ### Current State
 
+The four `let _ =` patterns are inside nested conditionals that must be preserved:
+
 ```rust
-let _ = crate::natpmp::delete_tcp_mapping(gw, tcp_port).await;
-let _ = crate::natpmp::delete_udp_mapping(gw, udp_port).await;
-let _ = crate::upnp::soap::soap_request(...).await;  // TCP
-let _ = crate::upnp::soap::soap_request(...).await;  // UDP
+if self.config.enable_natpmp && let Some(gw) = self.gateway {
+    let _ = crate::natpmp::delete_tcp_mapping(gw, tcp_port).await;       // (1)
+    if let Some(udp_port) = self.active_udp_port {
+        let _ = crate::natpmp::delete_udp_mapping(gw, udp_port).await;   // (2)
+    }
+}
+if let Some((ref control_url, ref service_type)) = self.upnp_control {
+    let _ = crate::upnp::soap::soap_request(...).await;                  // (3) TCP
+    if let Some(udp_port) = self.active_udp_port {
+        let _ = crate::upnp::soap::soap_request(...).await;              // (4) UDP
+    }
+}
 ```
 
 ### Design
 
-Replace all four `let _ =` patterns with:
+Replace each `let _ =` with protocol-specific debug logging, inside its existing conditional block:
 ```rust
-if let Err(e) = ... {
-    debug!("failed to delete {protocol} {port_type} mapping: {e}");
+if let Err(e) = crate::natpmp::delete_tcp_mapping(gw, tcp_port).await {
+    debug!("failed to delete NAT-PMP TCP mapping on port {tcp_port}: {e}");
 }
 ```
 
