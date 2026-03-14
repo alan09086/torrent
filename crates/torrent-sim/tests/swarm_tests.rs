@@ -251,6 +251,91 @@ async fn test_multi_peer_swarm_transfer() {
     swarm.shutdown().await;
 }
 
+/// 2-node swarm: partition after 200ms, verify transfer hasn't completed,
+/// heal partition, re-introduce peers, and verify transfer completes.
+#[tokio::test]
+async fn test_partition_recovery_transfer() {
+    let swarm = SimSwarmBuilder::new(2).build().await;
+
+    // 64 KiB of test data = 4 pieces at 16384 bytes each
+    let data = vec![0xAA; 65536];
+    let (meta, _bytes) = make_test_torrent(&data, 16384);
+    let seeded_storage = make_seeded_storage(&data, 16384);
+
+    // Node 0 is the seeder (with pre-populated storage)
+    let info_hash = swarm
+        .add_torrent(0, meta.clone().into(), Some(seeded_storage))
+        .await;
+
+    // Node 1 is the leecher (empty storage)
+    let _ih2 = swarm.add_torrent(1, meta.into(), None).await;
+
+    // Introduce peers to start transfer
+    swarm.introduce_peers(info_hash).await;
+
+    // Let transfer begin for 200ms
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Apply network partition: isolate seeder from leecher
+    swarm
+        .network()
+        .partition(vec![swarm.node_ip(0)], vec![swarm.node_ip(1)]);
+
+    // Record leecher's progress at partition time
+    let stats_at_partition = swarm.torrent_stats(1, info_hash).await;
+
+    // Verify transfer hasn't completed yet (best-effort: data in flight may arrive)
+    // If it already completed before partition, the test is still valid —
+    // we just can't assert the stall.
+    let completed_before_partition = stats_at_partition.total_done == data.len() as u64;
+
+    if !completed_before_partition {
+        // Wait 500ms to verify transfer is stalled during partition
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let stats_during_partition = swarm.torrent_stats(1, info_hash).await;
+        assert!(
+            stats_during_partition.total_done < data.len() as u64,
+            "transfer should not complete during partition; \
+             total_done={}, expected < {}",
+            stats_during_partition.total_done,
+            data.len(),
+        );
+    }
+
+    // Heal partition: restore full connectivity
+    swarm.network().heal_partitions();
+
+    // Re-introduce peers (old connections are broken by partition)
+    swarm.introduce_peers(info_hash).await;
+
+    // Poll leecher stats until download completes, with 30s timeout
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+        if leecher_stats.total_done == data.len() as u64 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for leecher to complete after partition heal; \
+             total_done={}, expected={}",
+            leecher_stats.total_done,
+            data.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Final verification
+    let final_stats = swarm.torrent_stats(1, info_hash).await;
+    assert_eq!(
+        final_stats.total_done,
+        data.len() as u64,
+        "leecher should have downloaded all data after partition recovery"
+    );
+
+    swarm.shutdown().await;
+}
+
 /// Verify make_seeded_storage produces storage with correct data.
 #[test]
 fn test_make_seeded_storage_roundtrip() {
