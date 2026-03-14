@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.87.0] — 2026-03-14
+
+### Added
+- **BEP 44 session API**: `SessionHandle` now exposes `dht_put_immutable()`,
+  `dht_get_immutable()`, `dht_put_mutable()`, and `dht_get_mutable()` for DHT
+  storage operations. Handlers forward to `DhtHandle` and fire pre-defined alerts
+  (`DhtPutComplete`, `DhtGetResult`, `DhtMutablePutComplete`, `DhtMutableGetResult`,
+  `DhtItemError`). Returns `Error::DhtDisabled` when DHT is off.
+
 ## [0.86.0] — 2026-03-14
 
 ### Added
