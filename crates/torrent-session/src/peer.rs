@@ -23,7 +23,7 @@ use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
 use crate::pipeline::PeerPipelineState;
 use crate::pex::PexMessage;
 use crate::piece_reservation::{BlockRequest, PieceReservationState};
-use crate::types::{PeerCommand, PeerEvent};
+use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 
 use tokio::sync::Semaphore;
 
@@ -412,15 +412,18 @@ pub(crate) async fn run_peer(
                             }
                             _ => {}
                         }
-                        // M78: If we did a direct disk write, send lightweight ChunkWritten
-                        // instead of PieceData (which carries the full Bytes payload)
+                        // M92: If we did a direct disk write, send batched PieceBlocksBatch
+                        // instead of PieceData (which carries the full Bytes payload).
+                        // Currently sends single-element batches; Task 6 adds real batching.
                         if let Message::Piece { index, begin, ref data } = msg
                             && let Some((_, _, Some(_), _)) = &reservation_state
                         {
-                            event_tx.send(PeerEvent::ChunkWritten {
+                            event_tx.send(PeerEvent::PieceBlocksBatch {
                                 peer_addr: addr,
-                                index, begin,
-                                length: data.len() as u32,
+                                blocks: vec![BlockEntry {
+                                    index, begin,
+                                    length: data.len() as u32,
+                                }],
                             }).await.map_err(|_| crate::Error::Shutdown)?;
                             continue; // skip handle_message for this message
                         }

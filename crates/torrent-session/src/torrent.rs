@@ -3592,8 +3592,8 @@ impl TorrentActor {
                     }
                 }
             }
-            PeerEvent::ChunkWritten { peer_addr, index, begin, length } => {
-                self.handle_chunk_written(peer_addr, index, begin, length).await;
+            PeerEvent::PieceBlocksBatch { peer_addr, blocks } => {
+                self.handle_piece_blocks_batch(peer_addr, blocks).await;
             }
         }
     }
@@ -3744,6 +3744,19 @@ impl TorrentActor {
         // End-game dispatch still happens here.
         if self.end_game.is_active() {
             self.request_end_game_block(peer_addr).await;
+        }
+    }
+
+    /// M92: Process a batch of block completions from a single peer.
+    /// Each block is processed identically to the former per-block handle_chunk_written().
+    async fn handle_piece_blocks_batch(
+        &mut self,
+        peer_addr: SocketAddr,
+        blocks: Vec<crate::types::BlockEntry>,
+    ) {
+        // Temporary stub: delegate to handle_chunk_written for each block
+        for block in blocks {
+            self.handle_chunk_written(peer_addr, block.index, block.begin, block.length).await;
         }
     }
 
