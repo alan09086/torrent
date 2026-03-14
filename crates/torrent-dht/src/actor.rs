@@ -460,6 +460,7 @@ struct PendingQuery {
     sent_at: Instant,
     addr: SocketAddr,
     kind: PendingQueryKind,
+    node_id: Option<Id20>,
 }
 
 #[derive(Debug)]
@@ -693,7 +694,7 @@ impl DhtActor {
                         .collect();
                     for addr in matching {
                         debug!(node = %addr_str, resolved = %addr, family = ?self.address_family, "bootstrapping");
-                        self.send_find_node(addr, own_id).await;
+                        self.send_find_node(addr, own_id, None).await;
                     }
                 }
                 Err(e) => {
@@ -723,8 +724,10 @@ impl DhtActor {
                 trace!(code, message, from = %addr, "KRPC error received");
                 // Still match pending query to clean up
                 let txn = msg.transaction_id.as_u16();
-                if let Some(pending) = self.pending.remove(&txn) {
-                    self.routing_table.mark_failed(&pending_node_id(&pending));
+                if let Some(pending) = self.pending.remove(&txn)
+                    && let Some(nid) = pending.node_id
+                {
+                    self.routing_table.mark_failed(&nid);
                 }
             }
         }
@@ -1228,7 +1231,7 @@ impl DhtActor {
                         if let Some(lookup) = self.lookups.get_mut(&info_hash) {
                             lookup.queried.insert(node.id);
                         }
-                        self.send_get_peers(node.addr, info_hash).await;
+                        self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
                     }
                 }
             }
@@ -1470,7 +1473,7 @@ impl DhtActor {
         let to_query: Vec<_> = initial_nodes.to_vec();
         for node in &to_query {
             queried.insert(node.id);
-            self.send_get_peers(node.addr, info_hash).await;
+            self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
         }
 
         self.lookups.insert(
@@ -1526,6 +1529,7 @@ impl DhtActor {
                         sent_at: Instant::now(),
                         addr: *addr,
                         kind: PendingQueryKind::AnnouncePeer,
+                        node_id: None,
                     },
                 );
                 self.stats.total_queries_sent += 1;
@@ -1565,9 +1569,8 @@ impl DhtActor {
         for txn in expired {
             if let Some(pending) = self.pending.remove(&txn) {
                 trace!(txn, addr = %pending.addr, "query timed out");
-                let node_id = pending_node_id(&pending);
-                if node_id != Id20::ZERO {
-                    self.routing_table.mark_failed(&node_id);
+                if let Some(nid) = pending.node_id {
+                    self.routing_table.mark_failed(&nid);
                 }
                 if matches!(pending.kind, PendingQueryKind::SampleInfohashes { .. })
                     && let Some(reply) = self.sample_replies.remove(&txn)
@@ -1601,7 +1604,7 @@ impl DhtActor {
                         lookup.queried.insert(node.id);
                     }
                     for node in to_query {
-                        self.send_get_peers(node.addr, info_hash).await;
+                        self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
                     }
                 } else if !has_pending {
                     debug!(%info_hash, "get_peers lookup exhausted all nodes");
@@ -1664,12 +1667,12 @@ impl DhtActor {
             let target = self.routing_table.random_id_in_bucket(bucket_idx);
             let closest = self.routing_table.closest(&target, 3);
             for node in closest {
-                self.send_find_node(node.addr, target).await;
+                self.send_find_node(node.addr, target, Some(node.id)).await;
             }
         }
     }
 
-    async fn send_find_node(&mut self, addr: SocketAddr, target: Id20) {
+    async fn send_find_node(&mut self, addr: SocketAddr, target: Id20, node_id: Option<Id20>) {
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
@@ -1685,13 +1688,14 @@ impl DhtActor {
                     sent_at: Instant::now(),
                     addr,
                     kind: PendingQueryKind::FindNode { target },
+                    node_id,
                 },
             );
             self.stats.total_queries_sent += 1;
         }
     }
 
-    async fn send_get_peers(&mut self, addr: SocketAddr, info_hash: Id20) {
+    async fn send_get_peers(&mut self, addr: SocketAddr, info_hash: Id20, node_id: Option<Id20>) {
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
@@ -1710,6 +1714,7 @@ impl DhtActor {
                     sent_at: Instant::now(),
                     addr,
                     kind: PendingQueryKind::GetPeers { info_hash },
+                    node_id,
                 },
             );
             self.stats.total_queries_sent += 1;
@@ -1905,6 +1910,7 @@ impl DhtActor {
                     sent_at: Instant::now(),
                     addr,
                     kind: PendingQueryKind::GetItem { target },
+                    node_id: None,
                 },
             );
             self.stats.total_queries_sent += 1;
@@ -1937,6 +1943,7 @@ impl DhtActor {
                     sent_at: Instant::now(),
                     addr: params.addr,
                     kind: PendingQueryKind::PutItem,
+                    node_id: None,
                 },
             );
             self.stats.total_queries_sent += 1;
@@ -2029,8 +2036,8 @@ impl DhtActor {
     ) {
         // Find closest node to the target and send the query there
         let closest = self.routing_table.closest(&target, 1);
-        let addr = match closest.first() {
-            Some(node) => node.addr,
+        let (addr, closest_node_id) = match closest.first() {
+            Some(node) => (node.addr, node.id),
             None => {
                 let _ = reply.send(Err(Error::InvalidMessage(
                     "no nodes in routing table".into(),
@@ -2054,6 +2061,7 @@ impl DhtActor {
                     sent_at: Instant::now(),
                     addr,
                     kind: PendingQueryKind::SampleInfohashes { target },
+                    node_id: Some(closest_node_id),
                 },
             );
             self.stats.total_queries_sent += 1;
@@ -2136,14 +2144,6 @@ impl DhtActor {
             dht_item_count: immutable + mutable,
         }
     }
-}
-
-/// Try to extract a node ID from a pending query (best effort).
-fn pending_node_id(_pending: &PendingQuery) -> Id20 {
-    // We don't store the remote node's ID in pending queries,
-    // so we can't mark_failed by ID. In a full implementation,
-    // we'd track this. For now, return ZERO to skip.
-    Id20::ZERO
 }
 
 /// Hash a socket address to a u64 for use as a voter source ID.
