@@ -26,6 +26,57 @@ use crate::storage::{DhtStorage, InMemoryDhtStorage};
 #[allow(unused_imports)]
 use ed25519_dalek::SigningKey;
 
+/// Token-bucket rate limiter for outgoing KRPC queries.
+///
+/// Permits refill continuously based on elapsed real time. `try_acquire` is
+/// non-blocking: it either consumes a permit or returns `false` immediately.
+#[allow(dead_code)]
+struct QueryRateLimiter {
+    permits: u32,
+    max_permits: u32,
+    last_refill: Instant,
+    refill_rate: u32,
+}
+
+#[allow(dead_code)]
+impl QueryRateLimiter {
+    /// Create a new limiter with `rate` permits per second. Starts with a full
+    /// bucket so the first burst of queries is not artificially delayed.
+    fn new(rate: usize) -> Self {
+        QueryRateLimiter {
+            permits: rate as u32,
+            max_permits: rate as u32,
+            last_refill: Instant::now(),
+            refill_rate: rate as u32,
+        }
+    }
+
+    /// Attempt to consume one permit. Returns `true` if a permit was available,
+    /// `false` if the bucket is empty. Never blocks.
+    fn try_acquire(&mut self) -> bool {
+        self.refill();
+        if self.permits > 0 {
+            self.permits -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Refill the bucket based on elapsed time since the last refill. Caps at
+    /// `max_permits`. Only updates `last_refill` when at least one permit is
+    /// added (avoids drift on very fast calls).
+    fn refill(&mut self) {
+        let elapsed = self.last_refill.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+        let new_permits = (elapsed_secs * self.refill_rate as f64) as u32;
+        if new_permits > 0 {
+            self.permits = (self.permits + new_permits).min(self.max_permits);
+            self.last_refill = Instant::now();
+        }
+    }
+}
+
 /// Configuration for the DHT.
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
@@ -62,7 +113,7 @@ impl Default for DhtConfig {
                 "router.utorrent.com:6881".into(),
             ],
             own_id: None,
-            queries_per_second: 50,
+            queries_per_second: 250,
             query_timeout: Duration::from_secs(5),
             address_family: AddressFamily::V4,
             enforce_node_id: false,
@@ -83,7 +134,7 @@ impl DhtConfig {
                 "dht.libtorrent.org:25401".into(),
             ],
             own_id: None,
-            queries_per_second: 50,
+            queries_per_second: 250,
             query_timeout: Duration::from_secs(5),
             address_family: AddressFamily::V6,
             enforce_node_id: false,
@@ -395,6 +446,9 @@ struct DhtActor {
     ip_consensus_tx: mpsc::Sender<std::net::IpAddr>,
     /// Pending one-shot replies for sample_infohashes queries.
     sample_replies: HashMap<u16, oneshot::Sender<Result<SampleInfohashesResult>>>,
+    /// Token-bucket rate limiter for outgoing KRPC queries.
+    #[allow(dead_code)]
+    rate_limiter: QueryRateLimiter,
 }
 
 struct ActorStats {
@@ -509,6 +563,7 @@ impl DhtActor {
         debug!(id = %own_id, family = ?address_family, "DHT node ID");
 
         let max_items = config.dht_max_items;
+        let queries_per_second = config.queries_per_second;
         DhtActor {
             config,
             address_family,
@@ -529,6 +584,7 @@ impl DhtActor {
             ip_voter: ExternalIpVoter::new(10),
             ip_consensus_tx,
             sample_replies: HashMap::new(),
+            rate_limiter: QueryRateLimiter::new(queries_per_second),
         }
     }
 
@@ -2577,5 +2633,82 @@ mod tests {
         // For now, just verify the handle method exists and handles shutdown gracefully
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle_a.shutdown().await.unwrap();
+    }
+
+    // ---- QueryRateLimiter unit tests ----
+
+    #[test]
+    fn rate_limiter_new_starts_full() {
+        let limiter = QueryRateLimiter::new(10);
+        assert_eq!(limiter.permits, 10);
+        assert_eq!(limiter.max_permits, 10);
+        assert_eq!(limiter.refill_rate, 10);
+    }
+
+    #[test]
+    fn rate_limiter_new_zero_rate() {
+        // A zero-rate limiter should never grant permits.
+        let mut limiter = QueryRateLimiter::new(0);
+        assert!(!limiter.try_acquire());
+    }
+
+    #[test]
+    fn rate_limiter_exhaustion() {
+        // Drain all N permits, then the (N+1)th call must fail.
+        let mut limiter = QueryRateLimiter::new(5);
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(), "permit should be available");
+        }
+        assert!(!limiter.try_acquire(), "bucket must be empty after N acquires");
+    }
+
+    #[test]
+    fn rate_limiter_initial_permits_work() {
+        // Full bucket on creation: first try_acquire always succeeds.
+        let mut limiter = QueryRateLimiter::new(1);
+        assert!(limiter.try_acquire());
+        // Bucket is now empty.
+        assert!(!limiter.try_acquire());
+    }
+
+    #[test]
+    fn rate_limiter_refill_caps_at_max() {
+        // Manually set permits below max, then trigger a refill by faking a
+        // large elapsed time through repeated calls; instead, just validate the
+        // cap logic by setting state directly and calling refill via try_acquire.
+        // We can't easily fake Instant, but we can verify that permits never
+        // exceed max_permits after a refill.
+        let mut limiter = QueryRateLimiter::new(10);
+        // Drain to 0.
+        for _ in 0..10 {
+            limiter.try_acquire();
+        }
+        assert_eq!(limiter.permits, 0);
+
+        // Sleep slightly longer than 1 second so the refill would add >10 permits
+        // if uncapped. Since we cannot sleep in a unit test cheaply, we instead
+        // directly manipulate last_refill to simulate elapsed time.
+        limiter.last_refill = Instant::now() - Duration::from_secs(5);
+        limiter.refill();
+        // After 5 seconds at rate 10, raw new_permits = 50, but cap is 10.
+        assert_eq!(limiter.permits, 10, "permits must not exceed max_permits");
+    }
+
+    #[test]
+    fn rate_limiter_refill_adds_correct_permits() {
+        let mut limiter = QueryRateLimiter::new(100);
+        // Drain all.
+        for _ in 0..100 {
+            limiter.try_acquire();
+        }
+        // Simulate 0.5 seconds elapsed → should add ~50 permits.
+        limiter.last_refill = Instant::now() - Duration::from_millis(500);
+        limiter.refill();
+        // Allow for timing imprecision: must be in [45, 55].
+        assert!(
+            limiter.permits >= 45 && limiter.permits <= 55,
+            "expected ~50 permits after 0.5s refill at rate 100, got {}",
+            limiter.permits
+        );
     }
 }
