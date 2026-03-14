@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1442-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.83.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.84.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.83.0"
+torrent = "0.84.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -162,13 +162,13 @@ Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per ve
 
 | Version | Avg Speed | Peak | CPU Time | RSS | Notes |
 |---------|-----------|------|----------|-----|-------|
-| **0.83.0** | **56.8 MB/s** | 83.5 MB/s | 13.1s | 68.8 MiB | Encryption disabled, AIMD depth 128, SIGTERM handling |
+| **0.84.0** | **55.7 MB/s** | 67.3 MB/s | 12.5s | 107 MiB | AWS-LC crypto backend (-28% CPU, -23% RSS vs ring) |
+| 0.83.0 | 56.8 MB/s | 83.5 MB/s | 13.1s | 68.8 MiB | Encryption disabled, AIMD depth 128, SIGTERM handling |
 | 0.82.0 | 38.6 MB/s | 62.1 MB/s | 18.4s | 88.9 MiB | Adaptive max_in_flight, cached dispatch, AIMD pipeline |
-| 0.81.0 | -- | -- | -- | -- | Three-phase connect interval (100ms/500ms/5s) |
 | 0.77.0 | 54.2 MB/s | -- | -- | -- | Wake storm elimination, batch drain 512 |
 | 0.75.0 | 56.7 MB/s | -- | -- | -- | Peer-integrated dispatch (4.6x over M74) |
 
-Reference: rqbit achieves ~74.8 MB/s on the same workload (gap: 1.3x).
+Reference: rqbit achieves ~74.8 MB/s on the same workload.
 
 ---
 
@@ -177,31 +177,32 @@ Reference: rqbit achieves ~74.8 MB/s on the same workload (gap: 1.3x).
 ### Prerequisites
 
 - **Rust 1.85+** (edition 2024) -- install via [rustup](https://rustup.rs/)
-- **C compiler** -- required by the `ring` cryptography crate (BoringSSL assembly)
+- **C compiler + cmake** -- required by the `aws-lc-sys` cryptography crate (AWS-LC)
 
 #### Linux
 
 ```bash
 # Debian / Ubuntu
-sudo apt install build-essential
+sudo apt install build-essential cmake
 
 # Fedora / RHEL
-sudo dnf install gcc
+sudo dnf install gcc cmake
 
 # Arch Linux
-sudo pacman -S base-devel
+sudo pacman -S base-devel cmake
 ```
 
 #### macOS
 
 ```bash
-# Xcode command line tools (includes clang)
+# Xcode command line tools (includes clang) + cmake
 xcode-select --install
+brew install cmake
 ```
 
 #### Windows
 
-Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "C++ build tools" workload, or use the full Visual Studio installer. The MSVC toolchain (`x86_64-pc-windows-msvc`) is recommended.
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "C++ build tools" workload, and install [CMake](https://cmake.org/download/). The MSVC toolchain (`x86_64-pc-windows-msvc`) is recommended.
 
 ### Build
 
@@ -233,7 +234,7 @@ The release binary is at `target/release/torrent-cli`.
 - **Async disk I/O** -- central `DiskActor` with write buffering, ARC read cache, and semaphore-limited `spawn_blocking`
 - **Wire-compatible coordinates** -- `(piece, begin, length)` throughout, matching BEP 3 directly
 - **Binary search file lookup** -- O(log n) piece-to-file mapping via sorted `FileMap`
-- **`ring` cryptography** -- BoringSSL assembly for SHA-1/SHA-256 (~4.6x throughput over pure Rust crates)
+- **`aws-lc-rs` cryptography** -- AWS-LC (BoringSSL fork) for SHA-1/SHA-256, with `ring` and `openssl` as optional backends
 - **No `rand` dependency** -- thread-local xorshift64 seeded from `SystemTime`
 - **Deterministic serialization** -- `SortedMapSerializer` ensures BEP 3 dict key ordering
 - **AIMD pipeline** -- per-peer congestion control with slow-start, additive increase, multiplicative decrease
@@ -263,6 +264,7 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Simulation | M51 | In-process network simulation framework | ✅ |
 | API Parity | M52-M53 | API documentation, full torrent operations API parity | ✅ |
 | Speed Optimization | M55-M83 | DHT persistence, dispatch architecture, pipeline tuning, CPU efficiency | ✅ |
+| Crypto Backend | M84 | AWS-LC default, pluggable crypto (ring/openssl/aws-lc feature flags) | ✅ |
 
 ---
 

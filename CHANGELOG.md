@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.84.0] — 2026-03-13
+
+### Changed
+- **Default crypto backend**: Switched from `ring` (BoringSSL) to `aws-lc-rs` (AWS-LC).
+  AWS-LC's SHA-1/SHA-256 implementation is significantly faster on modern x86_64 with
+  SHA-NI/AVX-512. Benchmarked: 28% less user CPU, 23% less RSS, 25% fewer page faults.
+  The `ring` and `openssl` backends remain available via feature flags (`crypto-ring`,
+  `crypto-openssl`).
+
+### Added
+- **Pluggable crypto backends**: New feature flags `crypto-ring`, `crypto-aws-lc` (default),
+  and `crypto-openssl` on `torrent-core`, forwarded through `torrent` facade and `torrent-cli`.
+  Allows compile-time selection of the SHA hashing backend. When multiple backends are enabled
+  via feature unification, priority is: openssl > aws-lc > ring.
+- **Crypto benchmark script**: `benchmarks/bench_crypto.sh` for A/B testing crypto backends
+  with full metrics (CPU, RSS, context switches, page faults).
+
+### Benchmark (Arch ISO ~1.45 GiB, 3 trials, ring vs aws-lc)
+- User CPU: 7.30s avg (-28% from ring's 10.13s)
+- RSS: 107 MB avg (-23% from ring's 139 MB)
+- Speed: 55.7 MB/s avg (+13% over ring's 49.1 MB/s)
+- Page faults: 55K avg (-25% from ring's 73K)
+- Test count: 1442
+
 ## [0.83.0] — 2026-03-13
 
 ### Changed

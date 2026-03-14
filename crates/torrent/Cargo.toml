@@ -8,9 +8,15 @@ description = "A Rust BitTorrent library — ergonomic facade for the torrent cr
 [lints]
 workspace = true
 
+[features]
+default = ["crypto-aws-lc"]
+crypto-ring = ["torrent-core/crypto-ring"]
+crypto-openssl = ["torrent-core/crypto-openssl"]
+crypto-aws-lc = ["torrent-core/crypto-aws-lc"]
+
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }
-torrent-core = { path = "../torrent-core" }
+torrent-core = { path = "../torrent-core", default-features = false }
 torrent-wire = { path = "../torrent-wire" }
 torrent-tracker = { path = "../torrent-tracker" }
 torrent-dht = { path = "../torrent-dht" }

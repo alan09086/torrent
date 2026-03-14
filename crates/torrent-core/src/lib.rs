@@ -52,7 +52,10 @@ pub enum AddressFamily {
     V6,
 }
 
+// --- Crypto backend: ring ---
+
 /// Compute SHA1 hash of input bytes.
+#[cfg(all(feature = "crypto-ring", not(feature = "crypto-openssl"), not(feature = "crypto-aws-lc")))]
 pub fn sha1(data: &[u8]) -> Id20 {
     let hash = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
     let mut id = [0u8; 20];
@@ -63,6 +66,7 @@ pub fn sha1(data: &[u8]) -> Id20 {
 /// Compute SHA1 hash of multiple chunks without concatenating them.
 ///
 /// Avoids allocating a large buffer when piece data is stored as separate blocks.
+#[cfg(all(feature = "crypto-ring", not(feature = "crypto-openssl"), not(feature = "crypto-aws-lc")))]
 pub fn sha1_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id20 {
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
     for chunk in chunks {
@@ -75,6 +79,7 @@ pub fn sha1_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id20 {
 }
 
 /// Compute SHA-256 hash of input bytes (used by BitTorrent v2, BEP 52).
+#[cfg(all(feature = "crypto-ring", not(feature = "crypto-openssl"), not(feature = "crypto-aws-lc")))]
 pub fn sha256(data: &[u8]) -> Id32 {
     let hash = ring::digest::digest(&ring::digest::SHA256, data);
     let mut id = [0u8; 32];
@@ -83,8 +88,106 @@ pub fn sha256(data: &[u8]) -> Id32 {
 }
 
 /// Compute SHA-256 hash of multiple chunks without concatenating them.
+#[cfg(all(feature = "crypto-ring", not(feature = "crypto-openssl"), not(feature = "crypto-aws-lc")))]
 pub fn sha256_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id32 {
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for chunk in chunks {
+        ctx.update(chunk);
+    }
+    let hash = ctx.finish();
+    let mut id = [0u8; 32];
+    id.copy_from_slice(hash.as_ref());
+    Id32(id)
+}
+
+// --- Crypto backend: openssl ---
+
+/// Compute SHA1 hash of input bytes.
+#[cfg(feature = "crypto-openssl")]
+pub fn sha1(data: &[u8]) -> Id20 {
+    let hash = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), data).unwrap();
+    let mut id = [0u8; 20];
+    id.copy_from_slice(&hash);
+    Id20(id)
+}
+
+/// Compute SHA1 hash of multiple chunks without concatenating them.
+///
+/// Avoids allocating a large buffer when piece data is stored as separate blocks.
+#[cfg(feature = "crypto-openssl")]
+pub fn sha1_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id20 {
+    let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha1()).unwrap();
+    for chunk in chunks {
+        hasher.update(chunk).unwrap();
+    }
+    let hash = hasher.finish().unwrap();
+    let mut id = [0u8; 20];
+    id.copy_from_slice(&hash);
+    Id20(id)
+}
+
+/// Compute SHA-256 hash of input bytes (used by BitTorrent v2, BEP 52).
+#[cfg(feature = "crypto-openssl")]
+pub fn sha256(data: &[u8]) -> Id32 {
+    let hash = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data).unwrap();
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&hash);
+    Id32(id)
+}
+
+/// Compute SHA-256 hash of multiple chunks without concatenating them.
+#[cfg(feature = "crypto-openssl")]
+pub fn sha256_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id32 {
+    let mut hasher =
+        openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256()).unwrap();
+    for chunk in chunks {
+        hasher.update(chunk).unwrap();
+    }
+    let hash = hasher.finish().unwrap();
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&hash);
+    Id32(id)
+}
+
+// --- Crypto backend: aws-lc-rs ---
+
+/// Compute SHA1 hash of input bytes.
+#[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+pub fn sha1(data: &[u8]) -> Id20 {
+    let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
+    let mut id = [0u8; 20];
+    id.copy_from_slice(hash.as_ref());
+    Id20(id)
+}
+
+/// Compute SHA1 hash of multiple chunks without concatenating them.
+///
+/// Avoids allocating a large buffer when piece data is stored as separate blocks.
+#[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+pub fn sha1_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id20 {
+    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY);
+    for chunk in chunks {
+        ctx.update(chunk);
+    }
+    let hash = ctx.finish();
+    let mut id = [0u8; 20];
+    id.copy_from_slice(hash.as_ref());
+    Id20(id)
+}
+
+/// Compute SHA-256 hash of input bytes (used by BitTorrent v2, BEP 52).
+#[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+pub fn sha256(data: &[u8]) -> Id32 {
+    let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, data);
+    let mut id = [0u8; 32];
+    id.copy_from_slice(hash.as_ref());
+    Id32(id)
+}
+
+/// Compute SHA-256 hash of multiple chunks without concatenating them.
+#[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+pub fn sha256_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id32 {
+    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
     for chunk in chunks {
         ctx.update(chunk);
     }

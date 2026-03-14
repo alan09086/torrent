@@ -13,8 +13,14 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["crypto-aws-lc"]
+crypto-ring = ["torrent/crypto-ring"]
+crypto-openssl = ["torrent/crypto-openssl"]
+crypto-aws-lc = ["torrent/crypto-aws-lc"]
+
 [dependencies]
-torrent = { path = "../torrent" }
+torrent = { path = "../torrent", default-features = false }
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 tokio = { workspace = true }

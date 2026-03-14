@@ -8,6 +8,12 @@ description = "Core types for BitTorrent: hashes, metainfo, magnets, piece arith
 [lints]
 workspace = true
 
+[features]
+default = ["crypto-aws-lc"]
+crypto-ring = ["dep:ring"]
+crypto-openssl = ["dep:openssl"]
+crypto-aws-lc = ["dep:aws-lc-rs"]
+
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }
 bytes = { workspace = true }
@@ -15,8 +21,10 @@ serde = { workspace = true }
 serde_bytes = { workspace = true }
 thiserror = { workspace = true }
 
-# Hashing
-ring = { workspace = true }
+# Hashing (select one backend via feature flags)
+ring = { workspace = true, optional = true }
+openssl = { version = "0.10", optional = true }
+aws-lc-rs = { version = "1.16", optional = true }
 
 # Encoding (hex, base32 for magnets)
 hex = "0.4"
