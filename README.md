@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1476-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.88.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.90.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.85.0"
+torrent = "0.90.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -162,9 +162,9 @@ Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per ve
 
 | Version | Avg Speed | Peak | CPU Time | RSS | Notes |
 |---------|-----------|------|----------|-----|-------|
-| **0.88.0** | — | — | — | — | I2P session integration: outbound SAM connects, BEP 7 tracker announces, PEX filtering |
-| 0.87.0 | — | — | — | — | BEP 44 session API (DHT storage put/get through SessionHandle) |
-| 0.86.0 | — | — | — | — | BEP 52 hash serving for v2/hybrid seeders |
+| **0.90.0** | — | — | — | — | I2P session integration: outbound SAM connects, BEP 7 tracker announces, PEX filtering |
+| 0.88.0 | — | — | — | — | BEP 44 session API (DHT storage put/get through SessionHandle) |
+| 0.87.0 | — | — | — | — | BEP 52 hash serving for v2/hybrid seeders |
 | 0.85.0 | — | — | — | — | DHT routing table overhaul: iterative bootstrap, node liveness, background pinger, periodic persistence |
 | 0.84.0 | 55.7 MB/s | 67.3 MB/s | 12.5s | 107 MiB | AWS-LC crypto backend (-28% CPU, -23% RSS vs ring) |
 | 0.83.0 | 56.8 MB/s | 83.5 MB/s | 13.1s | 68.8 MiB | Encryption disabled, AIMD depth 128, SIGTERM handling |
@@ -270,9 +270,11 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Speed Optimization | M55-M83 | DHT persistence, dispatch architecture, pipeline tuning, CPU efficiency | ✅ |
 | Crypto Backend | M84 | AWS-LC default, pluggable crypto (ring/openssl/aws-lc feature flags) | ✅ |
 | DHT Overhaul | M85 | Iterative bootstrap, node liveness, background pinger, rate limiting, periodic persistence | ✅ |
-| Audit Remediation | M86-M87 | Dead code removal, BEP 52 hash serving for v2/hybrid seeders | ✅ |
+| Audit Remediation | M86–M87 | Dead code removal, BEP 52 hash serving for v2/hybrid seeders | ✅ |
 | BEP 44 Session API | M88 | DHT storage put/get through SessionHandle with alert firing | ✅ |
 | I2P Integration | M90 | Outbound SAM connects, BEP 7 tracker announces, PEX mixed-mode filtering | ✅ |
+
+**Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 ---
 

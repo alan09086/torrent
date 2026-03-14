@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.88.0] — 2026-03-14
+## [0.90.0] — 2026-03-14
 
 ### Added
 - **I2P session integration (M90)**: Outbound I2P peer connects routed through SAM
@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
   destination per BEP 7. Mixed-mode PEX filtering prevents I2P/clearnet address
   leakage. Ignored integration test for environments with SAM bridge.
 
-## [0.87.0] — 2026-03-14
+## [0.88.0] — 2026-03-14
 
 ### Added
 - **BEP 44 session API**: `SessionHandle` now exposes `dht_put_immutable()`,
@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
   (`DhtPutComplete`, `DhtGetResult`, `DhtMutablePutComplete`, `DhtMutableGetResult`,
   `DhtItemError`). Returns `Error::DhtDisabled` when DHT is off.
 
-## [0.86.0] — 2026-03-14
+## [0.87.0] — 2026-03-14
 
 ### Added
 - **BEP 52 hash serving**: v2/hybrid seeders now serve piece-layer Merkle hashes to
@@ -162,8 +162,8 @@ All notable changes to this project will be documented in this file.
   drain. Fixed with `permit.forget()` to permanently consume permits.
 
 ### Benchmark (Arch ISO 2026.03.01 ~1.45 GiB, 3 trials)
-- Speed: 38.6 MB/s avg (+31% over v0.80.0's 29.5 MB/s), peak 62.1 MB/s
-- RSS: 88.9 MiB avg (-28% from v0.80.0's 123 MiB)
+- Speed: 38.6 MB/s avg (+31% over v0.78.0's 29.5 MB/s), peak 62.1 MB/s
+- RSS: 88.9 MiB avg (-28% from v0.78.0's 123 MiB)
 - Faster than qbittorrent (32.0 MB/s), gap to rqbit (77.0 MB/s) narrowed
 - Test count: 1442 (+15 new tests)
 
@@ -177,7 +177,7 @@ All notable changes to this project will be documented in this file.
   initial peer discovery (100ms vs 500ms) over a longer ramp-up window (15s vs 10s),
   with a gradual settling period before reaching the steady-state 5s interval.
 
-## [0.80.0] — 2026-03-13
+## [0.78.0] — 2026-03-13
 
 ### Changed
 - **`notify_one()` replaces `notify_waiters()` in piece completion**: `complete_piece()` and
@@ -200,7 +200,7 @@ All notable changes to this project will be documented in this file.
 - RSS: 81.2 MB avg (down from M77's 89.4 MB, -9%)
 - Test count: 1427 (+8 new dispatch tests)
 
-## [0.79.0] — 2026-03-13
+## [0.77.0] — 2026-03-13
 
 ### Added
 - **Safety-net periodic notification**: Added a 1-second `notify_waiters()` call in the
@@ -223,7 +223,7 @@ All notable changes to this project will be documented in this file.
 - RSS: 88 MB avg
 - Test count: 1419
 
-## [0.78.0] — 2026-03-13
+## [0.76.0] — 2026-03-13
 
 ### Changed
 - **Remove `PieceSelector` from production code**: Gated `PieceSelector` (2,271 lines) and 5
@@ -248,7 +248,7 @@ All notable changes to this project will be documented in this file.
 - Cache misses: 7.4M median (down from M75's 9.1M, -19%)
 - Test count: 1419
 
-## [0.77.0] — 2026-03-12
+## [0.75.0] — 2026-03-12
 
 ### Changed
 - **Peer-integrated request dispatch**: Moved block requesting from separate `request_driver`
@@ -275,7 +275,7 @@ All notable changes to this project will be documented in this file.
 - rqbit reference: 82 MB/s (now at 69% of rqbit, was 15% in M74)
 - Test count: 1419
 
-## [0.76.0] — 2026-03-11
+## [0.74.0] — 2026-03-11
 
 ### Fixed
 - **Semaphore permit leak on `try_send` failure**: Request driver replaced `try_send()`
@@ -301,7 +301,7 @@ All notable changes to this project will be documented in this file.
 - rqbit reference: 82.2 MB/s, 9.8s CPU, 39.4 MiB RSS (6.7x speed gap)
 - Test count: 1419
 
-## [0.75.0] — 2026-03-11
+## [0.73.0] — 2026-03-11
 
 ### Added
 - **Piece reservation state** (`PieceReservationState`): Shared state behind
@@ -337,7 +337,7 @@ All notable changes to this project will be documented in this file.
 - RSS: 67.6±4.6 MiB (down from 94.8 MiB — 29% reduction)
 - Test count: 1419
 
-## [0.74.0] — 2026-03-11
+## [0.72.0] — 2026-03-11
 
 ### Changed
 - **Zero-alloc steal phase**: Rewrote `pick_partial` steal phase to iterate `assigned_blocks`
@@ -348,7 +348,7 @@ All notable changes to this project will be documented in this file.
   below the steal threshold. O(peers) check via `peer_rates.values().any()`.
 - Test count: 1409
 
-## [0.73.0] — 2026-03-11
+## [0.71.0] — 2026-03-11
 
 ### Added
 - **ChunkMask 256-bit bitfield**: Fixed-size `[u64; 4]` bitfield tracking unassigned chunks per
@@ -367,7 +367,7 @@ All notable changes to this project will be documented in this file.
 - CPU time reduced 23% (37.1s → 28.7s on Arch ISO benchmark)
 - Test count: 1405
 
-## [0.72.0] — 2026-03-10
+## [0.70.0] — 2026-03-10
 
 ### Changed
 - **Pre-computed per-peer block queues**: Each peer gets a `VecDeque` of pre-assigned blocks filled
@@ -387,7 +387,7 @@ All notable changes to this project will be documented in this file.
 - **Pipeline tick 250ms → 500ms**: Safety net only — Notify handles the fast path.
 - Test count: 1392
 
-## [0.71.0] — 2026-03-10
+## [0.68.0] — 2026-03-10
 
 ### Changed
 - **Pipeline dispatch latency reduced**: Lowered `BATCH_DISPATCH_THRESHOLD` from 32 to 4 and pipeline tick
@@ -411,7 +411,7 @@ All notable changes to this project will be documented in this file.
   to 10 MiB. Presets: `min_memory()` = 12, `high_performance()` = 64.
 - Test count: 1392
 
-## [0.70.0] — 2026-03-10
+## [0.67.0] — 2026-03-10
 
 ### Changed
 - **BoringSSL crypto via `ring`**: Replaced `sha1`/`sha2` crates with `ring` (BoringSSL hand-optimized
@@ -426,7 +426,7 @@ All notable changes to this project will be documented in this file.
 - Removed all direct `sha1`/`sha2` crate dependencies from workspace.
 - Test count: 1395
 
-## [0.69.0] — 2026-03-10
+## [0.66.0] — 2026-03-10
 
 ### Changed
 - **Adaptive queue depth (BDP model)**: Per-peer request pipeline depth now computed dynamically
@@ -438,7 +438,7 @@ All notable changes to this project will be documented in this file.
 - `request_queue_time` parameter (previously ignored with `_` prefix) now actively used in BDP computation
 - Test count: 1395
 
-## [0.68.0] — 2026-03-10
+## [0.65.0] — 2026-03-10
 
 ### Changed
 - **SHA hardware acceleration**: Enabled `asm` feature on `sha1`/`sha2` crates for runtime CPU-dispatched
@@ -447,12 +447,12 @@ All notable changes to this project will be documented in this file.
   reducing ~91k picker calls to ~2.9k per 1.4 GiB download (~97% reduction in hot-path CPU)
 - Pipeline tick safety net widened to catch both fully idle peers and peers crossing the batch threshold
 
-## 0.67.0 — M61 Performance Optimizations
+## [0.61.0] — M61 Performance Optimizations
 
 ### Performance
 - **O(1) pending request lookup** — replaced `PeerState.pending_requests: Vec<(u32, u32, u32)>` with `PendingRequests` newtype wrapping `FxHashMap<(u32, u32), u32>`. Eliminates O(128) linear scan on every block received (~6000/sec). 4 call sites converted from `.iter().position()` + `.swap_remove()` to `.remove(index, begin)`.
 - **End-game cascade eliminated** — removed reactive re-requesting loop that triggered 50 picker invocations per block in end-game mode. Replaced with a 200ms periodic batch refill tick (`end_game_tick_interval`) with `MissedTickBehavior::Skip` to prevent burst-fire on activation. All peers with available pipeline slots refilled in a single pass.
-- **END_GAME_DEPTH raised 4 → 128** — matches normal-mode pipeline depth. With depth 4, each peer only had 64KB queued (6.4ms of work at 10 MB/s), idling 97% of the time between refill ticks. With depth 128, each peer has 2MB queued (200ms of work), fully utilising the 200ms tick interval. Eliminates `final_speed=0.0 MB/s` tail stall observed in all v0.66.0 benchmark trials.
+- **END_GAME_DEPTH raised 4 → 128** — matches normal-mode pipeline depth. With depth 4, each peer only had 64KB queued (6.4ms of work at 10 MB/s), idling 97% of the time between refill ticks. With depth 128, each peer has 2MB queued (200ms of work), fully utilising the 200ms tick interval. Eliminates `final_speed=0.0 MB/s` tail stall observed in all v0.58.1 benchmark trials.
 - **In-flight piece cap** — new `max_in_flight_pieces` setting (default 32) bounds store buffer memory at the piece selector level. When the cap is reached, Layers 3 (suggested) and 5 (new piece) are skipped — only partial/steal paths remain active. Memory bound: 32 × 512KB = 16 MiB for typical torrents (was unbounded).
 
 ### Added
@@ -465,7 +465,7 @@ All notable changes to this project will be documented in this file.
 - `cap_reached` field in `PickContext` for piece selector backpressure
 - Test count: 1390
 
-## 0.66.0 — Performance Consistency & Tuning
+## [0.58.1] — Performance Consistency & Tuning
 
 ### Fixed
 - **Store buffer race causing hash verification failures** — `store_buffer.remove()` was called inside a spawned blocking task, creating a race window where `on_piece_hash_failed()` could trigger re-download and write new blocks before the verify task consumed the old ones, producing "frankenstein pieces" that mixed data from different download attempts (thousands of hash failures per download). Fix: extract blocks synchronously before spawning. Also added `sha1_chunks()`/`sha256_chunks()` for incremental hashing, eliminating ~512KB concatenation allocation per piece verification. Before: 235-300s (4-5 MB/s); After: 35-49s (35-54 MB/s)
@@ -495,17 +495,17 @@ All notable changes to this project will be documented in this file.
 ### Benchmark (Arch ISO 1.5 GiB, 5 trials)
 | Client | Time (s) | CPU (s) | Speed (MB/s) | RSS (MiB) |
 |--------|----------|---------|-------------|-----------|
-| torrent 0.66.0 | 100.3 ±19.3 | 37.1 ±4.7 | 15.0 ±3.5 | 170.2 ±42.9 |
+| torrent 0.58.1 | 100.3 ±19.3 | 37.1 ±4.7 | 15.0 ±3.5 | 170.2 ±42.9 |
 | rqbit 8.1.1 | 34.4 ±24.1 | 10.4 ±0.6 | 56.7 ±27.0 | 37.5 ±3.9 |
 | qbittorrent 5.1.4 | 51.5 ±10.7 | 18.1 ±2.5 | 29.1 ±5.3 | 1525.5 ±5.5 |
 
 **Identified bottlenecks for M68:** end-game pipeline depth too shallow (4 vs 128), O(n) linear scans in pending_requests, redundant bitfield clones in hot path, reactive re-requesting triggers 2+ full picker cycles per block, peer_count() does O(n log n) sort per invocation, unbounded store buffer memory
 
-## 0.65.0 — `torrent` v0.65.0: Rename, Non-Blocking Pipeline, Production Hardening
+## [0.58.0] — `torrent` v0.58.0: Rename, Non-Blocking Pipeline, Production Hardening
 
 ### Breaking
 - **Workspace renamed from `ferrite` to `torrent`** — all 12 crates renamed: `ferrite-*` → `torrent-*`. Update your `Cargo.toml` dependencies and `use` imports accordingly.
-- Version bumped 0.64.0 → 0.65.0
+- Version bumped 0.57.0 → 0.58.0
 
 ### Added
 - crates.io metadata: keywords, categories, homepage, documentation URLs
@@ -524,7 +524,7 @@ All notable changes to this project will be documented in this file.
 - `torrent-cli` marked `publish = false`
 - Test count: 1378+
 
-## 0.64.0 — TCP Listener, UPnP Gateway Probe & Log Cleanup
+## [0.57.0] — TCP Listener, UPnP Gateway Probe & Log Cleanup
 
 ### Fixed
 - **TCP listener for incoming peer connections** — `SessionActor` only had uTP and SSL listeners, never binding a plain TCP accept loop on the main listen port. Incoming TCP connections were refused, preventing peers from connecting to us. Added TCP listener bind, generalized `identify_plaintext_connection` to any `AsyncRead+AsyncWrite` stream, and unified routing via `route_inbound_stream<S>`
@@ -547,7 +547,7 @@ All notable changes to this project will be documented in this file.
 | Peak unchoked | 156 peers |
 | Total peers | 200 |
 
-## 0.63.1 — Settings Wiring & Throughput Fixes
+## [0.56.1] — Settings Wiring & Throughput Fixes
 
 ### Fixed
 - **13 TorrentConfig fields now wired from Settings** — `upload_rate_limit`, `download_rate_limit`, `strict_end_game`, `max_web_seeds`, `initial_picker_threshold`, `whole_pieces_threshold`, `snub_timeout_secs`, `readahead_pieces`, and `streaming_timeout_escalation` were hardcoded in `From<&Settings>`, silently ignoring user configuration
@@ -569,7 +569,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Test count: 1376 (was under-reported as 1153 due to `--fail-fast` hiding 4 crates behind pre-existing sim test failure)
 
-## 0.63.0 — M56: Speed Optimization
+## [0.56.0] — M56: Speed Optimization
 
 ### Added
 - **DHT routing table persistence** — saves DHT routing table nodes on shutdown and reloads on startup for instant peer discovery (eliminates cold-start penalty)
@@ -595,7 +595,7 @@ All notable changes to this project will be documented in this file.
 
 **Note:** No speed improvement observed — the primary bottleneck is in the transfer pipeline itself (not peer discovery, queue depth, or block assignment). DHT persistence saves 40 nodes per session. Further investigation needed for M57.
 
-## 0.62.0 — M55: Download Speed Optimization
+## [0.55.0] — M55: Download Speed Optimization
 
 ### Changed
 - **Immediate peer connection** — DHT, PEX, tracker, and manually-added peers now trigger `try_connect_peers()` immediately instead of waiting up to 30s for the periodic connect timer
@@ -615,7 +615,7 @@ All notable changes to this project will be documented in this file.
 
 **Note:** Remaining speed gap is due to DHT cold-start (no routing table persistence). See M56 roadmap.
 
-## 0.61.0 — M54: CLI Binary & Benchmarking
+## [0.54.0] — M54: CLI Binary & Benchmarking
 
 ### Added
 - **`ferrite-cli` crate** — new workspace member providing the `ferrite` binary
@@ -628,7 +628,7 @@ All notable changes to this project will be documented in this file.
 ### Dependencies
 - `clap` 4.x (derive), `indicatif` 0.17, `tracing-subscriber` 0.3, `anyhow` 1, `serde_json` 1
 
-## 0.60.0 — M53: Full Torrent Operations API Parity
+## [0.53.0] — M53: Full Torrent Operations API Parity
 
 ### Added
 - **Session wrappers**: `force_reannounce`, `tracker_list`, `scrape`, `set_file_priority`, `file_priorities` — SessionHandle wrappers for existing TorrentHandle methods
@@ -671,7 +671,7 @@ All notable changes to this project will be documented in this file.
 - Updated download example to show progress percentage and rates
 - Version bump 0.58.0 → 0.59.0
 
-## 0.58.0 — M52: API Documentation & Examples
+## [0.52.0] — M52: API Documentation & Examples
 
 ### Added
 - `#![warn(missing_docs)]` lint enabled on all 12 workspace crates
@@ -681,9 +681,9 @@ All notable changes to this project will be documented in this file.
 - "Getting Started" section in README with usage example
 
 ### Changed
-- Version bump 0.57.0 → 0.58.0
+- Version bump 0.51.0 → 0.52.0
 
-## 0.57.0 — 2026-03-01
+## [0.51.0] — 2026-03-01
 
 Network simulation framework. Twelve crates, 1310 tests, 27 BEPs implemented. Phase 12 (Simulation) complete. **All 51 milestones done — full libtorrent-rasterbar parity achieved.**
 
