@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
 
-use torrent_core::Id20;
+use rustc_hash::FxHashMap;
+use torrent_core::{Id20, Lengths};
 use torrent_storage::Bitfield;
 use torrent_wire::{
     ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType,
@@ -23,9 +24,55 @@ use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
 use crate::pipeline::PeerPipelineState;
 use crate::pex::PexMessage;
 use crate::piece_reservation::{BlockRequest, PieceReservationState};
-use crate::types::{PeerCommand, PeerEvent};
+use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 
 use tokio::sync::Semaphore;
+
+/// M92: Accumulates block completions for batched delivery to TorrentActor.
+/// Lives in the peer task's stack — no shared state, no locking.
+struct PendingBatch {
+    /// Block completions awaiting flush.
+    blocks: Vec<BlockEntry>,
+    /// Per-piece block count for detecting piece completion.
+    /// Key: piece index, Value: blocks written so far in this batch.
+    piece_counts: FxHashMap<u32, u32>,
+    /// Piece/chunk arithmetic for completion detection.
+    lengths: Lengths,
+}
+
+impl PendingBatch {
+    fn new(lengths: &Lengths) -> Self {
+        Self {
+            blocks: Vec::with_capacity(BATCH_INITIAL_CAPACITY),
+            piece_counts: FxHashMap::default(),
+            lengths: lengths.clone(),
+        }
+    }
+
+    /// Record a block write. Returns true if the piece is now complete
+    /// (caller should flush immediately).
+    fn push(&mut self, index: u32, begin: u32, length: u32) -> bool {
+        self.blocks.push(BlockEntry { index, begin, length });
+        let count = self.piece_counts.entry(index).or_insert(0);
+        *count += 1;
+        *count >= self.lengths.chunks_in_piece(index)
+    }
+
+    /// Take accumulated blocks for sending. Resets internal state.
+    /// Pre-allocates the replacement Vec to avoid reallocation on the next batch cycle.
+    fn take(&mut self) -> Vec<BlockEntry> {
+        self.piece_counts.clear(); // retains HashMap capacity for reuse
+        std::mem::replace(&mut self.blocks, Vec::with_capacity(BATCH_INITIAL_CAPACITY))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+/// M92: Initial capacity for PendingBatch block buffer.
+/// Matches a standard 512 KiB piece (512 * 1024 / 16384 = 32 blocks).
+const BATCH_INITIAL_CAPACITY: usize = 32;
 
 /// M83: Initial per-peer queue depth — matches settings default (128).
 /// AIMD slow-start still applies (can grow to 250, shrink to 8).
@@ -300,6 +347,12 @@ pub(crate) async fn run_peer(
     let mut pipeline_tick = tokio::time::interval(Duration::from_millis(1000));
     pipeline_tick.tick().await; // skip initial tick
 
+    // M92: Pending batch for accumulating block completions
+    let mut pending_batch: Option<PendingBatch> = None;
+    // M92: 25ms flush interval — ticks only when batch has pending blocks
+    let mut flush_interval = tokio::time::interval(Duration::from_millis(25));
+    flush_interval.tick().await; // skip initial immediate tick
+
     let disconnect_reason: Option<String> = loop {
         // M75: Clone Arc references for requester arm (cheap Arc::clone)
         let rs_clone = reservation_state
@@ -412,17 +465,32 @@ pub(crate) async fn run_peer(
                             }
                             _ => {}
                         }
-                        // M78: If we did a direct disk write, send lightweight ChunkWritten
-                        // instead of PieceData (which carries the full Bytes payload)
+                        // M92: Accumulate block in PendingBatch.
+                        // Flush immediately on piece completion (when all blocks arrive within
+                        // one batch window); otherwise the 25ms timer flushes partial batches.
                         if let Message::Piece { index, begin, ref data } = msg
                             && let Some((_, _, Some(_), _)) = &reservation_state
                         {
-                            event_tx.send(PeerEvent::ChunkWritten {
-                                peer_addr: addr,
-                                index, begin,
-                                length: data.len() as u32,
-                            }).await.map_err(|_| crate::Error::Shutdown)?;
-                            continue; // skip handle_message for this message
+                            if let Some(ref mut batch) = pending_batch {
+                                let piece_complete = batch.push(index, begin, data.len() as u32);
+                                if piece_complete {
+                                    let blocks = batch.take();
+                                    event_tx.send(PeerEvent::PieceBlocksBatch {
+                                        peer_addr: addr,
+                                        blocks,
+                                    }).await.map_err(|_| crate::Error::Shutdown)?;
+                                }
+                            } else {
+                                // No batch yet (StartRequesting not received) — send single block
+                                event_tx.send(PeerEvent::PieceBlocksBatch {
+                                    peer_addr: addr,
+                                    blocks: vec![BlockEntry {
+                                        index, begin,
+                                        length: data.len() as u32,
+                                    }],
+                                }).await.map_err(|_| crate::Error::Shutdown)?;
+                            }
+                            continue; // skip handle_message
                         }
                         match handle_message(
                             msg,
@@ -471,8 +539,12 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx }) => {
+                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx, lengths }) => {
                         reservation_state = Some((rs, piece_notify, disk_handle, write_error_tx));
+                        // M92: Create PendingBatch for block batching
+                        if pending_batch.is_none() {
+                            pending_batch = Some(PendingBatch::new(&lengths));
+                        }
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
@@ -579,12 +651,36 @@ pub(crate) async fn run_peer(
                 }
                 current_effective_depth = new_target;
             }
+
+            // M92: 25ms batch flush timer — sends partial batches for stats/UI/endgame
+            _ = flush_interval.tick(), if pending_batch.as_ref().is_some_and(|b| !b.is_empty()) => {
+                if let Some(ref mut batch) = pending_batch {
+                    let blocks = batch.take();
+                    let _ = event_tx.send(PeerEvent::PieceBlocksBatch {
+                        peer_addr: addr,
+                        blocks,
+                    }).await;
+                }
+            }
         }
     };
 
     // Notify plugins that a peer disconnected
     for plugin in plugins.iter() {
         plugin.on_peer_disconnected(&info_hash, addr);
+    }
+
+    // M92: Flush remaining blocks before disconnect
+    if let Some(ref mut batch) = pending_batch
+        && !batch.is_empty()
+    {
+        let blocks = batch.take();
+        let _ = event_tx
+            .send(PeerEvent::PieceBlocksBatch {
+                peer_addr: addr,
+                blocks,
+            })
+            .await;
     }
 
     // Send disconnect event (best-effort)
@@ -2899,5 +2995,193 @@ mod tests {
         assert!(decoded.reqq.is_none());
         assert!(decoded.upload_only.is_none());
         assert!(!decoded.m.is_empty());
+    }
+
+    mod pending_batch_tests {
+        use super::super::PendingBatch;
+        use torrent_core::Lengths;
+
+        /// Standard torrent: 10 pieces, 512 KiB each (32 blocks per piece), 16 KiB chunks.
+        fn standard_lengths() -> Lengths {
+            Lengths::new(
+                10 * 512 * 1024,  // total_length: 5 MiB
+                512 * 1024,       // piece_length: 512 KiB
+                16384,            // chunk_size: 16 KiB
+            )
+        }
+
+        /// Small torrent where the last piece has only 1 block.
+        fn small_last_piece_lengths() -> Lengths {
+            Lengths::new(
+                10 * 512 * 1024 + 16384, // total_length: 5 MiB + 16 KiB
+                512 * 1024,              // piece_length: 512 KiB
+                16384,                   // chunk_size: 16 KiB
+            )
+        }
+
+        #[test]
+        fn batch_accumulation_full_piece() {
+            let lengths = standard_lengths();
+            let mut batch = PendingBatch::new(&lengths);
+
+            // Write 31 blocks — piece should NOT be complete
+            for i in 0..31 {
+                let complete = batch.push(0, i * 16384, 16384);
+                assert!(!complete, "piece should not be complete after block {i}");
+            }
+            assert_eq!(batch.blocks.len(), 31);
+            assert!(!batch.is_empty());
+
+            // Write 32nd block — piece IS complete
+            let complete = batch.push(0, 31 * 16384, 16384);
+            assert!(complete, "piece should be complete after 32 blocks");
+            assert_eq!(batch.blocks.len(), 32);
+
+            // Take should return all 32 entries and reset
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 32);
+            assert!(batch.is_empty());
+            assert_eq!(batch.blocks.len(), 0);
+            assert_eq!(batch.piece_counts.len(), 0);
+        }
+
+        #[test]
+        fn timer_flush_partial_piece() {
+            let lengths = standard_lengths();
+            let mut batch = PendingBatch::new(&lengths);
+
+            // Write 10 blocks (partial piece)
+            for i in 0..10 {
+                let complete = batch.push(0, i * 16384, 16384);
+                assert!(!complete);
+            }
+            assert_eq!(batch.blocks.len(), 10);
+
+            // Simulate timer flush: take returns partial batch
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 10);
+            assert!(batch.is_empty());
+
+            // Verify block contents
+            assert_eq!(blocks[0].index, 0);
+            assert_eq!(blocks[0].begin, 0);
+            assert_eq!(blocks[0].length, 16384);
+            assert_eq!(blocks[9].begin, 9 * 16384);
+        }
+
+        #[test]
+        fn single_block_last_piece() {
+            let lengths = small_last_piece_lengths();
+            let mut batch = PendingBatch::new(&lengths);
+
+            // The last piece (index 10) should have 1 block
+            assert_eq!(lengths.chunks_in_piece(10), 1);
+            assert_eq!(lengths.chunks_in_piece(0), 32); // standard pieces still 32
+
+            // Writing 1 block to the last piece triggers completion
+            let complete = batch.push(10, 0, 16384);
+            assert!(complete, "single-block last piece should complete immediately");
+
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].index, 10);
+        }
+
+        #[test]
+        fn multi_piece_accumulation() {
+            let lengths = standard_lengths();
+            let mut batch = PendingBatch::new(&lengths);
+
+            // Interleave blocks from two pieces — neither should complete
+            for i in 0..16 {
+                assert!(!batch.push(0, i * 16384, 16384));
+                assert!(!batch.push(1, i * 16384, 16384));
+            }
+            assert_eq!(batch.blocks.len(), 32); // 16 from piece 0 + 16 from piece 1
+
+            // Complete piece 0
+            for i in 16..31 {
+                assert!(!batch.push(0, i * 16384, 16384));
+            }
+            let complete = batch.push(0, 31 * 16384, 16384);
+            assert!(complete, "piece 0 should be complete");
+
+            // Flush includes piece 1's partial blocks too
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 48); // 32 from piece 0 + 16 from piece 1
+        }
+
+        #[test]
+        fn flush_on_disconnect_preserves_blocks() {
+            let lengths = standard_lengths();
+            let mut batch = PendingBatch::new(&lengths);
+
+            // Write 15 blocks
+            for i in 0..15 {
+                batch.push(0, i * 16384, 16384);
+            }
+            assert!(!batch.is_empty());
+
+            // Simulate disconnect: take returns all accumulated blocks
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 15);
+            assert!(batch.is_empty());
+        }
+
+        #[test]
+        fn blocks_for_piece_last_piece_exact_multiple() {
+            // Edge case: total_length is exact multiple of piece_length
+            // All pieces including last have the same block count
+            let lengths = Lengths::new(
+                10 * 512 * 1024, // 5 MiB exactly
+                512 * 1024,      // 512 KiB
+                16384,           // 16 KiB
+            );
+            let batch = PendingBatch::new(&lengths);
+            assert_eq!(batch.lengths.chunks_in_piece(0), 32);
+            assert_eq!(batch.lengths.chunks_in_piece(9), 32); // last piece, exact fit
+        }
+
+        #[test]
+        fn empty_batch_take_returns_empty() {
+            let lengths = standard_lengths();
+            let mut batch = PendingBatch::new(&lengths);
+            assert!(batch.is_empty());
+            let blocks = batch.take();
+            assert!(blocks.is_empty());
+        }
+
+        #[test]
+        fn pending_batch_cross_piece_boundary() {
+            // 4 pieces, 64 KiB each (4 blocks per piece), 16 KiB chunks
+            let lengths = Lengths::new(4 * 64 * 1024, 64 * 1024, 16384);
+            let mut batch = PendingBatch::new(&lengths);
+
+            assert_eq!(lengths.chunks_in_piece(0), 4);
+            assert_eq!(lengths.chunks_in_piece(3), 4); // last piece, exact fit
+
+            // Complete piece 0
+            for i in 0..3 {
+                assert!(!batch.push(0, i * 16384, 16384));
+            }
+            assert!(batch.push(0, 3 * 16384, 16384)); // piece 0 complete
+
+            // Flush piece 0
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 4);
+
+            // Start piece 1, then flush via "timer" (take without completion)
+            assert!(!batch.push(1, 0, 16384));
+            assert!(!batch.push(1, 16384, 16384));
+            let blocks = batch.take();
+            assert_eq!(blocks.len(), 2);
+            assert!(batch.is_empty());
+
+            // Verify counts were reset — pushing the same blocks again should
+            // not trigger false completion (only 2 blocks in this batch, not 4)
+            assert!(!batch.push(1, 2 * 16384, 16384));
+            assert!(!batch.push(1, 3 * 16384, 16384)); // only 2 in this batch
+            assert_eq!(batch.blocks.len(), 2);
+        }
     }
 }

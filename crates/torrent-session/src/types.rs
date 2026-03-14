@@ -585,6 +585,15 @@ impl Default for TorrentStats {
     }
 }
 
+/// Lightweight record of a single block write completion.
+/// Used in batched `PeerEvent::PieceBlocksBatch` to amortize channel sends.
+#[derive(Debug, Clone)]
+pub(crate) struct BlockEntry {
+    pub index: u32,  // piece index
+    pub begin: u32,  // byte offset within piece
+    pub length: u32, // block size (usually 16384)
+}
+
 /// Events sent from a `PeerTask` back to the `TorrentActor`.
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by peer/torrent modules (not yet implemented)
@@ -603,13 +612,12 @@ pub(crate) enum PeerEvent {
         begin: u32,
         data: Bytes,
     },
-    /// M78: Lightweight event for peer-side disk writes — carries only metadata,
-    /// not the full Bytes payload (which was already written to disk by the peer task).
-    ChunkWritten {
+    /// M92: Batched block completions from a peer task's direct disk writes.
+    /// Replaces per-block ChunkWritten — flushes on piece completion (immediate)
+    /// or 25ms timer (partial progress for stats/UI/endgame).
+    PieceBlocksBatch {
         peer_addr: SocketAddr,
-        index: u32,
-        begin: u32,
-        length: u32,
+        blocks: Vec<BlockEntry>,
     },
     PeerChoking {
         peer_addr: SocketAddr,
@@ -776,6 +784,8 @@ pub(crate) enum PeerCommand {
         piece_notify: std::sync::Arc<tokio::sync::Notify>,
         disk_handle: Option<crate::disk::DiskHandle>,
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
+        /// M92: Piece/chunk arithmetic for PendingBatch piece-completion detection.
+        lengths: torrent_core::Lengths,
     },
     Shutdown,
 }

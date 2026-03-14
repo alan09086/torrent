@@ -3588,12 +3588,13 @@ impl TorrentActor {
                             piece_notify: Arc::clone(notify),
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
+                            lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
                         });
                     }
                 }
             }
-            PeerEvent::ChunkWritten { peer_addr, index, begin, length } => {
-                self.handle_chunk_written(peer_addr, index, begin, length).await;
+            PeerEvent::PieceBlocksBatch { peer_addr, blocks } => {
+                self.handle_piece_blocks_batch(peer_addr, blocks).await;
             }
         }
     }
@@ -3747,19 +3748,40 @@ impl TorrentActor {
         }
     }
 
-    /// M78: Actor-side handler for the direct peer-to-disk path.
-    /// Called when a peer task has already written the chunk to disk and sends
-    /// ChunkWritten (metadata-only) instead of PieceData (full Bytes payload).
-    /// Performs all the same bookkeeping as handle_piece_data — stats, smart
-    /// banning, peer tracking, end-game cancels, chunk tracking, piece
-    /// verification — without the disk write.
-    async fn handle_chunk_written(
+    /// M92: Process a batch of block completions from a single peer.
+    /// Iterates blocks, calling `process_block_completion()` for each.
+    /// Piece verifications are triggered inline as pieces complete
+    /// (same as the former per-block path).
+    async fn handle_piece_blocks_batch(
+        &mut self,
+        peer_addr: SocketAddr,
+        blocks: Vec<crate::types::BlockEntry>,
+    ) {
+        for block in &blocks {
+            self.process_block_completion(
+                peer_addr,
+                block.index,
+                block.begin,
+                block.length,
+            )
+            .await;
+        }
+    }
+
+    /// M92: Process a single block completion — extracted from `handle_chunk_written()`.
+    /// Called once per block in a batch. Returns `true` if this block completed a piece
+    /// and piece verification was triggered.
+    ///
+    /// IMPORTANT: This is a line-for-line extraction of `handle_chunk_written()`.
+    /// Every edge case (duplicate detection, end-game cancels, v2/hybrid verification,
+    /// predictive Have, smart banning) is preserved identically.
+    async fn process_block_completion(
         &mut self,
         peer_addr: SocketAddr,
         index: u32,
         begin: u32,
         length: u32,
-    ) {
+    ) -> bool {
         // Skip duplicate blocks — in end-game mode or after timeout re-requests,
         // the same block may arrive from multiple peers. Writing it to the store
         // buffer would overwrite valid data that's pending verification.
@@ -3780,7 +3802,7 @@ impl TorrentActor {
                 self.end_game.block_received(index, begin, peer_addr);
             }
             // Peer task already returned its permit on direct write
-            return;
+            return false;
         }
 
         // NOTE: No disk write here — the peer task has already written to disk.
@@ -3875,6 +3897,8 @@ impl TorrentActor {
         if self.end_game.is_active() {
             self.request_end_game_block(peer_addr).await;
         }
+
+        piece_complete
     }
 
     async fn verify_existing_pieces(&mut self) {
@@ -5096,6 +5120,7 @@ impl TorrentActor {
                                     piece_notify: Arc::clone(notify),
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
+                                    lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
                                 });
                             }
                         }
@@ -5990,6 +6015,7 @@ impl TorrentActor {
                     piece_notify: Arc::clone(notify),
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
+                    lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
                 });
             }
 
@@ -6627,6 +6653,7 @@ impl TorrentActor {
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
+                lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
             });
         }
 
@@ -6818,6 +6845,7 @@ impl TorrentActor {
                 piece_notify: Arc::clone(notify),
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
+                lengths: self.lengths.clone().expect("lengths must be set before StartRequesting"),
             });
         }
 
