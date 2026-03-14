@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use torrent_core::Id20;
 
@@ -15,6 +15,20 @@ pub const K: usize = 8;
 
 /// Maximum number of buckets (one per bit of the ID).
 const MAX_BUCKETS: usize = 160;
+
+/// Kademlia node liveness classification (BEP 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    /// Node has responded or sent a query within the last 15 minutes.
+    Good,
+    /// Node has not been active recently but has not failed repeatedly.
+    Questionable,
+    /// Node has failed 2 or more consecutive queries.
+    Bad,
+}
+
+/// Age threshold for considering a node "active" (15 minutes).
+const ACTIVE_THRESHOLD: Duration = Duration::from_secs(15 * 60);
 
 /// A node in the routing table.
 #[derive(Debug, Clone)]
@@ -27,6 +41,31 @@ pub struct RoutingNode {
     pub last_seen: Instant,
     /// Number of consecutive failed queries.
     pub fail_count: u32,
+    /// Timestamp of the last response received from this node.
+    pub last_response: Option<Instant>,
+    /// Timestamp of the last query received from this node.
+    pub last_query: Option<Instant>,
+}
+
+impl RoutingNode {
+    /// Classify this node per Kademlia liveness rules.
+    ///
+    /// - `Bad`: fail_count >= 2
+    /// - `Good`: responded or sent a query within the last 15 minutes
+    /// - `Questionable`: otherwise
+    pub fn status(&self) -> NodeStatus {
+        if self.fail_count >= 2 {
+            return NodeStatus::Bad;
+        }
+        let cutoff = Instant::now() - ACTIVE_THRESHOLD;
+        let active = self.last_response.is_some_and(|t| t >= cutoff)
+            || self.last_query.is_some_and(|t| t >= cutoff);
+        if active {
+            NodeStatus::Good
+        } else {
+            NodeStatus::Questionable
+        }
+    }
 }
 
 /// A single k-bucket.
@@ -58,7 +97,7 @@ impl KBucket {
             .max_by(|(_, a), (_, b)| {
                 a.fail_count
                     .cmp(&b.fail_count)
-                    .then(a.last_seen.cmp(&b.last_seen))
+                    .then(b.last_seen.cmp(&a.last_seen))
             })
             .map(|(i, _)| i)
     }
@@ -165,6 +204,8 @@ impl RoutingTable {
                 addr,
                 last_seen: Instant::now(),
                 fail_count: 0,
+                last_response: None,
+                last_query: None,
             });
             if self.restrict_ips {
                 self.ip_set.insert(ip);
@@ -185,6 +226,8 @@ impl RoutingTable {
                 addr,
                 last_seen: Instant::now(),
                 fail_count: 0,
+                last_response: None,
+                last_query: None,
             };
             if self.restrict_ips {
                 self.ip_set.insert(ip);
@@ -280,6 +323,43 @@ impl RoutingTable {
         self.buckets[bucket_idx]
             .find(id)
             .map(|pos| &self.buckets[bucket_idx].nodes[pos])
+    }
+
+    /// Get a mutable reference to a node by ID.
+    pub fn get_mut(&mut self, id: &Id20) -> Option<&mut RoutingNode> {
+        let bucket_idx = self.bucket_index(id);
+        let pos = self.buckets[bucket_idx].find(id)?;
+        Some(&mut self.buckets[bucket_idx].nodes[pos])
+    }
+
+    /// Record a successful response from a node, resetting its fail count.
+    pub fn mark_response(&mut self, id: &Id20) {
+        let bucket_idx = self.bucket_index(id);
+        if let Some(pos) = self.buckets[bucket_idx].find(id) {
+            self.buckets[bucket_idx].nodes[pos].last_response = Some(Instant::now());
+            self.buckets[bucket_idx].nodes[pos].fail_count = 0;
+        }
+    }
+
+    /// Record an incoming query from a node.
+    pub fn mark_query(&mut self, id: &Id20) {
+        let bucket_idx = self.bucket_index(id);
+        if let Some(pos) = self.buckets[bucket_idx].find(id) {
+            self.buckets[bucket_idx].nodes[pos].last_query = Some(Instant::now());
+        }
+    }
+
+    /// Return all nodes whose status is `Questionable`.
+    pub fn questionable_nodes(&self) -> Vec<(Id20, SocketAddr)> {
+        self.buckets
+            .iter()
+            .flat_map(|b| {
+                b.nodes
+                    .iter()
+                    .filter(|n| n.status() == NodeStatus::Questionable)
+                    .map(|n| (n.id, n.addr))
+            })
+            .collect()
     }
 
     // ---- Internal ----
@@ -531,6 +611,157 @@ mod tests {
         // IP slot is now free — different node with same IP can insert
         assert!(rt.insert(id(2), addr));
         assert_eq!(rt.len(), 1);
+    }
+
+    // ── Liveness / NodeStatus tests ────────────────────────────────
+
+    #[test]
+    fn node_status_bad_on_two_failures() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1));
+        rt.mark_failed(&id(1));
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Questionable);
+        rt.mark_failed(&id(1));
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Bad);
+    }
+
+    #[test]
+    fn node_status_good_after_mark_response() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1));
+        // Freshly inserted nodes have no last_response/last_query, so Questionable
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Questionable);
+        rt.mark_response(&id(1));
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Good);
+    }
+
+    #[test]
+    fn node_status_good_after_mark_query() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1));
+        rt.mark_query(&id(1));
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Good);
+    }
+
+    #[test]
+    fn mark_response_resets_fail_count() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1));
+        rt.mark_failed(&id(1));
+        rt.mark_failed(&id(1));
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Bad);
+        rt.mark_response(&id(1));
+        assert_eq!(rt.get(&id(1)).unwrap().fail_count, 0);
+        assert_eq!(rt.get(&id(1)).unwrap().status(), NodeStatus::Good);
+    }
+
+    #[test]
+    fn mark_response_noop_for_unknown_node() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        // Should not panic when node is not in the table
+        rt.mark_response(&id(42));
+    }
+
+    #[test]
+    fn mark_query_noop_for_unknown_node() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.mark_query(&id(42));
+    }
+
+    #[test]
+    fn get_mut_finds_node() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1));
+        let node = rt.get_mut(&id(1));
+        assert!(node.is_some());
+        // Mutate through the reference
+        node.unwrap().fail_count = 99;
+        assert_eq!(rt.get(&id(1)).unwrap().fail_count, 99);
+    }
+
+    #[test]
+    fn get_mut_returns_none_for_missing_node() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        assert!(rt.get_mut(&id(1)).is_none());
+    }
+
+    #[test]
+    fn questionable_nodes_filters_correctly() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1)); // Questionable (no activity)
+        rt.insert(id(2), addr(2)); // Will be Good
+        rt.insert(id(3), addr(3)); // Will be Bad
+        rt.mark_response(&id(2));
+        rt.mark_failed(&id(3));
+        rt.mark_failed(&id(3));
+
+        let q = rt.questionable_nodes();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0, id(1));
+    }
+
+    #[test]
+    fn questionable_nodes_empty_when_all_good_or_bad() {
+        let mut rt = RoutingTable::new(Id20::ZERO);
+        rt.insert(id(1), addr(1));
+        rt.insert(id(2), addr(2));
+        rt.mark_response(&id(1));
+        rt.mark_failed(&id(2));
+        rt.mark_failed(&id(2));
+
+        assert!(rt.questionable_nodes().is_empty());
+    }
+
+    #[test]
+    fn worst_node_evicts_oldest_on_tied_fail_counts() {
+        // Build a bucket manually to control insertion order and last_seen values
+        let mut bucket = KBucket::new();
+        let now = Instant::now();
+        // Node A: inserted earlier (older last_seen), fail_count=1
+        bucket.nodes.push(RoutingNode {
+            id: id(1),
+            addr: addr(1),
+            last_seen: now - std::time::Duration::from_secs(100),
+            fail_count: 1,
+            last_response: None,
+            last_query: None,
+        });
+        // Node B: inserted more recently (newer last_seen), fail_count=1
+        bucket.nodes.push(RoutingNode {
+            id: id(2),
+            addr: addr(2),
+            last_seen: now - std::time::Duration::from_secs(10),
+            fail_count: 1,
+            last_response: None,
+            last_query: None,
+        });
+        // worst_node should return index 0 (the oldest node)
+        let worst = bucket.worst_node().unwrap();
+        assert_eq!(bucket.nodes[worst].id, id(1), "oldest node should be evicted on tied fail counts");
+    }
+
+    #[test]
+    fn worst_node_prefers_highest_fail_count() {
+        let mut bucket = KBucket::new();
+        let now = Instant::now();
+        bucket.nodes.push(RoutingNode {
+            id: id(1),
+            addr: addr(1),
+            last_seen: now,
+            fail_count: 3,
+            last_response: None,
+            last_query: None,
+        });
+        bucket.nodes.push(RoutingNode {
+            id: id(2),
+            addr: addr(2),
+            last_seen: now - std::time::Duration::from_secs(1000),
+            fail_count: 1,
+            last_response: None,
+            last_query: None,
+        });
+        let worst = bucket.worst_node().unwrap();
+        assert_eq!(bucket.nodes[worst].id, id(1), "highest fail_count should win regardless of age");
     }
 
     #[test]

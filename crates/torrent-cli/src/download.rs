@@ -3,7 +3,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use torrent::core::{DEFAULT_CHUNK_SIZE, Lengths, TorrentMeta};
 use torrent::session::SessionState;
@@ -118,6 +118,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     let mut finished = false;
     let mut peak_peers: usize = 0;
     let mut last_download_rate: u64 = 0;
+    let mut last_save = Instant::now();
+    const SAVE_INTERVAL: Duration = Duration::from_secs(60);
     loop {
         if shutdown.load(Ordering::SeqCst) {
             if let Some(ref pb) = pb {
@@ -187,6 +189,11 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if last_save.elapsed() >= SAVE_INTERVAL {
+            save_session_state(&session, &state_path, quiet).await;
+            last_save = Instant::now();
+        }
     }
 
     Ok(())
@@ -299,8 +306,11 @@ async fn save_session_state(
             }
             match torrent::bencode::to_bytes(&state) {
                 Ok(bytes) => {
-                    if let Err(e) = std::fs::write(state_path, &bytes) {
+                    let tmp_path = state_path.with_extension("dat.tmp");
+                    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
                         eprintln!("Warning: failed to write state file: {e}");
+                    } else if let Err(e) = std::fs::rename(&tmp_path, state_path) {
+                        eprintln!("Warning: failed to rename state file: {e}");
                     }
                 }
                 Err(e) => {
