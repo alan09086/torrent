@@ -2344,7 +2344,7 @@ impl TorrentActor {
                     }
                     if self.state == TorrentState::Downloading {
                         let have = self.chunk_tracker.as_ref().map(|ct| ct.bitfield().count_ones()).unwrap_or(0);
-                        let in_flight = self.piece_owner.iter().filter(|o| o.is_some()).count();
+                        let in_flight = self.atomic_states.as_ref().map(|s| s.in_flight_count() as usize).unwrap_or(0);
                         let unchoked = self.peers.values().filter(|p| !p.peer_choking).count();
                         info!(have, in_flight, total = self.num_pieces,
                               downloaded_mb = self.downloaded / (1024 * 1024),
@@ -5589,14 +5589,26 @@ impl TorrentActor {
         let Some(ref atomic_states) = self.atomic_states else {
             return;
         };
-        let in_flight = self.piece_owner.iter().filter(|o| o.is_some()).count() as u32;
+        let in_flight = atomic_states.in_flight_count();
         if have + in_flight >= self.num_pieces && in_flight > 0 {
             use std::collections::HashMap;
             let mut per_peer: HashMap<SocketAddr, Vec<(u32, u32, u32)>> = HashMap::new();
+            // M93: Find in-flight pieces from atomic state (not piece_owner,
+            // which only tracks pieces after chunks arrive). Use the known
+            // owner if available, otherwise assign to a random unchoked peer
+            // so endgame can send duplicate requests.
+            let fallback_addr = self.peers.values()
+                .find(|p| !p.peer_choking)
+                .map(|p| p.addr);
             for piece in 0..self.num_pieces {
-                if let Some(slab_idx) = self.piece_owner[piece as usize]
-                    && let Some(&addr) = self.peer_slab.get(slab_idx)
-                {
+                let state = atomic_states.get(piece);
+                if state != PieceState::Reserved && state != PieceState::Endgame {
+                    continue;
+                }
+                let addr = self.piece_owner[piece as usize]
+                    .and_then(|slab_idx| self.peer_slab.get(slab_idx).copied())
+                    .or(fallback_addr);
+                if let Some(addr) = addr {
                     let missing = ct.missing_chunks(piece);
                     for (begin, length) in missing {
                         per_peer.entry(addr).or_default().push((piece, begin, length));
@@ -5610,9 +5622,10 @@ impl TorrentActor {
                 blocks = self.end_game.block_count(),
                 "end-game mode activated"
             );
-            // M93: Transition in-flight pieces to Endgame state
+            // M93: Transition ALL in-flight pieces to Endgame state
             for piece in 0..self.num_pieces {
-                if self.piece_owner[piece as usize].is_some() {
+                let state = atomic_states.get(piece);
+                if state == PieceState::Reserved {
                     atomic_states.transition_to_endgame(piece);
                 }
             }

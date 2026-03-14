@@ -129,6 +129,21 @@ impl AtomicPieceStates {
     pub fn len(&self) -> u32 {
         self.states.len() as u32
     }
+
+    /// Count pieces in Reserved or Endgame state (i.e., in-flight).
+    ///
+    /// This is the authoritative in-flight count — unlike `piece_owner` which
+    /// only learns about reservations when chunks arrive, this reflects CAS
+    /// reservations immediately.
+    pub fn in_flight_count(&self) -> u32 {
+        self.states
+            .iter()
+            .filter(|a| {
+                let v = a.load(Ordering::Relaxed);
+                v == PieceState::Reserved as u8 || v == PieceState::Endgame as u8
+            })
+            .count() as u32
+    }
 }
 
 /// Pre-computed rarest-first ordering, cheaply cloneable via `Arc`.
