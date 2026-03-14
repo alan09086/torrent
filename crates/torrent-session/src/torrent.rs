@@ -436,6 +436,7 @@ impl TorrentHandle {
             sam_session,
             i2p_accept_rx: None,
             i2p_peer_counter: 0,
+            i2p_destinations: HashMap::new(),
             ssl_manager,
             rate_limiter_set,
             auto_sequential_active: false,
@@ -708,6 +709,7 @@ impl TorrentHandle {
             sam_session,
             i2p_accept_rx: None,
             i2p_peer_counter: 0,
+            i2p_destinations: HashMap::new(),
             ssl_manager,
             rate_limiter_set,
             auto_sequential_active: false,
@@ -1484,6 +1486,9 @@ struct TorrentActor {
 
     /// Counter for generating synthetic SocketAddr values for I2P peers (M41).
     i2p_peer_counter: u32,
+
+    /// Maps synthetic SocketAddr → I2pDestination for outbound I2P connects.
+    i2p_destinations: HashMap<SocketAddr, crate::i2p::I2pDestination>,
 
     /// SSL manager for SSL torrent certificate handling (M42).
     ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
@@ -3495,6 +3500,7 @@ impl TorrentActor {
                     }
                 }
                 self.suggested_to_peers.remove(&peer_addr);
+                self.i2p_destinations.remove(&peer_addr);
             }
             PeerEvent::WebSeedPieceData { url, index, data } => {
                 self.handle_web_seed_piece_data(url, index, data).await;
@@ -6354,19 +6360,38 @@ impl TorrentActor {
 
         let synthetic_addr = self.next_i2p_synthetic_addr();
 
+        let remote_dest = stream.remote_destination().clone();
         let dest_preview = {
-            let b64 = stream.remote_destination().to_base64();
+            let b64 = remote_dest.to_base64();
             if b64.len() >= 8 {
                 b64[..8].to_string()
             } else {
                 b64
             }
         };
+        self.i2p_destinations.insert(synthetic_addr, remote_dest);
         let tcp_stream = stream.into_inner();
 
         self.spawn_peer_from_stream(synthetic_addr, tcp_stream);
 
         debug!(dest = %dest_preview, addr = %synthetic_addr, "accepted I2P peer");
+    }
+
+    /// Add an I2P peer by destination, assigning a synthetic SocketAddr.
+    #[allow(dead_code)] // Used by Task 2 (outbound I2P connects)
+    fn add_i2p_peer(&mut self, dest: crate::i2p::I2pDestination, source: PeerSource) -> Option<SocketAddr> {
+        // Dedup: check if we already track this destination
+        if self.i2p_destinations.values().any(|d| d == &dest) {
+            return None;
+        }
+        let addr = self.next_i2p_synthetic_addr();
+        self.i2p_destinations.insert(addr, dest);
+        if self.available_peers_set.insert(addr) {
+            self.available_peers.push((addr, source));
+            Some(addr)
+        } else {
+            None
+        }
     }
 
     /// Generate a unique synthetic `SocketAddr` for an I2P peer.
@@ -6384,7 +6409,18 @@ impl TorrentActor {
             (self.i2p_peer_counter & 0xFFFF) as u16,
         )
     }
+}
 
+/// Check whether a `SocketAddr` uses a synthetic I2P address (240.0.0.0/4 range).
+#[allow(dead_code)] // Used by Task 2 (outbound I2P connects)
+pub(crate) fn is_i2p_synthetic_addr(addr: &SocketAddr) -> bool {
+    match addr {
+        SocketAddr::V4(v4) => v4.ip().octets()[0] & 0xF0 == 0xF0,
+        _ => false,
+    }
+}
+
+impl TorrentActor {
     /// Spawn a peer task from an already-connected stream (for incoming connections and tests).
     fn spawn_peer_from_stream(
         &mut self,
@@ -12100,5 +12136,13 @@ mod tests {
             torrent_core::MerkleTree::verify_proof(tree.root(), sub_root, leaf_index, uncle_hashes),
             "subtree proof should verify against tree root"
         );
+    }
+
+    #[test]
+    fn is_i2p_synthetic_addr_detects_240_range() {
+        assert!(is_i2p_synthetic_addr(&"240.0.0.1:1".parse().unwrap()));
+        assert!(is_i2p_synthetic_addr(&"255.255.255.255:65535".parse().unwrap()));
+        assert!(!is_i2p_synthetic_addr(&"192.168.1.1:6881".parse().unwrap()));
+        assert!(!is_i2p_synthetic_addr(&"[::1]:6881".parse().unwrap()));
     }
 }
