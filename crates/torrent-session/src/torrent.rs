@@ -3760,19 +3760,20 @@ impl TorrentActor {
         }
     }
 
-    /// M78: Actor-side handler for the direct peer-to-disk path.
-    /// Called when a peer task has already written the chunk to disk and sends
-    /// ChunkWritten (metadata-only) instead of PieceData (full Bytes payload).
-    /// Performs all the same bookkeeping as handle_piece_data — stats, smart
-    /// banning, peer tracking, end-game cancels, chunk tracking, piece
-    /// verification — without the disk write.
-    async fn handle_chunk_written(
+    /// M92: Process a single block completion — extracted from `handle_chunk_written()`.
+    /// Called once per block in a batch. Returns `true` if this block completed a piece
+    /// and piece verification was triggered.
+    ///
+    /// IMPORTANT: This is a line-for-line extraction of `handle_chunk_written()`.
+    /// Every edge case (duplicate detection, end-game cancels, v2/hybrid verification,
+    /// predictive Have, smart banning) is preserved identically.
+    async fn process_block_completion(
         &mut self,
         peer_addr: SocketAddr,
         index: u32,
         begin: u32,
         length: u32,
-    ) {
+    ) -> bool {
         // Skip duplicate blocks — in end-game mode or after timeout re-requests,
         // the same block may arrive from multiple peers. Writing it to the store
         // buffer would overwrite valid data that's pending verification.
@@ -3793,7 +3794,7 @@ impl TorrentActor {
                 self.end_game.block_received(index, begin, peer_addr);
             }
             // Peer task already returned its permit on direct write
-            return;
+            return false;
         }
 
         // NOTE: No disk write here — the peer task has already written to disk.
@@ -3888,6 +3889,26 @@ impl TorrentActor {
         if self.end_game.is_active() {
             self.request_end_game_block(peer_addr).await;
         }
+
+        piece_complete
+    }
+
+    /// M78: Actor-side handler for the direct peer-to-disk path.
+    /// Called when a peer task has already written the chunk to disk and sends
+    /// ChunkWritten (metadata-only) instead of PieceData (full Bytes payload).
+    /// Performs all the same bookkeeping as handle_piece_data — stats, smart
+    /// banning, peer tracking, end-game cancels, chunk tracking, piece
+    /// verification — without the disk write.
+    ///
+    /// M92: Now delegates to `process_block_completion()`. Will be removed in Task 8.
+    async fn handle_chunk_written(
+        &mut self,
+        peer_addr: SocketAddr,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) {
+        self.process_block_completion(peer_addr, index, begin, length).await;
     }
 
     async fn verify_existing_pieces(&mut self) {
