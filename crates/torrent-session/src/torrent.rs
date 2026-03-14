@@ -6528,7 +6528,6 @@ impl TorrentActor {
 }
 
 /// Check whether a `SocketAddr` uses a synthetic I2P address (240.0.0.0/4 range).
-#[allow(dead_code)] // Used by Task 2 (outbound I2P connects)
 pub(crate) fn is_i2p_synthetic_addr(addr: &SocketAddr) -> bool {
     match addr {
         SocketAddr::V4(v4) => v4.ip().octets()[0] & 0xF0 == 0xF0,

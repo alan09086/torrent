@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::torrent::is_i2p_synthetic_addr;
+
 /// Size of a single compact IPv4 peer entry (4 bytes IP + 2 bytes port).
 const COMPACT_PEER_SIZE: usize = 6;
 
@@ -102,6 +104,27 @@ impl PexMessage {
         }
         torrent_tracker::parse_compact_peers6(&self.dropped6).unwrap_or_default()
     }
+}
+
+/// Filter peer addresses for I2P mixed-mode compliance.
+///
+/// When `allow_mixed` is false:
+/// - I2P recipients only see I2P synthetic addresses
+/// - Clearnet recipients don't see I2P synthetic addresses
+#[allow(dead_code)] // will be called when PEX message construction is wired up
+pub(crate) fn filter_peers_for_transport(
+    peers: &[SocketAddr],
+    allow_mixed: bool,
+    recipient_is_i2p: bool,
+) -> Vec<SocketAddr> {
+    if allow_mixed {
+        return peers.to_vec();
+    }
+    peers
+        .iter()
+        .copied()
+        .filter(|addr| is_i2p_synthetic_addr(addr) == recipient_is_i2p)
+        .collect()
 }
 
 #[cfg(test)]
@@ -252,5 +275,38 @@ mod tests {
             ..Default::default()
         };
         assert!(msg.added_peers6().is_empty());
+    }
+
+    // --- I2P mixed-mode PEX filtering tests ---
+
+    #[test]
+    fn filter_removes_i2p_for_clearnet_recipient() {
+        let peers = vec![
+            "1.2.3.4:6881".parse().unwrap(),
+            "240.0.0.1:1".parse().unwrap(),
+        ];
+        let filtered = filter_peers_for_transport(&peers, false, false);
+        assert_eq!(filtered.len(), 1);
+        assert!(!is_i2p_synthetic_addr(&filtered[0]));
+    }
+
+    #[test]
+    fn filter_removes_clearnet_for_i2p_recipient() {
+        let peers = vec![
+            "1.2.3.4:6881".parse().unwrap(),
+            "240.0.0.1:1".parse().unwrap(),
+        ];
+        let filtered = filter_peers_for_transport(&peers, false, true);
+        assert_eq!(filtered.len(), 1);
+        assert!(is_i2p_synthetic_addr(&filtered[0]));
+    }
+
+    #[test]
+    fn filter_keeps_all_when_mixed_allowed() {
+        let peers = vec![
+            "1.2.3.4:6881".parse().unwrap(),
+            "240.0.0.1:1".parse().unwrap(),
+        ];
+        assert_eq!(filter_peers_for_transport(&peers, true, false).len(), 2);
     }
 }
