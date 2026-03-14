@@ -5,9 +5,17 @@ set -uo pipefail
 # heaptrack (trial 2), network connection logging (all).
 # Output: /mnt/TempNVME/bench-results/<timestamp>/
 
-MAGNET="${1:?Usage: $0 <magnet_uri> [trials]}"
+MAGNET="${1:?Usage: $0 <magnet_uri> [trials] [timeout]}"
 TRIALS="${2:-10}"
-TORRENT="target/release/torrent"
+TIMEOUT="${3:-120}"
+# Resolve to absolute path so sudo/timeout don't lose it
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+TORRENT="$REPO_ROOT/target/release/torrent"
+if [ ! -x "$TORRENT" ]; then
+    echo "ERROR: Binary not found at $TORRENT — run 'cargo build --release' first" >&2
+    exit 1
+fi
 BASE_DIR="/mnt/TempNVME/bench-results"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 RESULTS_DIR="$BASE_DIR/$TIMESTAMP"
@@ -15,6 +23,25 @@ DL_BASE="/mnt/TempNVME/bench-dl/torrent"
 PORT=42020
 
 mkdir -p "$RESULTS_DIR"
+
+# Pre-flight: ensure benchmark port is free (stale process from killed run)
+if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+    echo "Port $PORT already in use — killing stale process..."
+    stale_pid=$(sudo ss -tlnp 2>/dev/null | grep ":${PORT} " | grep -oP 'pid=\K[0-9]+' | head -1)
+    if [ -n "$stale_pid" ]; then
+        sudo kill "$stale_pid" 2>/dev/null || true
+        sleep 2
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+            sudo kill -9 "$stale_pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+        echo "ERROR: Cannot free port $PORT — aborting" >&2
+        exit 1
+    fi
+    echo "Port $PORT freed."
+fi
 
 # Check disk space
 AVAIL_GB=$(df --output=avail /mnt/TempNVME 2>/dev/null | tail -1 | awk '{printf "%d", $1/1048576}')
@@ -46,6 +73,7 @@ parse_time() {
 cleanup() {
     pgrep -x torrent | xargs -r kill -9 2>/dev/null
     pgrep -f "heaptrack.*torrent" | xargs -r kill -9 2>/dev/null
+    pgrep -f "perf.*torrent" | xargs -r kill -9 2>/dev/null
     sleep 2
     # Verify port is free
     if sudo ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
@@ -57,6 +85,9 @@ cleanup() {
         fi
     fi
 }
+
+# Ensure cleanup runs on script exit/interrupt (prevents stale port on Ctrl-C)
+trap cleanup EXIT INT TERM
 
 echo "=== Torrent Profiling Benchmark ==="
 echo "Results: $RESULTS_DIR"
@@ -92,8 +123,9 @@ for trial in $(seq 1 "$TRIALS"); do
     start_time=$(date +%s)
 
     if [ "$trial" -eq 1 ]; then
-        echo "  [flamegraph + perf stat]"
-        sudo perf record -g -F 999 -o "$out_dir/perf.data" -- \
+        echo "  [flamegraph + perf stat] (timeout ${TIMEOUT}s)"
+        sudo timeout --signal=TERM --kill-after=10 "$TIMEOUT" \
+            perf record -g -F 999 -o "$out_dir/perf.data" -- \
             /usr/bin/time -v "$TORRENT" download "$MAGNET" -o "$DL_BASE" -q -p "$PORT" \
             2>"$time_file" || true
         # Generate flamegraph
@@ -106,14 +138,16 @@ for trial in $(seq 1 "$TRIALS"); do
             sudo chown alan:alan "$out_dir/perf-stat.txt" 2>/dev/null || true
         fi
     elif [ "$trial" -eq 2 ]; then
-        echo "  [heaptrack]"
-        DISPLAY= /usr/bin/time -v heaptrack -o "$out_dir/heaptrack" \
+        echo "  [heaptrack] (timeout ${TIMEOUT}s)"
+        DISPLAY= timeout --signal=TERM --kill-after=10 "$TIMEOUT" \
+            /usr/bin/time -v heaptrack -o "$out_dir/heaptrack" \
             "$TORRENT" download "$MAGNET" -o "$DL_BASE" -q -p "$PORT" \
             2>"$time_file" || true
     else
-        echo "  [perf stat]"
+        echo "  [perf stat] (timeout ${TIMEOUT}s)"
         # Use software counters (hardware PMU may be unavailable on some kernels)
-        sudo perf stat -e cpu-clock,task-clock,context-switches,cpu-migrations,page-faults \
+        sudo timeout --signal=TERM --kill-after=10 "$TIMEOUT" \
+            perf stat -e cpu-clock,task-clock,context-switches,cpu-migrations,page-faults \
             -o "$out_dir/perf-stat.txt" -- \
             /usr/bin/time -v "$TORRENT" download "$MAGNET" -o "$DL_BASE" -q -p "$PORT" \
             2>"$time_file" || true
