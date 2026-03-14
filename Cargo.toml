@@ -4,7 +4,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.92.0"
+version = "0.93.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://codeberg.org/alan090/torrent"
@@ -42,6 +42,9 @@ ring = "0.17"
 
 # Fast synchronization primitives
 parking_lot = "0.12"
+
+# Arena-allocated slot map
+slab = "0.4"
 
 # Testing
 pretty_assertions = "1"
