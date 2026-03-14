@@ -211,6 +211,122 @@ impl AvailabilitySnapshot {
     }
 }
 
+/// Per-peer dispatch state. Owned entirely by a single peer task -- no
+/// sharing, no locks, no atomics on the hot path.
+pub(crate) struct PeerDispatchState {
+    /// Current snapshot (cheaply cloned via Arc).
+    snapshot: Arc<AvailabilitySnapshot>,
+    /// Cursor position within `snapshot.order`.
+    cursor: usize,
+    /// The piece currently being block-dispatched, if any.
+    current_piece: Option<CurrentPiece>,
+    /// Lengths for block arithmetic.
+    lengths: Lengths,
+}
+
+/// Tracks block-by-block progress within a single piece.
+struct CurrentPiece {
+    piece: u32,
+    next_block: u32,
+    total_blocks: u32,
+}
+
+impl PeerDispatchState {
+    pub fn new(snapshot: Arc<AvailabilitySnapshot>, lengths: Lengths) -> Self {
+        Self {
+            snapshot,
+            cursor: 0,
+            current_piece: None,
+            lengths,
+        }
+    }
+
+    /// Update the snapshot reference. Resets cursor if generation changed.
+    pub fn update_snapshot(&mut self, snapshot: Arc<AvailabilitySnapshot>) {
+        if snapshot.generation != self.snapshot.generation {
+            self.cursor = 0;
+        }
+        self.snapshot = snapshot;
+    }
+
+    /// Get the next block request for this peer.
+    ///
+    /// Hot path: if a current piece has remaining blocks, returns immediately
+    /// with no atomic operations at all.
+    ///
+    /// Cold path: walks the snapshot cursor, calling `try_reserve()` (CAS) on
+    /// each candidate the peer has. First CAS success becomes the new
+    /// `current_piece`.
+    ///
+    /// Returns `None` when the cursor is exhausted (caller should wait on
+    /// `piece_notify`).
+    pub fn next_block(
+        &mut self,
+        peer_bitfield: &Bitfield,
+        atomic_states: &AtomicPieceStates,
+    ) -> Option<BlockRequest> {
+        // 1. Hot path: current piece has blocks remaining.
+        if let Some(ref mut cp) = self.current_piece {
+            if cp.next_block < cp.total_blocks {
+                let piece = cp.piece;
+                let block_idx = cp.next_block;
+                cp.next_block += 1;
+                return Some(self.make_block_request(piece, block_idx));
+            }
+            // Piece fully dispatched -- drop it.
+            self.current_piece = None;
+        }
+
+        // 2. Cold path: walk snapshot for a new piece.
+        while self.cursor < self.snapshot.order.len() {
+            let piece = self.snapshot.order[self.cursor];
+            self.cursor += 1;
+
+            if !peer_bitfield.get(piece) {
+                continue;
+            }
+
+            if atomic_states.try_reserve(piece) {
+                let total_blocks = self.lengths.chunks_in_piece(piece);
+                if total_blocks == 0 {
+                    continue;
+                }
+                self.current_piece = Some(CurrentPiece {
+                    piece,
+                    next_block: 1,
+                    total_blocks,
+                });
+                return Some(self.make_block_request(piece, 0));
+            }
+        }
+
+        None // cursor exhausted
+    }
+
+    /// Build a `BlockRequest` using `Lengths::chunk_info`.
+    fn make_block_request(&self, piece: u32, block_idx: u32) -> BlockRequest {
+        let (begin, length) = self
+            .lengths
+            .chunk_info(piece, block_idx)
+            .expect("block_idx out of range for piece");
+        BlockRequest {
+            piece,
+            begin,
+            length,
+        }
+    }
+
+    /// Get the currently active piece, if any (for release on disconnect).
+    pub fn current_piece_index(&self) -> Option<u32> {
+        self.current_piece.as_ref().map(|cp| cp.piece)
+    }
+
+    /// Clear current piece (e.g., on choke -- peer must re-reserve).
+    pub fn clear_current_piece(&mut self) {
+        self.current_piece = None;
+    }
+}
+
 use slab::Slab;
 
 /// Arena-allocated peer index for compact piece tracking.
@@ -1908,5 +2024,216 @@ mod tests {
         assert_eq!(snap.order[2], 0); // avail=2
         assert_eq!(snap.order[3], 1); // avail=3
         assert_eq!(snap.order[4], 4); // avail=5
+    }
+
+    // ---- PeerDispatchState tests ----
+
+    #[test]
+    fn dispatch_state_hot_path_returns_blocks() {
+        let lengths = test_lengths(); // 128 KiB total, 32 KiB pieces, 16 KiB chunks -> 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        // First call: cold path (no current piece) -> reserves a piece, returns block 0
+        let b0 = ds.next_block(&peer_bf, &states).unwrap();
+        assert_eq!(b0.begin, 0);
+        assert_eq!(b0.length, 16384);
+        let piece = b0.piece;
+
+        // Second call: hot path -> returns block 1 of same piece
+        let b1 = ds.next_block(&peer_bf, &states).unwrap();
+        assert_eq!(b1.piece, piece);
+        assert_eq!(b1.begin, 16384);
+        assert_eq!(b1.length, 16384);
+
+        // Third call: piece fully dispatched, cold path -> reserves next piece
+        let b2 = ds.next_block(&peer_bf, &states).unwrap();
+        assert_ne!(b2.piece, piece, "should get a different piece");
+        assert_eq!(b2.begin, 0);
+    }
+
+    #[test]
+    fn dispatch_state_cursor_exhausted_returns_none() {
+        let lengths = test_lengths();
+        let num_pieces = 2u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        // Exhaust all pieces (2 pieces x 2 blocks = 4 blocks)
+        for _ in 0..4 {
+            assert!(ds.next_block(&peer_bf, &states).is_some());
+        }
+
+        // Cursor exhausted
+        assert!(ds.next_block(&peer_bf, &states).is_none());
+    }
+
+    #[test]
+    fn dispatch_state_cursor_reset_on_generation_change() {
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap1 = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap1), lengths.clone());
+
+        // Reserve piece from first snapshot
+        let b0 = ds.next_block(&peer_bf, &states).unwrap();
+        let first_piece = b0.piece;
+
+        // Exhaust first piece
+        ds.next_block(&peer_bf, &states).unwrap(); // block 1
+
+        // Release the first piece (simulating actor releasing it)
+        states.release(first_piece);
+
+        // New snapshot with different generation
+        let snap2 = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            2, // generation changed
+        ));
+        ds.update_snapshot(snap2);
+
+        // Cursor should have been reset -- can see pieces from the start again
+        let b_new = ds.next_block(&peer_bf, &states).unwrap();
+        // The released piece should be available again at the front
+        assert_eq!(b_new.begin, 0, "cursor should have reset to start");
+    }
+
+    #[test]
+    fn dispatch_state_skips_pieces_peer_lacks() {
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        // Peer only has piece 2
+        let mut peer_bf = Bitfield::new(num_pieces);
+        peer_bf.set(2);
+
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        let b = ds.next_block(&peer_bf, &states).unwrap();
+        assert_eq!(b.piece, 2, "should only get piece 2 which peer has");
+
+        // Exhaust piece 2 (2 blocks)
+        ds.next_block(&peer_bf, &states).unwrap();
+
+        // No more pieces available for this peer
+        assert!(ds.next_block(&peer_bf, &states).is_none());
+    }
+
+    #[test]
+    fn dispatch_state_cas_failure_advances_cursor() {
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+
+        // Pre-reserve all but the last piece externally (simulating other peers)
+        let first_three: Vec<u32> = snap.order[..3].to_vec();
+        for &p in &first_three {
+            assert!(states.try_reserve(p));
+        }
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        // Should skip the first 3 (CAS fails) and get the 4th
+        let b = ds.next_block(&peer_bf, &states).unwrap();
+        assert!(!first_three.contains(&b.piece), "should skip pre-reserved pieces");
+    }
+
+    #[test]
+    fn dispatch_state_current_piece_and_clear() {
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        // No current piece initially
+        assert!(ds.current_piece_index().is_none());
+
+        // Reserve a piece
+        let b = ds.next_block(&peer_bf, &states).unwrap();
+        assert_eq!(ds.current_piece_index(), Some(b.piece));
+
+        // Clear current piece (simulating choke)
+        ds.clear_current_piece();
+        assert!(ds.current_piece_index().is_none());
     }
 }
