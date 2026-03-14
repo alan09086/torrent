@@ -29,6 +29,16 @@ rm -rf "$OUTPUT_DIR"
 rm -rf /tmp/qbt-bench-profile /tmp/qbt-bench-cookies.txt /tmp/qbt-bench-startup.log
 mkdir -p "$OUTPUT_DIR"
 
+# --- Check disk space (need ~2GB per trial per client) ---
+REQUIRED_GB=$(( TRIALS * 3 * 2 ))
+AVAIL_GB=$(df --output=avail /tmp 2>/dev/null | tail -1 | awk '{printf "%d", $1/1048576}')
+if [ "$AVAIL_GB" -lt "$REQUIRED_GB" ]; then
+    echo "ERROR: Need ~${REQUIRED_GB}GB free in /tmp, only ${AVAIL_GB}GB available" >&2
+    echo "Clean up /tmp before running benchmarks." >&2
+    exit 1
+fi
+echo "Disk space: ${AVAIL_GB}GB available (need ~${REQUIRED_GB}GB)"
+
 echo "Building torrent-cli (release)..."
 cargo build --release -p torrent-cli 2>/dev/null
 TORRENT="target/release/torrent"
