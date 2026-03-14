@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.86.0] — 2026-03-14
+
+### Added
+- **BEP 52 hash serving**: v2/hybrid seeders now serve piece-layer Merkle hashes to
+  peers via `HashRequest` (message ID 21) instead of always rejecting. Extracts
+  `serve_hashes()` as a standalone testable function. Uses `MerkleTree::proof_path()`
+  for uncle proofs with correct subtree proof layout. V1-only torrents and invalid
+  requests are still rejected.
+
+### Changed
+- Removed unused placeholder fields from `PieceHashRequest` (`_num_requests`) and
+  `BlockHashRequest` (`_last_request`, `_num_requests`) in hash_picker.rs.
+- Fixed 6 redundant closures (`|i| leaf(i)` → `leaf`) in merkle.rs tests.
+
 ## [0.85.0] — 2026-03-13
 
 ### Added

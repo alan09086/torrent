@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1461-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1467-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.85.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.86.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1461 tests, zero clippy warnings**
+- 📊 **1467 tests, zero clippy warnings**
 
 ---
 
@@ -162,7 +162,8 @@ Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per ve
 
 | Version | Avg Speed | Peak | CPU Time | RSS | Notes |
 |---------|-----------|------|----------|-----|-------|
-| **0.85.0** | — | — | — | — | DHT routing table overhaul: iterative bootstrap, node liveness, background pinger, periodic persistence |
+| **0.86.0** | — | — | — | — | BEP 52 hash serving for v2/hybrid seeders |
+| 0.85.0 | — | — | — | — | DHT routing table overhaul: iterative bootstrap, node liveness, background pinger, periodic persistence |
 | 0.84.0 | 55.7 MB/s | 67.3 MB/s | 12.5s | 107 MiB | AWS-LC crypto backend (-28% CPU, -23% RSS vs ring) |
 | 0.83.0 | 56.8 MB/s | 83.5 MB/s | 13.1s | 68.8 MiB | Encryption disabled, AIMD depth 128, SIGTERM handling |
 | 0.82.0 | 38.6 MB/s | 62.1 MB/s | 18.4s | 88.9 MiB | Adaptive max_in_flight, cached dispatch, AIMD pipeline |
@@ -267,6 +268,7 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Speed Optimization | M55-M83 | DHT persistence, dispatch architecture, pipeline tuning, CPU efficiency | ✅ |
 | Crypto Backend | M84 | AWS-LC default, pluggable crypto (ring/openssl/aws-lc feature flags) | ✅ |
 | DHT Overhaul | M85 | Iterative bootstrap, node liveness, background pinger, rate limiting, periodic persistence | ✅ |
+| Audit Remediation | M86-M87 | Dead code removal, BEP 52 hash serving for v2/hybrid seeders | ✅ |
 
 ---
 
