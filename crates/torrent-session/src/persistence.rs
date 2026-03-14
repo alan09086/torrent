@@ -29,6 +29,10 @@ pub struct SessionState {
     /// Cached DHT routing table nodes for faster bootstrap on restart.
     #[serde(rename = "dht-nodes", default)]
     pub dht_nodes: Vec<DhtNodeEntry>,
+    /// BEP 42-compliant DHT node ID (hex). Persisted so the routing table
+    /// survives across sessions without regeneration.
+    #[serde(rename = "dht-node-id", default, skip_serializing_if = "Option::is_none")]
+    pub dht_node_id: Option<String>,
     /// Fast resume data for each torrent in the session.
     #[serde(rename = "torrents", default)]
     pub torrents: Vec<torrent_core::FastResumeData>,
@@ -45,6 +49,7 @@ impl SessionState {
     pub fn new() -> Self {
         Self {
             dht_nodes: Vec::new(),
+            dht_node_id: None,
             torrents: Vec::new(),
             banned_peers: Vec::new(),
             peer_strikes: Vec::new(),
@@ -89,6 +94,7 @@ mod tests {
                     port: 6881,
                 },
             ],
+            dht_node_id: None,
             torrents: vec![torrent_core::FastResumeData::new(
                 vec![0xAA; 20],
                 "test-torrent".into(),
@@ -144,6 +150,7 @@ mod tests {
     fn session_state_with_bans_round_trip() {
         let state = SessionState {
             dht_nodes: vec![],
+            dht_node_id: None,
             torrents: vec![],
             banned_peers: vec!["10.0.0.1".into(), "192.168.1.5".into()],
             peer_strikes: vec![
@@ -173,6 +180,7 @@ mod tests {
                 host: "example.com".into(),
                 port: 6881,
             }],
+            dht_node_id: None,
             torrents: vec![],
             banned_peers: vec![],
             peer_strikes: vec![],

@@ -51,8 +51,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         builder = builder.enable_dht(false);
     }
 
-    // Load saved DHT nodes from previous session for instant peer discovery
-    if let Some(saved_nodes) = load_dht_nodes(&state_path) {
+    // Load saved DHT state from previous session for instant peer discovery
+    if let Some((saved_nodes, saved_node_id)) = load_dht_state(&state_path) {
         if !quiet {
             eprintln!(
                 "Loaded {} saved DHT nodes from previous session",
@@ -60,6 +60,9 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
             );
         }
         builder = builder.dht_saved_nodes(saved_nodes);
+        if let Some(id) = saved_node_id {
+            builder = builder.dht_node_id(id);
+        }
     }
 
     let session = builder.start().await?;
@@ -273,10 +276,11 @@ fn state_file_path() -> PathBuf {
     dir.join("session.dat")
 }
 
-/// Load DHT node addresses from a previously saved state file.
+/// Load DHT state from a previously saved state file.
 ///
 /// Returns `None` if the file doesn't exist or can't be parsed.
-fn load_dht_nodes(state_path: &Path) -> Option<Vec<String>> {
+/// Returns (nodes, optional_node_id).
+fn load_dht_state(state_path: &Path) -> Option<(Vec<String>, Option<torrent::core::Id20>)> {
     let data = std::fs::read(state_path).ok()?;
     let state: SessionState = torrent::bencode::from_bytes(&data).ok()?;
     if state.dht_nodes.is_empty() {
@@ -287,7 +291,10 @@ fn load_dht_nodes(state_path: &Path) -> Option<Vec<String>> {
         .iter()
         .map(|entry| format!("{}:{}", entry.host, entry.port))
         .collect();
-    Some(nodes)
+    let node_id = state
+        .dht_node_id
+        .and_then(|hex| torrent::core::Id20::from_hex(&hex).ok());
+    Some((nodes, node_id))
 }
 
 /// Save session state (DHT nodes, etc.) to the state file.

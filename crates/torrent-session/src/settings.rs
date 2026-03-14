@@ -677,6 +677,11 @@ pub struct Settings {
     /// Runtime-injected, not serialized.
     #[serde(skip)]
     pub dht_saved_nodes: Vec<String>,
+    /// BEP 42-compliant DHT node ID from previous session.
+    /// Reusing the same ID avoids routing table regeneration on every startup.
+    /// Runtime-injected, not serialized.
+    #[serde(skip)]
+    pub dht_node_id: Option<torrent_core::Id20>,
 }
 
 impl Default for Settings {
@@ -816,6 +821,7 @@ impl Default for Settings {
             stats_report_interval: 1000,
             // DHT bootstrap (M56)
             dht_saved_nodes: Vec::new(),
+            dht_node_id: None,
         }
     }
 }
@@ -997,6 +1003,7 @@ impl Settings {
         bootstrap.extend(default.bootstrap_nodes.iter().cloned());
         torrent_dht::DhtConfig {
             bootstrap_nodes: bootstrap,
+            own_id: self.dht_node_id,
             queries_per_second: self.dht_queries_per_second,
             query_timeout: std::time::Duration::from_secs(self.dht_query_timeout_secs),
             enforce_node_id: self.dht_enforce_node_id,
@@ -1174,6 +1181,7 @@ impl PartialEq for Settings {
             && self.peer_dscp == other.peer_dscp
             && self.stats_report_interval == other.stats_report_interval
             && self.dht_saved_nodes == other.dht_saved_nodes
+            && self.dht_node_id == other.dht_node_id
     }
 }
 

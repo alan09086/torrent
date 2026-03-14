@@ -2820,7 +2820,12 @@ impl SessionActor {
         };
 
         let mut dht_entries = Vec::new();
+        let mut dht_node_id = None;
         if let Some(ref dht) = self.dht_v4 {
+            // Save the (possibly BEP 42-regenerated) node ID for next session
+            if let Ok(stats) = dht.stats().await {
+                dht_node_id = Some(stats.node_id.to_hex());
+            }
             for (_id, addr) in dht.get_routing_nodes().await {
                 dht_entries.push(crate::persistence::DhtNodeEntry {
                     host: addr.ip().to_string(),
@@ -2839,6 +2844,7 @@ impl SessionActor {
 
         Ok(SessionState {
             dht_nodes: dht_entries,
+            dht_node_id,
             torrents,
             banned_peers,
             peer_strikes,

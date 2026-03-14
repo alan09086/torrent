@@ -679,6 +679,17 @@ impl ClientBuilder {
         self
     }
 
+    /// Reuse a previously persisted BEP 42-compliant DHT node ID.
+    ///
+    /// Avoids routing table regeneration on startup when the external IP
+    /// hasn't changed. Without this, a random ID is generated each session
+    /// and immediately discarded by BEP 42, causing saved nodes to be
+    /// re-inserted into a fresh table with significant loss.
+    pub fn dht_node_id(mut self, id: torrent_core::Id20) -> Self {
+        self.settings.dht_node_id = Some(id);
+        self
+    }
+
     /// Set a custom disk I/O backend.
     ///
     /// When set, the session uses this backend instead of the default

@@ -146,6 +146,8 @@ impl DhtConfig {
 /// Runtime statistics for the DHT.
 #[derive(Debug, Clone)]
 pub struct DhtStats {
+    /// Our current node ID (may differ from startup ID after BEP 42 regeneration).
+    pub node_id: Id20,
     /// Number of nodes in the routing table.
     pub routing_table_size: usize,
     /// Number of k-buckets in use.
@@ -2334,6 +2336,7 @@ impl DhtActor {
     fn make_stats(&self) -> DhtStats {
         let (immutable, mutable) = self.item_store.count();
         DhtStats {
+            node_id: *self.routing_table.own_id(),
             routing_table_size: self.routing_table.len(),
             bucket_count: self.routing_table.bucket_count(),
             peer_store_info_hashes: self.peer_store.info_hash_count(),

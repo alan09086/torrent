@@ -303,6 +303,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 6881,
             }],
+            dht_node_id: None,
             torrents: vec![rd],
             banned_peers: Vec::new(),
             peer_strikes: Vec::new(),
@@ -359,6 +360,7 @@ mod tests {
         let _rd = FastResumeData::new(vec![0xCC; 20], "prelude-test".into(), "/tmp".into());
         let _state = SessionState {
             dht_nodes: Vec::new(),
+            dht_node_id: None,
             torrents: Vec::new(),
             banned_peers: Vec::new(),
             peer_strikes: Vec::new(),
