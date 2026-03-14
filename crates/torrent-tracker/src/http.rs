@@ -178,6 +178,11 @@ impl HttpTracker {
             url.push_str(&format!("&numwant={n}"));
         }
 
+        if let Some(ref dest) = req.i2p_destination {
+            url.push_str("&i2p=");
+            url.push_str(dest.trim_end_matches('='));
+        }
+
         Ok(url)
     }
 
@@ -343,6 +348,7 @@ mod tests {
             event: AnnounceEvent::Started,
             num_want: Some(50),
             compact: true,
+            i2p_destination: None,
         };
 
         let url =
@@ -444,5 +450,58 @@ mod tests {
         // Builds with TLS validation disabled and SSRF mitigation off.
         let tracker = HttpTracker::with_security(None, false, false);
         drop(tracker);
+    }
+
+    #[test]
+    fn build_announce_url_includes_i2p_destination() {
+        // Use I2P-specific Base64 chars (`-`, `~`) and padding to exercise stripping
+        let req = AnnounceRequest {
+            info_hash: Id20::ZERO,
+            peer_id: Id20::ZERO,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 1000,
+            event: AnnounceEvent::None,
+            num_want: None,
+            compact: true,
+            i2p_destination: Some("AAAA-BBB~CCC==".into()),
+        };
+
+        let url =
+            HttpTracker::build_announce_url("http://tracker.example.com/announce", &req).unwrap();
+
+        assert!(
+            url.contains("&i2p=AAAA-BBB~CCC"),
+            "URL should contain I2P destination with padding stripped: {url}"
+        );
+        // Verify padding was removed: no `=` should appear after the destination
+        let i2p_start = url.find("&i2p=").unwrap() + 5;
+        let i2p_value = &url[i2p_start..];
+        assert!(
+            !i2p_value.contains('='),
+            "I2P destination should not contain '=' padding in URL: {i2p_value}"
+        );
+    }
+
+    #[test]
+    fn build_announce_url_omits_i2p_when_none() {
+        let req = AnnounceRequest {
+            info_hash: Id20::ZERO,
+            peer_id: Id20::ZERO,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 1000,
+            event: AnnounceEvent::None,
+            num_want: None,
+            compact: true,
+            i2p_destination: None,
+        };
+
+        let url =
+            HttpTracker::build_announce_url("http://tracker.example.com/announce", &req).unwrap();
+
+        assert!(!url.contains("&i2p="), "URL should not contain &i2p= when None: {url}");
     }
 }

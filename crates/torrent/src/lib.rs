@@ -146,6 +146,7 @@ mod tests {
             event: tracker::AnnounceEvent::Started,
             num_want: Some(50),
             compact: true,
+            i2p_destination: None,
         };
 
         assert_eq!(req.port, 6881);

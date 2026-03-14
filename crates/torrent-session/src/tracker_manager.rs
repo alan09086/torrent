@@ -113,6 +113,8 @@ pub(crate) struct TrackerManager {
     udp_client: UdpTracker,
     anonymous_mode: bool,
     dscp: u8,
+    /// I2P destination Base64 for BEP 7 tracker announces.
+    i2p_destination: Option<String>,
 }
 
 impl TrackerManager {
@@ -187,6 +189,7 @@ impl TrackerManager {
             udp_client: UdpTracker::new(),
             anonymous_mode: false,
             dscp: 0,
+            i2p_destination: None,
         }
     }
 
@@ -278,6 +281,7 @@ impl TrackerManager {
             udp_client: UdpTracker::new().with_dscp(dscp),
             anonymous_mode,
             dscp,
+            i2p_destination: None,
         }
     }
 
@@ -303,6 +307,7 @@ impl TrackerManager {
             udp_client: UdpTracker::new().with_dscp(dscp),
             anonymous_mode,
             dscp,
+            i2p_destination: None,
         }
     }
 
@@ -333,6 +338,11 @@ impl TrackerManager {
     /// Set the full info hashes for dual-swarm support (hybrid torrents).
     pub fn set_info_hashes(&mut self, info_hashes: InfoHashes) {
         self.info_hashes = info_hashes;
+    }
+
+    /// Set the I2P destination Base64 string for BEP 7 tracker announces.
+    pub fn set_i2p_destination(&mut self, dest: Option<String>) {
+        self.i2p_destination = dest;
     }
 
     /// Number of configured trackers.
@@ -426,6 +436,7 @@ impl TrackerManager {
             event,
             num_want: Some(50),
             compact: true,
+            i2p_destination: self.i2p_destination.clone(),
         };
         let now = Instant::now();
 

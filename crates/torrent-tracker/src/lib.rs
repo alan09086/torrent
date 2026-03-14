@@ -65,6 +65,8 @@ pub struct AnnounceRequest {
     pub num_want: Option<i32>,
     /// Request compact peer list (6 bytes per IPv4 peer).
     pub compact: bool,
+    /// I2P destination Base64 string (BEP 7). Sent as `&i2p=<dest>` in HTTP announces.
+    pub i2p_destination: Option<String>,
 }
 
 /// Announce event type sent to trackers.

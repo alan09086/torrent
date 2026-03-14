@@ -474,6 +474,7 @@ mod tests {
             event: AnnounceEvent::Started,
             num_want: Some(50),
             compact: true,
+            i2p_destination: None,
         }
     }
 

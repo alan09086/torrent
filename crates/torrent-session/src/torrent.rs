@@ -232,6 +232,11 @@ impl TorrentHandle {
         );
         tracker_manager.set_info_hashes(info_hashes.clone());
 
+        // BEP 7: include our I2P destination in tracker announces
+        if let Some(ref sam) = sam_session {
+            tracker_manager.set_i2p_destination(Some(sam.destination().to_base64()));
+        }
+
         let enable_dht = config.enable_dht;
 
         // Start DHT peer discovery if enabled and available
@@ -528,6 +533,11 @@ impl TorrentHandle {
         // Add tracker URLs from the magnet link (BEP 9 §3.1)
         for url in &magnet.trackers {
             tracker_manager.add_tracker_url(url);
+        }
+
+        // BEP 7: include our I2P destination in tracker announces
+        if let Some(ref sam) = sam_session {
+            tracker_manager.set_i2p_destination(Some(sam.destination().to_base64()));
         }
 
         let enable_dht = config.enable_dht;
