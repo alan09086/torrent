@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
 
-use torrent_core::Id20;
+use rustc_hash::FxHashMap;
+use torrent_core::{Id20, Lengths};
 use torrent_storage::Bitfield;
 use torrent_wire::{
     ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType,
@@ -26,6 +27,54 @@ use crate::piece_reservation::{BlockRequest, PieceReservationState};
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 
 use tokio::sync::Semaphore;
+
+/// M92: Accumulates block completions for batched delivery to TorrentActor.
+/// Lives in the peer task's stack — no shared state, no locking.
+#[allow(dead_code)] // consumed in Task 6 when integrated into peer select! loop
+struct PendingBatch {
+    /// Block completions awaiting flush.
+    blocks: Vec<BlockEntry>,
+    /// Per-piece block count for detecting piece completion.
+    /// Key: piece index, Value: blocks written so far in this batch.
+    piece_counts: FxHashMap<u32, u32>,
+    /// Piece/chunk arithmetic for completion detection.
+    lengths: Lengths,
+}
+
+#[allow(dead_code)] // consumed in Task 6 when integrated into peer select! loop
+impl PendingBatch {
+    fn new(lengths: &Lengths) -> Self {
+        Self {
+            blocks: Vec::with_capacity(BATCH_INITIAL_CAPACITY),
+            piece_counts: FxHashMap::default(),
+            lengths: lengths.clone(),
+        }
+    }
+
+    /// Record a block write. Returns true if the piece is now complete
+    /// (caller should flush immediately).
+    fn push(&mut self, index: u32, begin: u32, length: u32) -> bool {
+        self.blocks.push(BlockEntry { index, begin, length });
+        let count = self.piece_counts.entry(index).or_insert(0);
+        *count += 1;
+        *count >= self.lengths.chunks_in_piece(index)
+    }
+
+    /// Take accumulated blocks for sending. Resets internal state.
+    /// Pre-allocates the replacement Vec to avoid reallocation on the next batch cycle.
+    fn take(&mut self) -> Vec<BlockEntry> {
+        self.piece_counts.clear(); // retains HashMap capacity for reuse
+        std::mem::replace(&mut self.blocks, Vec::with_capacity(BATCH_INITIAL_CAPACITY))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+/// M92: Initial capacity for PendingBatch block buffer.
+/// Matches a standard 512 KiB piece (512 * 1024 / 16384 = 32 blocks).
+const BATCH_INITIAL_CAPACITY: usize = 32;
 
 /// M83: Initial per-peer queue depth — matches settings default (128).
 /// AIMD slow-start still applies (can grow to 250, shrink to 8).
