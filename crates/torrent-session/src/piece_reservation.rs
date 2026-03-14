@@ -2236,4 +2236,72 @@ mod tests {
         ds.clear_current_piece();
         assert!(ds.current_piece_index().is_none());
     }
+
+    #[test]
+    fn snapshot_atomic_consistency_gap() {
+        // Verify that stale snapshots don't cause double reservation.
+        // Build a snapshot showing piece 2 as Available. Then another
+        // "thread" reserves piece 2 before this peer walks to it.
+        // The peer's CAS should fail, and it should advance to the next piece.
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        // Pre-reserve the first piece in the snapshot order (simulating another peer)
+        let contested_piece = snap.order[0];
+        assert!(states.try_reserve(contested_piece));
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        // Peer should skip the contested piece (CAS fails) and get the next one
+        let b = ds.next_block(&peer_bf, &states).unwrap();
+        assert_ne!(b.piece, contested_piece, "should skip piece reserved by another thread");
+    }
+
+    #[test]
+    fn multi_peer_dispatch_no_double_reservation() {
+        // Two PeerDispatchStates share the same AtomicPieceStates.
+        // Each should get unique pieces (no overlap).
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds1 = PeerDispatchState::new(Arc::clone(&snap), lengths.clone());
+        let mut ds2 = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        let mut reserved = std::collections::HashSet::new();
+
+        // Each peer reserves one piece (2 blocks each, but just check the piece)
+        let b1 = ds1.next_block(&peer_bf, &states).unwrap();
+        reserved.insert(b1.piece);
+        let b2 = ds2.next_block(&peer_bf, &states).unwrap();
+        reserved.insert(b2.piece);
+
+        assert_eq!(reserved.len(), 2, "two peers should get two different pieces");
+        assert_ne!(b1.piece, b2.piece);
+    }
 }
