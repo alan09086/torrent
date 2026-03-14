@@ -464,7 +464,6 @@ struct PendingQuery {
 
 #[derive(Debug)]
 enum PendingQueryKind {
-    #[allow(dead_code)]
     Ping,
     FindNode {
         #[allow(dead_code)]
@@ -481,8 +480,8 @@ enum PendingQueryKind {
     /// BEP 44: outgoing put item query.
     PutItem,
     /// BEP 51: outgoing sample_infohashes query.
-    #[allow(dead_code)]
     SampleInfohashes {
+        #[allow(dead_code)]
         target: Id20,
     },
 }
