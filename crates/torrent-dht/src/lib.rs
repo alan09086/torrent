@@ -45,5 +45,5 @@ pub use krpc::{
 pub use node_id::{
     ExternalIpVoter, IpVoteSource, generate_node_id, is_bep42_exempt, is_valid_node_id,
 };
-pub use routing_table::RoutingTable;
+pub use routing_table::{NodeStatus, RoutingTable};
 pub use storage::{DhtStorage, InMemoryDhtStorage};

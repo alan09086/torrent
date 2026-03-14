@@ -771,6 +771,7 @@ impl DhtActor {
         }
         let sender_id = *query.sender_id();
         self.checked_insert(sender_id, addr);
+        self.routing_table.mark_query(&sender_id);
 
         let response = match query {
             KrpcQuery::Ping { id: _ } => KrpcResponse::NodeId {
@@ -1156,6 +1157,7 @@ impl DhtActor {
 
         let sender_id = *resp.sender_id();
         self.checked_insert(sender_id, addr);
+        self.routing_table.mark_response(&sender_id);
 
         let txn = msg.transaction_id.as_u16();
         let pending = match self.pending.remove(&txn) {
@@ -1609,6 +1611,9 @@ impl DhtActor {
 
         let own_id = *self.routing_table.own_id();
         for (addr, token) in &tokens {
+            if !self.rate_limiter.try_acquire() {
+                break; // Use break, not return, since we still need to send the reply
+            }
             let txn = self.next_transaction_id();
             let msg = KrpcMessage {
                 transaction_id: TransactionId::from_u16(txn),
@@ -1839,6 +1844,9 @@ impl DhtActor {
     }
 
     async fn send_get_peers(&mut self, addr: SocketAddr, info_hash: Id20, node_id: Option<Id20>) {
+        if !self.rate_limiter.try_acquire() {
+            return;
+        }
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
@@ -2034,6 +2042,9 @@ impl DhtActor {
 
     // Gap 5: send_get_item uses sender_ip: None for outgoing queries
     async fn send_get_item(&mut self, addr: SocketAddr, target: Id20, seq: Option<i64>) {
+        if !self.rate_limiter.try_acquire() {
+            return;
+        }
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
@@ -2062,6 +2073,9 @@ impl DhtActor {
 
     // Gap 5: send_put_item uses sender_ip: None for outgoing queries
     async fn send_put_item(&mut self, params: PutItemParams) {
+        if !self.rate_limiter.try_acquire() {
+            return;
+        }
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
@@ -2189,6 +2203,10 @@ impl DhtActor {
             }
         };
 
+        if !self.rate_limiter.try_acquire() {
+            let _ = reply.send(Err(Error::Timeout));
+            return;
+        }
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
