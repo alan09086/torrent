@@ -23,7 +23,7 @@ use torrent_wire::{
 use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
 use crate::pipeline::PeerPipelineState;
 use crate::pex::PexMessage;
-use crate::piece_reservation::{BlockRequest, PieceReservationState};
+use crate::piece_reservation::{AtomicPieceStates, AvailabilitySnapshot, PeerDispatchState};
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 
 use tokio::sync::Semaphore;
@@ -78,63 +78,14 @@ const BATCH_INITIAL_CAPACITY: usize = 32;
 /// AIMD slow-start still applies (can grow to 250, shrink to 8).
 const INITIAL_QUEUE_DEPTH: usize = 128;
 
-/// M78: State needed for direct peer-to-disk writes.
-/// Tuple: (reservation_state, piece_notify, disk_handle, write_error_tx)
+/// M93: State needed for lock-free dispatch and direct peer-to-disk writes.
+/// Tuple: (atomic_states, piece_notify, disk_handle, write_error_tx)
 type ReservationState = Option<(
-    std::sync::Arc<parking_lot::RwLock<PieceReservationState>>,
+    std::sync::Arc<AtomicPieceStates>,
     std::sync::Arc<tokio::sync::Notify>,
     Option<DiskHandle>,
     mpsc::Sender<DiskWriteError>,
 )>;
-
-/// Acquire a semaphore permit and reserve the next block for this peer.
-///
-/// Returns when a block is available. If no block is available (all pieces
-/// reserved or end-game active), waits on `piece_notify` and retries.
-/// The permit is `forget()`-ed before returning — the caller is responsible
-/// for calling `semaphore.add_permits(1)` when the block data arrives.
-///
-/// **Cancellation safe**: if this future is dropped by `select!`, any
-/// acquired-but-not-forgotten permit is returned via `Drop`. No piece
-/// is reserved until `forget()` is called, which only happens atomically
-/// with the reservation.
-async fn acquire_and_reserve(
-    semaphore: &Semaphore,
-    state: &parking_lot::RwLock<PieceReservationState>,
-    piece_notify: &tokio::sync::Notify,
-    addr: SocketAddr,
-    local_bitfield: &Bitfield,
-) -> BlockRequest {
-    loop {
-        let permit = semaphore
-            .acquire()
-            .await
-            .expect("peer semaphore closed unexpectedly");
-
-        // Phase 1: Current piece (WRITE lock, O(1)) — hot path, 15/16 calls
-        if let Some(block) = state.write().try_current_piece(addr) {
-            permit.forget();
-            return block;
-        }
-
-        // Phase 2: Find candidate (READ lock, O(n)) — concurrent
-        let candidate = state.read().find_candidate(local_bitfield);
-
-        // Phase 3: Reserve candidate (WRITE lock, O(1))
-        if let Some(piece) = candidate {
-            if let Some(block) = state.write().try_reserve(addr, piece, local_bitfield) {
-                permit.forget();
-                return block;
-            }
-            // Lost race — retry without sleeping
-            drop(permit);
-            continue;
-        }
-
-        drop(permit);
-        piece_notify.notified().await;
-    }
-}
 
 /// Total handshake size: 1 + 19 + 8 + 20 + 20 = 68 bytes.
 const HANDSHAKE_SIZE: usize = 68;
@@ -337,6 +288,10 @@ pub(crate) async fn run_peer(
     let mut peer_choking = true; // Peers start in choked state
     let mut reservation_state: ReservationState = None;
 
+    // M93: Per-peer dispatch state (lock-free)
+    let mut dispatch_state: Option<PeerDispatchState> = None;
+    let mut pending_snapshot: Option<std::sync::Arc<AvailabilitySnapshot>> = None;
+
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
 
@@ -354,11 +309,7 @@ pub(crate) async fn run_peer(
     flush_interval.tick().await; // skip initial immediate tick
 
     let disconnect_reason: Option<String> = loop {
-        // M75: Clone Arc references for requester arm (cheap Arc::clone)
-        let rs_clone = reservation_state
-            .as_ref()
-            .map(|(rs, n, _, _)| (std::sync::Arc::clone(rs), std::sync::Arc::clone(n)));
-        let can_request = !peer_choking && rs_clone.is_some();
+        let can_request = !peer_choking && dispatch_state.is_some() && reservation_state.is_some();
 
         tokio::select! {
             biased;
@@ -433,8 +384,19 @@ pub(crate) async fn run_peer(
                             }
                             Message::Choke => {
                                 peer_choking = true;
-                                if let Some((ref rs, ..)) = reservation_state {
-                                    rs.write().release_peer_pieces(addr);
+                                // M93: Release current piece back to Available via atomic store
+                                if let Some(ref mut ds) = dispatch_state {
+                                    if let Some(piece) = ds.current_piece_index() {
+                                        if let Some((ref atomic_states, ..)) = reservation_state {
+                                            atomic_states.release(piece);
+                                        }
+                                        // Notify actor to clear piece_owner
+                                        let _ = event_tx.send(PeerEvent::PieceReleased {
+                                            peer_addr: addr,
+                                            piece,
+                                        }).await;
+                                    }
+                                    ds.clear_current_piece();
                                 }
                             }
                             Message::RejectRequest { .. } => {
@@ -539,8 +501,9 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { reservation_state: rs, piece_notify, disk_handle, write_error_tx, lengths }) => {
-                        reservation_state = Some((rs, piece_notify, disk_handle, write_error_tx));
+                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths }) => {
+                        reservation_state = Some((atomic_states, piece_notify, disk_handle, write_error_tx));
+                        dispatch_state = Some(PeerDispatchState::new(availability_snapshot, lengths.clone()));
                         // M92: Create PendingBatch for block batching
                         if pending_batch.is_none() {
                             pending_batch = Some(PendingBatch::new(&lengths));
@@ -595,6 +558,10 @@ pub(crate) async fn run_peer(
                             }
                         }
                     }
+                    Some(PeerCommand::SnapshotUpdate { snapshot }) => {
+                        pending_snapshot = Some(snapshot);
+                        // Will be applied on next dispatch iteration
+                    }
                     Some(cmd) => {
                         if let Err(e) = handle_command(
                             cmd,
@@ -613,20 +580,34 @@ pub(crate) async fn run_peer(
                 }
             }
 
-            // M75: Block requesting arm
-            block = async {
-                let (rs, notify) = rs_clone.as_ref().unwrap();
-                acquire_and_reserve(&semaphore, rs, notify, addr, &local_bitfield).await
-            }, if can_request => {
-                // Pre-increment is safe: if the send below fails, the ? exits
-                // the loop entirely (peer disconnect), so stale state is harmless.
-                peer_pipeline.request_sent(block.piece, block.begin, Instant::now());
-                in_flight += 1;
-                framed_write.send(Message::Request {
-                    index: block.piece,
-                    begin: block.begin,
-                    length: block.length,
-                }).await.map_err(crate::Error::Wire)?;
+            // M93: Lock-free block requesting arm
+            permit = semaphore.acquire(), if can_request => {
+                let permit = permit.expect("peer semaphore closed unexpectedly");
+                let ds = dispatch_state.as_mut().unwrap();
+                let (atomic_states, piece_notify, ..) = reservation_state.as_ref().unwrap();
+
+                // Check for snapshot updates from actor
+                if let Some(new_snap) = pending_snapshot.take() {
+                    ds.update_snapshot(new_snap);
+                }
+
+                match ds.next_block(&local_bitfield, atomic_states) {
+                    Some(block) => {
+                        permit.forget();
+                        peer_pipeline.request_sent(block.piece, block.begin, Instant::now());
+                        in_flight += 1;
+                        framed_write.send(Message::Request {
+                            index: block.piece,
+                            begin: block.begin,
+                            length: block.length,
+                        }).await.map_err(crate::Error::Wire)?;
+                    }
+                    None => {
+                        // Cursor exhausted -- wait for new pieces
+                        drop(permit);
+                        piece_notify.notified().await;
+                    }
+                }
             }
 
             // M82: AIMD pipeline tick — adjusts queue depth periodically
@@ -664,6 +645,15 @@ pub(crate) async fn run_peer(
             }
         }
     };
+
+    // M93: Release held piece on disconnect
+    if let Some(ref ds) = dispatch_state {
+        if let Some(piece) = ds.current_piece_index() {
+            if let Some((ref atomic_states, ..)) = reservation_state {
+                atomic_states.release(piece);
+            }
+        }
+    }
 
     // Notify plugins that a peer disconnected
     for plugin in plugins.iter() {
@@ -1245,7 +1235,7 @@ async fn handle_command(
             }
             return Ok(());
         }
-        PeerCommand::StartRequesting { .. } => {
+        PeerCommand::StartRequesting { .. } | PeerCommand::SnapshotUpdate { .. } => {
             // Handled in main loop, not here
             return Ok(());
         }

@@ -64,6 +64,7 @@ impl PieceState {
 ///
 /// Each piece occupies one `AtomicU8`. Peers reserve pieces via CAS
 /// (compare-and-swap) without any mutex or RwLock.
+#[derive(Debug)]
 pub(crate) struct AtomicPieceStates {
     states: Vec<AtomicU8>,
 }
@@ -145,6 +146,7 @@ impl AtomicPieceStates {
 ///
 /// Built by TorrentActor on a 500ms timer (or significant events like
 /// peer join/leave). Uses bucket sort -- O(n) where n = num_pieces.
+#[derive(Debug)]
 pub(crate) struct AvailabilitySnapshot {
     /// Pieces ordered rarest-first. Walk from index 0 for rarest pieces.
     pub order: Vec<u32>,
