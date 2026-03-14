@@ -5983,6 +5983,112 @@ impl TorrentActor {
                 });
             }
 
+            // I2P outbound: route through SAM instead of TCP/uTP
+            if let Some(i2p_dest) = self.i2p_destinations.get(&addr).cloned() {
+                if let Some(ref sam) = self.sam_session {
+                    let sam = Arc::clone(sam);
+                    let event_tx = self.event_tx.clone();
+                    let info_hash = self.info_hash;
+                    let peer_id = self.our_peer_id;
+                    let num_pieces = self.num_pieces;
+                    let enable_dht = self.config.enable_dht;
+                    let enable_fast = self.config.enable_fast;
+                    let anonymous_mode = self.config.anonymous_mode;
+                    let max_message_size = self.config.max_message_size;
+                    let peer_connect_timeout = self.config.peer_connect_timeout;
+                    let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
+                    let plugins = Arc::clone(&self.plugins);
+
+                    tokio::spawn(async move {
+                        // Apply connect timeout consistent with TCP path
+                        let connect_result = if peer_connect_timeout > 0 {
+                            match tokio::time::timeout(
+                                Duration::from_secs(peer_connect_timeout),
+                                sam.connect(&i2p_dest),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    debug!(%addr, timeout_secs = peer_connect_timeout, "I2P SAM connect timed out");
+                                    let _ = event_tx
+                                        .send(PeerEvent::Disconnected {
+                                            peer_addr: addr,
+                                            reason: Some("I2P connect: timeout".into()),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+                        } else {
+                            sam.connect(&i2p_dest).await
+                        };
+
+                        match connect_result {
+                            Ok(sam_stream) => {
+                                let tcp_stream = sam_stream.into_inner();
+                                // Transport identified: use Tcp as stand-in since the
+                                // underlying socket is TCP to the SAM bridge
+                                // (until a PeerTransport::I2p variant is added)
+                                let _ = event_tx
+                                    .send(PeerEvent::TransportIdentified {
+                                        peer_addr: addr,
+                                        transport: crate::rate_limiter::PeerTransport::Tcp,
+                                    })
+                                    .await;
+                                // I2P provides encryption; disable MSE
+                                match run_peer(
+                                    addr,
+                                    tcp_stream,
+                                    info_hash,
+                                    peer_id,
+                                    bitfield,
+                                    num_pieces,
+                                    event_tx.clone(),
+                                    cmd_rx,
+                                    enable_dht,
+                                    enable_fast,
+                                    torrent_wire::mse::EncryptionMode::Disabled,
+                                    true, // outbound
+                                    anonymous_mode,
+                                    info_bytes,
+                                    plugins,
+                                    false, // enable_holepunch — N/A for I2P
+                                    max_message_size,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        debug!(%addr, "I2P peer session ended normally");
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx
+                                            .send(PeerEvent::Disconnected {
+                                                peer_addr: addr,
+                                                reason: Some(e.to_string()),
+                                            })
+                                            .await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!(%addr, error = %e, "I2P SAM connect failed");
+                                let _ = event_tx
+                                    .send(PeerEvent::Disconnected {
+                                        peer_addr: addr,
+                                        reason: Some(format!("I2P connect: {e}")),
+                                    })
+                                    .await;
+                            }
+                        }
+                    });
+                    continue; // Skip TCP/uTP path
+                }
+                // No SAM session — can't connect to I2P peer, clean up
+                self.peers.remove(&addr);
+                continue;
+            }
+
             let info_hash = self.info_hash;
             let peer_id = self.our_peer_id;
             let num_pieces = self.num_pieces;
