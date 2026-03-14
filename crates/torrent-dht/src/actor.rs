@@ -30,7 +30,6 @@ use ed25519_dalek::SigningKey;
 ///
 /// Permits refill continuously based on elapsed real time. `try_acquire` is
 /// non-blocking: it either consumes a permit or returns `false` immediately.
-#[allow(dead_code)]
 struct QueryRateLimiter {
     permits: u32,
     max_permits: u32,
@@ -38,7 +37,6 @@ struct QueryRateLimiter {
     refill_rate: u32,
 }
 
-#[allow(dead_code)]
 impl QueryRateLimiter {
     /// Create a new limiter with `rate` permits per second. Starts with a full
     /// bucket so the first burst of queries is not artificially delayed.
@@ -447,8 +445,9 @@ struct DhtActor {
     /// Pending one-shot replies for sample_infohashes queries.
     sample_replies: HashMap<u16, oneshot::Sender<Result<SampleInfohashesResult>>>,
     /// Token-bucket rate limiter for outgoing KRPC queries.
-    #[allow(dead_code)]
     rate_limiter: QueryRateLimiter,
+    /// Active iterative bootstrap lookup (find_node self-lookup after initial bootstrap).
+    bootstrap_lookup: Option<FindNodeLookup>,
 }
 
 struct ActorStats {
@@ -467,8 +466,8 @@ struct PendingQuery {
 enum PendingQueryKind {
     #[allow(dead_code)]
     Ping,
-    #[allow(dead_code)]
     FindNode {
+        #[allow(dead_code)]
         target: Id20,
     },
     GetPeers {
@@ -496,6 +495,15 @@ struct LookupState {
     tokens: HashMap<Id20, (SocketAddr, Vec<u8>)>,
     /// Best (closest) nodes we know about.
     closest: Vec<CompactNodeInfo>,
+}
+
+/// State for an active iterative find_node bootstrap lookup.
+struct FindNodeLookup {
+    target: Id20,
+    closest: Vec<CompactNodeInfo>,
+    queried: std::collections::HashSet<Id20>,
+    round: u8,
+    max_rounds: u8,
 }
 
 /// State for an active BEP 44 get lookup.
@@ -586,6 +594,7 @@ impl DhtActor {
             ip_consensus_tx,
             sample_replies: HashMap::new(),
             rate_limiter: QueryRateLimiter::new(queries_per_second),
+            bootstrap_lookup: None,
         }
     }
 
@@ -702,6 +711,21 @@ impl DhtActor {
                 }
             }
         }
+
+        // Initiate iterative bootstrap: follow returned nodes to discover more
+        let initial_closest: Vec<CompactNodeInfo> = self
+            .routing_table
+            .closest(&own_id, K)
+            .into_iter()
+            .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
+            .collect();
+        self.bootstrap_lookup = Some(FindNodeLookup {
+            target: own_id,
+            closest: initial_closest,
+            queried: std::collections::HashSet::new(),
+            round: 0,
+            max_rounds: 6,
+        });
     }
 
     async fn handle_packet(&mut self, data: &[u8], addr: SocketAddr) {
@@ -1157,6 +1181,82 @@ impl DhtActor {
                         self.checked_insert(node.id, node.addr);
                     }
                 }
+
+                // Advance iterative bootstrap lookup if active
+                if self.bootstrap_lookup.is_some() {
+                    let family = self.address_family;
+                    let family_match = |a: &SocketAddr| match family {
+                        AddressFamily::V4 => a.is_ipv4(),
+                        AddressFamily::V6 => a.is_ipv6(),
+                    };
+
+                    // Accumulate returned nodes into the lookup's closest list
+                    if let Some(ref mut lookup) = self.bootstrap_lookup {
+                        for node in nodes {
+                            if family_match(&node.addr)
+                                && !lookup.closest.iter().any(|n| n.id == node.id)
+                            {
+                                lookup.closest.push(*node);
+                            }
+                        }
+                        for node in nodes6 {
+                            if family_match(&node.addr)
+                                && !lookup.closest.iter().any(|n| n.id == node.id)
+                            {
+                                lookup.closest.push(CompactNodeInfo {
+                                    id: node.id,
+                                    addr: node.addr,
+                                });
+                            }
+                        }
+                        let target = lookup.target;
+                        lookup.closest.sort_by_key(|n| n.id.xor_distance(&target));
+                        lookup.closest.truncate(K * 2);
+                    }
+
+                    // Extract data needed before calling send_find_node (drops borrow)
+                    let (to_query, target, terminate) = if let Some(ref mut lookup) =
+                        self.bootstrap_lookup
+                    {
+                        if lookup.round >= lookup.max_rounds {
+                            (Vec::new(), lookup.target, true)
+                        } else {
+                            let to_query: Vec<CompactNodeInfo> = lookup
+                                .closest
+                                .iter()
+                                .filter(|n| !lookup.queried.contains(&n.id))
+                                .take(3)
+                                .copied()
+                                .collect();
+                            let target = lookup.target;
+                            if to_query.is_empty() {
+                                (Vec::new(), target, true)
+                            } else {
+                                for node in &to_query {
+                                    lookup.queried.insert(node.id);
+                                }
+                                lookup.round += 1;
+                                (to_query, target, false)
+                            }
+                        }
+                    } else {
+                        (Vec::new(), Id20::ZERO, false)
+                    };
+
+                    if terminate {
+                        debug!(
+                            routing_table_size = self.routing_table.len(),
+                            "iterative bootstrap complete"
+                        );
+                        self.bootstrap_lookup = None;
+                    } else {
+                        let queries: Vec<(SocketAddr, Id20)> =
+                            to_query.iter().map(|n| (n.addr, n.id)).collect();
+                        for (node_addr, nid) in queries {
+                            self.send_find_node(node_addr, target, Some(nid)).await;
+                        }
+                    }
+                }
             }
             (PendingQueryKind::GetPeers { info_hash }, KrpcResponse::GetPeers(gp)) => {
                 // Add discovered nodes to routing table (filter by address family)
@@ -1565,6 +1665,7 @@ impl DhtActor {
         );
 
         let mut stalled_lookups: Vec<Id20> = Vec::new();
+        let mut find_node_timed_out = false;
 
         for txn in expired {
             if let Some(pending) = self.pending.remove(&txn) {
@@ -1579,6 +1680,9 @@ impl DhtActor {
                 }
                 if let PendingQueryKind::GetPeers { info_hash } = pending.kind {
                     stalled_lookups.push(info_hash);
+                }
+                if matches!(pending.kind, PendingQueryKind::FindNode { .. }) {
+                    find_node_timed_out = true;
                 }
             }
         }
@@ -1609,6 +1713,42 @@ impl DhtActor {
                 } else if !has_pending {
                     debug!(%info_hash, "get_peers lookup exhausted all nodes");
                     self.lookups.remove(&info_hash);
+                }
+            }
+        }
+
+        // Advance bootstrap lookup if a FindNode query timed out
+        if find_node_timed_out && self.bootstrap_lookup.is_some() {
+            // Extract queries before calling send_find_node (borrow-checker)
+            let (to_query, target, terminate) =
+                if let Some(ref mut lookup) = self.bootstrap_lookup {
+                    let to_query: Vec<CompactNodeInfo> = lookup
+                        .closest
+                        .iter()
+                        .filter(|n| !lookup.queried.contains(&n.id))
+                        .take(3)
+                        .copied()
+                        .collect();
+                    let target = lookup.target;
+                    if to_query.is_empty() {
+                        (Vec::new(), target, true)
+                    } else {
+                        for node in &to_query {
+                            lookup.queried.insert(node.id);
+                        }
+                        (to_query, target, false)
+                    }
+                } else {
+                    (Vec::new(), Id20::ZERO, false)
+                };
+
+            if terminate {
+                self.bootstrap_lookup = None;
+            } else {
+                let queries: Vec<(SocketAddr, Id20)> =
+                    to_query.iter().map(|n| (n.addr, n.id)).collect();
+                for (node_addr, nid) in queries {
+                    self.send_find_node(node_addr, target, Some(nid)).await;
                 }
             }
         }
@@ -1673,6 +1813,9 @@ impl DhtActor {
     }
 
     async fn send_find_node(&mut self, addr: SocketAddr, target: Id20, node_id: Option<Id20>) {
+        if !self.rate_limiter.try_acquire() {
+            return;
+        }
         let txn = self.next_transaction_id();
         let own_id = *self.routing_table.own_id();
         let msg = KrpcMessage {
