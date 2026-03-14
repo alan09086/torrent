@@ -1556,4 +1556,72 @@ mod tests {
         let states = AtomicPieceStates::new(42, &Bitfield::new(42), &all_pieces_wanted(42));
         assert_eq!(states.len(), 42);
     }
+
+    #[test]
+    fn atomic_cas_conflict_two_threads() {
+        use std::sync::Arc;
+
+        let states = Arc::new(AtomicPieceStates::new(
+            1,
+            &Bitfield::new(1),
+            &all_pieces_wanted(1),
+        ));
+
+        let results: Vec<bool> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let st = Arc::clone(&states);
+                    s.spawn(move || st.try_reserve(0))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        // Exactly one thread wins the CAS
+        let wins: usize = results.iter().filter(|&&r| r).count();
+        assert_eq!(wins, 1, "exactly one CAS should succeed, got {wins}");
+        assert_eq!(states.get(0), PieceState::Reserved);
+    }
+
+    #[test]
+    fn atomic_endgame_allows_multiple_reservations() {
+        let states = AtomicPieceStates::new(4, &Bitfield::new(4), &all_pieces_wanted(4));
+
+        // Reserve piece 1 normally
+        assert!(states.try_reserve(1));
+        assert_eq!(states.get(1), PieceState::Reserved);
+
+        // Transition to endgame
+        states.transition_to_endgame(1);
+        assert_eq!(states.get(1), PieceState::Endgame);
+
+        // Multiple "reservations" succeed in endgame
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(1));
+
+        // State remains Endgame (not transitioned to Reserved)
+        assert_eq!(states.get(1), PieceState::Endgame);
+    }
+
+    #[test]
+    fn atomic_endgame_state_transitions() {
+        let states = AtomicPieceStates::new(4, &Bitfield::new(4), &all_pieces_wanted(4));
+
+        // Reserve pieces 0 and 1
+        assert!(states.try_reserve(0));
+        assert!(states.try_reserve(1));
+
+        // Transition both to endgame
+        states.transition_to_endgame(0);
+        states.transition_to_endgame(1);
+
+        // force_reserved brings piece back from Endgame
+        states.force_reserved(0);
+        assert_eq!(states.get(0), PieceState::Reserved);
+
+        // release from Endgame (for pieces without an owner)
+        states.release(1);
+        assert_eq!(states.get(1), PieceState::Available);
+    }
 }
