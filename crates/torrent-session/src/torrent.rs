@@ -12260,4 +12260,19 @@ mod tests {
         assert!(!is_i2p_synthetic_addr(&"192.168.1.1:6881".parse().unwrap()));
         assert!(!is_i2p_synthetic_addr(&"[::1]:6881".parse().unwrap()));
     }
+
+    #[tokio::test]
+    #[ignore = "requires local I2P router with SAM bridge on 127.0.0.1:7656"]
+    async fn i2p_session_integration() {
+        let session = crate::i2p::SamSession::create(
+            "127.0.0.1",
+            7656,
+            "integration-test",
+            crate::i2p::SamTunnelConfig::default(),
+        )
+        .await
+        .expect("SAM session should connect");
+        assert!(!session.destination().is_empty());
+        assert!(session.destination().to_b32_address().ends_with(".b32.i2p"));
+    }
 }
