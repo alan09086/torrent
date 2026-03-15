@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.98.0 | M98 | Write coalescing — per-peer block buffering, ~32x fewer disk syscalls, split store-buffer/coalesced-write path |
 | 0.97.1 | — | DHT bootstrap simplification — remove PingVerify verification system, ping saved nodes instead of find_node, node-count gate, 5s maintenance pings |
 | 0.97.0 | M97 | DHT cold-start hardening — bootstrap completion gate, saved-node verification with re-bootstrap fallback, V6 exponential backoff |
 | 0.96.0 | M96 | Parallel piece verification — `HashPool` dedicated thread pool for SHA1 hashing, per-torrent result channels, generation counter for stale detection |
@@ -50,6 +51,20 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.98.0] — 2026-03-15
+
+### Added
+- **Write coalescing** (`WriteCoalescer`) — per-peer block accumulator that buffers incoming 16 KiB blocks and flushes entire pieces as single contiguous `pwrite()` calls, reducing disk write syscalls by ~32x (6,000/s → ~190/s at 100 MB/s)
+- `FlushRequest` struct — returned by the coalescer when a piece is complete or when switching pieces, carries the coalesced `Bytes` payload
+- `DiskHandle::store_buffer_insert()` — per-block store buffer population for hash verification, decoupled from disk writes
+- `DiskHandle::enqueue_write_coalesced()` — non-blocking coalesced write that skips store buffer insertion (avoids double-insert since `store_buffer_insert` already populated it)
+- 11 new tests: 7 WriteCoalescer unit tests (full piece, piece switch, boundary, disconnect flush, last piece, out-of-order assert, empty flush), 3 DiskHandle tests (insert populates, coalesced skips buffer, back-pressure), 1 integration test (end-to-end peer data path)
+
+### Changed
+- `Message::Piece` handler in peer task now uses a dual write path: coalesced path (when `WriteCoalescer` is initialized after `StartRequesting`) with per-block `store_buffer_insert` + coalesced flush, or fallback per-block `enqueue_write` (pre-`StartRequesting` edge case)
+- Disconnect cleanup flushes any partial coalesced data with proper back-pressure fallback to synchronous `write_chunk`
+- `FLUSH_PIECE` flag applied to all coalesced writes for immediate disk persistence
 
 ## [0.97.1] — 2026-03-15
 
