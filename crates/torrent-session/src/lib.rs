@@ -51,6 +51,7 @@ pub(crate) mod url_guard;
 pub(crate) mod utp_routing;
 pub(crate) mod web_seed;
 pub(crate) mod write_buffer;
+pub mod hash_pool;
 
 pub use crate::piece_selector::build_wanted_pieces;
 pub use crate::tracker_manager::{TrackerInfo, TrackerStatus};
@@ -72,6 +73,7 @@ pub use settings::Settings;
 pub use stats::{
     MetricKind, NUM_METRICS, SessionCounters, SessionStatsMetric, session_stats_metrics,
 };
+pub use hash_pool::{HashJob, HashPool, HashResult};
 pub use streaming::FileStream;
 pub use torrent::TorrentHandle;
 pub use transport::{BoxedStream, NetworkFactory, TransportListener};
