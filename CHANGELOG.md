@@ -56,8 +56,9 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 ### Changed
 - **DHT bootstrap simplification** — removed the M97 `PingVerify` verification system (~120 lines) which was over-engineered and caused 80% cold-start failure with stale saved state
 - `bootstrap()` now partitions saved nodes vs DNS hostnames: saved nodes receive `ping` (validates liveness via normal response handler), DNS nodes receive `find_node` (fresh neighbour discovery). This prevents stale neighbourhood data from flooding the routing table.
-- Added Transmission-style node-count gate: routing table ≥8 nodes opens the bootstrap gate early without waiting for `FindNodeLookup` convergence
+- Added Transmission-style node-count gate: routing table ≥8 nodes opens the bootstrap gate early without waiting for `FindNodeLookup` convergence. Gate is checked both in `start_get_peers()` and on every ping tick (5s).
 - `PING_INTERVAL` reduced from 225s to 5s — aggressive stale node eviction (questionable nodes detected in ~10s), aligned with libtorrent's maintenance model
+- Benchmark results: 10/10 clean state, 10/10 saved state (was 2/10 saved state before fix)
 
 ### Removed
 - `PingVerify` variant from `PendingQueryKind`
