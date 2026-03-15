@@ -139,9 +139,16 @@ impl WriteCoalescer {
 
     /// Drain the internal state and return the buffered data as a
     /// `FlushRequest`.  Returns `None` if there is nothing buffered.
+    ///
+    /// Uses `Bytes::copy_from_slice` to create an independent copy of the
+    /// buffered data, then `clear()` to reset the BytesMut length while
+    /// retaining its capacity.  This lets `start_piece()` reuse the same
+    /// allocation for the next piece instead of allocating fresh 512 KiB
+    /// every time.
     fn flush_current(&mut self) -> Option<FlushRequest> {
         let piece = self.current_piece.take()?;
-        let data = self.buf.split().freeze();
+        let data = Bytes::copy_from_slice(&self.buf);
+        self.buf.clear();
         self.blocks_received = 0;
         self.expected_offset = 0;
         Some(FlushRequest {
@@ -322,5 +329,39 @@ mod tests {
 
         assert!(wc_mut.is_empty());
         assert!(wc_mut.flush().is_none());
+    }
+
+    #[test]
+    fn buffer_reuse_across_pieces() {
+        let lengths = standard_lengths(PIECE_LEN * 4);
+        let mut wc = WriteCoalescer::new(&lengths);
+
+        // Complete piece 0 — triggers flush via check_complete
+        let mut flush0 = None;
+        for i in 0..32u32 {
+            if let Some(f) = wc.add_block(0, i * CHUNK, &block_data(i as u8, CHUNK as usize)) {
+                flush0 = Some(f);
+            }
+        }
+        let flush0 = flush0.expect("piece 0 should have flushed");
+
+        // After flush: buf should be empty but retain capacity for reuse
+        assert!(wc.is_empty());
+        assert!(
+            wc.buf.capacity() >= PIECE_LEN as usize,
+            "buffer should retain capacity after flush, got {}",
+            wc.buf.capacity()
+        );
+
+        // Data independence: flushed Bytes must survive buffer reuse
+        assert_eq!(flush0.data[0], 0); // first block fill byte
+        assert_eq!(flush0.data.len(), PIECE_LEN as usize);
+
+        // Start piece 1 — should reuse the existing buffer (no new alloc)
+        let _ = wc.add_block(1, 0, &block_data(0xAA, CHUNK as usize));
+        assert!(wc.buf.capacity() >= PIECE_LEN as usize);
+
+        // Verify piece 0 data is still intact after piece 1 started writing
+        assert_eq!(flush0.data[0], 0, "flush data must be independent of buffer reuse");
     }
 }

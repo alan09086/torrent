@@ -385,23 +385,33 @@ pub(crate) async fn run_peer(
                                 if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
                                     if let Some(ref mut wc) = write_coalescer {
                                         // M98: Per-block store buffer insert (for hash verification).
-                                        // No over-limit check here: the old enqueue_write() also
-                                        // inserts unconditionally — its back-pressure signal just
-                                        // switches from async to sync disk writes. The coalesced
-                                        // path gets equivalent throttling from enqueue_write_coalesced()
-                                        // returning Err on channel-full (triggers sync fallback below).
-                                        disk.store_buffer_insert(*index, *begin, data.clone());
+                                        // Returns true if store buffer exceeds size limit — apply
+                                        // back-pressure by forcing a sync write to bound memory.
+                                        let over_limit = disk.store_buffer_insert(*index, *begin, data.clone());
 
-                                        // M98: Coalesced write path
-                                        if let Some(flush) = wc.add_block(*index, *begin, data.as_ref()) {
-                                            match disk.enqueue_write_coalesced(
-                                                flush.piece, flush.begin, flush.data,
-                                                DiskJobFlags::FLUSH_PIECE, write_err_tx,
-                                            ) {
-                                                Ok(()) => {}
-                                                Err(returned_data) => {
-                                                    disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
-                                                        .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "coalesced write failed: {e}"));
+                                        if over_limit {
+                                            // Back-pressure: flush any buffered coalesced data, then
+                                            // sync-write this block to throttle the peer task.
+                                            if let Some(flush) = wc.flush() {
+                                                let _ = disk.enqueue_write_coalesced(
+                                                    flush.piece, flush.begin, flush.data,
+                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx,
+                                                );
+                                            }
+                                            disk.write_chunk(*index, *begin, data.clone(), DiskJobFlags::empty()).await
+                                                .unwrap_or_else(|e| warn!(%addr, index, begin, "back-pressure write failed: {e}"));
+                                        } else {
+                                            // M98: Coalesced write path
+                                            if let Some(flush) = wc.add_block(*index, *begin, data.as_ref()) {
+                                                match disk.enqueue_write_coalesced(
+                                                    flush.piece, flush.begin, flush.data,
+                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx,
+                                                ) {
+                                                    Ok(()) => {}
+                                                    Err(returned_data) => {
+                                                        disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
+                                                            .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "coalesced write failed: {e}"));
+                                                    }
                                                 }
                                             }
                                         }

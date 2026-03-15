@@ -618,11 +618,14 @@ impl DiskHandle {
     ///
     /// Used by write coalescing to populate the store buffer for hash
     /// verification while deferring the actual disk write to a coalesced flush.
-    pub(crate) fn store_buffer_insert(&self, piece: u32, begin: u32, data: Bytes) {
-        self.store_buffer
-            .lock()
-            .unwrap()
-            .insert((self.info_hash, piece), begin, data);
+    ///
+    /// Returns `true` if the store buffer is over the size limit after insertion,
+    /// signalling that the caller should apply back-pressure (e.g. fall back to
+    /// synchronous writes) to bound memory growth.
+    pub(crate) fn store_buffer_insert(&self, piece: u32, begin: u32, data: Bytes) -> bool {
+        let mut sb = self.store_buffer.lock().unwrap();
+        sb.insert((self.info_hash, piece), begin, data);
+        sb.is_over_limit()
     }
 
     /// Enqueue a non-blocking coalesced write that SKIPS store buffer insertion.
@@ -1543,7 +1546,8 @@ mod tests {
         let disk = DiskHandle::new(tx, Id20::ZERO);
         let data = Bytes::from(vec![0xABu8; 64]);
 
-        disk.store_buffer_insert(0, 0, data.clone());
+        let over_limit = disk.store_buffer_insert(0, 0, data.clone());
+        assert!(!over_limit, "64 bytes should not exceed 32 MiB limit");
 
         let sb = disk.store_buffer.lock().unwrap();
         let blocks = sb.entries.get(&(disk.info_hash, 0));
