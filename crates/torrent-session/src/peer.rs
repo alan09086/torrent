@@ -90,6 +90,33 @@ type ReservationState = Option<(
 /// Total handshake size: 1 + 19 + 8 + 20 + 20 = 68 bytes.
 const HANDSHAKE_SIZE: usize = 68;
 
+/// M94: Codec read buffer shrinks when it exceeds this capacity.
+/// During active download the buffer grows to ~16 KiB+ for Piece messages.
+const CODEC_BUFFER_SHRINK_THRESHOLD: usize = 32 * 1024;
+
+/// M94: Target capacity after shrinking — small enough to reclaim memory,
+/// large enough to avoid an immediate reallocation on the next message.
+const CODEC_BUFFER_TARGET_CAPACITY: usize = 4096;
+
+/// M94: Shrink codec read buffer when peer goes idle to reclaim memory.
+/// During active download, the buffer grows to ~16 KiB+ for Piece messages.
+/// Shrinking on idle (choke/cursor exhausted/disconnect) reclaims memory
+/// from peers that stopped sending without causing hot-path churn.
+fn maybe_shrink_codec_buffer<T: tokio::io::AsyncRead + Unpin>(
+    framed_read: &mut FramedRead<T, MessageCodec>,
+) {
+    let buf = framed_read.read_buffer_mut();
+    if buf.capacity() > CODEC_BUFFER_SHRINK_THRESHOLD {
+        let mut new_buf = bytes::BytesMut::with_capacity(
+            CODEC_BUFFER_TARGET_CAPACITY.max(buf.len()),
+        );
+        if !buf.is_empty() {
+            new_buf.extend_from_slice(buf);
+        }
+        *buf = new_buf;
+    }
+}
+
 /// Run a single peer connection, handling handshake, extension negotiation,
 /// and the message loop.
 ///
@@ -398,6 +425,8 @@ pub(crate) async fn run_peer(
                                     }
                                     ds.clear_current_piece();
                                 }
+                                // M94: Shrink codec buffer — peer stopped sending data
+                                maybe_shrink_codec_buffer(&mut framed_read);
                             }
                             Message::RejectRequest { .. } => {
                                 if reservation_state.is_some() {
@@ -605,6 +634,8 @@ pub(crate) async fn run_peer(
                     None => {
                         // Cursor exhausted -- wait for new pieces
                         drop(permit);
+                        // M94: Shrink codec buffer while waiting for new pieces
+                        maybe_shrink_codec_buffer(&mut framed_read);
                         piece_notify.notified().await;
                     }
                 }
@@ -653,6 +684,9 @@ pub(crate) async fn run_peer(
     {
         atomic_states.release(piece);
     }
+
+    // M94: Shrink codec buffer before disconnect cleanup
+    maybe_shrink_codec_buffer(&mut framed_read);
 
     // Notify plugins that a peer disconnected
     for plugin in plugins.iter() {
