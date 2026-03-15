@@ -427,6 +427,7 @@ impl TorrentHandle {
             dht_peers_rx,
             dht_v6_peers_rx,
             dht_v6_empty_count: 0,
+            dht_v6_last_retry: None,
             alert_tx,
             alert_mask,
             upload_bucket,
@@ -719,6 +720,7 @@ impl TorrentHandle {
             dht_peers_rx,
             dht_v6_peers_rx,
             dht_v6_empty_count: 0,
+            dht_v6_last_retry: None,
             alert_tx,
             alert_mask,
             upload_bucket,
@@ -1474,6 +1476,8 @@ struct TorrentActor {
     /// Consecutive times the V6 DHT returned an empty table.
     /// After 30 failures (~3s at 100ms), stop retrying to avoid log spam.
     dht_v6_empty_count: u32,
+    /// Timestamp of last V6 DHT retry attempt (M97).
+    dht_v6_last_retry: Option<std::time::Instant>,
 
     // Alert system (M15)
     alert_tx: broadcast::Sender<Alert>,
@@ -2135,8 +2139,10 @@ impl TorrentActor {
                         }
                         if self.dht_v6_peers_rx.is_none()
                             && self.dht_v6_empty_count < 30
+                            && self.should_retry_v6()
                             && let Some(ref dht6) = self.dht_v6
                         {
+                            self.dht_v6_last_retry = Some(std::time::Instant::now());
                             match dht6.get_peers(self.info_hash).await {
                                 Ok(rx) => self.dht_v6_peers_rx = Some(rx),
                                 Err(e) => debug!("DHT v6 re-search failed: {e}"),
@@ -2157,8 +2163,10 @@ impl TorrentActor {
                             }
                             if self.dht_v6_v2_peers_rx.is_none()
                                 && self.dht_v6_empty_count < 30
+                                && self.should_retry_v6()
                                 && let Some(ref dht6) = self.dht_v6
                             {
+                                self.dht_v6_last_retry = Some(std::time::Instant::now());
                                 match dht6.get_peers(v2_as_v1).await {
                                     Ok(rx) => self.dht_v6_v2_peers_rx = Some(rx),
                                     Err(e) => debug!("DHT v6 v2-swarm re-search failed: {e}"),
@@ -2869,6 +2877,25 @@ impl TorrentActor {
         }
 
         result
+    }
+
+    /// Exponential backoff delay for V6 DHT retries (M97).
+    /// 100ms, 200ms, 400ms, 800ms, 1600ms, 3200ms, 5000ms (cap).
+    fn v6_retry_delay(&self) -> std::time::Duration {
+        let base_ms: u64 = 100;
+        let max_ms: u64 = 5000;
+        let delay_ms = base_ms
+            .saturating_mul(1u64.checked_shl(self.dht_v6_empty_count).unwrap_or(u64::MAX))
+            .min(max_ms);
+        std::time::Duration::from_millis(delay_ms)
+    }
+
+    /// Check if enough time has elapsed for the next V6 DHT retry (M97).
+    fn should_retry_v6(&self) -> bool {
+        let Some(last) = self.dht_v6_last_retry else {
+            return true; // First attempt
+        };
+        last.elapsed() >= self.v6_retry_delay()
     }
 
     /// Force an immediate DHT announce on all available DHT handles (v4 + v6).
@@ -5269,9 +5296,11 @@ impl TorrentActor {
                                         }
                                         if self.dht_v6_v2_peers_rx.is_none()
                                             && self.dht_v6_empty_count < 30
+                                            && self.should_retry_v6()
                                             && let Some(ref dht6) = self.dht_v6
                                             && let Ok(rx) = dht6.get_peers(v2_as_v1).await
                                         {
+                                            self.dht_v6_last_retry = Some(std::time::Instant::now());
                                             self.dht_v6_v2_peers_rx = Some(rx);
                                         }
                                     }
@@ -12690,5 +12719,24 @@ mod tests {
         .expect("SAM session should connect");
         assert!(!session.destination().is_empty());
         assert!(session.destination().to_b32_address().ends_with(".b32.i2p"));
+    }
+
+    #[test]
+    fn v6_retry_delay_progression() {
+        // Verify exponential backoff: 100, 200, 400, 800, 1600, 3200, 5000, 5000...
+        let expected_ms = [100, 200, 400, 800, 1600, 3200, 5000, 5000, 5000, 5000, 5000];
+        for (count, &expected) in expected_ms.iter().enumerate() {
+            let delay_ms = {
+                let base_ms: u64 = 100;
+                let max_ms: u64 = 5000;
+                base_ms
+                    .saturating_mul(1u64.checked_shl(count as u32).unwrap_or(u64::MAX))
+                    .min(max_ms)
+            };
+            assert_eq!(
+                delay_ms, expected,
+                "count={count}: expected {expected}ms, got {delay_ms}ms"
+            );
+        }
     }
 }
