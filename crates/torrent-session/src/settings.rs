@@ -223,6 +223,11 @@ fn default_i2p_tunnel_quantity() -> u8 {
 fn default_i2p_tunnel_length() -> u8 {
     3
 }
+fn default_runtime_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(4)
+}
 
 // ── Settings ─────────────────────────────────────────────────────────
 
@@ -679,6 +684,15 @@ pub struct Settings {
     #[serde(default = "default_stats_report_interval")]
     pub stats_report_interval: u64,
 
+    // ── Runtime tuning (M95) ──
+    /// Number of tokio worker threads. Default: min(available cores, 8).
+    /// Set to 0 to use tokio's default (= available_parallelism()).
+    #[serde(default = "default_runtime_worker_threads")]
+    pub runtime_worker_threads: usize,
+    /// Pin tokio worker threads to CPU cores for cache locality. Default: true.
+    #[serde(default = "default_true")]
+    pub pin_cores: bool,
+
     // ── DHT bootstrap (M56) ──
     /// Previously saved DHT routing table nodes for fast bootstrap.
     /// These are prepended to the bootstrap node list on startup so that
@@ -829,6 +843,9 @@ impl Default for Settings {
             peer_dscp: 0x08,
             // Session Stats (M50)
             stats_report_interval: 1000,
+            // Runtime tuning (M95)
+            runtime_worker_threads: default_runtime_worker_threads(),
+            pin_cores: true,
             // DHT bootstrap (M56)
             dht_saved_nodes: Vec::new(),
             dht_node_id: None,
@@ -978,6 +995,12 @@ impl Settings {
                     "i2p_outbound_length must be 0-7".into(),
                 ));
             }
+        }
+
+        if self.runtime_worker_threads > 256 {
+            return Err(crate::Error::InvalidSettings(
+                "runtime_worker_threads must be at most 256".into(),
+            ));
         }
 
         Ok(())
@@ -1193,6 +1216,8 @@ impl PartialEq for Settings {
             && self.peer_connect_timeout == other.peer_connect_timeout
             && self.peer_dscp == other.peer_dscp
             && self.stats_report_interval == other.stats_report_interval
+            && self.runtime_worker_threads == other.runtime_worker_threads
+            && self.pin_cores == other.pin_cores
             && self.dht_saved_nodes == other.dht_saved_nodes
             && self.dht_node_id == other.dht_node_id
     }
@@ -1269,6 +1294,8 @@ mod tests {
         assert_eq!(s.readahead_pieces, 8);
         assert!(s.streaming_timeout_escalation);
         assert_eq!(s.max_peers_per_torrent, 128);
+        assert_eq!(s.runtime_worker_threads, default_runtime_worker_threads());
+        assert!(s.pin_cores);
     }
 
     #[test]
@@ -1868,5 +1895,26 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.stats_report_interval, 0);
+    }
+
+    #[test]
+    fn settings_runtime_worker_threads_and_pin_cores() {
+        // Defaults
+        let s = Settings::default();
+        assert_eq!(s.runtime_worker_threads, default_runtime_worker_threads());
+        assert!(s.pin_cores);
+
+        // 0 is valid (means auto-detect)
+        let mut s = Settings::default();
+        s.runtime_worker_threads = 0;
+        assert!(s.validate().is_ok());
+
+        // 256 is valid (boundary)
+        s.runtime_worker_threads = 256;
+        assert!(s.validate().is_ok());
+
+        // 257 is invalid
+        s.runtime_worker_threads = 257;
+        assert!(s.validate().is_err());
     }
 }
