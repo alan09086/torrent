@@ -291,7 +291,7 @@ fn load_dht_state(state_path: &Path) -> Option<(Vec<String>, Option<torrent::cor
 pub(crate) fn build_runtime(settings: &torrent::session::Settings) -> tokio::runtime::Runtime {
     let worker_count = if settings.runtime_worker_threads == 0 {
         std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(|n| n.get().min(8))
             .unwrap_or(4)
     } else {
         settings.runtime_worker_threads
