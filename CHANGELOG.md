@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.95.0 | M95 | Core affinity pinning — tokio worker threads pinned to CPU cores via `core_affinity`, `--workers`/`--no-pin-cores` CLI flags |
 | 0.94.0 | M94 | Memory footprint reduction — bounded StoreBuffer (32 MiB), codec read buffer shrinking on idle, disk cache 64→16 MiB |
 | 0.93.0 | M93 | Lock-free piece dispatch — atomic CAS reservation, AvailabilitySnapshot, PeerSlab, zero locks on hot path |
 | 0.92.0 | M92 | Peer event batching — PendingBatch, 25ms flush timer, ~3x context switch reduction |
@@ -46,6 +47,19 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.95.0] — 2026-03-14
+
+### Added
+- Pin tokio worker threads to CPU cores via `core_affinity::set_for_current()` in `on_thread_start` hook for improved L1/L2 cache locality
+- `runtime_worker_threads` and `pin_cores` settings in `Settings` (JSON-configurable)
+- `--workers` and `--no-pin-cores` CLI flags for runtime tuning
+- `build_runtime()` function with round-robin core pinning via `AtomicUsize`
+
+### Changed
+- Replaced `#[tokio::main]` with manual `fn main()` for runtime control
+- Config loading moved from `download::run()` to `main()` (DRY fix — load once, pass through `DownloadOpts`)
+- Worker thread count auto-capped at `min(available_cores, 8)`
 
 ## [0.94.0] — 2026-03-14
 
