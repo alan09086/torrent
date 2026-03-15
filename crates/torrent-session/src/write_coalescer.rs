@@ -2,7 +2,6 @@ use bytes::{Bytes, BytesMut};
 use torrent_core::Lengths;
 
 /// Result of a flush operation — tells the caller what to write to disk.
-#[allow(dead_code)] // consumed by peer task in a later commit
 pub(crate) struct FlushRequest {
     pub piece: u32,
     /// Byte offset within the piece (always 0 for full-piece flush).
@@ -16,7 +15,6 @@ pub(crate) struct FlushRequest {
 ///
 /// Reduces disk syscalls by ~32x (one write per piece instead of one per block).
 /// Defers `BytesMut` allocation until the first `start_piece()` call.
-#[allow(dead_code)] // consumed by peer task in a later commit
 pub(crate) struct WriteCoalescer {
     lengths: Lengths,
     /// Accumulation buffer. Starts at zero capacity; allocated with the correct
@@ -30,7 +28,6 @@ pub(crate) struct WriteCoalescer {
     expected_offset: u32,
 }
 
-#[allow(dead_code)] // consumed by peer task in a later commit
 impl WriteCoalescer {
     /// Create an empty coalescer. No allocation occurs until the first block
     /// arrives.
@@ -94,6 +91,7 @@ impl WriteCoalescer {
     }
 
     /// Returns `true` if no piece is currently being buffered.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.current_piece.is_none()
     }

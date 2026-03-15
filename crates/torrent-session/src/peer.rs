@@ -23,6 +23,7 @@ use torrent_wire::{
 use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
 use crate::pipeline::PeerPipelineState;
 use crate::pex::PexMessage;
+use crate::write_coalescer::WriteCoalescer;
 use crate::piece_reservation::{AtomicPieceStates, AvailabilitySnapshot, PeerDispatchState};
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 
@@ -331,6 +332,8 @@ pub(crate) async fn run_peer(
 
     // M92: Pending batch for accumulating block completions
     let mut pending_batch: Option<PendingBatch> = None;
+    // M98: Per-peer write coalescer — buffers blocks into full-piece writes
+    let mut write_coalescer: Option<WriteCoalescer> = None;
     // M92: 25ms flush interval — ticks only when batch has pending blocks
     let mut flush_interval = tokio::time::interval(Duration::from_millis(25));
     flush_interval.tick().await; // skip initial immediate tick
@@ -378,16 +381,36 @@ pub(crate) async fn run_peer(
                                         semaphore.add_permits(1);
                                     }
                                 }
-                                // M78: Direct peer-to-disk write — bypass actor for disk I/O
+                                // M98: Write coalescing — buffer blocks, flush as full pieces
                                 if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
-                                    match disk.enqueue_write(
-                                        *index, *begin, data.clone(),
-                                        DiskJobFlags::empty(), write_err_tx,
-                                    ) {
-                                        Ok(()) => {}
-                                        Err(returned_data) => {
-                                            disk.write_chunk(*index, *begin, returned_data, DiskJobFlags::empty()).await
-                                                .unwrap_or_else(|e| warn!(%addr, index, begin, "peer disk write failed: {e}"));
+                                    if let Some(ref mut wc) = write_coalescer {
+                                        // M98: Per-block store buffer insert (for hash verification)
+                                        disk.store_buffer_insert(*index, *begin, data.clone());
+
+                                        // M98: Coalesced write path
+                                        if let Some(flush) = wc.add_block(*index, *begin, data.as_ref()) {
+                                            match disk.enqueue_write_coalesced(
+                                                flush.piece, flush.begin, flush.data,
+                                                DiskJobFlags::FLUSH_PIECE, write_err_tx,
+                                            ) {
+                                                Ok(()) => {}
+                                                Err(returned_data) => {
+                                                    disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
+                                                        .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "coalesced write failed: {e}"));
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Fallback: pre-M98 per-block write (before StartRequesting)
+                                        match disk.enqueue_write(
+                                            *index, *begin, data.clone(),
+                                            DiskJobFlags::empty(), write_err_tx,
+                                        ) {
+                                            Ok(()) => {}
+                                            Err(returned_data) => {
+                                                disk.write_chunk(*index, *begin, returned_data, DiskJobFlags::empty()).await
+                                                    .unwrap_or_else(|e| warn!(%addr, index, begin, "peer disk write failed: {e}"));
+                                            }
                                         }
                                     }
                                 }
@@ -537,6 +560,8 @@ pub(crate) async fn run_peer(
                         if pending_batch.is_none() {
                             pending_batch = Some(PendingBatch::new(&lengths));
                         }
+                        // M98: Initialize write coalescer for piece-level disk writes
+                        write_coalescer = Some(WriteCoalescer::new(&lengths));
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
@@ -704,6 +729,17 @@ pub(crate) async fn run_peer(
                 blocks,
             })
             .await;
+    }
+
+    // M98: Flush any buffered coalesced data on disconnect
+    if let Some(ref mut wc) = write_coalescer
+        && let Some(flush) = wc.flush()
+        && let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state
+    {
+        let _ = disk.enqueue_write_coalesced(
+            flush.piece, flush.begin, flush.data,
+            DiskJobFlags::FLUSH_PIECE, write_err_tx,
+        );
     }
 
     // Send disconnect event (best-effort)
@@ -3206,5 +3242,63 @@ mod tests {
             assert!(!batch.push(1, 3 * 16384, 16384)); // only 2 in this batch
             assert_eq!(batch.blocks.len(), 2);
         }
+    }
+
+    /// M98: Verify the WriteCoalescer + DiskHandle store_buffer +
+    /// coalesced write work together correctly in the peer's data path.
+    #[test]
+    fn integration_write_coalescer_peer_path() {
+        use crate::disk::{DiskHandle, DiskJobFlags};
+        use crate::write_coalescer::WriteCoalescer;
+        use torrent_core::Lengths;
+
+        // 2-piece torrent: 32 KiB pieces, 16 KiB chunks (2 blocks per piece)
+        let lengths = Lengths::new(64 * 1024, 32 * 1024, 16384);
+        let (tx, mut rx) = mpsc::channel(16);
+        let disk = DiskHandle::new(tx, Id20::ZERO);
+        let (error_tx, _error_rx) = mpsc::channel(4);
+
+        let mut wc = WriteCoalescer::new(&lengths);
+
+        // Simulate receiving 2 blocks for piece 0
+        let block0 = Bytes::from(vec![0xAAu8; 16 * 1024]);
+        let block1 = Bytes::from(vec![0xBBu8; 16 * 1024]);
+
+        // Per-block: store buffer insert (mirrors peer.rs data path)
+        disk.store_buffer_insert(0, 0, block0.clone());
+        disk.store_buffer_insert(0, 16384, block1.clone());
+
+        // Per-block: coalescer accumulation
+        assert!(
+            wc.add_block(0, 0, block0.as_ref()).is_none(),
+            "first block should not trigger flush"
+        );
+        let flush = wc
+            .add_block(0, 16384, block1.as_ref())
+            .expect("second block should complete the piece and trigger flush");
+
+        assert_eq!(flush.piece, 0);
+        assert_eq!(flush.begin, 0);
+        assert_eq!(flush.data.len(), 32 * 1024);
+        // Verify coalesced data is block0 ++ block1
+        assert!(flush.data[..16 * 1024].iter().all(|&b| b == 0xAA));
+        assert!(flush.data[16 * 1024..].iter().all(|&b| b == 0xBB));
+
+        // Coalesced write should skip store buffer
+        disk.enqueue_write_coalesced(
+            flush.piece,
+            flush.begin,
+            flush.data,
+            DiskJobFlags::FLUSH_PIECE,
+            &error_tx,
+        )
+        .expect("enqueue should succeed on non-full channel");
+
+        // Verify: disk channel received the coalesced write job
+        let job = rx.try_recv().expect("disk channel should have one job");
+        drop(job);
+
+        // Verify coalescer is empty after flush
+        assert!(wc.is_empty());
     }
 }

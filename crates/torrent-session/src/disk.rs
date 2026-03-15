@@ -618,7 +618,6 @@ impl DiskHandle {
     ///
     /// Used by write coalescing to populate the store buffer for hash
     /// verification while deferring the actual disk write to a coalesced flush.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn store_buffer_insert(&self, piece: u32, begin: u32, data: Bytes) {
         self.store_buffer
             .lock()
@@ -633,7 +632,6 @@ impl DiskHandle {
     /// (or partial piece on disconnect), written as a single contiguous pwrite().
     ///
     /// Returns `Err(data)` on back-pressure (channel full), `Ok(())` otherwise.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn enqueue_write_coalesced(
         &self,
         piece: u32,
