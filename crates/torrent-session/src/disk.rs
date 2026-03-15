@@ -614,6 +614,54 @@ impl DiskHandle {
         }
     }
 
+    /// Insert a block into the store buffer without queuing a disk write.
+    ///
+    /// Used by write coalescing to populate the store buffer for hash
+    /// verification while deferring the actual disk write to a coalesced flush.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn store_buffer_insert(&self, piece: u32, begin: u32, data: Bytes) {
+        self.store_buffer
+            .lock()
+            .unwrap()
+            .insert((self.info_hash, piece), begin, data);
+    }
+
+    /// Enqueue a non-blocking coalesced write that SKIPS store buffer insertion.
+    ///
+    /// This is used after write coalescing has already populated the store buffer
+    /// via `store_buffer_insert()` per-block. The coalesced data is the full piece
+    /// (or partial piece on disconnect), written as a single contiguous pwrite().
+    ///
+    /// Returns `Err(data)` on back-pressure (channel full), `Ok(())` otherwise.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn enqueue_write_coalesced(
+        &self,
+        piece: u32,
+        begin: u32,
+        data: Bytes,
+        flags: DiskJobFlags,
+        error_tx: &mpsc::Sender<DiskWriteError>,
+    ) -> Result<(), Bytes> {
+        match self.tx.try_send(DiskJob::WriteAsync {
+            info_hash: self.info_hash,
+            piece,
+            begin,
+            data,
+            flags,
+            error_tx: error_tx.clone(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(job)) => {
+                if let DiskJob::WriteAsync { data, .. } = job {
+                    Err(data)
+                } else {
+                    unreachable!()
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
+        }
+    }
+
     /// Spawn a non-blocking v1 piece hash verification.
     ///
     /// Bypasses the disk channel entirely — hashes from the store buffer
@@ -1487,5 +1535,79 @@ mod tests {
         assert!(!result.passed, "wrong hash should fail v2 verify");
 
         mgr.shutdown().await;
+    }
+
+    // ── Write coalescing DiskHandle tests ─────────────────────────────
+
+    #[test]
+    fn store_buffer_insert_populates_buffer() {
+        let (tx, _rx) = mpsc::channel(16);
+        let disk = DiskHandle::new(tx, Id20::ZERO);
+        let data = Bytes::from(vec![0xABu8; 64]);
+
+        disk.store_buffer_insert(0, 0, data.clone());
+
+        let sb = disk.store_buffer.lock().unwrap();
+        let blocks = sb.entries.get(&(disk.info_hash, 0));
+        assert!(blocks.is_some(), "store buffer should contain piece 0");
+        let blocks = blocks.unwrap();
+        assert_eq!(blocks.get(&0), Some(&data));
+    }
+
+    #[test]
+    fn enqueue_write_coalesced_skips_store_buffer() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let disk = DiskHandle::new(tx, Id20::ZERO);
+        let data = Bytes::from(vec![0xCDu8; 128]);
+        let (error_tx, _error_rx) = mpsc::channel(4);
+
+        let result =
+            disk.enqueue_write_coalesced(0, 0, data.clone(), DiskJobFlags::empty(), &error_tx);
+        assert!(result.is_ok(), "enqueue should succeed on non-full channel");
+
+        // Store buffer must be empty — coalesced write skips insertion
+        let sb = disk.store_buffer.lock().unwrap();
+        assert!(
+            sb.entries.get(&(disk.info_hash, 0)).is_none(),
+            "store buffer should be empty after coalesced write"
+        );
+        drop(sb);
+
+        // The disk job should have been sent to the channel
+        let job = rx.try_recv();
+        assert!(job.is_ok(), "disk job should be on the channel");
+        if let Ok(DiskJob::WriteAsync {
+            piece, begin, data: job_data, ..
+        }) = job
+        {
+            assert_eq!(piece, 0);
+            assert_eq!(begin, 0);
+            assert_eq!(job_data, data);
+        } else {
+            panic!("expected WriteAsync job");
+        }
+    }
+
+    #[test]
+    fn enqueue_write_coalesced_backpressure() {
+        let (tx, _rx) = mpsc::channel(1);
+        let disk = DiskHandle::new(tx, Id20::ZERO);
+        let (error_tx, _error_rx) = mpsc::channel(4);
+
+        // Fill the channel with a dummy job
+        let dummy = Bytes::from(vec![0u8; 16]);
+        disk.enqueue_write_coalesced(0, 0, dummy, DiskJobFlags::empty(), &error_tx)
+            .unwrap();
+
+        // Next send should hit back-pressure
+        let payload = Bytes::from(vec![0xFFu8; 32]);
+        let result =
+            disk.enqueue_write_coalesced(1, 0, payload.clone(), DiskJobFlags::empty(), &error_tx);
+        assert!(result.is_err(), "should return Err on full channel");
+        assert_eq!(
+            result.unwrap_err(),
+            payload,
+            "should return the original data on back-pressure"
+        );
     }
 }
