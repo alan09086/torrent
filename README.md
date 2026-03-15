@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1498-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1503-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.95.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.96.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1498 tests, zero clippy warnings**
+- 📊 **1503 tests, zero clippy warnings**
 
 ---
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.95.0"
+torrent = "0.96.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -95,7 +95,7 @@ torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 | `torrent-tracker` | HTTP (reqwest) + UDP (BEP 15) tracker client, BEP 48 scrape, IPv6 compact peers, SSRF-safe HTTP client | 40 |
 | `torrent-dht` | Kademlia DHT with actor model, KRPC, routing table, BEP 24 IPv6 dual-stack, BEP 42 security, BEP 44 data storage, BEP 51 infohash indexing | 141 |
 | `torrent-storage` | Bitfield, FileMap (O(log n) lookup), ChunkTracker (v1+v2), MmapStorage, ARC disk cache | 66 |
-| `torrent-session` | Full session orchestration -- see [Session Features](#session-features) below | 672 |
+| `torrent-session` | Full session orchestration -- see [Session Features](#session-features) below | 677 |
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion control, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD with auto-renewal | 20 |
 | `torrent` | Public facade: `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` | 54 |
@@ -104,7 +104,7 @@ torrent-sim          🧪 In-process network simulation: SimNetwork, SimSwarm, v
 
 ### 🎯 Session Features
 
-The `torrent-session` crate (733 tests) includes:
+The `torrent-session` crate (738 tests) includes:
 
 | Category | Features |
 |----------|----------|
@@ -162,7 +162,8 @@ Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per ve
 
 | Version | Avg Speed | Peak | CPU Time | RSS | Notes |
 |---------|-----------|------|----------|-----|-------|
-| **0.95.0** | — | — | — | — | Core affinity pinning: tokio workers pinned to CPU cores via `core_affinity`, round-robin assignment, `--workers`/`--no-pin-cores` flags (benchmark pending) |
+| **0.96.0** | — | — | — | — | Parallel piece verification: `HashPool` dedicated thread pool for SHA1, per-torrent result channels, generation counter for stale detection (benchmark pending; expected SHA1 CPU 20.3%→~8%, speed +13%) |
+| 0.95.0 | — | — | — | — | Core affinity pinning: tokio workers pinned to CPU cores via `core_affinity`, round-robin assignment, `--workers`/`--no-pin-cores` flags (benchmark pending) |
 | 0.94.0 | — | — | — | — | Memory footprint reduction: bounded StoreBuffer (32 MiB), codec read buffer shrinking on idle, disk cache 64→16 MiB (benchmark pending) |
 | 0.93.0 | — | — | — | — | Lock-free piece dispatch: atomic CAS reservation, AvailabilitySnapshot, PeerSlab, zero locks on hot path (benchmark pending) |
 | 0.92.0 | — | — | — | — | Peer event batching: PendingBatch, 25ms flush timer (benchmark pending) |
@@ -283,6 +284,7 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Lock-Free Piece Dispatch | M93 | Atomic CAS reservation, AvailabilitySnapshot rarest-first, PeerSlab arena allocation, zero locks on hot path | ✅ |
 | Memory Footprint Reduction | M94 | Bounded StoreBuffer (32 MiB back-pressure), codec read buffer shrinking on idle, disk cache 64→16 MiB, store_buffer_bytes DiskStats field | ✅ |
 | Core Affinity | M95 | Pin tokio worker threads to CPU cores via `core_affinity`, round-robin assignment, `runtime_worker_threads`/`pin_cores` settings, `--workers`/`--no-pin-cores` CLI flags | ✅ |
+| Parallel Piece Verification | M96 | `HashPool` dedicated thread pool for SHA1, per-torrent result channels with generation counter, `handle_hash_result()` with staleness guard, dual-path dispatch (HashPool for v1, spawn_blocking for hybrid/v2) | ✅ |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 

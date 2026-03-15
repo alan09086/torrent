@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.96.0 | M96 | Parallel piece verification — `HashPool` dedicated thread pool for SHA1 hashing, per-torrent result channels, generation counter for stale detection |
 | 0.95.0 | M95 | Core affinity pinning — tokio worker threads pinned to CPU cores via `core_affinity`, `--workers`/`--no-pin-cores` CLI flags |
 | 0.94.0 | M94 | Memory footprint reduction — bounded StoreBuffer (32 MiB), codec read buffer shrinking on idle, disk cache 64→16 MiB |
 | 0.93.0 | M93 | Lock-free piece dispatch — atomic CAS reservation, AvailabilitySnapshot, PeerSlab, zero locks on hot path |
@@ -47,6 +48,21 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.96.0] — 2026-03-14
+
+### Added
+- `HashPool` — dedicated thread pool for CPU-bound SHA1 piece hash verification
+- Per-torrent result channels with generation counter for stale hash detection
+- `handle_hash_result()` method in TorrentActor with staleness + domination guards
+- New `select!` arm for parallel hash results
+- `WorkerMsg::Shutdown` sentinel for deadlock-free `Drop`
+- `set_hash_pool()` and `set_hash_result_tx()` setters on `DiskHandle`
+
+### Changed
+- `enqueue_verify()` gains `generation` parameter and dual-path dispatch (HashPool for v1, spawn_blocking for hybrid/v2)
+- `piece_generations: Vec<u64>` tracks re-reservation to prevent stale results
+- Session startup creates shared `Arc<HashPool>` from `hashing_threads` setting
 
 ## [0.95.0] — 2026-03-14
 
