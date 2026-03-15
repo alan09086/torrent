@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1516-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1517-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.98.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.98.1-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1,516 tests, zero clippy warnings**
+- 📊 **1,517 tests, zero clippy warnings**
 
 ---
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.98.0"
+torrent = "0.98.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -160,11 +160,11 @@ The `torrent-session` crate (763 tests) includes:
 
 Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded).
 
-### Head-to-head: torrent v0.98.0 vs rqbit 8.1.1
+### Head-to-head: torrent v0.98.1 vs rqbit 8.1.1
 
 Same magnet, same machine, back-to-back trials (2026-03-15):
 
-| Metric | torrent v0.98.0 | rqbit 8.1.1 | Ratio | Status |
+| Metric | torrent v0.98.1 | rqbit 8.1.1 | Ratio | Status |
 |--------|:-:|:-:|:-:|:-:|
 | **Speed** | 31.8 MB/s | 72.6 MB/s | 0.44x | Gap |
 | **CPU time** | 9.8s | 10.6s | 0.92x | Parity |
@@ -178,7 +178,8 @@ Same magnet, same machine, back-to-back trials (2026-03-15):
 
 | Version | Avg Speed | CPU Time | RSS | Ctx Switches | CPU Migrations | Page Faults | Notes |
 |---------|-----------|----------|-----|:------------:|:--------------:|:-----------:|-------|
-| **0.98.0** | 31.8 MB/s | 9.8s | 256 MiB | 114K | 645 | 226K | Write coalescing, cold-start |
+| **0.98.1** | 31.8 MB/s | 9.8s | 256 MiB | 114K | 645 | 226K | Write coalescer buffer reuse fix, store buffer back-pressure |
+| 0.98.0 | 31.8 MB/s | 9.8s | 256 MiB | 114K | 645 | 226K | Write coalescing, cold-start |
 | 0.95.0 | 66.9 MB/s | -- | ~133 MiB | -- | 141 | -- | Core affinity (warm-state) |
 | 0.84.0 | 55.7 MB/s | 12.5s | 107 MiB | -- | -- | -- | AWS-LC crypto (warm-state) |
 | 0.83.0 | 56.8 MB/s | 13.1s | 68.8 MiB | -- | -- | -- | AIMD depth 128 (warm-state) |
@@ -198,6 +199,7 @@ Profiling baseline: v0.84.0 cold-start (2026-03-14):
 
 | Version | Optimization | Measured Impact |
 |---------|-------------|-----------------|
+| 0.98.1 | Write coalescer buffer reuse — `copy_from_slice` + `clear()`, store buffer sync fallback | Eliminates ~3 GiB alloc churn on large torrents |
 | 0.98.0 | Write coalescing — per-peer block buffering, single pwrite per piece | ~32x fewer write syscalls |
 | 0.97.0 | DHT cold-start hardening — bootstrap gate, V6 backoff, 5s pings | 10/10 cold-start reliability |
 | 0.96.0 | Parallel piece verification — HashPool dedicated thread pool | SHA1 off main thread |
@@ -315,6 +317,7 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Parallel Hashing | M96 | HashPool dedicated thread pool for SHA1, per-torrent result channels, generation counter | ✅ |
 | DHT Cold-Start | M97 | Bootstrap completion gate, node-count gate (≥8 nodes), V6 exponential backoff, 5s pings | ✅ |
 | Write Coalescing | M98 | Per-peer block buffering, ~32x fewer disk syscalls, split store-buffer/coalesced-write path | ✅ |
+| Write Coalescer Fix | v0.98.1 | Buffer reuse via `copy_from_slice` + `clear()`, store buffer sync fallback | ✅ |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 

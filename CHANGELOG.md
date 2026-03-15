@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.98.1 | — | Write coalescer buffer reuse fix — `Bytes::copy_from_slice` + `clear()` eliminates ~3 GiB allocation churn; store buffer back-pressure fallback to sync writes |
 | 0.98.0 | M98 | Write coalescing — per-peer block buffering, ~32x fewer disk syscalls, split store-buffer/coalesced-write path |
 | 0.97.1 | — | DHT bootstrap simplification — remove PingVerify verification system, ping saved nodes instead of find_node, node-count gate, 5s maintenance pings |
 | 0.97.0 | M97 | DHT cold-start hardening — bootstrap completion gate, saved-node verification with re-bootstrap fallback, V6 exponential backoff |
@@ -51,6 +52,17 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.98.1] — 2026-03-15
+
+### Added
+- `buffer_reuse_across_pieces` test — asserts that `BytesMut` capacity is retained and data is independent after each flush
+
+### Fixed
+- **Write coalescer `flush_current()` buffer reuse** — replaced `split().freeze()` with `Bytes::copy_from_slice` + `clear()` to retain `BytesMut` capacity across pieces, eliminating ~3 GiB allocation churn on large torrents
+- **Store buffer back-pressure** — `store_buffer_insert()` now returns an over-limit signal; peer task falls back to synchronous writes when the store buffer exceeds 32 MiB
+
+1517 tests total.
 
 ## [0.98.0] — 2026-03-15
 
