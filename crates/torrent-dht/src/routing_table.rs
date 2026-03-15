@@ -349,6 +349,22 @@ impl RoutingTable {
         }
     }
 
+    /// Mark all nodes in the routing table as Questionable (M97).
+    ///
+    /// Called when saved-state verification fails — loaded nodes may be stale.
+    /// Setting `last_response = None` and `last_query = None` makes nodes
+    /// Questionable (never responded, never queried). `fail_count = 0` ensures
+    /// they are Questionable rather than Bad.
+    pub fn mark_all_questionable(&mut self) {
+        for bucket in &mut self.buckets {
+            for node in &mut bucket.nodes {
+                node.last_response = None;
+                node.last_query = None;
+                node.fail_count = 0;
+            }
+        }
+    }
+
     /// Return all nodes whose status is `Questionable`.
     pub fn questionable_nodes(&self) -> Vec<(Id20, SocketAddr)> {
         self.buckets
@@ -785,5 +801,35 @@ mod tests {
         // The old IP (10.0.0.1) should be freed
         let old_addr: SocketAddr = "10.0.0.1:6882".parse().unwrap();
         assert!(rt.insert(id(200), old_addr));
+    }
+
+    #[test]
+    fn mark_all_questionable_resets_liveness() {
+        let own_id = Id20([0x00; 20]);
+        let mut rt = RoutingTable::new(own_id);
+
+        // Insert two nodes and mark them as responsive
+        let node1 = Id20([0x80; 20]);
+        let node2 = Id20([0x40; 20]);
+        let addr1: SocketAddr = "192.0.2.1:6881".parse().unwrap();
+        let addr2: SocketAddr = "192.0.2.2:6881".parse().unwrap();
+
+        rt.insert(node1, addr1);
+        rt.insert(node2, addr2);
+        rt.mark_response(&node1);
+        rt.mark_response(&node2);
+
+        // Verify nodes are Good
+        assert_eq!(rt.get(&node1).unwrap().status(), NodeStatus::Good);
+        assert_eq!(rt.get(&node2).unwrap().status(), NodeStatus::Good);
+
+        // Mark all questionable
+        rt.mark_all_questionable();
+
+        // Verify nodes are now Questionable
+        assert_eq!(rt.get(&node1).unwrap().status(), NodeStatus::Questionable);
+        assert_eq!(rt.get(&node2).unwrap().status(), NodeStatus::Questionable);
+        assert_eq!(rt.get(&node1).unwrap().fail_count, 0);
+        assert_eq!(rt.get(&node2).unwrap().fail_count, 0);
     }
 }
