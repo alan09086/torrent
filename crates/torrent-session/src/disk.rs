@@ -48,7 +48,76 @@ pub struct VerifyResult {
 /// Keyed by `(info_hash, piece_index)`, value is a sorted map of
 /// `block_offset -> block_data`. Hash jobs read from here to avoid
 /// waiting for disk writes, matching libtorrent's store_buffer pattern.
-type StoreBuffer = Mutex<HashMap<(Id20, u32), BTreeMap<u32, Bytes>>>;
+///
+/// Tracks total bytes held so callers can apply back-pressure when the
+/// buffer grows too large.
+#[derive(Debug)]
+pub(crate) struct StoreBufferInner {
+    entries: HashMap<(Id20, u32), BTreeMap<u32, Bytes>>,
+    total_bytes: usize,
+    max_bytes: usize,
+}
+
+impl StoreBufferInner {
+    pub(crate) fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            total_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    /// Insert a block into the store buffer, tracking byte usage.
+    pub(crate) fn insert(&mut self, key: (Id20, u32), begin: u32, data: Bytes) {
+        self.total_bytes += data.len();
+        self.entries
+            .entry(key)
+            .or_default()
+            .insert(begin, data);
+    }
+
+    /// Remove all blocks for a `(info_hash, piece)` key, decrementing byte count.
+    pub(crate) fn remove(&mut self, key: &(Id20, u32)) -> Option<BTreeMap<u32, Bytes>> {
+        let blocks = self.entries.remove(key)?;
+        let removed_bytes: usize = blocks.values().map(|b| b.len()).sum();
+        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
+        Some(blocks)
+    }
+
+    /// Convenience wrapper for removing a single piece.
+    #[allow(dead_code)]
+    pub(crate) fn remove_piece(&mut self, info_hash: Id20, piece: u32) {
+        self.remove(&(info_hash, piece));
+    }
+
+    /// Remove all entries belonging to the given info_hash.
+    pub(crate) fn remove_by_info_hash(&mut self, info_hash: Id20) {
+        let mut removed_bytes = 0usize;
+        self.entries.retain(|&(ih, _), blocks| {
+            if ih == info_hash {
+                removed_bytes += blocks.values().map(|b| b.len()).sum::<usize>();
+                false
+            } else {
+                true
+            }
+        });
+        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
+    }
+
+    /// Returns true if the store buffer has exceeded its byte limit.
+    pub(crate) fn is_over_limit(&self) -> bool {
+        self.total_bytes > self.max_bytes
+    }
+
+    /// Total bytes currently held in the store buffer.
+    // Used in tests now; will be wired to DiskStats in a follow-up task.
+    #[allow(dead_code)]
+    pub(crate) fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
+type StoreBuffer = Mutex<StoreBufferInner>;
 
 pub(crate) enum DiskJob {
     Register {
@@ -148,6 +217,8 @@ pub struct DiskConfig {
     pub write_cache_ratio: f32,
     /// Bounded channel capacity. Default: 512.
     pub channel_capacity: usize,
+    /// Maximum size of the in-memory store buffer in bytes. Default: 32 MiB.
+    pub store_buffer_max_bytes: usize,
 }
 
 impl Default for DiskConfig {
@@ -158,6 +229,7 @@ impl Default for DiskConfig {
             cache_size: 16 * 1024 * 1024,
             write_cache_ratio: 0.5,
             channel_capacity: 512,
+            store_buffer_max_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -217,7 +289,7 @@ impl DiskManagerHandle {
         config: DiskConfig,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let store_buffer = Arc::new(Mutex::new(HashMap::new()));
+        let store_buffer = Arc::new(Mutex::new(StoreBufferInner::new(config.store_buffer_max_bytes)));
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         let actor = DiskActor::new(rx, config, backend, Arc::clone(&store_buffer));
         let join = tokio::spawn(actor.run());
@@ -280,7 +352,7 @@ impl DiskHandle {
         Self {
             tx,
             info_hash,
-            store_buffer: Arc::new(Mutex::new(HashMap::new())),
+            store_buffer: Arc::new(Mutex::new(StoreBufferInner::new(32 * 1024 * 1024))),
         }
     }
 
@@ -483,12 +555,17 @@ impl DiskHandle {
     ) -> Result<(), Bytes> {
         // Insert into store buffer BEFORE queuing the write job.
         // This ensures hash verification always sees the block data.
-        self.store_buffer
-            .lock()
-            .unwrap()
-            .entry((self.info_hash, piece))
-            .or_default()
-            .insert(begin, data.clone());
+        // Check the limit after inserting: if over limit, return Err to signal
+        // back-pressure so the caller falls back to a synchronous write.
+        let over_limit = {
+            let mut sb = self.store_buffer.lock().unwrap();
+            sb.insert((self.info_hash, piece), begin, data.clone());
+            sb.is_over_limit()
+        };
+
+        if over_limit {
+            return Err(data);
+        }
 
         match self.tx.try_send(DiskJob::WriteAsync {
             info_hash: self.info_hash,
@@ -686,7 +763,7 @@ impl DiskActor {
                 self.store_buffer
                     .lock()
                     .unwrap()
-                    .retain(|&(ih, _), _| ih != info_hash);
+                    .remove_by_info_hash(info_hash);
                 self.backend.unregister(info_hash);
             }
             DiskJob::ClearPiece { info_hash, piece } => {
@@ -897,6 +974,55 @@ mod tests {
     use super::*;
     use torrent_core::Lengths;
     use torrent_storage::MemoryStorage;
+
+    // ── StoreBufferInner unit tests ───────────────────────────────────
+
+    #[test]
+    fn store_buffer_tracks_bytes() {
+        let mut sb = StoreBufferInner::new(1024);
+        let key = (Id20::ZERO, 0);
+        let data = Bytes::from(vec![0u8; 100]);
+        sb.insert(key, 0, data.clone());
+        assert_eq!(sb.total_bytes(), 100);
+        sb.insert(key, 100, data.clone());
+        assert_eq!(sb.total_bytes(), 200);
+        assert!(!sb.is_over_limit());
+
+        // Remove piece
+        let removed = sb.remove(&key);
+        assert!(removed.is_some());
+        assert_eq!(sb.total_bytes(), 0);
+    }
+
+    #[test]
+    fn store_buffer_over_limit() {
+        let mut sb = StoreBufferInner::new(150);
+        let key = (Id20::ZERO, 0);
+        sb.insert(key, 0, Bytes::from(vec![0u8; 100]));
+        assert!(!sb.is_over_limit());
+        sb.insert(key, 100, Bytes::from(vec![0u8; 100]));
+        assert!(sb.is_over_limit()); // 200 > 150
+    }
+
+    #[test]
+    fn store_buffer_remove_by_info_hash() {
+        let mut sb = StoreBufferInner::new(1024);
+        let ih1 = Id20::ZERO;
+        let ih2 = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        sb.insert((ih1, 0), 0, Bytes::from(vec![0u8; 100]));
+        sb.insert((ih1, 1), 0, Bytes::from(vec![0u8; 100]));
+        sb.insert((ih2, 0), 0, Bytes::from(vec![0u8; 50]));
+        assert_eq!(sb.total_bytes(), 250);
+
+        sb.remove_by_info_hash(ih1);
+        assert_eq!(sb.total_bytes(), 50);
+        // ih2 entries should remain
+        assert!(sb.entries.contains_key(&(ih2, 0)));
+        assert!(!sb.entries.contains_key(&(ih1, 0)));
+        assert!(!sb.entries.contains_key(&(ih1, 1)));
+    }
+
+    // ── DiskActor integration tests ──────────────────────────────────
 
     fn test_config() -> DiskConfig {
         DiskConfig {
@@ -1209,6 +1335,7 @@ mod tests {
             disk.store_buffer
                 .lock()
                 .unwrap()
+                .entries
                 .get(&(ih, 0))
                 .is_none(),
             "store buffer entry should be removed after verify"
@@ -1255,6 +1382,7 @@ mod tests {
             disk.store_buffer
                 .lock()
                 .unwrap()
+                .entries
                 .get(&(ih, 0))
                 .is_none(),
             "store buffer entry should be removed after v2 verify"
