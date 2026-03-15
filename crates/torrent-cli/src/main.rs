@@ -43,6 +43,12 @@ enum Command {
         /// Quiet mode — suppress progress bar
         #[arg(short, long)]
         quiet: bool,
+        /// Number of tokio worker threads (0 = auto)
+        #[arg(long, default_value_t = 0)]
+        workers: usize,
+        /// Disable core affinity pinning
+        #[arg(long)]
+        no_pin_cores: bool,
     },
     /// Create a .torrent file
     Create {
@@ -68,8 +74,7 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -90,17 +95,49 @@ async fn main() {
             seed,
             port,
             quiet,
+            workers,
+            no_pin_cores,
         } => {
-            download::run(download::DownloadOpts {
+            // Load config once, apply CLI overrides
+            let mut settings = if let Some(ref config_path) = config {
+                let data = std::fs::read_to_string(config_path)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: failed to read config {}: {e}", config_path.display());
+                        std::process::exit(1);
+                    });
+                let s: torrent::session::Settings = serde_json::from_str(&data)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: failed to parse settings JSON: {e}");
+                        std::process::exit(1);
+                    });
+                if let Err(e) = s.validate() {
+                    eprintln!("Error: invalid settings: {e}");
+                    std::process::exit(1);
+                }
+                s
+            } else {
+                torrent::session::Settings::default()
+            };
+
+            // Apply CLI overrides
+            if workers != 0 {
+                settings.runtime_worker_threads = workers;
+            }
+            if no_pin_cores {
+                settings.pin_cores = false;
+            }
+
+            // Build runtime with core pinning
+            let rt = download::build_runtime(&settings);
+            rt.block_on(download::run(download::DownloadOpts {
                 source: &source,
                 output: &output,
                 no_dht,
-                config: config.as_deref(),
                 seed,
                 port,
                 quiet,
-            })
-            .await
+                settings,
+            }))
         }
         Command::Create {
             path,

@@ -13,10 +13,10 @@ pub struct DownloadOpts<'a> {
     pub source: &'a str,
     pub output: &'a Path,
     pub no_dht: bool,
-    pub config: Option<&'a Path>,
     pub seed: bool,
     pub port: u16,
     pub quiet: bool,
+    pub settings: torrent::session::Settings,
 }
 
 pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
@@ -24,26 +24,17 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         source,
         output,
         no_dht,
-        config,
         seed,
         port,
         quiet,
+        settings,
     } = opts;
 
     // Global state file for DHT node persistence across sessions
     let state_path = state_file_path();
 
-    // Load settings
-    let mut builder = if let Some(config_path) = config {
-        let data = std::fs::read_to_string(config_path)
-            .with_context(|| format!("failed to read config: {}", config_path.display()))?;
-        let settings: torrent::session::Settings =
-            serde_json::from_str(&data).with_context(|| "failed to parse settings JSON")?;
-        settings.validate().with_context(|| "invalid settings")?;
-        torrent::ClientBuilder::from_settings(settings)
-    } else {
-        torrent::ClientBuilder::new()
-    };
+    // Build session from pre-loaded settings
+    let mut builder = torrent::ClientBuilder::from_settings(settings);
 
     builder = builder.listen_port(port).download_dir(output);
 
