@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.94.0 | M94 | Memory footprint reduction — bounded StoreBuffer (32 MiB), codec read buffer shrinking on idle, disk cache 64→16 MiB |
 | 0.93.0 | M93 | Lock-free piece dispatch — atomic CAS reservation, AvailabilitySnapshot, PeerSlab, zero locks on hot path |
 | 0.92.0 | M92 | Peer event batching — PendingBatch, 25ms flush timer, ~3x context switch reduction |
 | 0.91.0 | M91 | SimTransport integration tests — end-to-end transfer, multi-peer, partition recovery, dead code cleanup |
@@ -45,6 +46,28 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.94.0] — 2026-03-14
+
+### Added
+- **Memory footprint reduction (M94)**: Bounded `StoreBuffer` with byte tracking — accumulates
+  in-flight write bytes and applies back-pressure when the 32 MiB default limit is exceeded,
+  preventing unbounded memory growth during disk saturation.
+- `store_buffer_bytes` field added to `DiskStats` for real-time monitoring of write-buffer
+  memory consumption.
+- Codec read buffer shrinking on idle: peer codec reclaims its 16 KiB+ read buffer when the
+  peer is choked, cursor is exhausted, or the connection disconnects — reduces per-idle-peer
+  RSS proportionally to swarm size.
+
+### Changed
+- Default disk cache reduced from 64 MiB to 16 MiB (8 MiB write + 8 MiB read), with the
+  write ratio raised from 0.25 to 0.5. Keeps the cache effective for typical workloads while
+  significantly reducing baseline RSS.
+
+### Fixed
+- Fixed byte-count leak in `StoreBuffer` on duplicate block insertion — duplicate blocks now
+  correctly skip the byte accounting increment, preventing the tracked size from drifting above
+  actual buffer occupancy.
 
 ## [0.93.0] — 2026-03-14
 
