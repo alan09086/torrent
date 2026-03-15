@@ -68,12 +68,17 @@ impl StoreBufferInner {
     }
 
     /// Insert a block into the store buffer, tracking byte usage.
+    /// If a block at the same offset already exists (retransmission), the old
+    /// block's size is subtracted before adding the new one.
     pub(crate) fn insert(&mut self, key: (Id20, u32), begin: u32, data: Bytes) {
-        self.total_bytes += data.len();
-        self.entries
+        let new_len = data.len();
+        let old_len = self
+            .entries
             .entry(key)
             .or_default()
-            .insert(begin, data);
+            .insert(begin, data)
+            .map_or(0, |old| old.len());
+        self.total_bytes = self.total_bytes.saturating_sub(old_len) + new_len;
     }
 
     /// Remove all blocks for a `(info_hash, piece)` key, decrementing byte count.
@@ -82,12 +87,6 @@ impl StoreBufferInner {
         let removed_bytes: usize = blocks.values().map(|b| b.len()).sum();
         self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
         Some(blocks)
-    }
-
-    /// Convenience wrapper for removing a single piece.
-    #[allow(dead_code)]
-    pub(crate) fn remove_piece(&mut self, info_hash: Id20, piece: u32) {
-        self.remove(&(info_hash, piece));
     }
 
     /// Remove all entries belonging to the given info_hash.
@@ -1002,6 +1001,17 @@ mod tests {
         assert!(!sb.is_over_limit());
         sb.insert(key, 100, Bytes::from(vec![0u8; 100]));
         assert!(sb.is_over_limit()); // 200 > 150
+    }
+
+    #[test]
+    fn store_buffer_duplicate_insert_no_leak() {
+        let mut sb = StoreBufferInner::new(1024);
+        let key = (Id20::ZERO, 0);
+        sb.insert(key, 0, Bytes::from(vec![0u8; 100]));
+        assert_eq!(sb.total_bytes(), 100);
+        // Re-insert same block offset (retransmission) — old bytes subtracted
+        sb.insert(key, 0, Bytes::from(vec![0u8; 80]));
+        assert_eq!(sb.total_bytes(), 80); // NOT 180
     }
 
     #[test]
