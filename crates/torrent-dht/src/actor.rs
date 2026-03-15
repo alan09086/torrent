@@ -450,6 +450,18 @@ struct DhtActor {
     rate_limiter: QueryRateLimiter,
     /// Active iterative bootstrap lookup (find_node self-lookup after initial bootstrap).
     bootstrap_lookup: Option<FindNodeLookup>,
+    /// Whether initial bootstrap (FindNodeLookup) has completed (M97).
+    bootstrap_complete: bool,
+    /// Queued get_peers requests waiting for bootstrap to complete (M97).
+    pending_get_peers: Vec<(Id20, mpsc::Sender<Vec<SocketAddr>>)>,
+    /// Bootstrap timeout timer — forces bootstrap_complete after 10s (M97).
+    bootstrap_timeout: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// Outstanding saved-node verification pings (M97).
+    saved_node_pings_outstanding: u32,
+    /// Responses received from saved-node verification pings (M97).
+    saved_node_ping_responses: u32,
+    /// Whether saved-node verification has been evaluated (M97).
+    saved_node_verified: bool,
 }
 
 struct ActorStats {
@@ -467,6 +479,8 @@ struct PendingQuery {
 #[derive(Debug)]
 enum PendingQueryKind {
     Ping,
+    /// Saved-node verification ping (M97).
+    PingVerify,
     FindNode,
     GetPeers {
         info_hash: Id20,
@@ -588,6 +602,12 @@ impl DhtActor {
             sample_replies: HashMap::new(),
             rate_limiter: QueryRateLimiter::new(queries_per_second),
             bootstrap_lookup: None,
+            bootstrap_complete: false,
+            pending_get_peers: Vec::new(),
+            bootstrap_timeout: Some(Box::pin(tokio::time::sleep(Duration::from_secs(10)))),
+            saved_node_pings_outstanding: 0,
+            saved_node_ping_responses: 0,
+            saved_node_verified: true, // Default: no verification needed if no saved nodes
         }
     }
 
@@ -684,12 +704,45 @@ impl DhtActor {
                 _ = ping_tick.tick() => {
                     self.ping_questionable_nodes().await;
                 }
+
+                // M97: Bootstrap timeout — force bootstrap_complete after 10s
+                _ = async {
+                    match &mut self.bootstrap_timeout {
+                        Some(timer) => timer.as_mut().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.bootstrap_timeout.is_some() && !self.bootstrap_complete => {
+                    warn!("bootstrap timeout (10s), proceeding with current routing table");
+                    self.on_bootstrap_complete().await;
+                }
             }
         }
     }
 
     async fn bootstrap(&mut self) {
         let own_id = *self.routing_table.own_id();
+
+        // ── M97: Verify saved nodes ──
+        // Saved nodes parse as SocketAddr (IP:port); hardcoded bootstrap nodes
+        // have hostname:port and will fail parse.
+        let saved_addrs: Vec<SocketAddr> = self
+            .config
+            .bootstrap_nodes
+            .iter()
+            .filter_map(|s| s.parse::<SocketAddr>().ok())
+            .collect();
+
+        if !saved_addrs.is_empty() {
+            let sample_size = saved_addrs.len().min(8);
+            self.saved_node_pings_outstanding = sample_size as u32;
+            self.saved_node_ping_responses = 0;
+            self.saved_node_verified = false;
+
+            for addr in &saved_addrs[..sample_size] {
+                self.send_ping_verify(*addr, None).await;
+            }
+        }
+
         for addr_str in &self.config.bootstrap_nodes.clone() {
             match tokio::net::lookup_host(addr_str).await {
                 Ok(addrs) => {
@@ -1250,6 +1303,7 @@ impl DhtActor {
                             "iterative bootstrap complete"
                         );
                         self.bootstrap_lookup = None;
+                        self.on_bootstrap_complete().await;
                     } else {
                         let queries: Vec<(SocketAddr, Id20)> =
                             to_query.iter().map(|n| (n.addr, n.id)).collect();
@@ -1338,6 +1392,20 @@ impl DhtActor {
             }
             (PendingQueryKind::Ping, KrpcResponse::NodeId { .. }) => {
                 // Ping response — node is alive, already updated routing table
+            }
+            (PendingQueryKind::PingVerify, _) => {
+                // M97: Saved-node verification ping response
+                self.saved_node_pings_outstanding = self.saved_node_pings_outstanding.saturating_sub(1);
+                self.saved_node_ping_responses += 1;
+                debug!(
+                    addr = %pending.addr,
+                    responses = self.saved_node_ping_responses,
+                    outstanding = self.saved_node_pings_outstanding,
+                    "saved node verification ping response"
+                );
+                if self.saved_node_pings_outstanding == 0 && !self.saved_node_verified {
+                    self.check_saved_node_verification().await;
+                }
             }
             (PendingQueryKind::AnnouncePeer, KrpcResponse::NodeId { .. }) => {
                 // Announce response — success
@@ -1536,6 +1604,19 @@ impl DhtActor {
     }
 
     async fn start_get_peers(&mut self, info_hash: Id20, reply: mpsc::Sender<Vec<SocketAddr>>) {
+        if !self.bootstrap_complete {
+            debug!(
+                %info_hash,
+                pending = self.pending_get_peers.len(),
+                "get_peers queued (bootstrap not yet complete)"
+            );
+            self.pending_get_peers.push((info_hash, reply));
+            return;
+        }
+        self.start_get_peers_inner(info_hash, reply).await;
+    }
+
+    async fn start_get_peers_inner(&mut self, info_hash: Id20, reply: mpsc::Sender<Vec<SocketAddr>>) {
         let closest = self.routing_table.closest(&info_hash, K);
         let initial_nodes: Vec<CompactNodeInfo> = closest
             .iter()
@@ -1586,6 +1667,68 @@ impl DhtActor {
                 closest: initial_nodes,
             },
         );
+    }
+
+    /// M97: Called when bootstrap (FindNodeLookup) completes or times out.
+    /// Drains queued get_peers requests.
+    async fn on_bootstrap_complete(&mut self) {
+        if self.bootstrap_complete {
+            return; // Prevent double-fire
+        }
+        self.bootstrap_complete = true;
+        self.bootstrap_timeout = None;
+
+        let pending = std::mem::take(&mut self.pending_get_peers);
+        debug!(
+            count = pending.len(),
+            table_size = self.routing_table.len(),
+            "bootstrap complete, processing queued get_peers"
+        );
+        for (info_hash, reply) in pending {
+            self.start_get_peers_inner(info_hash, reply).await;
+        }
+    }
+
+    /// M97: Evaluate saved-node verification results after all pings resolve.
+    async fn check_saved_node_verification(&mut self) {
+        if self.saved_node_verified {
+            return;
+        }
+        self.saved_node_verified = true;
+
+        if self.saved_node_ping_responses >= 4 {
+            debug!(
+                responses = self.saved_node_ping_responses,
+                "saved DHT nodes verified — trusting saved state"
+            );
+        } else {
+            warn!(
+                responses = self.saved_node_ping_responses,
+                "saved DHT nodes mostly stale — marking questionable and re-bootstrapping"
+            );
+            self.routing_table.mark_all_questionable();
+
+            // Re-bootstrap from hardcoded nodes
+            let own_id = *self.routing_table.own_id();
+            let default_config = DhtConfig::default();
+            for addr_str in &default_config.bootstrap_nodes {
+                if let Ok(addrs) = tokio::net::lookup_host(addr_str).await {
+                    for addr in addrs {
+                        let matches = match self.address_family {
+                            AddressFamily::V4 => addr.is_ipv4(),
+                            AddressFamily::V6 => addr.is_ipv6(),
+                        };
+                        if matches {
+                            self.send_find_node(addr, own_id, None).await;
+                        }
+                    }
+                }
+            }
+
+            // Re-gate get_peers until the new bootstrap completes
+            self.bootstrap_complete = false;
+            self.bootstrap_timeout = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));
+        }
     }
 
     async fn handle_announce(
@@ -1670,12 +1813,20 @@ impl DhtActor {
 
         let mut stalled_lookups: Vec<Id20> = Vec::new();
         let mut find_node_timed_out = false;
+        let mut check_verification = false;
 
         for txn in expired {
             if let Some(pending) = self.pending.remove(&txn) {
                 trace!(txn, addr = %pending.addr, "query timed out");
                 if let Some(nid) = pending.node_id {
                     self.routing_table.mark_failed(&nid);
+                }
+                // M97: Track PingVerify timeouts
+                if matches!(pending.kind, PendingQueryKind::PingVerify) {
+                    self.saved_node_pings_outstanding = self.saved_node_pings_outstanding.saturating_sub(1);
+                    if self.saved_node_pings_outstanding == 0 && !self.saved_node_verified {
+                        check_verification = true;
+                    }
                 }
                 if matches!(pending.kind, PendingQueryKind::SampleInfohashes)
                     && let Some(reply) = self.sample_replies.remove(&txn)
@@ -1689,6 +1840,11 @@ impl DhtActor {
                     find_node_timed_out = true;
                 }
             }
+        }
+
+        // M97: Check saved-node verification after expired loop (deferred from non-async loop)
+        if check_verification {
+            self.check_saved_node_verification().await;
         }
 
         // Advance stalled lookups immediately — query next closest unqueried nodes
@@ -1748,6 +1904,7 @@ impl DhtActor {
 
             if terminate {
                 self.bootstrap_lookup = None;
+                self.on_bootstrap_complete().await;
             } else {
                 let queries: Vec<(SocketAddr, Id20)> =
                     to_query.iter().map(|n| (n.addr, n.id)).collect();
@@ -1862,6 +2019,35 @@ impl DhtActor {
                     addr,
                     node_id,
                     kind: PendingQueryKind::Ping,
+                },
+            );
+            self.stats.total_queries_sent += 1;
+        }
+    }
+
+    /// M97: Send a verification ping to a saved DHT node.
+    /// Like `send_ping` but uses `PendingQueryKind::PingVerify`.
+    async fn send_ping_verify(&mut self, addr: SocketAddr, node_id: Option<Id20>) {
+        if !self.rate_limiter.try_acquire() {
+            self.saved_node_pings_outstanding = self.saved_node_pings_outstanding.saturating_sub(1);
+            return;
+        }
+        let txn = self.next_transaction_id();
+        let own_id = *self.routing_table.own_id();
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::from_u16(txn),
+            body: KrpcBody::Query(KrpcQuery::Ping { id: own_id }),
+            sender_ip: None,
+        };
+        if let Ok(bytes) = msg.to_bytes() {
+            let _ = self.socket.send_to(&bytes, addr).await;
+            self.pending.insert(
+                txn,
+                PendingQuery {
+                    sent_at: Instant::now(),
+                    addr,
+                    node_id,
+                    kind: PendingQueryKind::PingVerify,
                 },
             );
             self.stats.total_queries_sent += 1;
@@ -2362,6 +2548,9 @@ impl DhtActor {
                 round: 0,
                 max_rounds: 6,
             });
+            // M97: Re-gate get_peers until the new bootstrap completes
+            self.bootstrap_complete = false;
+            self.bootstrap_timeout = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));
         }
     }
 
