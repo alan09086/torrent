@@ -109,8 +109,6 @@ impl StoreBufferInner {
     }
 
     /// Total bytes currently held in the store buffer.
-    // Used in tests now; will be wired to DiskStats in a follow-up task.
-    #[allow(dead_code)]
     pub(crate) fn total_bytes(&self) -> usize {
         self.total_bytes
     }
@@ -248,6 +246,9 @@ pub struct DiskStats {
     pub write_buffer_bytes: usize,
     /// Number of pending disk I/O jobs in the queue.
     pub queued_jobs: usize,
+    /// Current bytes held in the in-memory store buffer (blocks awaiting
+    /// piece hash verification). M94: tracked for memory monitoring.
+    pub store_buffer_bytes: usize,
 }
 
 impl From<crate::disk_backend::DiskIoStats> for DiskStats {
@@ -259,6 +260,7 @@ impl From<crate::disk_backend::DiskIoStats> for DiskStats {
             cache_misses: s.cache_misses,
             write_buffer_bytes: s.write_buffer_bytes,
             queued_jobs: 0,
+            store_buffer_bytes: 0, // populated by DiskManagerHandle::stats()
         }
     }
 }
@@ -322,6 +324,11 @@ impl DiskManagerHandle {
     /// Unregister a torrent, flushing and clearing its write buffer and cache.
     pub async fn unregister_torrent(&self, info_hash: Id20) {
         let _ = self.tx.send(DiskJob::Unregister { info_hash }).await;
+    }
+
+    /// Query current store buffer bytes (for stats/monitoring).
+    pub fn store_buffer_bytes(&self) -> usize {
+        self.store_buffer.lock().unwrap().total_bytes()
     }
 
     /// Gracefully shut down the disk subsystem, flushing all buffers.
