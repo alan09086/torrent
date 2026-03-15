@@ -2,7 +2,7 @@ use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use torrent::core::{DEFAULT_CHUNK_SIZE, Lengths, TorrentMeta};
@@ -297,8 +297,45 @@ fn load_dht_state(state_path: &Path) -> Option<(Vec<String>, Option<torrent::cor
     Some((nodes, node_id))
 }
 
+pub(crate) fn build_runtime(settings: &torrent::session::Settings) -> tokio::runtime::Runtime {
+    let worker_count = if settings.runtime_worker_threads == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    } else {
+        settings.runtime_worker_threads
+    };
+
+    let pin = settings.pin_cores;
+    let core_ids = if pin {
+        core_affinity::get_core_ids().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(worker_count);
+    builder.enable_all();
+
+    if pin && !core_ids.is_empty() {
+        let core_ids = std::sync::Arc::new(core_ids);
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        builder.on_thread_start(move || {
+            let idx = counter.fetch_add(1, Ordering::Relaxed);
+            let core = core_ids[idx % core_ids.len()];
+            if !core_affinity::set_for_current(core) {
+                eprintln!("warning: failed to set core affinity for worker {idx}");
+            }
+        });
+    }
+
+    builder.build().expect("failed to build tokio runtime")
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn core_affinity_available() {
         let core_ids = core_affinity::get_core_ids();
@@ -306,6 +343,36 @@ mod tests {
             core_ids.as_ref().is_some_and(|ids| !ids.is_empty()),
             "expected get_core_ids() to return a non-empty list, got: {core_ids:?}"
         );
+    }
+
+    #[test]
+    fn build_runtime_creates_runtime() {
+        let mut settings = torrent::session::Settings::default();
+        settings.runtime_worker_threads = 2;
+        settings.pin_cores = true;
+        let rt = build_runtime(&settings);
+        let result = rt.block_on(async { 42 });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn build_runtime_no_pin() {
+        let mut settings = torrent::session::Settings::default();
+        settings.runtime_worker_threads = 2;
+        settings.pin_cores = false;
+        let rt = build_runtime(&settings);
+        let result = rt.block_on(async { 42 });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn build_runtime_auto_workers() {
+        let mut settings = torrent::session::Settings::default();
+        settings.runtime_worker_threads = 0; // auto-detect
+        settings.pin_cores = false;
+        let rt = build_runtime(&settings);
+        let result = rt.block_on(async { 42 });
+        assert_eq!(result, 42);
     }
 }
 
