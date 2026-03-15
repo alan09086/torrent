@@ -6,7 +6,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 
 [![Tests](https://img.shields.io/badge/tests-1505-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.97.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.97.1-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.97.0"
+torrent = "0.97.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
