@@ -291,4 +291,79 @@ mod tests {
         assert!(results[0].generation != current_gen);
         assert!(results[1].generation == current_gen);
     }
+
+    #[tokio::test]
+    async fn hash_pool_shutdown() {
+        let pool = HashPool::new(2, 8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        // Submit a few jobs
+        for i in 0u32..3 {
+            let data = format!("data-{i}").into_bytes();
+            let expected = torrent_core::sha1(&data);
+            pool.submit(HashJob {
+                piece: i,
+                expected,
+                generation: 0,
+                data,
+                result_tx: tx.clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        // Collect results
+        for _ in 0..3 {
+            let r = rx.recv().await.unwrap();
+            assert!(r.passed);
+        }
+
+        // Drop pool — should join worker threads cleanly
+        drop(pool);
+        // Drop our tx clone so channel can close
+        drop(tx);
+
+        // After drop, recv should return None (channel closed)
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn hash_pool_failure_recovery() {
+        let pool = HashPool::new(1, 8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        // Submit a job with mismatched hash
+        let data = b"corrupt data".to_vec();
+        let expected = torrent_core::Id20([0xAA; 20]); // Wrong hash
+        pool.submit(HashJob {
+            piece: 0,
+            expected,
+            generation: 0,
+            data,
+            result_tx: tx.clone(),
+        })
+        .await
+        .unwrap();
+
+        let r = rx.recv().await.unwrap();
+        assert!(!r.passed, "hash mismatch should report failure");
+        assert_eq!(r.piece, 0);
+
+        // Worker should continue — submit a correct job
+        let data2 = b"good data".to_vec();
+        let expected2 = torrent_core::sha1(&data2);
+        pool.submit(HashJob {
+            piece: 1,
+            expected: expected2,
+            generation: 0,
+            data: data2,
+            result_tx: tx,
+        })
+        .await
+        .unwrap();
+
+        let r2 = rx.recv().await.unwrap();
+        assert!(r2.passed, "correct hash should pass");
+        assert_eq!(r2.piece, 1);
+    }
 }
