@@ -689,9 +689,19 @@ impl DhtActor {
                     );
                 }
 
-                // Ping questionable nodes to verify liveness
+                // Ping questionable nodes to verify liveness + check node-count gate
                 _ = ping_tick.tick() => {
                     self.ping_questionable_nodes().await;
+                    // Node-count gate: if saved-node pings have populated the
+                    // table but FindNodeLookup hasn't converged yet, open the
+                    // gate early so queued get_peers aren't blocked.
+                    if !self.bootstrap_complete && self.routing_table.len() >= 8 {
+                        debug!(
+                            table_size = self.routing_table.len(),
+                            "node-count gate: opening bootstrap gate early"
+                        );
+                        self.on_bootstrap_complete().await;
+                    }
                 }
 
                 // M97: Bootstrap timeout — force bootstrap_complete after 10s
