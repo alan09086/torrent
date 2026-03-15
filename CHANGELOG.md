@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.99.0 | M99 | Piece buffer pool — `PieceBufferPool` with semaphore-gated reusable `BytesMut` buffers, hard-bounded ~48 MiB write pipeline regardless of peer count |
 | 0.98.1 | — | Write coalescer buffer reuse fix — `Bytes::copy_from_slice` + `clear()` eliminates ~3 GiB allocation churn; store buffer back-pressure fallback to sync writes |
 | 0.98.0 | M98 | Write coalescing — per-peer block buffering, ~32x fewer disk syscalls, split store-buffer/coalesced-write path |
 | 0.97.1 | — | DHT bootstrap simplification — remove PingVerify verification system, ping saved nodes instead of find_node, node-count gate, 5s maintenance pings |
@@ -52,6 +53,26 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.99.0] — 2026-03-15
+
+### Added
+- `PieceBufferPool` — per-torrent pool of reusable `BytesMut` buffers gated by a
+  tokio `Semaphore`, bounding the entire write pipeline to 32 concurrent pieces
+- `piece_buffer_pool_size` setting (default: 32, `min_memory`: 8, `high_performance`: 64)
+- `WriteCoalescer` pool integration — accepts pool buffers via `set_buffer()`,
+  returns them on flush for recycling
+- `DiskJob::WriteAsync` carries optional `OwnedSemaphorePermit` through pwrite()
+- Peer task acquire/release lifecycle — buffer+permit acquired before new piece,
+  buffer recycled on flush, permit held through disk write completion
+- 10 new tests (1527 total)
+
+### Changed
+- Memory is now hard-bounded regardless of peer count: 16 MiB buffer pool +
+  32 MiB store buffer ≈ 48 MiB total (previously unbounded coalescer buffers
+  grew with peer count — 100 peers = 50+ MiB coalescer alone)
+- Store buffer, verification paths, and hash pool are **unchanged** — this is
+  the key safety property vs. the failed M99 v1 attempt
 
 ## [0.98.1] — 2026-03-15
 
