@@ -690,6 +690,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the number of tokio worker threads (0 = use tokio's default).
+    pub fn runtime_worker_threads(mut self, n: usize) -> Self {
+        self.settings.runtime_worker_threads = n;
+        self
+    }
+
+    /// Pin tokio worker threads to CPU cores for cache locality.
+    pub fn pin_cores(mut self, v: bool) -> Self {
+        self.settings.pin_cores = v;
+        self
+    }
+
     /// Set a custom disk I/O backend.
     ///
     /// When set, the session uses this backend instead of the default
@@ -1164,6 +1176,28 @@ mod tests {
             "da39a3ee5e6b4b0d3255bfef95601890afd80709"
         );
         session.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn client_builder_core_affinity_config() {
+        // Defaults
+        let config = ClientBuilder::new().into_settings();
+        assert!(config.pin_cores);
+        assert!(config.runtime_worker_threads > 0);
+
+        // Custom values
+        let config = ClientBuilder::new()
+            .runtime_worker_threads(4)
+            .pin_cores(false)
+            .into_settings();
+        assert_eq!(config.runtime_worker_threads, 4);
+        assert!(!config.pin_cores);
+
+        // Zero means auto-detect
+        let config = ClientBuilder::new()
+            .runtime_worker_threads(0)
+            .into_settings();
+        assert_eq!(config.runtime_worker_threads, 0);
     }
 
     #[tokio::test]
