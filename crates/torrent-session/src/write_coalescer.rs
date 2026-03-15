@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use bytes::{Bytes, BytesMut};
 use torrent_core::Lengths;
+
+use crate::piece_buffer_pool::PieceBufferPool;
 
 /// Result of a flush operation — tells the caller what to write to disk.
 pub(crate) struct FlushRequest {
@@ -15,6 +19,13 @@ pub(crate) struct FlushRequest {
 ///
 /// Reduces disk syscalls by ~32x (one write per piece instead of one per block).
 /// Defers `BytesMut` allocation until the first `start_piece()` call.
+///
+/// # M99: Pool integration
+///
+/// When constructed with an `Option<Arc<PieceBufferPool>>`, the coalescer can
+/// accept pre-allocated buffers via [`set_buffer`] and return them on flush for
+/// recycling. Without a pool, the coalescer self-allocates (existing M98
+/// behavior).
 pub(crate) struct WriteCoalescer {
     lengths: Lengths,
     /// Accumulation buffer. Starts at zero capacity; allocated with the correct
@@ -26,28 +37,66 @@ pub(crate) struct WriteCoalescer {
     blocks_received: u32,
     /// Next expected `begin` offset (for sequential-order debug assertions).
     expected_offset: u32,
+    /// M99: Optional pool reference for buffer lifecycle management.
+    pool: Option<Arc<PieceBufferPool>>,
+    /// M99: Buffer staged by the caller for the next `start_piece()` call.
+    staged_buf: Option<BytesMut>,
 }
 
 impl WriteCoalescer {
     /// Create an empty coalescer. No allocation occurs until the first block
     /// arrives.
-    pub fn new(lengths: &Lengths) -> Self {
+    ///
+    /// When `pool` is `Some`, the coalescer expects callers to supply buffers
+    /// via [`set_buffer`] and will return them on flush for recycling. When
+    /// `pool` is `None`, the coalescer self-allocates (existing M98 behavior).
+    pub fn new(lengths: &Lengths, pool: Option<Arc<PieceBufferPool>>) -> Self {
         Self {
             lengths: lengths.clone(),
             buf: BytesMut::new(),
             current_piece: None,
             blocks_received: 0,
             expected_offset: 0,
+            pool,
+            staged_buf: None,
         }
+    }
+
+    /// Stage a pool-provided buffer for the next piece.
+    ///
+    /// Called by the peer task after acquiring a buffer+permit from the pool.
+    /// The staged buffer is consumed by `start_piece()` on the next new piece.
+    pub fn set_buffer(&mut self, buf: BytesMut) {
+        self.staged_buf = Some(buf);
+    }
+
+    /// Returns `true` if the caller should acquire a new pool buffer for `piece`.
+    ///
+    /// This is the case when:
+    /// - We have a pool (otherwise the coalescer self-allocates)
+    /// - No buffer is currently staged
+    /// - The piece differs from what we're currently accumulating (or we have nothing)
+    pub fn needs_buffer_for(&self, piece: u32) -> bool {
+        self.pool.is_some()
+            && self.staged_buf.is_none()
+            && self.current_piece != Some(piece)
     }
 
     /// Accumulate a block into the coalescer.
     ///
-    /// Returns `Some(FlushRequest)` when either:
+    /// Returns `Some((FlushRequest, Option<BytesMut>))` when either:
     /// - The current piece is complete (all chunks received), or
     /// - A block arrives for a *different* piece (the old piece is flushed as
     ///   a partial write and the new piece begins).
-    pub fn add_block(&mut self, piece: u32, begin: u32, data: &[u8]) -> Option<FlushRequest> {
+    ///
+    /// The `Option<BytesMut>` is the returned pool buffer (if pool is active).
+    /// When there is no pool, it is `None`.
+    pub fn add_block(
+        &mut self,
+        piece: u32,
+        begin: u32,
+        data: &[u8],
+    ) -> Option<(FlushRequest, Option<BytesMut>)> {
         match self.current_piece {
             None => {
                 // First block ever, or after a flush — start a new piece.
@@ -85,8 +134,10 @@ impl WriteCoalescer {
 
     /// Flush any buffered partial data (e.g., on peer disconnect).
     ///
-    /// Returns `None` if the coalescer is empty.
-    pub fn flush(&mut self) -> Option<FlushRequest> {
+    /// Returns `None` if the coalescer is empty. The `Option<BytesMut>` in the
+    /// tuple is the returned pool buffer for recycling (or `None` without a
+    /// pool).
+    pub fn flush(&mut self) -> Option<(FlushRequest, Option<BytesMut>)> {
         self.flush_current()
     }
 
@@ -103,13 +154,17 @@ impl WriteCoalescer {
     fn start_piece(&mut self, piece: u32, begin: u32, data: &[u8]) {
         let piece_size = self.lengths.piece_size(piece) as usize;
 
-        // Reuse the existing allocation if it is large enough; otherwise
-        // allocate a fresh buffer.  `BytesMut::with_capacity` is
-        // preferred over `reserve` on an empty buf because it avoids a
-        // potential realloc of a too-small leftover allocation.
-        if self.buf.capacity() >= piece_size {
+        // M99: Use staged pool buffer if available.
+        if let Some(mut staged) = self.staged_buf.take() {
+            staged.clear();
+            self.buf = staged;
+        } else if self.buf.capacity() >= piece_size {
+            // Reuse the existing allocation if it is large enough.
             self.buf.clear();
         } else {
+            // Allocate a fresh buffer. `BytesMut::with_capacity` is
+            // preferred over `reserve` on an empty buf because it avoids a
+            // potential realloc of a too-small leftover allocation.
             self.buf = BytesMut::with_capacity(piece_size);
         }
 
@@ -126,7 +181,7 @@ impl WriteCoalescer {
 
     /// If the current piece has received all its chunks, freeze the buffer and
     /// return a `FlushRequest`.
-    fn check_complete(&mut self) -> Option<FlushRequest> {
+    fn check_complete(&mut self) -> Option<(FlushRequest, Option<BytesMut>)> {
         let piece = self.current_piece?;
         let expected_blocks = self.lengths.chunks_in_piece(piece);
 
@@ -141,21 +196,44 @@ impl WriteCoalescer {
     /// `FlushRequest`.  Returns `None` if there is nothing buffered.
     ///
     /// Uses `Bytes::copy_from_slice` to create an independent copy of the
-    /// buffered data, then `clear()` to reset the BytesMut length while
-    /// retaining its capacity.  This lets `start_piece()` reuse the same
-    /// allocation for the next piece instead of allocating fresh 512 KiB
-    /// every time.
-    fn flush_current(&mut self) -> Option<FlushRequest> {
+    /// buffered data. When a pool is active, the `BytesMut` is extracted and
+    /// returned for recycling. Without a pool, the buffer is cleared in-place
+    /// so `start_piece()` can reuse the same allocation.
+    fn flush_current(&mut self) -> Option<(FlushRequest, Option<BytesMut>)> {
         let piece = self.current_piece.take()?;
         let data = Bytes::copy_from_slice(&self.buf);
-        self.buf.clear();
+
+        // If pool-managed, return the BytesMut for recycling instead of
+        // retaining it.
+        let returned_buf = if self.pool.is_some() {
+            let mut buf = std::mem::replace(&mut self.buf, BytesMut::new());
+            buf.clear();
+            Some(buf)
+        } else {
+            // No pool — retain buffer for reuse (existing M98 behavior).
+            self.buf.clear();
+            None
+        };
+
         self.blocks_received = 0;
         self.expected_offset = 0;
-        Some(FlushRequest {
-            piece,
-            begin: 0,
-            data,
-        })
+        Some((FlushRequest { piece, begin: 0, data }, returned_buf))
+    }
+}
+
+impl Drop for WriteCoalescer {
+    fn drop(&mut self) {
+        if let Some(ref pool) = self.pool {
+            // Return the active buffer if it has pool-sized capacity.
+            if self.buf.capacity() > 0 {
+                let buf = std::mem::replace(&mut self.buf, BytesMut::new());
+                pool.release_buffer(buf);
+            }
+            // Return staged buffer.
+            if let Some(buf) = self.staged_buf.take() {
+                pool.release_buffer(buf);
+            }
+        }
     }
 }
 
@@ -179,14 +257,14 @@ mod tests {
 
     #[test]
     fn coalescing_correctness_full_piece() {
-        // 512 KiB piece, 16 KiB chunks → 32 blocks.
+        // 512 KiB piece, 16 KiB chunks -> 32 blocks.
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
         let blocks_per_piece = lengths.chunks_in_piece(0);
         assert_eq!(blocks_per_piece, 32);
 
-        // Feed blocks 0..30 — all should return None.
+        // Feed blocks 0..30 -- all should return None.
         for i in 0..blocks_per_piece - 1 {
             let begin = i * CHUNK;
             let result = wc.add_block(0, begin, &block_data(i as u8, CHUNK as usize));
@@ -196,14 +274,14 @@ mod tests {
             );
         }
 
-        // Feed the 32nd block — should trigger a full-piece flush.
+        // Feed the 32nd block -- should trigger a full-piece flush.
         let last_begin = (blocks_per_piece - 1) * CHUNK;
         let result = wc.add_block(
             0,
             last_begin,
             &block_data(31, CHUNK as usize),
         );
-        let flush = result.expect("32nd block should trigger flush");
+        let (flush, _ret_buf) = result.expect("32nd block should trigger flush");
         assert_eq!(flush.piece, 0);
         assert_eq!(flush.begin, 0);
         assert_eq!(flush.data.len(), PIECE_LEN as usize);
@@ -213,7 +291,7 @@ mod tests {
     #[test]
     fn piece_switch_flushes_partial() {
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
         // Feed 10 blocks for piece 0.
         for i in 0..10u32 {
@@ -222,8 +300,8 @@ mod tests {
             assert!(result.is_none());
         }
 
-        // Feed a block for piece 1 — should flush piece 0 as partial.
-        let flush = wc
+        // Feed a block for piece 1 -- should flush piece 0 as partial.
+        let (flush, _ret_buf) = wc
             .add_block(1, 0, &block_data(0xBB, CHUNK as usize))
             .expect("piece switch should flush old piece");
         assert_eq!(flush.piece, 0);
@@ -239,7 +317,7 @@ mod tests {
     #[test]
     fn piece_boundary_flush_then_new_piece() {
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
         let blocks_per_piece = lengths.chunks_in_piece(0);
 
@@ -250,7 +328,7 @@ mod tests {
             if i < blocks_per_piece - 1 {
                 assert!(result.is_none());
             } else {
-                let flush = result.expect("last block should flush");
+                let (flush, _ret_buf) = result.expect("last block should flush");
                 assert_eq!(flush.piece, 0);
                 assert_eq!(flush.data.len(), PIECE_LEN as usize);
             }
@@ -259,7 +337,7 @@ mod tests {
         // Coalescer should be empty after full-piece flush.
         assert!(wc.is_empty());
 
-        // Add first block of piece 1 — should return None (new piece started).
+        // Add first block of piece 1 -- should return None (new piece started).
         let result = wc.add_block(1, 0, &block_data(0xDD, CHUNK as usize));
         assert!(result.is_none());
         assert!(!wc.is_empty());
@@ -268,7 +346,7 @@ mod tests {
     #[test]
     fn flush_on_disconnect() {
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
         // Feed 15 blocks for piece 0.
         for i in 0..15u32 {
@@ -280,7 +358,7 @@ mod tests {
         assert!(!wc.is_empty());
 
         // Explicit flush (simulating disconnect).
-        let flush = wc.flush().expect("should flush partial data");
+        let (flush, _ret_buf) = wc.flush().expect("should flush partial data");
         assert_eq!(flush.piece, 0);
         assert_eq!(flush.begin, 0);
         assert_eq!(flush.data.len(), 15 * CHUNK as usize);
@@ -297,10 +375,10 @@ mod tests {
         assert_eq!(lengths.piece_size(3), CHUNK);
         assert_eq!(lengths.chunks_in_piece(3), 1);
 
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
-        // Feed 1 block for the last piece — should flush immediately.
-        let flush = wc
+        // Feed 1 block for the last piece -- should flush immediately.
+        let (flush, _ret_buf) = wc
             .add_block(3, 0, &block_data(0xFF, CHUNK as usize))
             .expect("single-block piece should flush immediately");
         assert_eq!(flush.piece, 3);
@@ -313,19 +391,19 @@ mod tests {
     #[should_panic(expected = "out-of-order block")]
     fn debug_assert_on_out_of_order() {
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
-        // First block at offset 0 — fine.
+        // First block at offset 0 -- fine.
         wc.add_block(0, 0, &block_data(0x00, CHUNK as usize));
 
-        // Second block at offset 32768, skipping 16384 — should panic.
+        // Second block at offset 32768, skipping 16384 -- should panic.
         wc.add_block(0, CHUNK * 2, &block_data(0x01, CHUNK as usize));
     }
 
     #[test]
     fn empty_coalescer_flush_returns_none() {
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let wc_mut = &mut WriteCoalescer::new(&lengths);
+        let wc_mut = &mut WriteCoalescer::new(&lengths, None);
 
         assert!(wc_mut.is_empty());
         assert!(wc_mut.flush().is_none());
@@ -334,12 +412,14 @@ mod tests {
     #[test]
     fn buffer_reuse_across_pieces() {
         let lengths = standard_lengths(PIECE_LEN * 4);
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
-        // Complete piece 0 — triggers flush via check_complete
+        // Complete piece 0 -- triggers flush via check_complete
         let mut flush0 = None;
         for i in 0..32u32 {
-            if let Some(f) = wc.add_block(0, i * CHUNK, &block_data(i as u8, CHUNK as usize)) {
+            if let Some((f, _ret_buf)) =
+                wc.add_block(0, i * CHUNK, &block_data(i as u8, CHUNK as usize))
+            {
                 flush0 = Some(f);
             }
         }
@@ -357,11 +437,98 @@ mod tests {
         assert_eq!(flush0.data[0], 0); // first block fill byte
         assert_eq!(flush0.data.len(), PIECE_LEN as usize);
 
-        // Start piece 1 — should reuse the existing buffer (no new alloc)
+        // Start piece 1 -- should reuse the existing buffer (no new alloc)
         let _ = wc.add_block(1, 0, &block_data(0xAA, CHUNK as usize));
         assert!(wc.buf.capacity() >= PIECE_LEN as usize);
 
         // Verify piece 0 data is still intact after piece 1 started writing
         assert_eq!(flush0.data[0], 0, "flush data must be independent of buffer reuse");
+    }
+
+    // -- M99: Pool integration tests --
+
+    #[test]
+    fn pool_set_buffer_used_by_start_piece() {
+        let lengths = standard_lengths(PIECE_LEN * 4);
+        let pool = Arc::new(PieceBufferPool::new(4, PIECE_LEN as usize));
+        let mut wc = WriteCoalescer::new(&lengths, Some(Arc::clone(&pool)));
+
+        // Stage a pool buffer.
+        let (buf, _permit) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(pool.acquire())
+            .expect("acquire failed");
+        wc.set_buffer(buf);
+
+        // needs_buffer_for should be false now (we have a staged buf).
+        assert!(!wc.needs_buffer_for(0));
+
+        // Add a block -- should consume the staged buffer.
+        let result = wc.add_block(0, 0, &block_data(0xAA, CHUNK as usize));
+        assert!(result.is_none()); // not complete yet
+        assert!(wc.staged_buf.is_none()); // staged was consumed
+    }
+
+    #[test]
+    fn pool_flush_returns_buffer() {
+        let lengths = standard_lengths(PIECE_LEN * 4);
+        let pool = Arc::new(PieceBufferPool::new(4, PIECE_LEN as usize));
+        let mut wc = WriteCoalescer::new(&lengths, Some(Arc::clone(&pool)));
+
+        // Stage and add blocks.
+        let (buf, _permit) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(pool.acquire())
+            .expect("acquire failed");
+        wc.set_buffer(buf);
+
+        wc.add_block(0, 0, &block_data(0xBB, CHUNK as usize));
+
+        // Explicit flush should return the buffer.
+        let (flush, ret_buf) = wc.flush().expect("should flush");
+        assert_eq!(flush.piece, 0);
+        assert!(ret_buf.is_some(), "pool-managed flush should return buffer");
+        let ret_buf = ret_buf.expect("already checked is_some");
+        assert!(ret_buf.capacity() >= PIECE_LEN as usize);
+        assert_eq!(ret_buf.len(), 0); // should be cleared
+    }
+
+    #[test]
+    fn needs_buffer_for_correct_logic() {
+        let lengths = standard_lengths(PIECE_LEN * 4);
+
+        // Without pool -- never needs buffer.
+        let wc_no_pool = WriteCoalescer::new(&lengths, None);
+        assert!(!wc_no_pool.needs_buffer_for(0));
+
+        // With pool -- needs buffer for new piece.
+        let pool = Arc::new(PieceBufferPool::new(4, PIECE_LEN as usize));
+        let mut wc = WriteCoalescer::new(&lengths, Some(Arc::clone(&pool)));
+        assert!(wc.needs_buffer_for(0)); // no current piece, no staged buf
+
+        // Stage a buffer -- no longer needs one.
+        let (buf, _permit) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(pool.acquire())
+            .expect("acquire failed");
+        wc.set_buffer(buf);
+        assert!(!wc.needs_buffer_for(0));
+    }
+
+    #[test]
+    fn no_pool_flush_returns_no_buffer() {
+        let lengths = standard_lengths(PIECE_LEN * 4);
+        let mut wc = WriteCoalescer::new(&lengths, None);
+
+        wc.add_block(0, 0, &block_data(0xAA, CHUNK as usize));
+        let (flush, ret_buf) = wc.flush().expect("should flush");
+        assert_eq!(flush.piece, 0);
+        assert!(ret_buf.is_none(), "no-pool flush should not return buffer");
     }
 }

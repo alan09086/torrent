@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
 use torrent_core::{Id20, Id32};
 use torrent_storage::TorrentStorage;
 use tracing::warn;
@@ -141,6 +141,8 @@ pub(crate) enum DiskJob {
         data: Bytes,
         flags: DiskJobFlags,
         error_tx: mpsc::Sender<DiskWriteError>,
+        /// M99: Pool permit held until pwrite() completes — bounds entire pipeline.
+        _pool_permit: Option<OwnedSemaphorePermit>,
     },
     Read {
         info_hash: Id20,
@@ -601,6 +603,7 @@ impl DiskHandle {
             data,
             flags,
             error_tx: error_tx.clone(),
+            _pool_permit: None,
         }) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(job)) => {
@@ -642,6 +645,7 @@ impl DiskHandle {
         data: Bytes,
         flags: DiskJobFlags,
         error_tx: &mpsc::Sender<DiskWriteError>,
+        pool_permit: Option<OwnedSemaphorePermit>,
     ) -> Result<(), Bytes> {
         match self.tx.try_send(DiskJob::WriteAsync {
             info_hash: self.info_hash,
@@ -650,6 +654,7 @@ impl DiskHandle {
             data,
             flags,
             error_tx: error_tx.clone(),
+            _pool_permit: pool_permit,
         }) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(job)) => {
@@ -933,6 +938,7 @@ impl DiskActor {
                 data,
                 flags,
                 error_tx,
+                _pool_permit,
             } => {
                 let flush = flags.contains(DiskJobFlags::FLUSH_PIECE);
                 let backend = Arc::clone(&self.backend);
@@ -945,6 +951,9 @@ impl DiskActor {
                     .await
                     .unwrap();
                     drop(permit);
+                    // _pool_permit is moved into this future and drops here
+                    // (after pwrite completes), releasing the pool semaphore slot.
+                    drop(_pool_permit);
                     if let Err(e) = to_storage_result(result) {
                         let _ = error_tx.try_send(DiskWriteError {
                             piece,
@@ -1564,7 +1573,7 @@ mod tests {
         let (error_tx, _error_rx) = mpsc::channel(4);
 
         let result =
-            disk.enqueue_write_coalesced(0, 0, data.clone(), DiskJobFlags::empty(), &error_tx);
+            disk.enqueue_write_coalesced(0, 0, data.clone(), DiskJobFlags::empty(), &error_tx, None);
         assert!(result.is_ok(), "enqueue should succeed on non-full channel");
 
         // Store buffer must be empty — coalesced write skips insertion
@@ -1598,13 +1607,13 @@ mod tests {
 
         // Fill the channel with a dummy job
         let dummy = Bytes::from(vec![0u8; 16]);
-        disk.enqueue_write_coalesced(0, 0, dummy, DiskJobFlags::empty(), &error_tx)
+        disk.enqueue_write_coalesced(0, 0, dummy, DiskJobFlags::empty(), &error_tx, None)
             .unwrap();
 
         // Next send should hit back-pressure
         let payload = Bytes::from(vec![0xFFu8; 32]);
         let result =
-            disk.enqueue_write_coalesced(1, 0, payload.clone(), DiskJobFlags::empty(), &error_tx);
+            disk.enqueue_write_coalesced(1, 0, payload.clone(), DiskJobFlags::empty(), &error_tx, None);
         assert!(result.is_err(), "should return Err on full channel");
         assert_eq!(
             result.unwrap_err(),

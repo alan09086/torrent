@@ -334,6 +334,10 @@ pub(crate) async fn run_peer(
     let mut pending_batch: Option<PendingBatch> = None;
     // M98: Per-peer write coalescer — buffers blocks into full-piece writes
     let mut write_coalescer: Option<WriteCoalescer> = None;
+    // M99: Buffer pool reference (set when StartRequesting arrives)
+    let mut pool_ref: Option<std::sync::Arc<crate::piece_buffer_pool::PieceBufferPool>> = None;
+    // M99: Pool permit for the current in-flight piece — held until disk write completes
+    let mut current_pool_permit: Option<tokio::sync::OwnedSemaphorePermit> = None;
     // M92: 25ms flush interval — ticks only when batch has pending blocks
     let mut flush_interval = tokio::time::interval(Duration::from_millis(25));
     flush_interval.tick().await; // skip initial immediate tick
@@ -384,6 +388,27 @@ pub(crate) async fn run_peer(
                                 // M98: Write coalescing — buffer blocks, flush as full pieces
                                 if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
                                     if let Some(ref mut wc) = write_coalescer {
+                                        // M99: Acquire pool buffer if needed for a new piece
+                                        if let Some(ref pool) = pool_ref
+                                            && wc.needs_buffer_for(*index)
+                                        {
+                                            match pool.acquire().await {
+                                                Ok((buf, permit)) => {
+                                                    wc.set_buffer(buf);
+                                                    // Drop any orphaned permit from a prior piece
+                                                    // that wasn't flushed (shouldn't happen in
+                                                    // practice — piece switches trigger a flush in
+                                                    // add_block — but be defensive).
+                                                    drop(current_pool_permit.take());
+                                                    current_pool_permit = Some(permit);
+                                                }
+                                                Err(_) => {
+                                                    // Pool closed — exit peer loop
+                                                    break None;
+                                                }
+                                            }
+                                        }
+
                                         // M98: Per-block store buffer insert (for hash verification).
                                         // Returns true if store buffer exceeds size limit — apply
                                         // back-pressure by forcing a sync write to bound memory.
@@ -392,23 +417,38 @@ pub(crate) async fn run_peer(
                                         if over_limit {
                                             // Back-pressure: flush any buffered coalesced data, then
                                             // sync-write this block to throttle the peer task.
-                                            if let Some(flush) = wc.flush() {
+                                            if let Some((flush, ret_buf)) = wc.flush() {
+                                                if let Some(buf) = ret_buf
+                                                    && let Some(ref pool) = pool_ref
+                                                {
+                                                    pool.release_buffer(buf);
+                                                }
+                                                let permit = current_pool_permit.take();
                                                 let _ = disk.enqueue_write_coalesced(
                                                     flush.piece, flush.begin, flush.data,
-                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx,
+                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx, permit,
                                                 );
                                             }
                                             disk.write_chunk(*index, *begin, data.clone(), DiskJobFlags::empty()).await
                                                 .unwrap_or_else(|e| warn!(%addr, index, begin, "back-pressure write failed: {e}"));
                                         } else {
                                             // M98: Coalesced write path
-                                            if let Some(flush) = wc.add_block(*index, *begin, data.as_ref()) {
+                                            if let Some((flush, ret_buf)) = wc.add_block(*index, *begin, data.as_ref()) {
+                                                if let Some(buf) = ret_buf
+                                                    && let Some(ref pool) = pool_ref
+                                                {
+                                                    pool.release_buffer(buf);
+                                                }
+                                                let permit = current_pool_permit.take();
                                                 match disk.enqueue_write_coalesced(
                                                     flush.piece, flush.begin, flush.data,
-                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx,
+                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx, permit,
                                                 ) {
                                                     Ok(()) => {}
                                                     Err(returned_data) => {
+                                                        // Channel full — DiskJob was returned, permit
+                                                        // inside it was dropped (freed). Fall back to
+                                                        // sync write which doesn't need pool gating.
                                                         disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
                                                             .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "coalesced write failed: {e}"));
                                                     }
@@ -568,15 +608,17 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths }) => {
+                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths, piece_buffer_pool }) => {
                         reservation_state = Some((atomic_states, piece_notify, disk_handle, write_error_tx));
                         dispatch_state = Some(PeerDispatchState::new(availability_snapshot, lengths.clone()));
                         // M92: Create PendingBatch for block batching
                         if pending_batch.is_none() {
                             pending_batch = Some(PendingBatch::new(&lengths));
                         }
+                        // M99: Store pool reference before moving into coalescer
+                        pool_ref = piece_buffer_pool.clone();
                         // M98: Initialize write coalescer for piece-level disk writes
-                        write_coalescer = Some(WriteCoalescer::new(&lengths));
+                        write_coalescer = Some(WriteCoalescer::new(&lengths, piece_buffer_pool));
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
@@ -748,12 +790,20 @@ pub(crate) async fn run_peer(
 
     // M98: Flush any buffered coalesced data on disconnect
     if let Some(ref mut wc) = write_coalescer
-        && let Some(flush) = wc.flush()
+        && let Some((flush, ret_buf)) = wc.flush()
         && let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state
     {
+        // M99: Return buffer to pool for recycling
+        if let Some(buf) = ret_buf
+            && let Some(ref pool) = pool_ref
+        {
+            pool.release_buffer(buf);
+        }
+        // On disconnect, don't pass permit to disk — just drop it.
+        // The partial write doesn't need pipeline gating (peer is going away).
         match disk.enqueue_write_coalesced(
             flush.piece, flush.begin, flush.data,
-            DiskJobFlags::FLUSH_PIECE, write_err_tx,
+            DiskJobFlags::FLUSH_PIECE, write_err_tx, None,
         ) {
             Ok(()) => {}
             Err(returned_data) => {
@@ -762,6 +812,8 @@ pub(crate) async fn run_peer(
             }
         }
     }
+    // M99: Release any held pool permit (drop frees the semaphore slot)
+    drop(current_pool_permit);
 
     // Send disconnect event (best-effort)
     let _ = event_tx
@@ -3279,7 +3331,7 @@ mod tests {
         let disk = DiskHandle::new(tx, Id20::ZERO);
         let (error_tx, _error_rx) = mpsc::channel(4);
 
-        let mut wc = WriteCoalescer::new(&lengths);
+        let mut wc = WriteCoalescer::new(&lengths, None);
 
         // Simulate receiving 2 blocks for piece 0
         let block0 = Bytes::from(vec![0xAAu8; 16 * 1024]);
@@ -3294,7 +3346,7 @@ mod tests {
             wc.add_block(0, 0, block0.as_ref()).is_none(),
             "first block should not trigger flush"
         );
-        let flush = wc
+        let (flush, _ret_buf) = wc
             .add_block(0, 16384, block1.as_ref())
             .expect("second block should complete the piece and trigger flush");
 
@@ -3312,6 +3364,7 @@ mod tests {
             flush.data,
             DiskJobFlags::FLUSH_PIECE,
             &error_tx,
+            None,
         )
         .expect("enqueue should succeed on non-full channel");
 

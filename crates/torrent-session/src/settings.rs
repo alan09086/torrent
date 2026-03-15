@@ -211,6 +211,9 @@ fn default_max_outstanding_requests() -> usize {
 fn default_max_in_flight_pieces() -> usize {
     256
 }
+fn default_piece_buffer_pool_size() -> u32 {
+    32
+}
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
 }
@@ -436,6 +439,11 @@ pub struct Settings {
     /// disk I/O to apply back-pressure.
     #[serde(default = "default_store_buffer_max_bytes")]
     pub store_buffer_max_bytes: usize,
+    /// Maximum number of concurrent in-flight pieces per torrent (default: 32).
+    /// Each slot holds one piece-sized BytesMut buffer (~512 KiB). The pool
+    /// bounds total coalescer memory regardless of peer count.
+    #[serde(default = "default_piece_buffer_pool_size")]
+    pub piece_buffer_pool_size: u32,
 
     // ── Hashing & piece picking ──
     /// Number of concurrent piece hash verification threads (default: 2).
@@ -770,6 +778,7 @@ impl Default for Settings {
             disk_write_cache_ratio: 0.5,
             disk_channel_capacity: 512,
             store_buffer_max_bytes: 32 * 1024 * 1024,
+            piece_buffer_pool_size: 32,
             // Hashing & piece picking
             hashing_threads: default_hashing_threads(),
             max_request_queue_depth: 250,
@@ -859,6 +868,7 @@ impl Settings {
         Self {
             disk_cache_size: 8 * 1024 * 1024,
             store_buffer_max_bytes: 8 * 1024 * 1024,
+            piece_buffer_pool_size: 8,
             max_torrents: 20,
             max_peers_per_torrent: 30,
             active_downloads: 1,
@@ -897,6 +907,7 @@ impl Settings {
             suggest_mode: true,
             steal_threshold_ratio: 5.0,
             max_in_flight_pieces: 512,
+            piece_buffer_pool_size: 64,
             ..Self::default()
         }
     }
@@ -1157,6 +1168,7 @@ impl PartialEq for Settings {
             && self.disk_write_cache_ratio.to_bits() == other.disk_write_cache_ratio.to_bits()
             && self.disk_channel_capacity == other.disk_channel_capacity
             && self.store_buffer_max_bytes == other.store_buffer_max_bytes
+            && self.piece_buffer_pool_size == other.piece_buffer_pool_size
             && self.hashing_threads == other.hashing_threads
             && self.max_request_queue_depth == other.max_request_queue_depth
             && self.initial_queue_depth == other.initial_queue_depth
@@ -1269,6 +1281,7 @@ mod tests {
         assert!((s.disk_write_cache_ratio - 0.5).abs() < f32::EPSILON);
         assert_eq!(s.disk_channel_capacity, 512);
         assert_eq!(s.store_buffer_max_bytes, 32 * 1024 * 1024);
+        assert_eq!(s.piece_buffer_pool_size, 32);
         assert_eq!(s.hashing_threads, default_hashing_threads());
         assert_eq!(s.max_request_queue_depth, 250);
         assert_eq!(s.initial_queue_depth, 128);
@@ -1314,6 +1327,7 @@ mod tests {
         assert_eq!(s.max_concurrent_stream_reads, 2);
         assert_eq!(s.hashing_threads, 1);
         assert_eq!(s.disk_io_threads, 1);
+        assert_eq!(s.piece_buffer_pool_size, 8);
     }
 
     #[test]
@@ -1333,6 +1347,7 @@ mod tests {
         assert_eq!(s.hashing_threads, 4);
         assert_eq!(s.disk_io_threads, 8);
         assert_eq!(s.auto_upload_slots_max, 100);
+        assert_eq!(s.piece_buffer_pool_size, 64);
     }
 
     #[test]

@@ -343,6 +343,14 @@ impl TorrentHandle {
             disk.set_hash_result_tx(hash_result_tx.clone());
         }
 
+        // M99: Create piece buffer pool eagerly — lengths is known from .torrent metadata.
+        let piece_buffer_pool = Some(Arc::new(
+            crate::piece_buffer_pool::PieceBufferPool::new(
+                config.piece_buffer_pool_size,
+                lengths.piece_length() as usize,
+            ),
+        ));
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -469,6 +477,7 @@ impl TorrentHandle {
             auto_sequential_active: false,
             factory,
             hash_pool_ref: hash_pool,
+            piece_buffer_pool,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -762,6 +771,7 @@ impl TorrentHandle {
             auto_sequential_active: false,
             factory,
             hash_pool_ref: hash_pool,
+            piece_buffer_pool: None, // M99: created when metadata arrives (piece_size unknown)
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1572,6 +1582,8 @@ struct TorrentActor {
     factory: Arc<crate::transport::NetworkFactory>,
     /// Shared hash pool for parallel piece verification (M96).
     hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
+    /// M99: Shared piece buffer pool — created when metadata available.
+    piece_buffer_pool: Option<Arc<crate::piece_buffer_pool::PieceBufferPool>>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -3740,6 +3752,7 @@ impl TorrentActor {
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
                             lengths: lengths.clone(),
+                            piece_buffer_pool: self.piece_buffer_pool.clone(),
                         });
                     }
                 }
@@ -5215,6 +5228,14 @@ impl TorrentActor {
                             .await;
 
                         self.chunk_tracker = Some(ChunkTracker::new(lengths.clone()));
+                        // M99: Create piece buffer pool now that piece_size is known
+                        if self.piece_buffer_pool.is_none() {
+                            let piece_size = lengths.piece_length() as usize;
+                            let pool_size = self.config.piece_buffer_pool_size;
+                            self.piece_buffer_pool = Some(Arc::new(
+                                crate::piece_buffer_pool::PieceBufferPool::new(pool_size, piece_size),
+                            ));
+                        }
                         self.lengths = Some(lengths);
                         self.num_pieces = num_pieces;
                         // M96: Initialize real generation counters + hash result channel
@@ -5399,6 +5420,7 @@ impl TorrentActor {
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
                                     lengths: lengths.clone(),
+                                    piece_buffer_pool: self.piece_buffer_pool.clone(),
                                 });
                             }
                         }
@@ -6369,6 +6391,7 @@ impl TorrentActor {
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
                     lengths: lengths.clone(),
+                    piece_buffer_pool: self.piece_buffer_pool.clone(),
                 });
             }
 
@@ -7010,6 +7033,7 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
+                piece_buffer_pool: self.piece_buffer_pool.clone(),
             });
         }
 
@@ -7205,6 +7229,7 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
+                piece_buffer_pool: self.piece_buffer_pool.clone(),
             });
         }
 
@@ -7615,6 +7640,7 @@ mod tests {
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
             max_in_flight_pieces: 20,
+            piece_buffer_pool_size: 32,
         }
     }
 

@@ -139,6 +139,8 @@ pub struct TorrentConfig {
     /// Maximum number of pieces simultaneously in-flight (downloaded but not
     /// yet verified). Caps the store buffer memory usage.
     pub max_in_flight_pieces: usize,
+    /// M99: Number of buffers in the per-torrent piece buffer pool.
+    pub piece_buffer_pool_size: u32,
 }
 
 impl Default for TorrentConfig {
@@ -209,6 +211,7 @@ impl Default for TorrentConfig {
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
             max_in_flight_pieces: 256,
+            piece_buffer_pool_size: 32,
         }
     }
 }
@@ -276,6 +279,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_piece_length: s.max_piece_length,
             max_outstanding_requests: s.max_outstanding_requests,
             max_in_flight_pieces: s.max_in_flight_pieces,
+            piece_buffer_pool_size: s.piece_buffer_pool_size,
         }
     }
 }
@@ -792,6 +796,8 @@ pub(crate) enum PeerCommand {
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
         /// M92: Piece/chunk arithmetic for PendingBatch piece-completion detection.
         lengths: torrent_core::Lengths,
+        /// M99: Shared piece buffer pool for bounded coalescer memory.
+        piece_buffer_pool: Option<std::sync::Arc<crate::piece_buffer_pool::PieceBufferPool>>,
     },
     /// Actor sends an updated availability snapshot to the peer task.
     SnapshotUpdate {
