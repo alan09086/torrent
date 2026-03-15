@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.97.1 | — | DHT bootstrap simplification — remove PingVerify verification system, ping saved nodes instead of find_node, node-count gate, 5s maintenance pings |
 | 0.97.0 | M97 | DHT cold-start hardening — bootstrap completion gate, saved-node verification with re-bootstrap fallback, V6 exponential backoff |
 | 0.96.0 | M96 | Parallel piece verification — `HashPool` dedicated thread pool for SHA1 hashing, per-torrent result channels, generation counter for stale detection |
 | 0.95.0 | M95 | Core affinity pinning — tokio worker threads pinned to CPU cores via `core_affinity`, `--workers`/`--no-pin-cores` CLI flags |
@@ -49,6 +50,20 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.97.1] — 2026-03-15
+
+### Changed
+- **DHT bootstrap simplification** — removed the M97 `PingVerify` verification system (~120 lines) which was over-engineered and caused 80% cold-start failure with stale saved state
+- `bootstrap()` now partitions saved nodes vs DNS hostnames: saved nodes receive `ping` (validates liveness via normal response handler), DNS nodes receive `find_node` (fresh neighbour discovery). This prevents stale neighbourhood data from flooding the routing table.
+- Added Transmission-style node-count gate: routing table ≥8 nodes opens the bootstrap gate early without waiting for `FindNodeLookup` convergence
+- `PING_INTERVAL` reduced from 225s to 5s — aggressive stale node eviction (questionable nodes detected in ~10s), aligned with libtorrent's maintenance model
+
+### Removed
+- `PingVerify` variant from `PendingQueryKind`
+- `send_ping_verify()`, `check_saved_node_verification()` methods
+- `saved_node_pings_outstanding`, `saved_node_ping_responses`, `saved_node_verified` fields
+- Verification phase in `bootstrap()` and timeout tracking in `expire_queries_and_advance_lookups()`
 
 ## [0.97.0] — 2026-03-14
 

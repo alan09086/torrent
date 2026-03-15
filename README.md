@@ -286,7 +286,7 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Memory Footprint Reduction | M94 | Bounded StoreBuffer (32 MiB back-pressure), codec read buffer shrinking on idle, disk cache 64→16 MiB, store_buffer_bytes DiskStats field | ✅ |
 | Core Affinity | M95 | Pin tokio worker threads to CPU cores via `core_affinity`, round-robin assignment, `runtime_worker_threads`/`pin_cores` settings, `--workers`/`--no-pin-cores` CLI flags | ✅ |
 | Parallel Piece Verification | M96 | `HashPool` dedicated thread pool for SHA1, per-torrent result channels with generation counter, `handle_hash_result()` with staleness guard, dual-path dispatch (HashPool for v1, spawn_blocking for hybrid/v2) | ✅ |
-| DHT Cold-Start Hardening | M97 | Bootstrap completion gate (queued get_peers), saved-node ping verification with `mark_all_questionable()` re-bootstrap fallback, V6 exponential backoff (100ms→5s), `PingVerify` query variant, 10s bootstrap timeout | ✅ |
+| DHT Cold-Start Hardening | M97 | Bootstrap completion gate (queued get_peers), node-count gate (≥8 nodes), saved-node ping validation, V6 exponential backoff (100ms→5s), 5s maintenance pings, 10s bootstrap timeout | ✅ |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
