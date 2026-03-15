@@ -297,6 +297,18 @@ fn load_dht_state(state_path: &Path) -> Option<(Vec<String>, Option<torrent::cor
     Some((nodes, node_id))
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn core_affinity_available() {
+        let core_ids = core_affinity::get_core_ids();
+        assert!(
+            core_ids.as_ref().is_some_and(|ids| !ids.is_empty()),
+            "expected get_core_ids() to return a non-empty list, got: {core_ids:?}"
+        );
+    }
+}
+
 /// Save session state (DHT nodes, etc.) to the state file.
 async fn save_session_state(
     session: &torrent::session::SessionHandle,
