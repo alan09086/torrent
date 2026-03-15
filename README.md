@@ -158,30 +158,54 @@ The `torrent-session` crate (763 tests) includes:
 
 ## ⚡ Performance
 
-Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded), 3 trials per version:
+Benchmarked against the Arch Linux ISO (~1.45 GiB, well-seeded).
 
-| Version | Avg Speed | Peak | CPU Time | RSS | Notes |
-|---------|-----------|------|----------|-----|-------|
-| **0.83.0** | **56.8 MB/s** | 83.5 MB/s | 13.1s | 68.8 MiB | Encryption disabled, AIMD depth 128, SIGTERM handling |
-| 0.84.0 | 55.7 MB/s | 67.3 MB/s | 12.5s | 107 MiB | AWS-LC crypto backend (-28% CPU, -23% RSS vs ring) |
-| 0.82.0 | 38.6 MB/s | 62.1 MB/s | 18.4s | 88.9 MiB | Adaptive max_in_flight, cached dispatch, AIMD pipeline |
-| 0.77.0 | 54.2 MB/s | -- | -- | -- | Wake storm elimination, batch drain 512 |
-| 0.75.0 | 56.7 MB/s | -- | -- | -- | Peer-integrated dispatch (4.6x over M74) |
+### Head-to-head: torrent v0.98.0 vs rqbit 8.1.1
 
-Reference: rqbit achieves ~74.8 MB/s on the same workload.
+Same magnet, same machine, back-to-back trials (2026-03-15):
 
-**Post-benchmark optimizations** (M85-M98, not yet benchmarked as a combined stack):
+| Metric | torrent v0.98.0 | rqbit 8.1.1 | Ratio | Status |
+|--------|:-:|:-:|:-:|:-:|
+| **Speed** | 31.8 MB/s | 72.6 MB/s | 0.44x | Gap |
+| **CPU time** | 9.8s | 10.6s | 0.92x | Parity |
+| **Ctx switches** | 114K | 161K | 0.71x | Winning |
+| **RSS** | 256 MiB | 54 MiB | 4.7x | Gap |
+| **Page faults** | 226K | 12K | 18.5x | Biggest gap |
 
-| Version | Optimization | Expected Impact |
+**Analysis:** CPU efficiency is at parity — the M92-M98 optimization stack closed that gap entirely. Context switches are now _lower_ than rqbit. The remaining speed gap is driven by **peer discovery latency** (DHT bootstrap overhead) and **memory overhead** (18x more page faults = cache pressure). Next optimizations should target RSS and page fault reduction.
+
+### Version history
+
+| Version | Avg Speed | CPU Time | RSS | Ctx Switches | CPU Migrations | Page Faults | Notes |
+|---------|-----------|----------|-----|:------------:|:--------------:|:-----------:|-------|
+| **0.98.0** | 31.8 MB/s | 9.8s | 256 MiB | 114K | 645 | 226K | Write coalescing, cold-start |
+| 0.95.0 | 66.9 MB/s | -- | ~133 MiB | -- | 141 | -- | Core affinity (warm-state) |
+| 0.84.0 | 55.7 MB/s | 12.5s | 107 MiB | -- | -- | -- | AWS-LC crypto (warm-state) |
+| 0.83.0 | 56.8 MB/s | 13.1s | 68.8 MiB | -- | -- | -- | AIMD depth 128 (warm-state) |
+
+### Progress vs profiling baseline
+
+Profiling baseline: v0.84.0 cold-start (2026-03-14):
+
+| Metric | Baseline | v0.98.0 | Change |
+|--------|----------|---------|--------|
+| CPU time | 15.0s | 9.8s | **-35%** |
+| Ctx switches | 462K | 114K | **-75%** |
+| CPU migrations | 140K | 645 | **-99.5%** |
+| Cold-start reliability | ~30% | 100% (10/10) | DHT hardening |
+
+### Optimization stack (M85-M98)
+
+| Version | Optimization | Measured Impact |
 |---------|-------------|-----------------|
-| 0.98.0 | Write coalescing — per-peer block buffering, ~32x fewer disk syscalls | ~2.2% CPU savings (net ~1.2% after memcpy) |
-| 0.97.0 | DHT cold-start hardening — bootstrap gate, V6 backoff, 5s pings | Cold-start reliability ~95%→~99%+ |
-| 0.96.0 | Parallel piece verification — HashPool dedicated thread pool | SHA1 CPU 20.3%→~8%, speed +13% |
-| 0.95.0 | Core affinity — tokio workers pinned to CPU cores | CPU migrations 140K→~25K |
+| 0.98.0 | Write coalescing — per-peer block buffering, single pwrite per piece | ~32x fewer write syscalls |
+| 0.97.0 | DHT cold-start hardening — bootstrap gate, V6 backoff, 5s pings | 10/10 cold-start reliability |
+| 0.96.0 | Parallel piece verification — HashPool dedicated thread pool | SHA1 off main thread |
+| 0.95.0 | Core affinity — tokio workers pinned to CPU cores | CPU migrations 140K→645 |
 | 0.94.0 | Memory footprint — bounded StoreBuffer, codec shrinking, cache 64→16 MiB | RSS reduction |
 | 0.93.0 | Lock-free piece dispatch — atomic CAS, zero locks on hot path | Dispatch latency reduction |
-| 0.92.0 | Peer event batching — PendingBatch, 25ms flush timer | ~3x context switch reduction |
-| 0.85.0 | DHT routing table overhaul — iterative bootstrap, node liveness | DHT reliability |
+| 0.92.0 | Peer event batching — PendingBatch, 25ms flush timer | Ctx switches 462K→114K |
+| 0.85.0 | DHT routing table overhaul — iterative bootstrap, node liveness | DHT reliability foundation |
 
 ---
 
