@@ -1382,11 +1382,22 @@ impl DhtActor {
                         .collect();
 
                     let info_hash = *info_hash;
-                    for node in to_query {
-                        if let Some(lookup) = self.lookups.get_mut(&info_hash) {
-                            lookup.queried.insert(node.id);
+                    if to_query.is_empty() {
+                        // No new nodes to query — check if lookup is complete
+                        let has_pending = self.pending.values().any(|p| {
+                            matches!(p.kind, PendingQueryKind::GetPeers { info_hash: ih } if ih == info_hash)
+                        });
+                        if !has_pending {
+                            debug!(%info_hash, "get_peers lookup exhausted all nodes");
+                            self.lookups.remove(&info_hash);
                         }
-                        self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
+                    } else {
+                        for node in to_query {
+                            if let Some(lookup) = self.lookups.get_mut(&info_hash) {
+                                lookup.queried.insert(node.id);
+                            }
+                            self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
+                        }
                     }
                 }
             }
