@@ -384,7 +384,12 @@ pub(crate) async fn run_peer(
                                 // M98: Write coalescing — buffer blocks, flush as full pieces
                                 if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
                                     if let Some(ref mut wc) = write_coalescer {
-                                        // M98: Per-block store buffer insert (for hash verification)
+                                        // M98: Per-block store buffer insert (for hash verification).
+                                        // No over-limit check here: the old enqueue_write() also
+                                        // inserts unconditionally — its back-pressure signal just
+                                        // switches from async to sync disk writes. The coalesced
+                                        // path gets equivalent throttling from enqueue_write_coalesced()
+                                        // returning Err on channel-full (triggers sync fallback below).
                                         disk.store_buffer_insert(*index, *begin, data.clone());
 
                                         // M98: Coalesced write path
@@ -736,10 +741,16 @@ pub(crate) async fn run_peer(
         && let Some(flush) = wc.flush()
         && let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state
     {
-        let _ = disk.enqueue_write_coalesced(
+        match disk.enqueue_write_coalesced(
             flush.piece, flush.begin, flush.data,
             DiskJobFlags::FLUSH_PIECE, write_err_tx,
-        );
+        ) {
+            Ok(()) => {}
+            Err(returned_data) => {
+                disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
+                    .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "disconnect coalesced flush failed: {e}"));
+            }
+        }
     }
 
     // Send disconnect event (best-effort)
