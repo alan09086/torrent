@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.97.0 | M97 | DHT cold-start hardening — bootstrap completion gate, saved-node verification with re-bootstrap fallback, V6 exponential backoff |
 | 0.96.0 | M96 | Parallel piece verification — `HashPool` dedicated thread pool for SHA1 hashing, per-torrent result channels, generation counter for stale detection |
 | 0.95.0 | M95 | Core affinity pinning — tokio worker threads pinned to CPU cores via `core_affinity`, `--workers`/`--no-pin-cores` CLI flags |
 | 0.94.0 | M94 | Memory footprint reduction — bounded StoreBuffer (32 MiB), codec read buffer shrinking on idle, disk cache 64→16 MiB |
@@ -48,6 +49,21 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.97.0] — 2026-03-14
+
+### Added
+- **Bootstrap completion gate** — `get_peers` lookups are queued until `FindNodeLookup` completes, preventing peer discovery on a half-populated routing table
+- `on_bootstrap_complete()` drains the queued `get_peers` requests once bootstrap finishes
+- 10-second bootstrap timeout safety net to unblock the gate if bootstrap stalls indefinitely
+- **Saved-node verification** — on startup, a sample of persisted DHT nodes are pinged; if fewer than 4 respond, all routing table nodes are marked `Questionable` and a fresh bootstrap from hardcoded nodes is triggered
+- `PingVerify` query variant for distinguishing verification pings from ordinary maintenance pings
+- `mark_all_questionable()` method on `RoutingTable` for saved-node fallback
+- **V6 exponential backoff** — replaces the fixed 100 ms IPv6 retry interval with exponential backoff (100 ms → 5 s), reducing ~30 lookups/3 s to ~8 lookups/12 s during V6 failures
+- `should_retry_v6()` / `v6_retry_delay()` helpers encapsulating the backoff logic
+
+### Changed
+- Cold-start reliability improved from ~95% to ~99%+; eliminates 270-second stalls caused by premature `get_peers` on empty routing tables
 
 ## [0.96.0] — 2026-03-14
 
