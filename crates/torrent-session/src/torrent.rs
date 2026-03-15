@@ -156,6 +156,7 @@ impl TorrentHandle {
         sam_session: Option<Arc<crate::i2p::SamSession>>,
         ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
         factory: Arc<crate::transport::NetworkFactory>,
+        hash_pool: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     ) -> crate::Result<Self> {
         let mut config = config;
         // BEP 27: private torrents disable DHT and PEX
@@ -199,6 +200,7 @@ impl TorrentHandle {
         let (event_tx, event_rx) = mpsc::channel(2048);
         let (write_error_tx, write_error_rx) = mpsc::channel(64);
         let (verify_result_tx, verify_result_rx) = mpsc::channel(1024);
+        let (hash_result_tx, hash_result_rx) = mpsc::channel(64); // M96
         let our_peer_id = if config.anonymous_mode {
             PeerId::generate_anonymous().0
         } else {
@@ -332,6 +334,15 @@ impl TorrentHandle {
             20,
         );
 
+        // M96: Wire hash pool into disk handle for V1-only torrents
+        let mut disk = disk;
+        if matches!(version, torrent_core::TorrentVersion::V1Only)
+            && let Some(pool) = &hash_pool
+        {
+            disk.set_hash_pool(pool.clone());
+            disk.set_hash_result_tx(hash_result_tx.clone());
+        }
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -403,6 +414,9 @@ impl TorrentHandle {
             verify_result_rx,
             verify_result_tx,
             pending_verify: HashSet::new(),
+            piece_generations: vec![0u64; num_pieces as usize],
+            hash_result_rx,
+            hash_result_tx,
             meta: Some(meta),
             listener,
             utp_socket,
@@ -453,6 +467,7 @@ impl TorrentHandle {
             rate_limiter_set,
             auto_sequential_active: false,
             factory,
+            hash_pool_ref: hash_pool,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -503,11 +518,14 @@ impl TorrentHandle {
         sam_session: Option<Arc<crate::i2p::SamSession>>,
         ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
         factory: Arc<crate::transport::NetworkFactory>,
+        hash_pool: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     ) -> crate::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(2048);
         let (write_error_tx, write_error_rx) = mpsc::channel(64);
         let (verify_result_tx, verify_result_rx) = mpsc::channel(1024);
+        // M96: Dummy channel — replaced when metadata arrives and num_pieces is known
+        let (hash_result_tx, hash_result_rx) = mpsc::channel(1);
         let our_peer_id = if config.anonymous_mode {
             PeerId::generate_anonymous().0
         } else {
@@ -688,6 +706,9 @@ impl TorrentHandle {
             verify_result_rx,
             verify_result_tx,
             pending_verify: HashSet::new(),
+            piece_generations: Vec::new(),
+            hash_result_rx,
+            hash_result_tx,
             meta: None,
             listener,
             utp_socket,
@@ -738,6 +759,7 @@ impl TorrentHandle {
             rate_limiter_set,
             auto_sequential_active: false,
             factory,
+            hash_pool_ref: hash_pool,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1425,6 +1447,13 @@ struct TorrentActor {
     /// Pieces currently awaiting async verification — prevents duplicate
     /// verify tasks when end game or slow peers deliver duplicate blocks.
     pending_verify: HashSet<u32>,
+    /// Generation counter per piece — increments on release/re-reserve.
+    /// Used to detect stale hash results from the HashPool (M96).
+    piece_generations: Vec<u64>,
+    /// Receiver for hash pool results (M96).
+    hash_result_rx: tokio::sync::mpsc::Receiver<crate::hash_pool::HashResult>,
+    /// Sender for hash pool results — cloned into DiskHandle (M96).
+    hash_result_tx: tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>,
 
     // TCP listener for incoming peer connections
     listener: Option<Box<dyn crate::transport::TransportListener>>,
@@ -1537,6 +1566,8 @@ struct TorrentActor {
     auto_sequential_active: bool,
     /// Network transport factory for TCP operations (M51).
     factory: Arc<crate::transport::NetworkFactory>,
+    /// Shared hash pool for parallel piece verification (M96).
+    hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -1813,6 +1844,10 @@ impl TorrentActor {
                             // M73: Drivers pick up released pieces automatically via shared state
                         }
                     }
+                }
+                // M96: Hash pool verification results
+                Some(result) = self.hash_result_rx.recv() => {
+                    self.handle_hash_result(result).await;
                 }
                 // Commands from handle
                 cmd = self.cmd_rx.recv() => {
@@ -3835,7 +3870,8 @@ impl TorrentActor {
                             .and_then(|m| m.info.piece_hash(index as usize))
                     {
                         self.pending_verify.insert(index);
-                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
+                        let generation = self.piece_generations.get(index as usize).copied().unwrap_or(0);
+                        disk.enqueue_verify(index, expected, generation, &self.verify_result_tx);
                     }
                 }
                 torrent_core::TorrentVersion::V2Only => {
@@ -3993,7 +4029,8 @@ impl TorrentActor {
                             .and_then(|m| m.info.piece_hash(index as usize))
                     {
                         self.pending_verify.insert(index);
-                        disk.enqueue_verify(index, expected, &self.verify_result_tx);
+                        let generation = self.piece_generations.get(index as usize).copied().unwrap_or(0);
+                        disk.enqueue_verify(index, expected, generation, &self.verify_result_tx);
                     }
                 }
                 torrent_core::TorrentVersion::V2Only => {
@@ -4567,6 +4604,43 @@ impl TorrentActor {
     }
 
     /// Common success path after a piece passes verification (v1 SHA-1 or v2 Merkle).
+    /// Handle a result from the HashPool (M96).
+    async fn handle_hash_result(&mut self, result: crate::hash_pool::HashResult) {
+        self.pending_verify.remove(&result.piece);
+
+        // Staleness check
+        let current_gen = self
+            .piece_generations
+            .get(result.piece as usize)
+            .copied()
+            .unwrap_or(0);
+        if result.generation != current_gen {
+            tracing::debug!(
+                piece = result.piece,
+                result_gen = result.generation,
+                current_gen,
+                "discarding stale hash result"
+            );
+            return;
+        }
+
+        // Guard: ignore results for already-verified pieces
+        let dominated = self
+            .chunk_tracker
+            .as_ref()
+            .map(|ct| ct.bitfield().get(result.piece))
+            .unwrap_or(false);
+        if dominated {
+            return;
+        }
+
+        if result.passed {
+            self.on_piece_verified(result.piece).await;
+        } else {
+            self.on_piece_hash_failed(result.piece).await;
+        }
+    }
+
     async fn on_piece_verified(&mut self, index: u32) {
         if let Some(ref mut ct) = self.chunk_tracker {
             ct.mark_verified(index);
@@ -4744,6 +4818,10 @@ impl TorrentActor {
         );
         if let Some(ref mut ct) = self.chunk_tracker {
             ct.mark_failed(index);
+        }
+        // M96: Increment generation to invalidate any in-flight hash for this piece
+        if let Some(g) = self.piece_generations.get_mut(index as usize) {
+            *g += 1;
         }
         // M93: Release piece back to Available
         if let Some(ref states) = self.atomic_states {
@@ -5104,15 +5182,26 @@ impl TorrentActor {
                                     Arc::new(MemoryStorage::new(lengths.clone()))
                                 }
                             };
-                        let disk_handle = self
+                        let mut disk_handle = self
                             .disk_manager
                             .register_torrent(self.info_hash, storage)
                             .await;
 
-                        self.disk = Some(disk_handle);
                         self.chunk_tracker = Some(ChunkTracker::new(lengths.clone()));
                         self.lengths = Some(lengths);
                         self.num_pieces = num_pieces;
+                        // M96: Initialize real generation counters + hash result channel
+                        self.piece_generations = vec![0u64; num_pieces as usize];
+                        let (hash_tx, hash_rx) = tokio::sync::mpsc::channel(64);
+                        self.hash_result_tx = hash_tx;
+                        self.hash_result_rx = hash_rx;
+                        // M96: Wire hash pool into disk handle (version check deferred
+                        // until after metadata detection below sets self.version)
+                        if let Some(ref pool) = self.hash_pool_ref {
+                            disk_handle.set_hash_pool(pool.clone());
+                            disk_handle.set_hash_result_tx(self.hash_result_tx.clone());
+                        }
+                        self.disk = Some(disk_handle);
                         // Update all connected peer tasks so they can validate
                         // incoming Bitfield messages with the correct piece count.
                         for peer in self.peers.values() {
@@ -7584,6 +7673,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7633,6 +7723,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7677,6 +7768,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7740,6 +7832,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7828,6 +7921,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7874,6 +7968,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7919,6 +8014,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -7977,6 +8073,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8051,6 +8148,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8136,6 +8234,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8281,6 +8380,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8428,6 +8528,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8566,6 +8667,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8766,6 +8868,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8840,6 +8943,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -8926,6 +9030,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9006,6 +9111,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9051,6 +9157,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9098,6 +9205,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9150,6 +9258,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9209,6 +9318,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9442,6 +9552,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9645,6 +9756,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9698,6 +9810,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9756,6 +9869,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9814,6 +9928,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9870,6 +9985,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -9936,6 +10052,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10010,6 +10127,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10144,6 +10262,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10198,6 +10317,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10417,6 +10537,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10518,6 +10639,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10616,6 +10738,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10679,6 +10802,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10762,6 +10886,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -10824,6 +10949,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11081,6 +11207,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11147,6 +11274,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11215,6 +11343,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11279,6 +11408,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11327,6 +11457,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11411,6 +11542,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11466,6 +11598,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11514,6 +11647,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11565,6 +11699,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11629,6 +11764,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11721,6 +11857,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11764,6 +11901,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11810,6 +11948,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11859,6 +11998,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -11906,6 +12046,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -12012,6 +12153,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -12063,6 +12205,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -12108,6 +12251,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -12159,6 +12303,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -12211,6 +12356,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();
@@ -12276,6 +12422,7 @@ mod tests {
             None,
             None,
             Arc::new(crate::transport::NetworkFactory::tokio()),
+            None, // M96: hash_pool
         )
         .await
         .unwrap();

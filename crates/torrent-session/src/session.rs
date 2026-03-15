@@ -692,6 +692,12 @@ impl SessionHandle {
 
         let counters = Arc::new(crate::stats::SessionCounters::new());
 
+        // M96: Create shared hash pool for parallel piece verification
+        let hash_pool = std::sync::Arc::new(crate::hash_pool::HashPool::new(
+            settings.hashing_threads,
+            64,
+        ));
+
         let external_ip = settings.external_ip;
         let actor = SessionActor {
             settings,
@@ -725,6 +731,7 @@ impl SessionHandle {
             ssl_listener,
             counters: Arc::clone(&counters),
             factory: Arc::clone(&factory),
+            hash_pool,
         };
 
         let join_handle = tokio::spawn(actor.run());
@@ -1882,6 +1889,8 @@ struct SessionActor {
     counters: Arc<crate::stats::SessionCounters>,
     /// Network transport factory for TCP operations (M51).
     factory: Arc<crate::transport::NetworkFactory>,
+    /// Shared hash pool for parallel piece verification (M96).
+    hash_pool: std::sync::Arc<crate::hash_pool::HashPool>,
 }
 
 impl SessionActor {
@@ -2618,6 +2627,7 @@ impl SessionActor {
             self.sam_session.clone(),
             self.ssl_manager.clone(),
             Arc::clone(&self.factory),
+            Some(Arc::clone(&self.hash_pool)),
         )
         .await?;
 
@@ -2686,6 +2696,7 @@ impl SessionActor {
             self.sam_session.clone(),
             self.ssl_manager.clone(),
             Arc::clone(&self.factory),
+            Some(Arc::clone(&self.hash_pool)),
         )
         .await?;
         self.torrents.insert(

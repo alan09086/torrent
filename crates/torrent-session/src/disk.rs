@@ -318,6 +318,8 @@ impl DiskManagerHandle {
             tx: self.tx.clone(),
             info_hash,
             store_buffer: Arc::clone(&self.store_buffer),
+            hash_pool: None,
+            hash_result_tx: None,
         }
     }
 
@@ -349,6 +351,10 @@ pub struct DiskHandle {
     tx: mpsc::Sender<DiskJob>,
     info_hash: Id20,
     store_buffer: Arc<StoreBuffer>,
+    /// Hash pool for parallel piece verification (M96).
+    hash_pool: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
+    /// Per-torrent hash result sender (M96).
+    hash_result_tx: Option<tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>>,
 }
 
 impl DiskHandle {
@@ -359,7 +365,22 @@ impl DiskHandle {
             tx,
             info_hash,
             store_buffer: Arc::new(Mutex::new(StoreBufferInner::new(32 * 1024 * 1024))),
+            hash_pool: None,
+            hash_result_tx: None,
         }
+    }
+
+    /// Set the hash pool reference (M96).
+    pub fn set_hash_pool(&mut self, pool: std::sync::Arc<crate::hash_pool::HashPool>) {
+        self.hash_pool = Some(pool);
+    }
+
+    /// Set the per-torrent hash result sender (M96).
+    pub fn set_hash_result_tx(
+        &mut self,
+        tx: tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>,
+    ) {
+        self.hash_result_tx = Some(tx);
     }
 
     /// Write a chunk to disk (may be buffered).
@@ -599,12 +620,60 @@ impl DiskHandle {
     /// (in-memory) and sends the result directly via `result_tx`.  This avoids
     /// channel contention with write jobs which previously caused verify jobs
     /// to be silently dropped or blocked behind a backlog of writes.
+    ///
+    /// M96: If a hash pool is configured, submits the job to the pool instead
+    /// of using `spawn_blocking`. The `generation` parameter enables staleness
+    /// detection by the caller.
     pub fn enqueue_verify(
         &self,
         piece: u32,
         expected: Id20,
+        generation: u64,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
+        // M96: If hash pool is available, use parallel hashing path
+        if let (Some(pool), Some(hash_tx)) = (&self.hash_pool, &self.hash_result_tx) {
+            let blocks = {
+                self.store_buffer
+                    .lock()
+                    .unwrap()
+                    .remove(&(self.info_hash, piece))
+            };
+            let pool = pool.clone();
+            let hash_tx = hash_tx.clone();
+            tokio::spawn(async move {
+                if let Some(blocks) = blocks {
+                    let total_size: usize = blocks.values().map(|b| b.len()).sum();
+                    let mut data = Vec::with_capacity(total_size);
+                    for block in blocks.values() {
+                        data.extend_from_slice(block);
+                    }
+                    let job = crate::hash_pool::HashJob {
+                        piece,
+                        expected,
+                        generation,
+                        data,
+                        result_tx: hash_tx,
+                    };
+                    if let Err(_job) = pool.submit(job).await {
+                        tracing::warn!(piece, "hash pool shut down, treating as failed");
+                    }
+                } else {
+                    tracing::warn!(piece, "verify: store buffer miss (hash pool path)");
+                    // Send failure through hash result channel
+                    let _ = hash_tx
+                        .send(crate::hash_pool::HashResult {
+                            piece,
+                            passed: false,
+                            generation,
+                        })
+                        .await;
+                }
+            });
+            return;
+        }
+
+        // Legacy path: spawn_blocking (used when hash pool is not configured)
         // Extract blocks synchronously BEFORE spawning to prevent race with
         // re-download: if verification is slow to start, new blocks for the
         // same piece could arrive and be written to the store buffer, producing
@@ -620,9 +689,8 @@ impl DiskHandle {
             let passed = tokio::task::spawn_blocking(move || {
                 if let Some(blocks) = blocks {
                     // Stream-hash blocks in-place to avoid concatenation alloc
-                    let actual = torrent_core::sha1_chunks(
-                        blocks.values().map(|b| b.as_ref()),
-                    );
+                    let actual =
+                        torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
                     let passed = actual == expected;
                     if !passed {
                         let num_blocks = blocks.len();
@@ -1340,7 +1408,7 @@ mod tests {
             .unwrap();
 
         // Enqueue verify — should hash from store buffer (spawns task directly)
-        disk.enqueue_verify(0, expected, &result_tx);
+        disk.enqueue_verify(0, expected, 0, &result_tx);
 
         // Wait for result
         let result = result_rx.recv().await.unwrap();
