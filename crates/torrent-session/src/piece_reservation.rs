@@ -333,9 +333,10 @@ impl PeerDispatchState {
         }
 
         // 3. Steal path: find unrequested blocks in other peers' pieces.
+        // Bound attempts to avoid spinning when queue has many exhausted pieces.
+        const MAX_STEAL_ATTEMPTS: usize = 32;
         if let (Some(bm), Some(sc)) = (&self.block_maps, &self.steal_candidates) {
-            // Try up to a bounded number of candidates to avoid spinning.
-            for _ in 0..32 {
+            for _ in 0..MAX_STEAL_ATTEMPTS {
                 let Some(piece) = sc.pop() else { break };
 
                 // Skip if peer doesn't have this piece.
