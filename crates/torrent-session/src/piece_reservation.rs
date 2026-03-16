@@ -1980,10 +1980,10 @@ mod tests {
             "should steal block 2 (offset 32768)"
         );
 
-        // Block 2 should now be marked as requested.
+        // Block 2 should already be claimed by Phase 3 steal.
         assert!(
             bm.mark_requested(0, 2),
-            "block 2 should be marked as requested after steal"
+            "block 2 should already be claimed (Phase 3 stole it)"
         );
     }
 
@@ -2060,17 +2060,17 @@ mod tests {
         // Verify all three blocks are marked in block_maps.
         assert!(
             bm.mark_requested(piece, 0),
-            "block 0 should be marked (peer A)"
+            "block 0 should already be claimed (peer A Phase 2)"
         );
         assert!(
             bm.mark_requested(piece, 1),
-            "block 1 should be marked (peer A)"
+            "block 1 should already be claimed (peer A Phase 1)"
         );
-        // The stolen block (either 2 or 3) should also be marked.
+        // The stolen block (either 2 or 3) should also be claimed.
         let stolen_block_idx = b_stolen.begin / 16384;
         assert!(
             bm.mark_requested(piece, stolen_block_idx),
-            "stolen block should be marked (peer B)"
+            "stolen block should already be claimed (peer B Phase 3)"
         );
     }
 

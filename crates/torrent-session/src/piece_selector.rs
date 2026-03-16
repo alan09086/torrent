@@ -360,7 +360,7 @@ impl PieceSelector {
 
         // Layer 5: New piece selection (skip if in-flight cap reached)
         if ctx.cap_reached {
-            return None; // only partial/steal blocks available when cap reached
+            return None; // only partial blocks available when cap reached
         }
         self.pick_new_piece(ctx, missing_chunks, scratch)
     }
