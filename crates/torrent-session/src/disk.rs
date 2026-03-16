@@ -430,10 +430,9 @@ pub struct DiskHandle {
     /// Per-torrent hash result sender (M96).
     hash_result_tx: Option<tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>>,
     /// Direct storage reference for deferred writes (M100).
-    #[allow(dead_code)] // M100: wired in Task 3/4
+    #[allow(dead_code)] // M100: wired in Task 4
     storage: Option<Arc<dyn TorrentStorage>>,
     /// Backend reference for disk-based verify (M100).
-    #[allow(dead_code)] // M100: wired in Task 3
     backend: Option<Arc<dyn crate::disk_backend::DiskIoBackend>>,
     /// Deferred write queue state (M100).
     #[allow(dead_code)] // M100: wired in Task 4
@@ -762,10 +761,10 @@ impl DiskHandle {
 
     /// Spawn a non-blocking v1 piece hash verification.
     ///
-    /// Bypasses the disk channel entirely — hashes from the store buffer
-    /// (in-memory) and sends the result directly via `result_tx`.  This avoids
-    /// channel contention with write jobs which previously caused verify jobs
-    /// to be silently dropped or blocked behind a backlog of writes.
+    /// M100: Prefers the store buffer (for callers still using `enqueue_write`),
+    /// falls back to reading the piece from disk (for callers using the deferred
+    /// writer task + `flush_piece_writes`). The store buffer path will be removed
+    /// in Task 5 once all callers have been migrated to the deferred write path.
     ///
     /// M96: If a hash pool is configured, submits the job to the pool instead
     /// of using `spawn_blocking`. The `generation` parameter enables staleness
@@ -777,18 +776,23 @@ impl DiskHandle {
         generation: u64,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
+        // Try the store buffer first (old write path via enqueue_write).
+        // If the store buffer has data for this piece, use it directly.
+        // If not, fall through to the disk-read path (deferred write path).
+        let blocks = {
+            self.store_buffer
+                .lock()
+                .expect("store buffer lock poisoned")
+                .remove(&(self.info_hash, piece))
+        };
+
         // M96: If hash pool is available, use parallel hashing path
         if let (Some(pool), Some(hash_tx)) = (&self.hash_pool, &self.hash_result_tx) {
-            let blocks = {
-                self.store_buffer
-                    .lock()
-                    .unwrap()
-                    .remove(&(self.info_hash, piece))
-            };
-            let pool = pool.clone();
-            let hash_tx = hash_tx.clone();
-            tokio::spawn(async move {
-                if let Some(blocks) = blocks {
+            if let Some(blocks) = blocks {
+                // Store buffer hit — assemble data and submit to hash pool.
+                let pool = pool.clone();
+                let hash_tx = hash_tx.clone();
+                tokio::spawn(async move {
                     let total_size: usize = blocks.values().map(|b| b.len()).sum();
                     let mut data = Vec::with_capacity(total_size);
                     for block in blocks.values() {
@@ -804,42 +808,77 @@ impl DiskHandle {
                     if let Err(_job) = pool.submit(job).await {
                         tracing::warn!(piece, "hash pool shut down, treating as failed");
                     }
-                } else {
-                    tracing::warn!(piece, "verify: store buffer miss (hash pool path)");
-                    // Send failure through hash result channel
-                    let _ = hash_tx
-                        .send(crate::hash_pool::HashResult {
-                            piece,
-                            passed: false,
-                            generation,
-                        })
-                        .await;
-                }
+                });
+                return;
+            }
+
+            // M100: Store buffer miss — read from disk (deferred write path).
+            if let Some(backend) = &self.backend {
+                let pool = pool.clone();
+                let hash_tx = hash_tx.clone();
+                let backend = Arc::clone(backend);
+                let info_hash = self.info_hash;
+                tokio::spawn(async move {
+                    let data = tokio::task::spawn_blocking(move || {
+                        backend.read_piece(info_hash, piece)
+                    })
+                    .await
+                    .expect("read_piece task panicked");
+                    match data {
+                        Ok(data) => {
+                            let job = crate::hash_pool::HashJob {
+                                piece,
+                                expected,
+                                generation,
+                                data,
+                                result_tx: hash_tx,
+                            };
+                            if let Err(_job) = pool.submit(job).await {
+                                tracing::warn!(piece, "hash pool shut down, treating as failed");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(piece, %e, "verify: read_piece failed (hash pool path)");
+                            let _ = hash_tx
+                                .send(crate::hash_pool::HashResult {
+                                    piece,
+                                    passed: false,
+                                    generation,
+                                })
+                                .await;
+                        }
+                    }
+                });
+                return;
+            }
+
+            // No backend and no store buffer — send failure.
+            let hash_tx = hash_tx.clone();
+            tokio::spawn(async move {
+                tracing::warn!(piece, "verify: no data source (hash pool path)");
+                let _ = hash_tx
+                    .send(crate::hash_pool::HashResult {
+                        piece,
+                        passed: false,
+                        generation,
+                    })
+                    .await;
             });
             return;
         }
 
-        // Legacy path: spawn_blocking (used when hash pool is not configured)
-        // Extract blocks synchronously BEFORE spawning to prevent race with
-        // re-download: if verification is slow to start, new blocks for the
-        // same piece could arrive and be written to the store buffer, producing
-        // a frankenstein piece that mixes blocks from different attempts.
-        let blocks = {
-            self.store_buffer
-                .lock()
-                .unwrap()
-                .remove(&(self.info_hash, piece))
-        };
-        let result_tx = result_tx.clone();
-        tokio::spawn(async move {
-            let passed = tokio::task::spawn_blocking(move || {
-                if let Some(blocks) = blocks {
-                    // Stream-hash blocks in-place to avoid concatenation alloc
-                    let actual = torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
+        // Non-pool path: store buffer hit
+        if let Some(blocks) = blocks {
+            let result_tx = result_tx.clone();
+            tokio::spawn(async move {
+                let passed = tokio::task::spawn_blocking(move || {
+                    let actual =
+                        torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
                     let passed = actual == expected;
                     if !passed {
                         let num_blocks = blocks.len();
-                        let total_size: usize = blocks.values().map(|b| b.len()).sum();
+                        let total_size: usize =
+                            blocks.values().map(|b| b.len()).sum();
                         let block_info: Vec<(u32, usize)> = blocks
                             .iter()
                             .map(|(&offset, data)| (offset, data.len()))
@@ -855,47 +894,134 @@ impl DiskHandle {
                         );
                     }
                     passed
-                } else {
-                    warn!(piece, "verify: store buffer miss, treating as failed");
-                    false
-                }
-            })
-            .await
-            .unwrap();
-            let _ = result_tx.send(VerifyResult { piece, passed }).await;
+                })
+                .await
+                .expect("store buffer verify task panicked");
+                let _ = result_tx.send(VerifyResult { piece, passed }).await;
+            });
+            return;
+        }
+
+        // M100: Store buffer miss — read from disk (deferred write path).
+        if let Some(backend) = &self.backend {
+            let backend = Arc::clone(backend);
+            let info_hash = self.info_hash;
+            let result_tx = result_tx.clone();
+            tokio::spawn(async move {
+                let passed = tokio::task::spawn_blocking(move || {
+                    match backend.read_piece(info_hash, piece) {
+                        Ok(data) => {
+                            let actual = torrent_core::sha1(&data);
+                            let passed = actual == expected;
+                            if !passed {
+                                warn!(
+                                    piece,
+                                    data_len = data.len(),
+                                    expected = %expected.to_hex(),
+                                    actual = %actual.to_hex(),
+                                    "verify FAILED: hash mismatch"
+                                );
+                            }
+                            passed
+                        }
+                        Err(e) => {
+                            warn!(piece, %e, "verify: read_piece failed");
+                            false
+                        }
+                    }
+                })
+                .await
+                .expect("read_piece task panicked");
+                let _ = result_tx.send(VerifyResult { piece, passed }).await;
+            });
+            return;
+        }
+
+        // No data source at all — treat as failure.
+        let result_tx = result_tx.clone();
+        tokio::spawn(async move {
+            warn!(piece, "verify: no data source, treating as failed");
+            let _ = result_tx
+                .send(VerifyResult {
+                    piece,
+                    passed: false,
+                })
+                .await;
         });
     }
 
-    /// Spawn a non-blocking v2 piece hash verification.
+    /// Spawn a non-blocking v2 piece hash verification (SHA-256).
     ///
-    /// Same approach as [`enqueue_verify`] — bypasses disk channel.
+    /// M100: Prefers the store buffer (for callers still using `enqueue_write`),
+    /// falls back to reading the piece from disk (for callers using the deferred
+    /// writer task + `flush_piece_writes`). The store buffer path will be removed
+    /// in Task 5 once all callers have been migrated to the deferred write path.
     pub fn enqueue_verify_v2(
         &self,
         piece: u32,
         expected: Id32,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        // Extract blocks synchronously — same race prevention as enqueue_verify.
+        // Try the store buffer first (old write path via enqueue_write).
         let blocks = {
             self.store_buffer
                 .lock()
-                .unwrap()
+                .expect("store buffer lock poisoned")
                 .remove(&(self.info_hash, piece))
         };
+
+        // Store buffer hit — hash from memory.
+        if let Some(blocks) = blocks {
+            let result_tx = result_tx.clone();
+            tokio::spawn(async move {
+                let passed = tokio::task::spawn_blocking(move || {
+                    let actual = torrent_core::sha256_chunks(
+                        blocks.values().map(|b| b.as_ref()),
+                    );
+                    actual == expected
+                })
+                .await
+                .expect("store buffer verify v2 task panicked");
+                let _ = result_tx.send(VerifyResult { piece, passed }).await;
+            });
+            return;
+        }
+
+        // M100: Store buffer miss — read from disk (deferred write path).
+        if let Some(backend) = &self.backend {
+            let backend = Arc::clone(backend);
+            let info_hash = self.info_hash;
+            let result_tx = result_tx.clone();
+            tokio::spawn(async move {
+                let passed = tokio::task::spawn_blocking(move || {
+                    match backend.read_piece(info_hash, piece) {
+                        Ok(data) => {
+                            let actual = torrent_core::sha256(&data);
+                            actual == expected
+                        }
+                        Err(e) => {
+                            warn!(piece, %e, "verify v2: read_piece failed");
+                            false
+                        }
+                    }
+                })
+                .await
+                .expect("read_piece v2 task panicked");
+                let _ = result_tx.send(VerifyResult { piece, passed }).await;
+            });
+            return;
+        }
+
+        // No data source at all — treat as failure.
         let result_tx = result_tx.clone();
         tokio::spawn(async move {
-            let passed = tokio::task::spawn_blocking(move || {
-                if let Some(blocks) = blocks {
-                    let actual = torrent_core::sha256_chunks(blocks.values().map(|b| b.as_ref()));
-                    actual == expected
-                } else {
-                    warn!(piece, "verify v2: store buffer miss, treating as failed");
-                    false
-                }
-            })
-            .await
-            .unwrap();
-            let _ = result_tx.send(VerifyResult { piece, passed }).await;
+            warn!(piece, "verify v2: no data source, treating as failed");
+            let _ = result_tx
+                .send(VerifyResult {
+                    piece,
+                    passed: false,
+                })
+                .await;
         });
     }
 
@@ -963,7 +1089,7 @@ impl DiskHandle {
     ///
     /// Returns immediately if write_state is `None` (pre-M100 path) or if
     /// there are no pending writes for the given piece.
-    #[allow(dead_code)] // M100: wired in Task 3
+    #[allow(dead_code)] // M100: wired in Task 4 (used in tests now)
     pub(crate) async fn flush_piece_writes(&self, piece: u32) {
         let write_state = match &self.write_state {
             Some(ws) => ws,
@@ -1641,7 +1767,7 @@ mod tests {
         disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
             .unwrap();
 
-        // Enqueue verify — should hash from store buffer (spawns task directly)
+        // Enqueue verify — should hash from store buffer (preferred over disk)
         disk.enqueue_verify(0, expected, 0, &result_tx);
 
         // Wait for result
@@ -1688,7 +1814,7 @@ mod tests {
         disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
             .unwrap();
 
-        // Enqueue v2 verify — should hash from store buffer (spawns task directly)
+        // Enqueue v2 verify — should hash from store buffer (preferred over disk)
         disk.enqueue_verify_v2(0, expected, &result_tx);
 
         // Wait for result
@@ -1864,6 +1990,133 @@ mod tests {
         assert_eq!(&piece[25..50], &[2u8; 25]);
         assert_eq!(&piece[50..75], &[3u8; 25]);
         assert_eq!(&piece[75..100], &[4u8; 25]);
+
+        mgr.shutdown().await;
+    }
+
+    // ── M100: Disk-based verify tests ────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_from_disk_after_deferred_write() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(40);
+        let chunk_size = 16384u32;
+        let piece_size = u64::from(chunk_size) * 2;
+        let lengths = Lengths::new(piece_size, piece_size, chunk_size);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        // Write both chunks via deferred queue.
+        let chunk0 = vec![0xAAu8; chunk_size as usize];
+        let chunk1 = vec![0xBBu8; chunk_size as usize];
+        disk.write_block_deferred(0, 0, Bytes::from(chunk0.clone()));
+        disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1.clone()));
+        disk.flush_piece_writes(0).await;
+
+        // Compute expected SHA-1 hash.
+        let mut full_piece = Vec::with_capacity(piece_size as usize);
+        full_piece.extend_from_slice(&chunk0);
+        full_piece.extend_from_slice(&chunk1);
+        let expected_hash = torrent_core::sha1(&full_piece);
+
+        // Verify via disk-read path.
+        let (result_tx, mut result_rx) = mpsc::channel(4);
+        disk.enqueue_verify(0, expected_hash, 0, &result_tx);
+        let result = result_rx.recv().await.expect("should receive verify result");
+        assert_eq!(result.piece, 0);
+        assert!(result.passed, "disk-based SHA-1 verify should pass");
+
+        // Wrong hash should fail.
+        disk.write_block_deferred(0, 0, Bytes::from(chunk0));
+        disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1));
+        disk.flush_piece_writes(0).await;
+        disk.enqueue_verify(0, Id20::ZERO, 0, &result_tx);
+        let result = result_rx.recv().await.expect("should receive verify result");
+        assert!(!result.passed, "wrong hash should fail disk-based verify");
+
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_v2_from_disk_after_deferred_write() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(41);
+        let chunk_size = 16384u32;
+        let piece_size = u64::from(chunk_size) * 2;
+        let lengths = Lengths::new(piece_size, piece_size, chunk_size);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        // Write both chunks via deferred queue.
+        let chunk0 = vec![0xCCu8; chunk_size as usize];
+        let chunk1 = vec![0xDDu8; chunk_size as usize];
+        disk.write_block_deferred(0, 0, Bytes::from(chunk0.clone()));
+        disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1.clone()));
+        disk.flush_piece_writes(0).await;
+
+        // Compute expected SHA-256 hash.
+        let mut full_piece = Vec::with_capacity(piece_size as usize);
+        full_piece.extend_from_slice(&chunk0);
+        full_piece.extend_from_slice(&chunk1);
+        let expected_hash = torrent_core::sha256(&full_piece);
+
+        // Verify via disk-read path.
+        let (result_tx, mut result_rx) = mpsc::channel(4);
+        disk.enqueue_verify_v2(0, expected_hash, &result_tx);
+        let result = result_rx.recv().await.expect("should receive v2 verify result");
+        assert_eq!(result.piece, 0);
+        assert!(result.passed, "disk-based SHA-256 verify should pass");
+
+        // Wrong hash should fail.
+        disk.write_block_deferred(0, 0, Bytes::from(chunk0));
+        disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1));
+        disk.flush_piece_writes(0).await;
+        disk.enqueue_verify_v2(0, Id32::ZERO, &result_tx);
+        let result = result_rx.recv().await.expect("should receive v2 verify result");
+        assert!(!result.passed, "wrong hash should fail disk-based v2 verify");
+
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_with_hash_pool_from_disk() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(42);
+        let chunk_size = 16384u32;
+        let piece_size = u64::from(chunk_size) * 2;
+        let lengths = Lengths::new(piece_size, piece_size, chunk_size);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let mut disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        // Configure hash pool.
+        let (hash_result_tx, mut hash_result_rx) = mpsc::channel(4);
+        disk.set_hash_result_tx(hash_result_tx);
+        let hash_pool = std::sync::Arc::new(crate::hash_pool::HashPool::new(2, 16));
+        disk.set_hash_pool(hash_pool);
+
+        // Write both chunks via deferred queue.
+        let chunk0 = vec![0xEEu8; chunk_size as usize];
+        let chunk1 = vec![0xFFu8; chunk_size as usize];
+        disk.write_block_deferred(0, 0, Bytes::from(chunk0.clone()));
+        disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1.clone()));
+        disk.flush_piece_writes(0).await;
+
+        // Compute expected SHA-1 hash.
+        let mut full_piece = Vec::with_capacity(piece_size as usize);
+        full_piece.extend_from_slice(&chunk0);
+        full_piece.extend_from_slice(&chunk1);
+        let expected_hash = torrent_core::sha1(&full_piece);
+
+        // Verify via hash pool path (reads from disk, submits to pool).
+        let (verify_result_tx, _) = mpsc::channel(4); // not used for pool path
+        disk.enqueue_verify(0, expected_hash, 42, &verify_result_tx);
+        let result = hash_result_rx
+            .recv()
+            .await
+            .expect("should receive hash pool result");
+        assert!(result.passed, "hash pool disk-based verify should pass");
+        assert_eq!(result.piece, 0);
+        assert_eq!(result.generation, 42);
 
         mgr.shutdown().await;
     }
