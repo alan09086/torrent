@@ -151,7 +151,10 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
             total_bytes = stats.total_done;
             total_wanted = stats.total_wanted;
 
-            if stats.progress >= 1.0 {
+            // Only treat as finished when we actually have data to download
+            // and it's all done. Before magnet metadata resolves, total_wanted
+            // is 0 and progress is 1.0 — that's not "finished".
+            if stats.progress >= 1.0 && stats.total_wanted > 0 {
                 finished = true;
             }
 

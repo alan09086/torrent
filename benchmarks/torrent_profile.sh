@@ -138,9 +138,9 @@ for trial in $(seq 1 "$TRIALS"); do
             sudo chown alan:alan "$out_dir/perf-stat.txt" 2>/dev/null || true
         fi
     elif [ "$trial" -eq 2 ]; then
-        echo "  [heaptrack] (timeout ${TIMEOUT}s)"
-        DISPLAY= timeout --signal=TERM --kill-after=10 "$TIMEOUT" \
-            /usr/bin/time -v heaptrack -o "$out_dir/heaptrack" \
+        echo "  [heaptrack --record-only] (timeout ${TIMEOUT}s)"
+        timeout --signal=TERM --kill-after=10 "$TIMEOUT" \
+            /usr/bin/time -v heaptrack --record-only -o "$out_dir/heaptrack" \
             "$TORRENT" download "$MAGNET" -o "$DL_BASE" -q -p "$PORT" \
             2>"$time_file" || true
     else
