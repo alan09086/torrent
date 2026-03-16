@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.100.0 | M100 | Direct per-block pwrite — deferred write queue replaces WriteCoalescer/StoreBuffer/PieceBufferPool, verify from disk, ~1100 lines deleted, RSS 46-73 MiB |
 | 0.99.0 | M99 | Piece buffer pool — `PieceBufferPool` with semaphore-gated reusable `BytesMut` buffers, hard-bounded ~48 MiB write pipeline regardless of peer count |
 | 0.98.1 | — | Write coalescer buffer reuse fix — `Bytes::copy_from_slice` + `clear()` eliminates ~3 GiB allocation churn; store buffer back-pressure fallback to sync writes |
 | 0.98.0 | M98 | Write coalescing — per-peer block buffering, ~32x fewer disk syscalls, split store-buffer/coalesced-write path |
@@ -53,6 +54,36 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.100.0] — 2026-03-15
+
+### Added
+- `DiskIoBackend::read_piece()` — read full piece from storage for disk-based verification
+- Deferred write queue — per-torrent MPSC channel + dedicated writer task calls
+  `spawn_blocking(storage.write_chunk())` for each block
+- `DiskWriteState` — per-piece pending counter with `Notify` flush barrier
+- `DiskHandle::write_block_deferred()` — enqueue block write, fallback to
+  `block_in_place` if channel full
+- `DiskHandle::flush_piece_writes()` — async barrier waits until all deferred
+  writes for a piece complete
+- 6 new tests for deferred write queue and disk-based verification
+
+### Changed
+- **Peer write path simplified** — replaced 80-line WriteCoalescer + store buffer
+  block with single `disk.write_block_deferred()` call
+- **Verification reads from disk** — `enqueue_verify`/`enqueue_verify_v2` now call
+  `backend.read_piece()` instead of extracting from in-memory store buffer
+- **TorrentActor flushes before verify** — `flush_piece_writes()` called before
+  `enqueue_verify` at both piece-completion call sites
+- RSS reduced to 46-73 MiB (from ~58 MiB with M99 pipeline)
+
+### Removed
+- `write_coalescer.rs` — per-peer block accumulator (~250 lines)
+- `piece_buffer_pool.rs` — semaphore-gated buffer pool (~290 lines)
+- `StoreBufferInner` — in-memory block store for verification (~70 lines)
+- `DiskJob::WriteAsync` variant
+- `store_buffer_max_bytes` and `piece_buffer_pool_size` settings
+- ~1100 lines net deleted (1505 tests, was 1527)
 
 ## [0.99.0] — 2026-03-15
 
