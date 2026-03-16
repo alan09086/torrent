@@ -5805,10 +5805,10 @@ impl TorrentActor {
     }
 
     fn check_end_game_activation(&mut self) {
-        // M103: Block stealing replaces endgame when enabled
-        if self.block_maps.is_some() {
-            return;
-        }
+        // M103: EndGame coexists with block stealing — stealing handles the
+        // bulk download (fast peers steal from slow peers' pieces), while
+        // EndGame handles the last-pieces problem (duplicate requests for the
+        // final few blocks when all pieces are reserved).
         if self.end_game.is_active() || self.state != TorrentState::Downloading {
             return;
         }
