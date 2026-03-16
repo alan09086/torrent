@@ -5,9 +5,11 @@
 //! mid-piece, the piece is released and another peer can re-request all blocks.
 
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use rustc_hash::FxHashMap;
 use torrent_core::Lengths;
@@ -401,6 +403,187 @@ impl PeerSlab {
     /// Number of active peers.
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+}
+
+/// Pre-allocated atomic bit arrays for tracking per-block request and receipt
+/// status across all pieces.
+///
+/// Enables multiple peers to claim individual blocks within the same piece via
+/// lock-free atomic operations. Each piece has two bit arrays (`requested` and
+/// `received`), stored as flat `Vec<AtomicU64>` indexed by piece and block.
+///
+/// This is the core data structure for M103 per-block stealing: when a piece
+/// is in steal mode, peers race to claim individual blocks via `mark_requested`
+/// (atomic `fetch_or`), achieving zero-contention dispatch.
+#[derive(Debug)]
+pub(crate) struct BlockMaps {
+    /// Bit array tracking which blocks have been requested (one bit per block).
+    requested: Vec<AtomicU64>,
+    /// Bit array tracking which blocks have been received (one bit per block).
+    received: Vec<AtomicU64>,
+    /// Number of `AtomicU64` words per piece. Computed as `ceil(max_blocks / 64)`.
+    words_per_piece: u32,
+}
+
+#[allow(dead_code)]
+impl BlockMaps {
+    /// Create a new `BlockMaps` for the given torrent geometry.
+    ///
+    /// Pre-allocates atomic bit arrays for all pieces. Each piece gets
+    /// `ceil(max_blocks_per_piece / 64)` words, where max blocks is derived
+    /// from the first (full-size) piece.
+    pub fn new(num_pieces: u32, lengths: &Lengths) -> Self {
+        let max_blocks = if num_pieces == 0 {
+            0
+        } else {
+            lengths.chunks_in_piece(0)
+        };
+        let words_per_piece = max_blocks.saturating_add(63) / 64;
+        let total_words = (num_pieces as usize).saturating_mul(words_per_piece as usize);
+
+        let mut requested = Vec::with_capacity(total_words);
+        let mut received = Vec::with_capacity(total_words);
+        for _ in 0..total_words {
+            requested.push(AtomicU64::new(0));
+            received.push(AtomicU64::new(0));
+        }
+
+        Self {
+            requested,
+            received,
+            words_per_piece,
+        }
+    }
+
+    /// Atomically mark a block as requested.
+    ///
+    /// Returns `true` if the bit was **already set** (another peer won the
+    /// race). Returns `false` if this caller claimed the block.
+    ///
+    /// Uses `AtomicU64::fetch_or` on the appropriate word, then checks the
+    /// old value's bit to determine whether we were first.
+    pub fn mark_requested(&self, piece: u32, block: u32) -> bool {
+        let (word_idx, bit_mask) = self.word_and_mask(piece, block);
+        let old = self.requested[word_idx].fetch_or(bit_mask, Ordering::Relaxed);
+        old & bit_mask != 0
+    }
+
+    /// Mark a block as received.
+    pub fn mark_received(&self, piece: u32, block: u32) {
+        let (word_idx, bit_mask) = self.word_and_mask(piece, block);
+        self.received[word_idx].fetch_or(bit_mask, Ordering::Relaxed);
+    }
+
+    /// Find the first block index in `[0, total_blocks)` where the requested
+    /// bit is **not** set.
+    ///
+    /// Returns `None` if all blocks have been requested.
+    pub fn next_unrequested(&self, piece: u32, total_blocks: u32) -> Option<u32> {
+        let base = (piece as usize).checked_mul(self.words_per_piece as usize)?;
+
+        for block in 0..total_blocks {
+            let word_offset = block / 64;
+            let bit = block % 64;
+            let word_idx = base.checked_add(word_offset as usize)?;
+            let word = self.requested.get(word_idx)?.load(Ordering::Relaxed);
+            if word & (1u64 << bit) == 0 {
+                return Some(block);
+            }
+        }
+        None
+    }
+
+    /// Check if all blocks in `[0, total_blocks)` have their received bit set.
+    pub fn all_received(&self, piece: u32, total_blocks: u32) -> bool {
+        let Some(base) = (piece as usize).checked_mul(self.words_per_piece as usize) else {
+            return total_blocks == 0;
+        };
+
+        for block in 0..total_blocks {
+            let word_offset = block / 64;
+            let bit = block % 64;
+            let Some(atom) = self.received.get(base + word_offset as usize) else {
+                return false;
+            };
+            let word = atom.load(Ordering::Relaxed);
+            if word & (1u64 << bit) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Zero all bits for a piece (both requested and received arrays).
+    ///
+    /// Called on piece completion or hash failure to reset block tracking.
+    pub fn clear(&self, piece: u32, total_blocks: u32) {
+        let base = (piece as usize).saturating_mul(self.words_per_piece as usize);
+        let num_words = total_blocks.saturating_add(63) / 64;
+
+        for w in 0..num_words as usize {
+            let idx = base + w;
+            if let Some(atom) = self.requested.get(idx) {
+                atom.store(0, Ordering::Relaxed);
+            }
+            if let Some(atom) = self.received.get(idx) {
+                atom.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Compute the flat array index and bit mask for a (piece, block) pair.
+    fn word_and_mask(&self, piece: u32, block: u32) -> (usize, u64) {
+        let base = (piece as usize).saturating_mul(self.words_per_piece as usize);
+        let word_offset = (block / 64) as usize;
+        let bit = block % 64;
+        (base + word_offset, 1u64 << bit)
+    }
+}
+
+/// Shared queue of pieces available for block-level stealing.
+///
+/// Maintained by `TorrentActor`. When a piece has unrequested blocks available
+/// for stealing (e.g., original owner disconnected mid-piece), it is pushed
+/// here. Peer tasks pop from the front to find steal work.
+///
+/// Uses `std::sync::Mutex` (not tokio) because the lock is never held across
+/// an await point — operations are trivially fast (push/pop/linear scan).
+#[derive(Debug)]
+pub(crate) struct StealCandidates {
+    inner: Mutex<VecDeque<u32>>,
+}
+
+#[allow(dead_code)]
+impl StealCandidates {
+    /// Create an empty steal queue.
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Add a piece to the back of the steal queue.
+    pub fn push(&self, piece: u32) {
+        let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
+        guard.push_back(piece);
+    }
+
+    /// Take a piece from the front of the steal queue.
+    pub fn pop(&self) -> Option<u32> {
+        let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
+        guard.pop_front()
+    }
+
+    /// Remove a specific piece from the queue (linear scan).
+    ///
+    /// This is O(n) but acceptable because the steal queue is small — it only
+    /// contains pieces that are partially downloaded and available for stealing.
+    pub fn remove(&self, piece: u32) {
+        let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
+        if let Some(pos) = guard.iter().position(|&p| p == piece) {
+            guard.remove(pos);
+        }
     }
 }
 
@@ -1151,5 +1334,177 @@ mod tests {
         // Both peers got pieces (peer 2 might get the endgame piece or the other one)
         // The key invariant: no deadlock, no panic, both get blocks
         assert!(b2.length > 0);
+    }
+
+    // ---- BlockMaps tests ----
+
+    #[test]
+    fn block_maps_mark_requested() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // First mark: we win the race (bit was not set).
+        let was_set = bm.mark_requested(0, 0);
+        assert!(
+            !was_set,
+            "first mark_requested should return false (we claimed it)"
+        );
+
+        // Second mark on same block: someone already claimed it.
+        let was_set = bm.mark_requested(0, 0);
+        assert!(
+            was_set,
+            "second mark_requested should return true (already set)"
+        );
+    }
+
+    #[test]
+    fn block_maps_mark_received() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Not all received initially.
+        assert!(!bm.all_received(0, 2));
+
+        // Mark block 0 received — still not all.
+        bm.mark_received(0, 0);
+        assert!(!bm.all_received(0, 2));
+
+        // Mark block 1 received — now all received.
+        bm.mark_received(0, 1);
+        assert!(bm.all_received(0, 2));
+    }
+
+    #[test]
+    fn block_maps_next_unrequested() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Initially block 0 is unrequested.
+        assert_eq!(bm.next_unrequested(1, 2), Some(0));
+
+        // Request block 0 — next unrequested is block 1.
+        bm.mark_requested(1, 0);
+        assert_eq!(bm.next_unrequested(1, 2), Some(1));
+
+        // Request block 1 — no unrequested blocks remain.
+        bm.mark_requested(1, 1);
+        assert_eq!(bm.next_unrequested(1, 2), None);
+    }
+
+    #[test]
+    fn block_maps_all_requested() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Request all blocks in piece 2.
+        bm.mark_requested(2, 0);
+        bm.mark_requested(2, 1);
+
+        // next_unrequested should return None.
+        assert_eq!(bm.next_unrequested(2, 2), None);
+    }
+
+    #[test]
+    fn block_maps_all_received() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Mark all blocks in piece 3 as received.
+        bm.mark_received(3, 0);
+        bm.mark_received(3, 1);
+
+        assert!(bm.all_received(3, 2));
+    }
+
+    #[test]
+    fn block_maps_partial_received() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Mark only block 0 of piece 1 as received.
+        bm.mark_received(1, 0);
+
+        assert!(
+            !bm.all_received(1, 2),
+            "should be false with only 1 of 2 blocks received"
+        );
+    }
+
+    #[test]
+    fn block_maps_clear_resets_bits() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Set some bits.
+        bm.mark_requested(0, 0);
+        bm.mark_requested(0, 1);
+        bm.mark_received(0, 0);
+
+        // Clear piece 0.
+        bm.clear(0, 2);
+
+        // All bits should be zeroed.
+        assert_eq!(bm.next_unrequested(0, 2), Some(0));
+        assert!(!bm.all_received(0, 2));
+        // mark_requested should succeed again (bit was cleared).
+        assert!(!bm.mark_requested(0, 0));
+    }
+
+    #[test]
+    fn block_maps_independent_pieces() {
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let bm = BlockMaps::new(4, &lengths);
+
+        // Request all blocks in piece 0, none in piece 1.
+        bm.mark_requested(0, 0);
+        bm.mark_requested(0, 1);
+
+        // Piece 0 fully requested, piece 1 untouched.
+        assert_eq!(bm.next_unrequested(0, 2), None);
+        assert_eq!(bm.next_unrequested(1, 2), Some(0));
+    }
+
+    // ---- StealCandidates tests ----
+
+    #[test]
+    fn steal_candidates_push_pop_fifo() {
+        let sc = StealCandidates::new();
+
+        sc.push(10);
+        sc.push(20);
+        sc.push(30);
+
+        assert_eq!(sc.pop(), Some(10));
+        assert_eq!(sc.pop(), Some(20));
+        assert_eq!(sc.pop(), Some(30));
+        assert_eq!(sc.pop(), None);
+    }
+
+    #[test]
+    fn steal_candidates_remove() {
+        let sc = StealCandidates::new();
+
+        sc.push(5);
+        sc.push(10);
+        sc.push(15);
+
+        // Remove middle element.
+        sc.remove(10);
+
+        assert_eq!(sc.pop(), Some(5));
+        assert_eq!(sc.pop(), Some(15));
+        assert_eq!(sc.pop(), None);
+    }
+
+    #[test]
+    fn steal_candidates_remove_nonexistent() {
+        let sc = StealCandidates::new();
+        sc.push(42);
+
+        // Removing a nonexistent element is a no-op.
+        sc.remove(999);
+
+        assert_eq!(sc.pop(), Some(42));
     }
 }
