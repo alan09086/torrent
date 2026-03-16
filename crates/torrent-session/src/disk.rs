@@ -149,11 +149,17 @@ pub struct DiskConfig {
     /// Storage allocation mode. Default: Auto.
     pub storage_mode: torrent_core::StorageMode,
     /// Total cache size in bytes (read + write). Default: 16 MiB.
+    /// Deprecated: use `buffer_pool_capacity` instead.
     pub cache_size: usize,
     /// Fraction of cache_size reserved for write buffering. Default: 0.5.
+    /// Deprecated: buffer pool handles write/read split implicitly.
     pub write_cache_ratio: f32,
     /// Bounded channel capacity. Default: 512.
     pub channel_capacity: usize,
+    /// Unified buffer pool capacity in bytes. Default: 64 MiB.
+    pub buffer_pool_capacity: usize,
+    /// Lock cached piece data in physical memory. Default: true on Unix.
+    pub enable_mlock: bool,
 }
 
 impl Default for DiskConfig {
@@ -164,6 +170,8 @@ impl Default for DiskConfig {
             cache_size: 16 * 1024 * 1024,
             write_cache_ratio: 0.5,
             channel_capacity: 512,
+            buffer_pool_capacity: 64 * 1024 * 1024,
+            enable_mlock: cfg!(unix),
         }
     }
 }

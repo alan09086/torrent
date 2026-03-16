@@ -85,6 +85,12 @@ fn default_disk_cache_size() -> usize {
 fn default_disk_write_cache_ratio() -> f32 {
     0.5
 }
+fn default_buffer_pool_capacity() -> usize {
+    64 * 1024 * 1024
+}
+fn default_enable_mlock() -> bool {
+    cfg!(unix)
+}
 fn default_disk_channel_capacity() -> usize {
     512
 }
@@ -134,7 +140,7 @@ fn default_dht_sample_interval() -> u64 {
     0
 }
 fn default_max_suggest_pieces() -> usize {
-    10
+    16
 }
 fn default_predictive_piece_announce_ms() -> u64 {
     0
@@ -427,6 +433,15 @@ pub struct Settings {
     /// Capacity of the async disk I/O command channel (default: 512).
     #[serde(default = "default_disk_channel_capacity")]
     pub disk_channel_capacity: usize,
+    /// Unified buffer pool capacity in bytes (default: 64 MiB).
+    /// Replaces disk_cache_size when set. Covers both write buffering and read cache.
+    #[serde(default = "default_buffer_pool_capacity")]
+    pub buffer_pool_capacity: usize,
+    /// Lock cached piece data in physical memory (default: true on Unix).
+    /// Prevents the OS from swapping out hot cache entries. Silently ignored
+    /// if RLIMIT_MEMLOCK is exceeded.
+    #[serde(default = "default_enable_mlock")]
+    pub enable_mlock: bool,
     // ── Hashing & piece picking ──
     /// Number of concurrent piece hash verification threads (default: 2).
     #[serde(default = "default_hashing_threads")]
@@ -759,6 +774,8 @@ impl Default for Settings {
             disk_cache_size: 16 * 1024 * 1024,
             disk_write_cache_ratio: 0.5,
             disk_channel_capacity: 512,
+            buffer_pool_capacity: 64 * 1024 * 1024,
+            enable_mlock: cfg!(unix),
             // Hashing & piece picking
             hashing_threads: default_hashing_threads(),
             max_request_queue_depth: 250,
@@ -778,7 +795,7 @@ impl Default for Settings {
             // Piece picker enhancements (M44)
             piece_extent_affinity: true,
             suggest_mode: false,
-            max_suggest_pieces: 10,
+            max_suggest_pieces: 16,
             predictive_piece_announce_ms: 0,
             // Proxy
             proxy: ProxyConfig::default(),
@@ -847,6 +864,7 @@ impl Settings {
     pub fn min_memory() -> Self {
         Self {
             disk_cache_size: 8 * 1024 * 1024,
+            buffer_pool_capacity: 16 * 1024 * 1024,
             max_torrents: 20,
             max_peers_per_torrent: 30,
             active_downloads: 1,
@@ -869,6 +887,7 @@ impl Settings {
     pub fn high_performance() -> Self {
         Self {
             disk_cache_size: 256 * 1024 * 1024,
+            buffer_pool_capacity: 256 * 1024 * 1024,
             max_torrents: 2000,
             max_peers_per_torrent: 250,
             active_downloads: 30,
@@ -1005,6 +1024,8 @@ impl From<&Settings> for crate::disk::DiskConfig {
             cache_size: s.disk_cache_size,
             write_cache_ratio: s.disk_write_cache_ratio,
             channel_capacity: s.disk_channel_capacity,
+            buffer_pool_capacity: s.buffer_pool_capacity,
+            enable_mlock: s.enable_mlock,
         }
     }
 }
@@ -1143,6 +1164,8 @@ impl PartialEq for Settings {
             && self.disk_cache_size == other.disk_cache_size
             && self.disk_write_cache_ratio.to_bits() == other.disk_write_cache_ratio.to_bits()
             && self.disk_channel_capacity == other.disk_channel_capacity
+            && self.buffer_pool_capacity == other.buffer_pool_capacity
+            && self.enable_mlock == other.enable_mlock
             && self.hashing_threads == other.hashing_threads
             && self.max_request_queue_depth == other.max_request_queue_depth
             && self.initial_queue_depth == other.initial_queue_depth
@@ -1717,7 +1740,7 @@ mod tests {
         let s = Settings::default();
         assert!(s.piece_extent_affinity);
         assert!(!s.suggest_mode);
-        assert_eq!(s.max_suggest_pieces, 10);
+        assert_eq!(s.max_suggest_pieces, 16);
         assert_eq!(s.predictive_piece_announce_ms, 0);
     }
 
