@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.102.0 | M102 | Unified buffer pool (libtorrent 1.x-style) — replaces separate ARC cache + WriteBuffer with single BufferPool, hash-from-cache, full-piece prefetch, BEP 6 T2-based suggest |
 | 0.101.0 | M101 | Performance parity — SmallVec segments (111K allocs eliminated), batch writer (93K→~1.5K spawns), streaming piece verification (262 KiB/piece alloc eliminated) |
 | 0.100.0 | M100 | Direct per-block pwrite — deferred write queue replaces WriteCoalescer/StoreBuffer/PieceBufferPool, verify from disk, ~1100 lines deleted, RSS 46-73 MiB |
 | 0.99.0 | M99 | Piece buffer pool — `PieceBufferPool` with semaphore-gated reusable `BytesMut` buffers, hard-bounded ~48 MiB write pipeline regardless of peer count |
@@ -55,6 +56,39 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.102.0] — 2026-03-16
+
+### Added
+- **Unified buffer pool** (`buffer_pool.rs`, ~1400 lines) — libtorrent 1.x-style cache
+  replacing separate `ArcCache` read cache + `WriteBuffer` write buffer with a single
+  `BufferPool`. One entry per piece transitions through Writing → Skeleton → Cached states.
+- **Purpose-built byte-budget ARC** — adaptive replacement cache with T1/T2 deques,
+  B1/B2 ghost lists, byte-level capacity tracking (not entry count), and `t2_keys()`
+  query for BEP 6 suggest (proven-popular pieces accessed ≥2 times)
+- **Hash-from-cache** — `hash_piece()` checks BufferPool for assembled blocks before
+  reading from disk, eliminating the write→read→hash round-trip for every piece.
+  Failed pieces never touch disk.
+- **Full-piece prefetch** — read cache miss triggers full piece read from storage,
+  subsequent block reads from same piece are cache hits (libtorrent 1.x model)
+- **BEP 6 T2-based suggest** — `cached_pieces()` now returns T2 entries (capped at 16)
+  instead of all cached pieces, maximising cache hit probability for suggested pieces
+- **mlock support** — `libc::mlock()` on Cached entry memory at ARC insert, `munlock()`
+  on eviction. Log-once suppression on RLIMIT_MEMLOCK failure.
+- **Buffer pool settings** — `buffer_pool_capacity` (64 MiB default),
+  `enable_mlock` (true on Unix), `max_suggest_pieces` default raised from 10 to 16
+- 25 new tests (18 unit + 7 integration)
+
+### Changed
+- `DiskIoBackend::write_chunk()` now accepts `Bytes` instead of `&[u8]` (zero-copy
+  from wire to cache)
+- `DiskIoStats` extended with 5 new fields: `read_cache_bytes`, `pool_entries`,
+  `prefetch_count`, `eviction_count`, `skeleton_count`
+- `DiskStats` extended with matching fields (serde forward-compatible via `#[serde(default)]`)
+
+### Removed
+- `write_buffer.rs` (211 lines) — replaced by BufferPool
+- `ArcCache` read cache in PosixDiskIo — replaced by BufferPool's purpose-built ARC
 
 ## [0.101.0] — 2026-03-16
 
