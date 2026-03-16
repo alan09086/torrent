@@ -264,27 +264,46 @@ impl DiskManagerHandle {
         let writer_storage = Arc::clone(&storage_for_handle);
         let writer_state = Arc::clone(&write_state);
         tokio::spawn(async move {
-            while let Some(WriteJob { piece, begin, data }) = write_rx.recv().await {
+            while let Some(first) = write_rx.recv().await {
+                // Drain up to 64 jobs into a batch, then execute all in a
+                // single spawn_blocking call to reduce thread pool overhead.
+                let mut batch = vec![first];
+                while batch.len() < 64 {
+                    match write_rx.try_recv() {
+                        Ok(job) => batch.push(job),
+                        Err(_) => break,
+                    }
+                }
+
+                // Collect piece indices before moving batch into the closure.
+                let pieces: Vec<u32> = batch.iter().map(|j| j.piece).collect();
+
                 // Use spawn_blocking (not block_in_place) because this task may
                 // run on a current_thread runtime in tests. The hot-path fallback
                 // in write_block_deferred uses block_in_place on worker threads.
                 let ws = Arc::clone(&writer_storage);
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = ws.write_chunk(piece, begin, &data) {
-                        tracing::warn!(piece, begin, %e, "deferred write failed");
+                    for WriteJob { piece, begin, data } in &batch {
+                        if let Err(e) = ws.write_chunk(*piece, *begin, data) {
+                            tracing::warn!(piece, begin, %e, "deferred write failed");
+                        }
                     }
                 })
                 .await;
-                // Decrement pending count and notify waiters.
-                let mut pending = writer_state.pending.lock().expect("pending lock poisoned");
-                if let Some(count) = pending.get_mut(&piece) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        pending.remove(&piece);
-                        drop(pending);
-                        writer_state.notify.notify_waiters();
+
+                // Decrement pending counts for all jobs in batch, notify once.
+                {
+                    let mut pending = writer_state.pending.lock().expect("pending lock poisoned");
+                    for piece in &pieces {
+                        if let Some(count) = pending.get_mut(piece) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                pending.remove(piece);
+                            }
+                        }
                     }
                 }
+                writer_state.notify.notify_waiters();
             }
         });
 
@@ -1378,6 +1397,71 @@ mod tests {
         assert_eq!(&piece[25..50], &[2u8; 25]);
         assert_eq!(&piece[50..75], &[3u8; 25]);
         assert_eq!(&piece[75..100], &[4u8; 25]);
+
+        mgr.shutdown().await;
+    }
+
+    // ── M101: Batch writer tests ──────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_writer_drains_multiple_jobs() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(50);
+        // 10 blocks of 25 bytes each across a single piece of 250 bytes.
+        let lengths = Lengths::new(250, 250, 25);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        // Enqueue 10 writes (well within the 64-job batch cap).
+        for i in 0u32..10 {
+            let data = Bytes::from(vec![i as u8 + 1; 25]);
+            disk.write_block_deferred(0, i * 25, data);
+        }
+
+        // Wait for all writes to piece 0 to flush.
+        disk.flush_piece_writes(0).await;
+
+        // Verify all 10 blocks landed correctly.
+        for i in 0u32..10 {
+            let chunk = storage.read_chunk(0, i * 25, 25).unwrap();
+            assert_eq!(
+                &chunk[..],
+                vec![i as u8 + 1; 25].as_slice(),
+                "block {i} mismatch"
+            );
+        }
+
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_writer_caps_at_64() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(51);
+        // 100 blocks of 16 bytes each across a single piece of 1600 bytes.
+        let lengths = Lengths::new(1600, 1600, 16);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        // Enqueue 100 writes — more than the 64-job batch cap, so at least
+        // two batches are needed to drain the channel.
+        for i in 0u32..100 {
+            let data = Bytes::from(vec![i as u8; 16]);
+            disk.write_block_deferred(0, i * 16, data);
+        }
+
+        // Wait for all 100 writes to complete (requires multiple batches).
+        disk.flush_piece_writes(0).await;
+
+        // Verify every block landed correctly.
+        for i in 0u32..100 {
+            let chunk = storage.read_chunk(0, i * 16, 16).unwrap();
+            assert_eq!(
+                &chunk[..],
+                vec![i as u8; 16].as_slice(),
+                "block {i} mismatch after overflow to next batch"
+            );
+        }
 
         mgr.shutdown().await;
     }
