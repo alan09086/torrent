@@ -372,7 +372,6 @@ impl TorrentHandle {
             block_maps: None,
             steal_candidates: None,
             snapshot_dirty: false,
-            last_snapshot_rebuild: std::time::Instant::now(),
             availability_snapshot: None,
             snapshot_generation: 0,
             piece_owner: Vec::new(),
@@ -669,7 +668,6 @@ impl TorrentHandle {
             block_maps: None,
             steal_candidates: None,
             snapshot_dirty: false,
-            last_snapshot_rebuild: std::time::Instant::now(),
             availability_snapshot: None,
             snapshot_generation: 0,
             piece_owner: Vec::new(),
@@ -1398,8 +1396,6 @@ struct TorrentActor {
     steal_candidates: Option<Arc<StealCandidates>>,
     /// M103: Dirty flag for reactive snapshot rebuild.
     snapshot_dirty: bool,
-    /// M103: Last snapshot rebuild time for debounce.
-    last_snapshot_rebuild: std::time::Instant,
     /// M93: Current availability snapshot (shared with peers via Arc).
     availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
     /// M93: Snapshot generation counter.
@@ -2438,7 +2434,6 @@ impl TorrentActor {
                 _ = snapshot_rebuild_interval.tick() => {
                     if self.snapshot_dirty {
                         self.snapshot_dirty = false;
-                        self.last_snapshot_rebuild = std::time::Instant::now();
                         self.rebuild_availability_snapshot();
                     }
                 }
