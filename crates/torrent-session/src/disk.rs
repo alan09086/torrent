@@ -367,11 +367,16 @@ impl DiskManagerHandle {
         let writer_state = Arc::clone(&write_state);
         tokio::spawn(async move {
             while let Some(WriteJob { piece, begin, data }) = write_rx.recv().await {
-                tokio::task::block_in_place(|| {
-                    if let Err(e) = writer_storage.write_chunk(piece, begin, &data) {
+                // Use spawn_blocking (not block_in_place) because this task may
+                // run on a current_thread runtime in tests. The hot-path fallback
+                // in write_block_deferred uses block_in_place on worker threads.
+                let ws = Arc::clone(&writer_storage);
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = ws.write_chunk(piece, begin, &data) {
                         tracing::warn!(piece, begin, %e, "deferred write failed");
                     }
-                });
+                })
+                .await;
                 // Decrement pending count and notify waiters.
                 let mut pending = writer_state.pending.lock().expect("pending lock poisoned");
                 if let Some(count) = pending.get_mut(&piece) {
@@ -716,6 +721,7 @@ impl DiskHandle {
     /// Returns `true` if the store buffer is over the size limit after insertion,
     /// signalling that the caller should apply back-pressure (e.g. fall back to
     /// synchronous writes) to bound memory growth.
+    #[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
     pub(crate) fn store_buffer_insert(&self, piece: u32, begin: u32, data: Bytes) -> bool {
         let mut sb = self.store_buffer.lock().unwrap();
         sb.insert((self.info_hash, piece), begin, data);
@@ -729,6 +735,7 @@ impl DiskHandle {
     /// (or partial piece on disconnect), written as a single contiguous pwrite().
     ///
     /// Returns `Err(data)` on back-pressure (channel full), `Ok(())` otherwise.
+    #[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
     pub(crate) fn enqueue_write_coalesced(
         &self,
         piece: u32,
@@ -819,11 +826,10 @@ impl DiskHandle {
                 let backend = Arc::clone(backend);
                 let info_hash = self.info_hash;
                 tokio::spawn(async move {
-                    let data = tokio::task::spawn_blocking(move || {
-                        backend.read_piece(info_hash, piece)
-                    })
-                    .await
-                    .expect("read_piece task panicked");
+                    let data =
+                        tokio::task::spawn_blocking(move || backend.read_piece(info_hash, piece))
+                            .await
+                            .expect("read_piece task panicked");
                     match data {
                         Ok(data) => {
                             let job = crate::hash_pool::HashJob {
@@ -872,13 +878,11 @@ impl DiskHandle {
             let result_tx = result_tx.clone();
             tokio::spawn(async move {
                 let passed = tokio::task::spawn_blocking(move || {
-                    let actual =
-                        torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
+                    let actual = torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
                     let passed = actual == expected;
                     if !passed {
                         let num_blocks = blocks.len();
-                        let total_size: usize =
-                            blocks.values().map(|b| b.len()).sum();
+                        let total_size: usize = blocks.values().map(|b| b.len()).sum();
                         let block_info: Vec<(u32, usize)> = blocks
                             .iter()
                             .map(|(&offset, data)| (offset, data.len()))
@@ -975,9 +979,7 @@ impl DiskHandle {
             let result_tx = result_tx.clone();
             tokio::spawn(async move {
                 let passed = tokio::task::spawn_blocking(move || {
-                    let actual = torrent_core::sha256_chunks(
-                        blocks.values().map(|b| b.as_ref()),
-                    );
+                    let actual = torrent_core::sha256_chunks(blocks.values().map(|b| b.as_ref()));
                     actual == expected
                 })
                 .await
@@ -2022,7 +2024,10 @@ mod tests {
         // Verify via disk-read path.
         let (result_tx, mut result_rx) = mpsc::channel(4);
         disk.enqueue_verify(0, expected_hash, 0, &result_tx);
-        let result = result_rx.recv().await.expect("should receive verify result");
+        let result = result_rx
+            .recv()
+            .await
+            .expect("should receive verify result");
         assert_eq!(result.piece, 0);
         assert!(result.passed, "disk-based SHA-1 verify should pass");
 
@@ -2031,7 +2036,10 @@ mod tests {
         disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1));
         disk.flush_piece_writes(0).await;
         disk.enqueue_verify(0, Id20::ZERO, 0, &result_tx);
-        let result = result_rx.recv().await.expect("should receive verify result");
+        let result = result_rx
+            .recv()
+            .await
+            .expect("should receive verify result");
         assert!(!result.passed, "wrong hash should fail disk-based verify");
 
         mgr.shutdown().await;
@@ -2063,7 +2071,10 @@ mod tests {
         // Verify via disk-read path.
         let (result_tx, mut result_rx) = mpsc::channel(4);
         disk.enqueue_verify_v2(0, expected_hash, &result_tx);
-        let result = result_rx.recv().await.expect("should receive v2 verify result");
+        let result = result_rx
+            .recv()
+            .await
+            .expect("should receive v2 verify result");
         assert_eq!(result.piece, 0);
         assert!(result.passed, "disk-based SHA-256 verify should pass");
 
@@ -2072,8 +2083,14 @@ mod tests {
         disk.write_block_deferred(0, chunk_size, Bytes::from(chunk1));
         disk.flush_piece_writes(0).await;
         disk.enqueue_verify_v2(0, Id32::ZERO, &result_tx);
-        let result = result_rx.recv().await.expect("should receive v2 verify result");
-        assert!(!result.passed, "wrong hash should fail disk-based v2 verify");
+        let result = result_rx
+            .recv()
+            .await
+            .expect("should receive v2 verify result");
+        assert!(
+            !result.passed,
+            "wrong hash should fail disk-based v2 verify"
+        );
 
         mgr.shutdown().await;
     }

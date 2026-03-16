@@ -9,9 +9,9 @@ mod settings;
 mod types;
 // These will be added as they're implemented:
 pub(crate) mod ban;
+pub(crate) mod choker;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod chunk_mask;
-pub(crate) mod choker;
 /// Disk I/O manager: configuration, handles, and statistics.
 pub mod disk;
 /// Pluggable disk I/O backend trait and implementations.
@@ -20,6 +20,7 @@ pub mod disk_backend;
 pub(crate) mod dscp;
 pub(crate) mod end_game;
 pub mod extension;
+pub mod hash_pool;
 pub(crate) mod have_buffer;
 pub mod i2p;
 pub(crate) mod ip_filter;
@@ -29,6 +30,8 @@ pub(crate) mod peer;
 pub(crate) mod peer_priority;
 mod persistence;
 pub(crate) mod pex;
+#[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
+pub(crate) mod piece_buffer_pool;
 pub(crate) mod piece_reservation;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod piece_selector;
@@ -51,9 +54,8 @@ pub(crate) mod url_guard;
 pub(crate) mod utp_routing;
 pub(crate) mod web_seed;
 pub(crate) mod write_buffer;
+#[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
 pub(crate) mod write_coalescer;
-pub(crate) mod piece_buffer_pool;
-pub mod hash_pool;
 
 pub use crate::piece_selector::build_wanted_pieces;
 pub use crate::tracker_manager::{TrackerInfo, TrackerStatus};
@@ -64,6 +66,7 @@ pub use disk::{DiskConfig, DiskHandle, DiskJobFlags, DiskManagerHandle, DiskStat
 pub use disk_backend::{DisabledDiskIo, DiskIoBackend, DiskIoStats};
 pub use error::{Error, Result};
 pub use extension::ExtensionPlugin;
+pub use hash_pool::{HashJob, HashPool, HashResult};
 pub use i2p::{I2pDestination, I2pDestinationError};
 pub use ip_filter::{IpFilter, IpFilterError, PortFilter, parse_dat, parse_p2p};
 pub use peer_state::PeerSource;
@@ -75,7 +78,6 @@ pub use settings::Settings;
 pub use stats::{
     MetricKind, NUM_METRICS, SessionCounters, SessionStatsMetric, session_stats_metrics,
 };
-pub use hash_pool::{HashJob, HashPool, HashResult};
 pub use streaming::FileStream;
 pub use torrent::TorrentHandle;
 pub use transport::{BoxedStream, NetworkFactory, TransportListener};

@@ -20,13 +20,11 @@ use torrent_wire::{
     ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType,
 };
 
-use crate::disk::{DiskHandle, DiskJobFlags, DiskWriteError};
-use crate::pipeline::PeerPipelineState;
+use crate::disk::{DiskHandle, DiskWriteError};
 use crate::pex::PexMessage;
-use crate::write_coalescer::WriteCoalescer;
 use crate::piece_reservation::{AtomicPieceStates, AvailabilitySnapshot, PeerDispatchState};
+use crate::pipeline::PeerPipelineState;
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
-
 use tokio::sync::Semaphore;
 
 /// M92: Accumulates block completions for batched delivery to TorrentActor.
@@ -53,7 +51,11 @@ impl PendingBatch {
     /// Record a block write. Returns true if the piece is now complete
     /// (caller should flush immediately).
     fn push(&mut self, index: u32, begin: u32, length: u32) -> bool {
-        self.blocks.push(BlockEntry { index, begin, length });
+        self.blocks.push(BlockEntry {
+            index,
+            begin,
+            length,
+        });
         let count = self.piece_counts.entry(index).or_insert(0);
         *count += 1;
         *count >= self.lengths.chunks_in_piece(index)
@@ -108,9 +110,8 @@ fn maybe_shrink_codec_buffer<T: tokio::io::AsyncRead + Unpin>(
 ) {
     let buf = framed_read.read_buffer_mut();
     if buf.capacity() > CODEC_BUFFER_SHRINK_THRESHOLD {
-        let mut new_buf = bytes::BytesMut::with_capacity(
-            CODEC_BUFFER_TARGET_CAPACITY.max(buf.len()),
-        );
+        let mut new_buf =
+            bytes::BytesMut::with_capacity(CODEC_BUFFER_TARGET_CAPACITY.max(buf.len()));
         if !buf.is_empty() {
             new_buf.extend_from_slice(buf);
         }
@@ -332,12 +333,6 @@ pub(crate) async fn run_peer(
 
     // M92: Pending batch for accumulating block completions
     let mut pending_batch: Option<PendingBatch> = None;
-    // M98: Per-peer write coalescer — buffers blocks into full-piece writes
-    let mut write_coalescer: Option<WriteCoalescer> = None;
-    // M99: Buffer pool reference (set when StartRequesting arrives)
-    let mut pool_ref: Option<std::sync::Arc<crate::piece_buffer_pool::PieceBufferPool>> = None;
-    // M99: Pool permit for the current in-flight piece — held until disk write completes
-    let mut current_pool_permit: Option<tokio::sync::OwnedSemaphorePermit> = None;
     // M92: 25ms flush interval — ticks only when batch has pending blocks
     let mut flush_interval = tokio::time::interval(Duration::from_millis(25));
     flush_interval.tick().await; // skip initial immediate tick
@@ -385,89 +380,9 @@ pub(crate) async fn run_peer(
                                         semaphore.add_permits(1);
                                     }
                                 }
-                                // M98: Write coalescing — buffer blocks, flush as full pieces
-                                if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state {
-                                    if let Some(ref mut wc) = write_coalescer {
-                                        // M99: Acquire pool buffer if needed for a new piece
-                                        if let Some(ref pool) = pool_ref
-                                            && wc.needs_buffer_for(*index)
-                                        {
-                                            match pool.acquire().await {
-                                                Ok((buf, permit)) => {
-                                                    wc.set_buffer(buf);
-                                                    // Drop any orphaned permit from a prior piece
-                                                    // that wasn't flushed (shouldn't happen in
-                                                    // practice — piece switches trigger a flush in
-                                                    // add_block — but be defensive).
-                                                    drop(current_pool_permit.take());
-                                                    current_pool_permit = Some(permit);
-                                                }
-                                                Err(_) => {
-                                                    // Pool closed — exit peer loop
-                                                    break None;
-                                                }
-                                            }
-                                        }
-
-                                        // M98: Per-block store buffer insert (for hash verification).
-                                        // Returns true if store buffer exceeds size limit — apply
-                                        // back-pressure by forcing a sync write to bound memory.
-                                        let over_limit = disk.store_buffer_insert(*index, *begin, data.clone());
-
-                                        if over_limit {
-                                            // Back-pressure: flush any buffered coalesced data, then
-                                            // sync-write this block to throttle the peer task.
-                                            if let Some((flush, ret_buf)) = wc.flush() {
-                                                if let Some(buf) = ret_buf
-                                                    && let Some(ref pool) = pool_ref
-                                                {
-                                                    pool.release_buffer(buf);
-                                                }
-                                                let permit = current_pool_permit.take();
-                                                let _ = disk.enqueue_write_coalesced(
-                                                    flush.piece, flush.begin, flush.data,
-                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx, permit,
-                                                );
-                                            }
-                                            disk.write_chunk(*index, *begin, data.clone(), DiskJobFlags::empty()).await
-                                                .unwrap_or_else(|e| warn!(%addr, index, begin, "back-pressure write failed: {e}"));
-                                        } else {
-                                            // M98: Coalesced write path
-                                            if let Some((flush, ret_buf)) = wc.add_block(*index, *begin, data.as_ref()) {
-                                                if let Some(buf) = ret_buf
-                                                    && let Some(ref pool) = pool_ref
-                                                {
-                                                    pool.release_buffer(buf);
-                                                }
-                                                let permit = current_pool_permit.take();
-                                                match disk.enqueue_write_coalesced(
-                                                    flush.piece, flush.begin, flush.data,
-                                                    DiskJobFlags::FLUSH_PIECE, write_err_tx, permit,
-                                                ) {
-                                                    Ok(()) => {}
-                                                    Err(returned_data) => {
-                                                        // Channel full — DiskJob was returned, permit
-                                                        // inside it was dropped (freed). Fall back to
-                                                        // sync write which doesn't need pool gating.
-                                                        disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
-                                                            .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "coalesced write failed: {e}"));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // Fallback: pre-M98 per-block write (before StartRequesting)
-                                        match disk.enqueue_write(
-                                            *index, *begin, data.clone(),
-                                            DiskJobFlags::empty(), write_err_tx,
-                                        ) {
-                                            Ok(()) => {}
-                                            Err(returned_data) => {
-                                                disk.write_chunk(*index, *begin, returned_data, DiskJobFlags::empty()).await
-                                                    .unwrap_or_else(|e| warn!(%addr, index, begin, "peer disk write failed: {e}"));
-                                            }
-                                        }
-                                    }
+                                // M100: Direct per-block deferred write
+                                if let Some((_, _, Some(ref disk), _)) = reservation_state {
+                                    disk.write_block_deferred(*index, *begin, data.clone());
                                 }
                             }
                             Message::Unchoke => {
@@ -608,17 +523,13 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths, piece_buffer_pool }) => {
+                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths }) => {
                         reservation_state = Some((atomic_states, piece_notify, disk_handle, write_error_tx));
                         dispatch_state = Some(PeerDispatchState::new(availability_snapshot, lengths.clone()));
                         // M92: Create PendingBatch for block batching
                         if pending_batch.is_none() {
                             pending_batch = Some(PendingBatch::new(&lengths));
                         }
-                        // M99: Store pool reference before moving into coalescer
-                        pool_ref = piece_buffer_pool.clone();
-                        // M98: Initialize write coalescer for piece-level disk writes
-                        write_coalescer = Some(WriteCoalescer::new(&lengths, piece_buffer_pool));
                         // Requester arm activates on next loop iteration if unchoked
                     }
                     Some(PeerCommand::UpdateNumPieces(n)) => {
@@ -787,33 +698,6 @@ pub(crate) async fn run_peer(
             })
             .await;
     }
-
-    // M98: Flush any buffered coalesced data on disconnect
-    if let Some(ref mut wc) = write_coalescer
-        && let Some((flush, ret_buf)) = wc.flush()
-        && let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state
-    {
-        // M99: Return buffer to pool for recycling
-        if let Some(buf) = ret_buf
-            && let Some(ref pool) = pool_ref
-        {
-            pool.release_buffer(buf);
-        }
-        // On disconnect, don't pass permit to disk — just drop it.
-        // The partial write doesn't need pipeline gating (peer is going away).
-        match disk.enqueue_write_coalesced(
-            flush.piece, flush.begin, flush.data,
-            DiskJobFlags::FLUSH_PIECE, write_err_tx, None,
-        ) {
-            Ok(()) => {}
-            Err(returned_data) => {
-                disk.write_chunk(flush.piece, flush.begin, returned_data, DiskJobFlags::FLUSH_PIECE).await
-                    .unwrap_or_else(|e| warn!(%addr, piece=flush.piece, "disconnect coalesced flush failed: {e}"));
-            }
-        }
-    }
-    // M99: Release any held pool permit (drop frees the semaphore slot)
-    drop(current_pool_permit);
 
     // Send disconnect event (best-effort)
     let _ = event_tx
@@ -1504,7 +1388,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1556,7 +1440,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1608,7 +1492,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1669,7 +1553,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1721,7 +1605,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1782,7 +1666,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1840,7 +1724,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1888,7 +1772,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -1975,7 +1859,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2027,7 +1911,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2081,7 +1965,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2148,7 +2032,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2246,7 +2130,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2299,7 +2183,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2349,7 +2233,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2416,7 +2300,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2462,7 +2346,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2527,7 +2411,7 @@ mod tests {
                 Some(info_bytes),
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2635,8 +2519,8 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 plugins,
-                true, // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                true,             // enable_holepunch
+                16 * 1024 * 1024, // max_message_size
             )
             .await
         });
@@ -2690,8 +2574,8 @@ mod tests {
                 false, // anonymous_mode
                 None,  // info_bytes
                 plugins,
-                true, // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                true,             // enable_holepunch
+                16 * 1024 * 1024, // max_message_size
             )
             .await
         });
@@ -2843,7 +2727,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 false,                           // enable_holepunch = DISABLED
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2897,7 +2781,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch = ENABLED
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -2951,7 +2835,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -3035,7 +2919,7 @@ mod tests {
                 None,                            // info_bytes
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
-                16 * 1024 * 1024,              // max_message_size
+                16 * 1024 * 1024,                // max_message_size
             )
             .await
         });
@@ -3136,9 +3020,9 @@ mod tests {
         /// Standard torrent: 10 pieces, 512 KiB each (32 blocks per piece), 16 KiB chunks.
         fn standard_lengths() -> Lengths {
             Lengths::new(
-                10 * 512 * 1024,  // total_length: 5 MiB
-                512 * 1024,       // piece_length: 512 KiB
-                16384,            // chunk_size: 16 KiB
+                10 * 512 * 1024, // total_length: 5 MiB
+                512 * 1024,      // piece_length: 512 KiB
+                16384,           // chunk_size: 16 KiB
             )
         }
 
@@ -3212,7 +3096,10 @@ mod tests {
 
             // Writing 1 block to the last piece triggers completion
             let complete = batch.push(10, 0, 16384);
-            assert!(complete, "single-block last piece should complete immediately");
+            assert!(
+                complete,
+                "single-block last piece should complete immediately"
+            );
 
             let blocks = batch.take();
             assert_eq!(blocks.len(), 1);

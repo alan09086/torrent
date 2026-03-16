@@ -343,14 +343,6 @@ impl TorrentHandle {
             disk.set_hash_result_tx(hash_result_tx.clone());
         }
 
-        // M99: Create piece buffer pool eagerly — lengths is known from .torrent metadata.
-        let piece_buffer_pool = Some(Arc::new(
-            crate::piece_buffer_pool::PieceBufferPool::new(
-                config.piece_buffer_pool_size,
-                lengths.piece_length() as usize,
-            ),
-        ));
-
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -477,7 +469,6 @@ impl TorrentHandle {
             auto_sequential_active: false,
             factory,
             hash_pool_ref: hash_pool,
-            piece_buffer_pool,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -771,7 +762,6 @@ impl TorrentHandle {
             auto_sequential_active: false,
             factory,
             hash_pool_ref: hash_pool,
-            piece_buffer_pool: None, // M99: created when metadata arrives (piece_size unknown)
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1582,8 +1572,6 @@ struct TorrentActor {
     factory: Arc<crate::transport::NetworkFactory>,
     /// Shared hash pool for parallel piece verification (M96).
     hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
-    /// M99: Shared piece buffer pool — created when metadata available.
-    piece_buffer_pool: Option<Arc<crate::piece_buffer_pool::PieceBufferPool>>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -2815,7 +2803,8 @@ impl TorrentActor {
             .filter_map(|(piece_index, owner)| {
                 owner.map(|_| {
                     let piece_index = piece_index as u32;
-                    let blocks_in_piece = self.lengths
+                    let blocks_in_piece = self
+                        .lengths
                         .as_ref()
                         .map(|l| l.piece_size(piece_index).div_ceil(l.chunk_size()))
                         .unwrap_or(0);
@@ -2897,7 +2886,10 @@ impl TorrentActor {
         let base_ms: u64 = 100;
         let max_ms: u64 = 5000;
         let delay_ms = base_ms
-            .saturating_mul(1u64.checked_shl(self.dht_v6_empty_count).unwrap_or(u64::MAX))
+            .saturating_mul(
+                1u64.checked_shl(self.dht_v6_empty_count)
+                    .unwrap_or(u64::MAX),
+            )
             .min(max_ms);
         std::time::Duration::from_millis(delay_ms)
     }
@@ -3741,9 +3733,11 @@ impl TorrentActor {
                     debug!(%peer_addr, "MSE retry: updating cmd_tx for plaintext attempt");
                     peer.cmd_tx = cmd_tx;
                     // M93: Re-send lock-free dispatch state to the new peer task
-                    if let (Some(atomic_states), Some(snapshot), Some(notify)) =
-                        (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
-                        && let Some(ref lengths) = self.lengths
+                    if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
+                        &self.atomic_states,
+                        &self.availability_snapshot,
+                        &self.reservation_notify,
+                    ) && let Some(ref lengths) = self.lengths
                     {
                         let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
                             atomic_states: Arc::clone(atomic_states),
@@ -3752,7 +3746,6 @@ impl TorrentActor {
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
                             lengths: lengths.clone(),
-                            piece_buffer_pool: self.piece_buffer_pool.clone(),
                         });
                     }
                 }
@@ -3900,6 +3893,12 @@ impl TorrentActor {
                 }
             }
 
+            // M100: Flush deferred writes before verification — ensures all
+            // blocks are on disk so read_piece() sees complete data.
+            if let Some(ref disk) = self.disk {
+                disk.flush_piece_writes(index).await;
+            }
+
             match self.version {
                 torrent_core::TorrentVersion::V1Only => {
                     // Async: fire-and-forget, result via verify_result_rx
@@ -3910,7 +3909,11 @@ impl TorrentActor {
                             .and_then(|m| m.info.piece_hash(index as usize))
                     {
                         self.pending_verify.insert(index);
-                        let generation = self.piece_generations.get(index as usize).copied().unwrap_or(0);
+                        let generation = self
+                            .piece_generations
+                            .get(index as usize)
+                            .copied()
+                            .unwrap_or(0);
                         disk.enqueue_verify(index, expected, generation, &self.verify_result_tx);
                     }
                 }
@@ -3942,13 +3945,8 @@ impl TorrentActor {
         blocks: Vec<crate::types::BlockEntry>,
     ) {
         for block in &blocks {
-            self.process_block_completion(
-                peer_addr,
-                block.index,
-                block.begin,
-                block.length,
-            )
-            .await;
+            self.process_block_completion(peer_addr, block.index, block.begin, block.length)
+                .await;
         }
     }
 
@@ -4013,8 +4011,7 @@ impl TorrentActor {
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
             peer.pending_requests.remove(index, begin);
             peer.download_bytes_window += length as u64;
-            peer.pipeline
-                .block_received(index, begin, length, now);
+            peer.pipeline.block_received(index, begin, length, now);
             peer.last_data_received = Some(now);
             // Clear snub if snubbed
             if peer.snubbed {
@@ -4059,6 +4056,12 @@ impl TorrentActor {
                 }
             }
 
+            // M100: Flush deferred writes before verification — ensures all
+            // blocks are on disk so read_piece() sees complete data.
+            if let Some(ref disk) = self.disk {
+                disk.flush_piece_writes(index).await;
+            }
+
             match self.version {
                 torrent_core::TorrentVersion::V1Only => {
                     // Async: fire-and-forget, result via verify_result_rx
@@ -4069,7 +4072,11 @@ impl TorrentActor {
                             .and_then(|m| m.info.piece_hash(index as usize))
                     {
                         self.pending_verify.insert(index);
-                        let generation = self.piece_generations.get(index as usize).copied().unwrap_or(0);
+                        let generation = self
+                            .piece_generations
+                            .get(index as usize)
+                            .copied()
+                            .unwrap_or(0);
                         disk.enqueue_verify(index, expected, generation, &self.verify_result_tx);
                     }
                 }
@@ -4982,9 +4989,16 @@ impl TorrentActor {
             None => return,
         };
 
-        match serve_hashes(self.meta_v2.as_ref(), self.version, self.lengths.as_ref(), &request) {
+        match serve_hashes(
+            self.meta_v2.as_ref(),
+            self.version,
+            self.lengths.as_ref(),
+            &request,
+        ) {
             Some(hashes) => {
-                let _ = peer.cmd_tx.try_send(PeerCommand::SendHashes { request, hashes });
+                let _ = peer
+                    .cmd_tx
+                    .try_send(PeerCommand::SendHashes { request, hashes });
             }
             None => {
                 let _ = peer.cmd_tx.try_send(PeerCommand::SendHashReject(request));
@@ -5228,14 +5242,6 @@ impl TorrentActor {
                             .await;
 
                         self.chunk_tracker = Some(ChunkTracker::new(lengths.clone()));
-                        // M99: Create piece buffer pool now that piece_size is known
-                        if self.piece_buffer_pool.is_none() {
-                            let piece_size = lengths.piece_length() as usize;
-                            let pool_size = self.config.piece_buffer_pool_size;
-                            self.piece_buffer_pool = Some(Arc::new(
-                                crate::piece_buffer_pool::PieceBufferPool::new(pool_size, piece_size),
-                            ));
-                        }
                         self.lengths = Some(lengths);
                         self.num_pieces = num_pieces;
                         // M96: Initialize real generation counters + hash result channel
@@ -5321,7 +5327,8 @@ impl TorrentActor {
                                             && let Some(ref dht6) = self.dht_v6
                                             && let Ok(rx) = dht6.get_peers(v2_as_v1).await
                                         {
-                                            self.dht_v6_last_retry = Some(std::time::Instant::now());
+                                            self.dht_v6_last_retry =
+                                                Some(std::time::Instant::now());
                                             self.dht_v6_v2_peers_rx = Some(rx);
                                         }
                                     }
@@ -5408,9 +5415,11 @@ impl TorrentActor {
                         self.recalc_max_in_flight();
                         self.rebuild_availability_snapshot();
                         // M93: Inform all connected peers about lock-free dispatch state
-                        if let (Some(atomic_states), Some(snapshot), Some(notify)) =
-                            (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
-                            && let Some(ref lengths) = self.lengths
+                        if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
+                            &self.atomic_states,
+                            &self.availability_snapshot,
+                            &self.reservation_notify,
+                        ) && let Some(ref lengths) = self.lengths
                         {
                             for peer in self.peers.values() {
                                 let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
@@ -5420,7 +5429,6 @@ impl TorrentActor {
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
                                     lengths: lengths.clone(),
-                                    piece_buffer_pool: self.piece_buffer_pool.clone(),
                                 });
                             }
                         }
@@ -5579,7 +5587,10 @@ impl TorrentActor {
             // not in web_seed_in_flight, and wanted.
             let piece = (0..self.num_pieces).find(|&i| {
                 !ct.has_piece(i)
-                    && !self.piece_owner.get(i as usize).is_some_and(|o| o.is_some())
+                    && !self
+                        .piece_owner
+                        .get(i as usize)
+                        .is_some_and(|o| o.is_some())
                     && !self.web_seed_in_flight.contains_key(&i)
                     && self.wanted_pieces.get(i)
             });
@@ -5692,7 +5703,9 @@ impl TorrentActor {
 
     /// M93: Rebuild the availability snapshot and broadcast to all peers.
     fn rebuild_availability_snapshot(&mut self) {
-        let Some(ref atomic_states) = self.atomic_states else { return };
+        let Some(ref atomic_states) = self.atomic_states else {
+            return;
+        };
         self.snapshot_generation += 1;
         let snapshot = Arc::new(AvailabilitySnapshot::build(
             &self.availability,
@@ -5737,7 +5750,9 @@ impl TorrentActor {
             // which only tracks pieces after chunks arrive). Use the known
             // owner if available, otherwise assign to a random unchoked peer
             // so endgame can send duplicate requests.
-            let fallback_addr = self.peers.values()
+            let fallback_addr = self
+                .peers
+                .values()
                 .find(|p| !p.peer_choking)
                 .map(|p| p.addr);
             for piece in 0..self.num_pieces {
@@ -5751,7 +5766,10 @@ impl TorrentActor {
                 if let Some(addr) = addr {
                     let missing = ct.missing_chunks(piece);
                     for (begin, length) in missing {
-                        per_peer.entry(addr).or_default().push((piece, begin, length));
+                        per_peer
+                            .entry(addr)
+                            .or_default()
+                            .push((piece, begin, length));
                     }
                 }
             }
@@ -5796,8 +5814,11 @@ impl TorrentActor {
 
         for _ in 0..slots {
             let block = if !self.streaming_pieces.is_empty() {
-                self.end_game
-                    .pick_block_streaming(peer_addr, &peer_bitfield, &self.streaming_pieces)
+                self.end_game.pick_block_streaming(
+                    peer_addr,
+                    &peer_bitfield,
+                    &self.streaming_pieces,
+                )
             } else if self.config.strict_end_game {
                 self.end_game
                     .pick_block_strict(peer_addr, &peer_bitfield, &[])
@@ -6117,8 +6138,7 @@ impl TorrentActor {
                 .peers
                 .values()
                 .filter(|p| {
-                    p.bitfield.count_ones() == 0
-                        && p.connected_at.elapsed() > zombie_threshold
+                    p.bitfield.count_ones() == 0 && p.connected_at.elapsed() > zombie_threshold
                 })
                 .map(|p| p.addr)
                 .collect();
@@ -6309,7 +6329,8 @@ impl TorrentActor {
         };
 
         let availability = self.availability.clone();
-        if let Some(idx) = ss.assign_piece(peer_addr, &peer_bitfield, &availability, self.num_pieces)
+        if let Some(idx) =
+            ss.assign_piece(peer_addr, &peer_bitfield, &availability, self.num_pieces)
             && let Some(peer) = self.peers.get(&peer_addr)
         {
             let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));
@@ -6379,9 +6400,11 @@ impl TorrentActor {
                 },
             );
             // M93: Send lock-free dispatch state to peer for integrated dispatch
-            if let (Some(atomic_states), Some(snapshot), Some(notify)) =
-                (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
-                && let Some(peer) = self.peers.get(&addr)
+            if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
+                &self.atomic_states,
+                &self.availability_snapshot,
+                &self.reservation_notify,
+            ) && let Some(peer) = self.peers.get(&addr)
                 && let Some(ref lengths) = self.lengths
             {
                 let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
@@ -6391,7 +6414,6 @@ impl TorrentActor {
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
                     lengths: lengths.clone(),
-                    piece_buffer_pool: self.piece_buffer_pool.clone(),
                 });
             }
 
@@ -6897,7 +6919,11 @@ impl TorrentActor {
 
     /// Add an I2P peer by destination, assigning a synthetic SocketAddr.
     #[allow(dead_code)] // Used by Task 2 (outbound I2P connects)
-    fn add_i2p_peer(&mut self, dest: crate::i2p::I2pDestination, source: PeerSource) -> Option<SocketAddr> {
+    fn add_i2p_peer(
+        &mut self,
+        dest: crate::i2p::I2pDestination,
+        source: PeerSource,
+    ) -> Option<SocketAddr> {
         // Dedup: check if we already track this destination
         if self.i2p_destinations.values().any(|d| d == &dest) {
             return None;
@@ -7021,9 +7047,11 @@ impl TorrentActor {
             },
         );
         // M93: Send lock-free dispatch state to peer for integrated dispatch
-        if let (Some(atomic_states), Some(snapshot), Some(notify)) =
-            (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
-            && let Some(peer) = self.peers.get(&addr)
+        if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
+            &self.atomic_states,
+            &self.availability_snapshot,
+            &self.reservation_notify,
+        ) && let Some(peer) = self.peers.get(&addr)
             && let Some(ref lengths) = self.lengths
         {
             let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
@@ -7033,7 +7061,6 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
-                piece_buffer_pool: self.piece_buffer_pool.clone(),
             });
         }
 
@@ -7109,12 +7136,12 @@ impl TorrentActor {
             None => {
                 debug!(%initiator_addr, %target, "holepunch: target not connected (NotConnected)");
                 if let Some(peer) = self.peers.get(&initiator_addr) {
-                    let _ = peer
-                        .cmd_tx
-                        .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
-                            target,
-                            torrent_wire::HolepunchError::NotConnected,
-                        )));
+                    let _ =
+                        peer.cmd_tx
+                            .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
+                                target,
+                                torrent_wire::HolepunchError::NotConnected,
+                            )));
                 }
                 return;
             }
@@ -7143,11 +7170,12 @@ impl TorrentActor {
 
         // Forward Connect to initiator: "connect to the target"
         if let Some(initiator) = self.peers.get(&initiator_addr) {
-            let _ = initiator
-                .cmd_tx
-                .try_send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
-                    target,
-                )));
+            let _ =
+                initiator
+                    .cmd_tx
+                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
+                        target,
+                    )));
         }
 
         debug!(%initiator_addr, %target, "holepunch: relayed connect to both peers");
@@ -7217,9 +7245,11 @@ impl TorrentActor {
             },
         );
         // M93: Send lock-free dispatch state to peer for integrated dispatch
-        if let (Some(atomic_states), Some(snapshot), Some(notify)) =
-            (&self.atomic_states, &self.availability_snapshot, &self.reservation_notify)
-            && let Some(peer) = self.peers.get(&target)
+        if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
+            &self.atomic_states,
+            &self.availability_snapshot,
+            &self.reservation_notify,
+        ) && let Some(peer) = self.peers.get(&target)
             && let Some(ref lengths) = self.lengths
         {
             let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
@@ -7229,7 +7259,6 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
-                piece_buffer_pool: self.piece_buffer_pool.clone(),
             });
         }
 
@@ -7413,11 +7442,12 @@ impl TorrentActor {
 
         debug!(%target, %relay_addr, "holepunch: sending rendezvous via relay");
         if let Some(relay) = self.peers.get(&relay_addr) {
-            let _ = relay
-                .cmd_tx
-                .try_send(PeerCommand::SendHolepunch(HolepunchMessage::rendezvous(
-                    target,
-                )));
+            let _ =
+                relay
+                    .cmd_tx
+                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::rendezvous(
+                        target,
+                    )));
         }
     }
 }
@@ -7508,7 +7538,9 @@ fn serve_hashes(
         let full_proof = tree.proof_path(start);
         // Skip levels internal to the requested subtree
         let subtree_depth = if request.count > 1 {
-            (request.count as usize).next_power_of_two().trailing_zeros() as usize
+            (request.count as usize)
+                .next_power_of_two()
+                .trailing_zeros() as usize
         } else {
             0
         };
@@ -12568,7 +12600,12 @@ mod tests {
             proof_layers: 0,
         };
 
-        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let result = serve_hashes(
+            Some(&meta),
+            torrent_core::TorrentVersion::V2Only,
+            Some(&lengths),
+            &request,
+        );
         let served = result.expect("should serve hashes");
         assert_eq!(served.len(), 4);
         for (i, h) in served.iter().enumerate() {
@@ -12591,7 +12628,12 @@ mod tests {
             proof_layers: 0,
         };
 
-        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V1Only, Some(&lengths), &request);
+        let result = serve_hashes(
+            Some(&meta),
+            torrent_core::TorrentVersion::V1Only,
+            Some(&lengths),
+            &request,
+        );
         assert!(result.is_none(), "V1Only should reject hash requests");
     }
 
@@ -12612,16 +12654,20 @@ mod tests {
             proof_layers: 0,
         };
 
-        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let result = serve_hashes(
+            Some(&meta),
+            torrent_core::TorrentVersion::V2Only,
+            Some(&lengths),
+            &request,
+        );
         assert!(result.is_none(), "unknown file_root should reject");
     }
 
     #[test]
     fn test_serve_hashes_rejects_out_of_bounds() {
         // 2 piece hashes, piece_length = 16384, chunk_size = 16384
-        let hashes: Vec<torrent_core::Id32> = (0..2u8)
-            .map(|i| torrent_core::Id32([i; 32]))
-            .collect();
+        let hashes: Vec<torrent_core::Id32> =
+            (0..2u8).map(|i| torrent_core::Id32([i; 32])).collect();
         let file_root = torrent_core::Id32([0xAA; 32]);
         let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 2);
         let lengths = Lengths::new(16384 * 2, 16384, DEFAULT_CHUNK_SIZE);
@@ -12635,7 +12681,12 @@ mod tests {
             proof_layers: 0,
         };
 
-        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let result = serve_hashes(
+            Some(&meta),
+            torrent_core::TorrentVersion::V2Only,
+            Some(&lengths),
+            &request,
+        );
         assert!(result.is_none(), "out-of-bounds index should reject");
     }
 
@@ -12643,9 +12694,8 @@ mod tests {
     fn test_serve_hashes_includes_proofs() {
         // 4 piece hashes, piece_length = 16384, chunk_size = 16384
         // => blocks_per_piece = 1, tree has 4 leaves => depth 2
-        let hashes: Vec<torrent_core::Id32> = (0..4u8)
-            .map(|i| torrent_core::Id32([i; 32]))
-            .collect();
+        let hashes: Vec<torrent_core::Id32> =
+            (0..4u8).map(|i| torrent_core::Id32([i; 32])).collect();
         let file_root = torrent_core::Id32([0xAA; 32]);
         let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 4);
         let lengths = Lengths::new(16384 * 4, 16384, DEFAULT_CHUNK_SIZE);
@@ -12659,7 +12709,12 @@ mod tests {
             proof_layers: 1,
         };
 
-        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let result = serve_hashes(
+            Some(&meta),
+            torrent_core::TorrentVersion::V2Only,
+            Some(&lengths),
+            &request,
+        );
         let served = result.expect("should serve hashes with proofs");
         // 1 requested hash + 1 proof hash (sibling of leaf 0) = 2 total
         assert_eq!(served.len(), 2, "should have 1 data hash + 1 proof hash");
@@ -12685,9 +12740,8 @@ mod tests {
         // subtree_depth = log2(2) = 1, so we skip 1 level of the proof path.
         // proof_path(0) = [h1, hash(h2,h3)] — h1 is internal to subtree,
         // hash(h2,h3) is the uncle above. We skip h1 and send hash(h2,h3).
-        let hashes: Vec<torrent_core::Id32> = (0..4u8)
-            .map(|i| torrent_core::Id32([i; 32]))
-            .collect();
+        let hashes: Vec<torrent_core::Id32> =
+            (0..4u8).map(|i| torrent_core::Id32([i; 32])).collect();
         let file_root = torrent_core::Id32([0xAA; 32]);
         let meta = make_test_meta_v2(&hashes, file_root, 16384, 16384 * 4);
         let lengths = Lengths::new(16384 * 4, 16384, DEFAULT_CHUNK_SIZE);
@@ -12700,7 +12754,12 @@ mod tests {
             proof_layers: 1,
         };
 
-        let result = serve_hashes(Some(&meta), torrent_core::TorrentVersion::V2Only, Some(&lengths), &request);
+        let result = serve_hashes(
+            Some(&meta),
+            torrent_core::TorrentVersion::V2Only,
+            Some(&lengths),
+            &request,
+        );
         let served = result.expect("should serve hashes with batch proof");
         // 2 base hashes + 1 uncle hash = 3 total
         assert_eq!(served.len(), 3, "should have 2 data hashes + 1 uncle hash");
@@ -12727,7 +12786,9 @@ mod tests {
     #[test]
     fn is_i2p_synthetic_addr_detects_240_range() {
         assert!(is_i2p_synthetic_addr(&"240.0.0.1:1".parse().unwrap()));
-        assert!(is_i2p_synthetic_addr(&"255.255.255.255:65535".parse().unwrap()));
+        assert!(is_i2p_synthetic_addr(
+            &"255.255.255.255:65535".parse().unwrap()
+        ));
         assert!(!is_i2p_synthetic_addr(&"192.168.1.1:6881".parse().unwrap()));
         assert!(!is_i2p_synthetic_addr(&"[::1]:6881".parse().unwrap()));
     }

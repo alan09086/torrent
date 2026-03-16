@@ -796,8 +796,6 @@ pub(crate) enum PeerCommand {
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
         /// M92: Piece/chunk arithmetic for PendingBatch piece-completion detection.
         lengths: torrent_core::Lengths,
-        /// M99: Shared piece buffer pool for bounded coalescer memory.
-        piece_buffer_pool: Option<std::sync::Arc<crate::piece_buffer_pool::PieceBufferPool>>,
     },
     /// Actor sends an updated availability snapshot to the peer task.
     SnapshotUpdate {
