@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use torrent_core::{Id20, Id32};
 use torrent_storage::TorrentStorage;
 use tracing::warn;
@@ -115,6 +115,28 @@ impl StoreBufferInner {
 }
 
 type StoreBuffer = Mutex<StoreBufferInner>;
+
+/// A single block write job for the deferred writer task.
+pub(crate) struct WriteJob {
+    piece: u32,
+    begin: u32,
+    data: Bytes,
+}
+
+/// State for the per-torrent deferred write queue.
+///
+/// Peers enqueue writes via an MPSC channel; a dedicated writer task
+/// drains the channel and calls `block_in_place(storage.write_chunk())`.
+/// A per-piece pending counter + Notify allows callers to wait until
+/// all writes for a piece are flushed before hash verification.
+#[allow(dead_code)] // M100: fields used by write_block_deferred/flush_piece_writes, wired in Task 4
+pub(crate) struct DiskWriteState {
+    tx: mpsc::Sender<WriteJob>,
+    /// Per-piece outstanding write count.
+    pending: Mutex<HashMap<u32, u32>>,
+    /// Signalled whenever any piece's pending count hits zero.
+    notify: tokio::sync::Notify,
+}
 
 pub(crate) enum DiskJob {
     Register {
@@ -276,6 +298,8 @@ impl From<crate::disk_backend::DiskIoStats> for DiskStats {
 pub struct DiskManagerHandle {
     tx: mpsc::Sender<DiskJob>,
     store_buffer: Arc<StoreBuffer>,
+    /// Backend reference for per-torrent deferred writes (M100).
+    backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
 }
 
 impl DiskManagerHandle {
@@ -292,11 +316,21 @@ impl DiskManagerHandle {
         config: DiskConfig,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let store_buffer = Arc::new(Mutex::new(StoreBufferInner::new(config.store_buffer_max_bytes)));
+        let store_buffer = Arc::new(Mutex::new(StoreBufferInner::new(
+            config.store_buffer_max_bytes,
+        )));
         let (tx, rx) = mpsc::channel(config.channel_capacity);
-        let actor = DiskActor::new(rx, config, backend, Arc::clone(&store_buffer));
+        let backend_for_actor = Arc::clone(&backend);
+        let actor = DiskActor::new(rx, config, backend_for_actor, Arc::clone(&store_buffer));
         let join = tokio::spawn(actor.run());
-        (DiskManagerHandle { tx, store_buffer }, join)
+        (
+            DiskManagerHandle {
+                tx,
+                store_buffer,
+                backend,
+            },
+            join,
+        )
     }
 
     /// Register a torrent's storage with the disk subsystem and return a
@@ -306,6 +340,9 @@ impl DiskManagerHandle {
         info_hash: Id20,
         storage: Arc<dyn TorrentStorage>,
     ) -> DiskHandle {
+        // Clone storage: one for the DiskJob::Register, one for the DiskHandle.
+        let storage_for_handle = Arc::clone(&storage);
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self
             .tx
@@ -316,12 +353,47 @@ impl DiskManagerHandle {
             })
             .await;
         let _ = reply_rx.await;
+
+        // Create the deferred write queue (M100).
+        let (write_tx, mut write_rx) = mpsc::channel::<WriteJob>(512);
+        let write_state = Arc::new(DiskWriteState {
+            tx: write_tx,
+            pending: Mutex::new(HashMap::new()),
+            notify: tokio::sync::Notify::new(),
+        });
+
+        // Spawn the per-torrent writer task.
+        let writer_storage = Arc::clone(&storage_for_handle);
+        let writer_state = Arc::clone(&write_state);
+        tokio::spawn(async move {
+            while let Some(WriteJob { piece, begin, data }) = write_rx.recv().await {
+                tokio::task::block_in_place(|| {
+                    if let Err(e) = writer_storage.write_chunk(piece, begin, &data) {
+                        tracing::warn!(piece, begin, %e, "deferred write failed");
+                    }
+                });
+                // Decrement pending count and notify waiters.
+                let mut pending = writer_state.pending.lock().expect("pending lock poisoned");
+                if let Some(count) = pending.get_mut(&piece) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        pending.remove(&piece);
+                        drop(pending);
+                        writer_state.notify.notify_waiters();
+                    }
+                }
+            }
+        });
+
         DiskHandle {
             tx: self.tx.clone(),
             info_hash,
             store_buffer: Arc::clone(&self.store_buffer),
             hash_pool: None,
             hash_result_tx: None,
+            storage: Some(storage_for_handle),
+            backend: Some(Arc::clone(&self.backend)),
+            write_state: Some(write_state),
         }
     }
 
@@ -348,7 +420,7 @@ impl DiskManagerHandle {
 // ---------------------------------------------------------------------------
 
 /// Per-torrent handle for async disk I/O.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DiskHandle {
     tx: mpsc::Sender<DiskJob>,
     info_hash: Id20,
@@ -357,6 +429,23 @@ pub struct DiskHandle {
     hash_pool: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     /// Per-torrent hash result sender (M96).
     hash_result_tx: Option<tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>>,
+    /// Direct storage reference for deferred writes (M100).
+    #[allow(dead_code)] // M100: wired in Task 3/4
+    storage: Option<Arc<dyn TorrentStorage>>,
+    /// Backend reference for disk-based verify (M100).
+    #[allow(dead_code)] // M100: wired in Task 3
+    backend: Option<Arc<dyn crate::disk_backend::DiskIoBackend>>,
+    /// Deferred write queue state (M100).
+    #[allow(dead_code)] // M100: wired in Task 4
+    write_state: Option<Arc<DiskWriteState>>,
+}
+
+impl std::fmt::Debug for DiskHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiskHandle")
+            .field("info_hash", &self.info_hash)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DiskHandle {
@@ -369,6 +458,9 @@ impl DiskHandle {
             store_buffer: Arc::new(Mutex::new(StoreBufferInner::new(32 * 1024 * 1024))),
             hash_pool: None,
             hash_result_tx: None,
+            storage: None,
+            backend: None,
+            write_state: None,
         }
     }
 
@@ -743,13 +835,11 @@ impl DiskHandle {
             let passed = tokio::task::spawn_blocking(move || {
                 if let Some(blocks) = blocks {
                     // Stream-hash blocks in-place to avoid concatenation alloc
-                    let actual =
-                        torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
+                    let actual = torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
                     let passed = actual == expected;
                     if !passed {
                         let num_blocks = blocks.len();
-                        let total_size: usize =
-                            blocks.values().map(|b| b.len()).sum();
+                        let total_size: usize = blocks.values().map(|b| b.len()).sum();
                         let block_info: Vec<(u32, usize)> = blocks
                             .iter()
                             .map(|(&offset, data)| (offset, data.len()))
@@ -796,9 +886,7 @@ impl DiskHandle {
         tokio::spawn(async move {
             let passed = tokio::task::spawn_blocking(move || {
                 if let Some(blocks) = blocks {
-                    let actual = torrent_core::sha256_chunks(
-                        blocks.values().map(|b| b.as_ref()),
-                    );
+                    let actual = torrent_core::sha256_chunks(blocks.values().map(|b| b.as_ref()));
                     actual == expected
                 } else {
                     warn!(piece, "verify v2: store buffer miss, treating as failed");
@@ -809,6 +897,94 @@ impl DiskHandle {
             .unwrap();
             let _ = result_tx.send(VerifyResult { piece, passed }).await;
         });
+    }
+
+    /// Enqueue a block write via the deferred writer task (M100).
+    ///
+    /// The write is sent to a dedicated per-torrent writer task that calls
+    /// `block_in_place(storage.write_chunk())`. If the channel is full, falls
+    /// back to a synchronous `block_in_place` write from the calling task.
+    ///
+    /// Returns early (no-op) if write_state is `None` (pre-M100 code path).
+    #[allow(dead_code)] // M100: wired in Task 4
+    pub(crate) fn write_block_deferred(&self, piece: u32, begin: u32, data: Bytes) {
+        let (write_state, storage) = match (&self.write_state, &self.storage) {
+            (Some(ws), Some(s)) => (ws, s),
+            _ => return, // pre-M100 path
+        };
+
+        // Increment pending count before sending.
+        {
+            let mut pending = write_state.pending.lock().expect("pending lock poisoned");
+            *pending.entry(piece).or_insert(0) += 1;
+        }
+
+        match write_state.tx.try_send(WriteJob {
+            piece,
+            begin,
+            data: data.clone(),
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Channel full: write synchronously to avoid unbounded backlog.
+                let storage = Arc::clone(storage);
+                tokio::task::block_in_place(|| {
+                    if let Err(e) = storage.write_chunk(piece, begin, &data) {
+                        tracing::warn!(piece, begin, %e, "deferred write fallback failed");
+                    }
+                });
+                // Decrement pending + notify.
+                let mut pending = write_state.pending.lock().expect("pending lock poisoned");
+                if let Some(count) = pending.get_mut(&piece) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        pending.remove(&piece);
+                        drop(pending);
+                        write_state.notify.notify_waiters();
+                    }
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Writer task gone — decrement pending to avoid stuck waiters.
+                let mut pending = write_state.pending.lock().expect("pending lock poisoned");
+                if let Some(count) = pending.get_mut(&piece) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        pending.remove(&piece);
+                        drop(pending);
+                        write_state.notify.notify_waiters();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wait until all deferred writes for `piece` have been flushed to storage.
+    ///
+    /// Returns immediately if write_state is `None` (pre-M100 path) or if
+    /// there are no pending writes for the given piece.
+    #[allow(dead_code)] // M100: wired in Task 3
+    pub(crate) async fn flush_piece_writes(&self, piece: u32) {
+        let write_state = match &self.write_state {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        loop {
+            {
+                let pending = write_state.pending.lock().expect("pending lock poisoned");
+                if !pending.contains_key(&piece) {
+                    return;
+                }
+            }
+            write_state.notify.notified().await;
+        }
+    }
+
+    /// Direct storage reference (M100).
+    #[allow(dead_code)] // M100: wired in Task 3
+    pub(crate) fn storage(&self) -> Option<Arc<dyn TorrentStorage>> {
+        self.storage.clone()
     }
 }
 
@@ -1572,8 +1748,14 @@ mod tests {
         let data = Bytes::from(vec![0xCDu8; 128]);
         let (error_tx, _error_rx) = mpsc::channel(4);
 
-        let result =
-            disk.enqueue_write_coalesced(0, 0, data.clone(), DiskJobFlags::empty(), &error_tx, None);
+        let result = disk.enqueue_write_coalesced(
+            0,
+            0,
+            data.clone(),
+            DiskJobFlags::empty(),
+            &error_tx,
+            None,
+        );
         assert!(result.is_ok(), "enqueue should succeed on non-full channel");
 
         // Store buffer must be empty — coalesced write skips insertion
@@ -1588,7 +1770,10 @@ mod tests {
         let job = rx.try_recv();
         assert!(job.is_ok(), "disk job should be on the channel");
         if let Ok(DiskJob::WriteAsync {
-            piece, begin, data: job_data, ..
+            piece,
+            begin,
+            data: job_data,
+            ..
         }) = job
         {
             assert_eq!(piece, 0);
@@ -1612,13 +1797,74 @@ mod tests {
 
         // Next send should hit back-pressure
         let payload = Bytes::from(vec![0xFFu8; 32]);
-        let result =
-            disk.enqueue_write_coalesced(1, 0, payload.clone(), DiskJobFlags::empty(), &error_tx, None);
+        let result = disk.enqueue_write_coalesced(
+            1,
+            0,
+            payload.clone(),
+            DiskJobFlags::empty(),
+            &error_tx,
+            None,
+        );
         assert!(result.is_err(), "should return Err on full channel");
         assert_eq!(
             result.unwrap_err(),
             payload,
             "should return the original data on back-pressure"
         );
+    }
+
+    // ── Deferred write queue tests (M100) ────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_block_deferred_writes_to_storage() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(30);
+        let lengths = Lengths::new(100, 50, 25);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        let block0 = Bytes::from(vec![0xAAu8; 25]);
+        let block1 = Bytes::from(vec![0xBBu8; 25]);
+
+        disk.write_block_deferred(0, 0, block0.clone());
+        disk.write_block_deferred(0, 25, block1.clone());
+
+        // Wait for all writes to piece 0 to flush.
+        disk.flush_piece_writes(0).await;
+
+        // Read back from storage to verify data landed on disk.
+        let read0 = storage.read_chunk(0, 0, 25).unwrap();
+        assert_eq!(&read0[..], &block0[..], "block 0 should match");
+        let read1 = storage.read_chunk(0, 25, 25).unwrap();
+        assert_eq!(&read1[..], &block1[..], "block 1 should match");
+
+        mgr.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_piece_writes_waits_for_completion() {
+        let (mgr, _actor) = DiskManagerHandle::new(test_config());
+        let ih = make_hash(31);
+        let lengths = Lengths::new(200, 100, 25);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+        let disk = mgr.register_torrent(ih, Arc::clone(&storage)).await;
+
+        // Enqueue 4 blocks for piece 0.
+        for i in 0u32..4 {
+            let data = Bytes::from(vec![(i as u8) + 1; 25]);
+            disk.write_block_deferred(0, i * 25, data);
+        }
+
+        // flush_piece_writes must block until all 4 writes complete.
+        disk.flush_piece_writes(0).await;
+
+        // Verify all blocks are visible on storage.
+        let piece = storage.read_piece(0).unwrap();
+        assert_eq!(&piece[0..25], &[1u8; 25]);
+        assert_eq!(&piece[25..50], &[2u8; 25]);
+        assert_eq!(&piece[50..75], &[3u8; 25]);
+        assert_eq!(&piece[75..100], &[4u8; 25]);
+
+        mgr.shutdown().await;
     }
 }
