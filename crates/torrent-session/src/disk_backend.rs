@@ -446,7 +446,7 @@ impl DiskIoBackend for PosixDiskIo {
 
     fn cached_pieces(&self, info_hash: Id20) -> Vec<u32> {
         let pool = self.pool.lock().unwrap();
-        pool.cached_pieces(info_hash)
+        pool.hot_pieces(info_hash)
     }
 
     fn stats(&self) -> DiskIoStats {
@@ -886,7 +886,8 @@ mod tests {
             .write_chunk(ih, 1, 0, Bytes::from(data), true)
             .unwrap();
 
-        // Read piece 0 to populate cache (non-volatile)
+        // Read piece 0 twice to promote to T2 (hot_pieces requires ≥2 accesses)
+        backend.read_chunk(ih, 0, 0, 25, false).unwrap();
         backend.read_chunk(ih, 0, 0, 25, false).unwrap();
 
         let cached = backend.cached_pieces(ih);
@@ -1020,7 +1021,10 @@ mod tests {
         let piece_data = backend.read_piece(ih, 0).unwrap();
         assert_eq!(piece_data.len(), 100);
 
-        // And the piece should be in the read cache (promoted)
+        // Read again to promote from T1 to T2 (hot_pieces requires ≥2 accesses)
+        backend.read_chunk(ih, 0, 0, 50, false).unwrap();
+
+        // The piece should now be in the hot pieces list (T2)
         let cached = backend.cached_pieces(ih);
         assert!(cached.contains(&0));
     }

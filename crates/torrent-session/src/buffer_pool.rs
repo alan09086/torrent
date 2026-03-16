@@ -710,7 +710,6 @@ impl BufferPool {
 
     /// Return up to 16 piece indices from the ARC T2 list (proven-popular)
     /// for the given torrent. Used for BEP 6 suggest messages.
-    #[allow(dead_code)] // wired in Task 4 (suggest_cached_pieces)
     pub fn hot_pieces(&self, info_hash: Id20) -> Vec<u32> {
         self.arc
             .t2_keys()
