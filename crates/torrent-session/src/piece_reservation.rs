@@ -7,9 +7,9 @@
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 use torrent_core::Lengths;
@@ -1914,6 +1914,324 @@ mod tests {
         assert!(
             ds.next_block(&peer_bf, &states).is_none(),
             "next_block must return None when block stealing is disabled (no block_maps)"
+        );
+    }
+
+    // ---- M103 integration tests: block-stealing components working together ----
+
+    /// 4 pieces, 4 blocks per piece (256 KiB total, 64 KiB pieces, 16 KiB chunks).
+    fn test_lengths_4blocks() -> Lengths {
+        Lengths::new(256 * 1024, 64 * 1024, 16384)
+    }
+
+    #[test]
+    fn steal_completes_slow_peer_piece() {
+        // Peer A reserves piece 0, dispatches blocks 0 and 1 (out of 4).
+        // Peer B has Phase 2 exhausted and enters Phase 3 to steal a block.
+        let lengths = test_lengths_4blocks(); // 4 pieces, 4 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        // Peer A reserves piece 0 via CAS.
+        assert!(states.try_reserve(0));
+
+        // Set up block maps: blocks 0 and 1 of piece 0 are already requested by peer A.
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        bm.mark_requested(0, 0);
+        bm.mark_requested(0, 1);
+
+        // Put piece 0 in steal candidates.
+        let sc = Arc::new(StealCandidates::new());
+        sc.push(0);
+
+        // Reserve all other pieces so peer B's Phase 2 is exhausted.
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(2));
+        assert!(states.try_reserve(3));
+
+        // Build empty snapshot (all pieces Reserved).
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        assert!(snap.order.is_empty());
+
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds_b = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        ds_b.set_block_maps(Arc::clone(&bm));
+        ds_b.set_steal_candidates(Arc::clone(&sc));
+
+        // Peer B should steal block 2 (the first unrequested block).
+        let stolen = ds_b
+            .next_block(&peer_bf, &states)
+            .expect("Phase 3 should steal a block from piece 0");
+        assert_eq!(stolen.piece, 0, "should steal from piece 0");
+        assert_eq!(
+            stolen.begin,
+            2 * 16384,
+            "should steal block 2 (offset 32768)"
+        );
+
+        // Block 2 should now be marked as requested.
+        assert!(
+            bm.mark_requested(0, 2),
+            "block 2 should be marked as requested after steal"
+        );
+    }
+
+    #[test]
+    fn steal_coexists_with_owner() {
+        // Peer A owns piece 0 (dispatches blocks sequentially).
+        // Peer B steals block 2 from piece 0.
+        // Peer A continues and dispatches block 1 via Phase 1 hot path.
+        // Both peers contribute blocks — no conflict.
+        let lengths = test_lengths_4blocks(); // 4 pieces, 4 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        let sc = Arc::new(StealCandidates::new());
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        // Peer A: set up with block maps, dispatch block 0 (Phase 2 cold path).
+        let mut ds_a = PeerDispatchState::new(Arc::clone(&snap), lengths.clone());
+        ds_a.set_block_maps(Arc::clone(&bm));
+
+        let a_block0 = ds_a
+            .next_block(&peer_bf, &states)
+            .expect("peer A should get block 0");
+        let piece = a_block0.piece;
+        assert_eq!(a_block0.begin, 0);
+
+        // Mark piece as a steal candidate (simulating actor seeing it partially done).
+        sc.push(piece);
+
+        // Reserve remaining pieces so peer B's Phase 2 is exhausted.
+        for p in 0..num_pieces {
+            if p != piece {
+                let _ = states.try_reserve(p);
+            }
+        }
+
+        // Rebuild snapshot (all Reserved now).
+        let snap2 = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            2,
+        ));
+
+        // Peer B: Phase 2 exhausted, enters Phase 3 and steals a block.
+        let mut ds_b = PeerDispatchState::new(Arc::clone(&snap2), lengths.clone());
+        ds_b.set_block_maps(Arc::clone(&bm));
+        ds_b.set_steal_candidates(Arc::clone(&sc));
+
+        let b_stolen = ds_b
+            .next_block(&peer_bf, &states)
+            .expect("peer B should steal a block");
+        assert_eq!(b_stolen.piece, piece, "peer B should steal from same piece");
+
+        // Peer A continues: Phase 1 hot path dispatches block 1.
+        let a_block1 = ds_a
+            .next_block(&peer_bf, &states)
+            .expect("peer A should get block 1 via hot path");
+        assert_eq!(a_block1.piece, piece, "peer A should continue same piece");
+        assert_eq!(a_block1.begin, 16384, "peer A should get block 1");
+
+        // Verify all three blocks are marked in block_maps.
+        assert!(
+            bm.mark_requested(piece, 0),
+            "block 0 should be marked (peer A)"
+        );
+        assert!(
+            bm.mark_requested(piece, 1),
+            "block 1 should be marked (peer A)"
+        );
+        // The stolen block (either 2 or 3) should also be marked.
+        let stolen_block_idx = b_stolen.begin / 16384;
+        assert!(
+            bm.mark_requested(piece, stolen_block_idx),
+            "stolen block should be marked (peer B)"
+        );
+    }
+
+    #[test]
+    fn steal_handles_duplicate_claim() {
+        // Two peers race to steal the same block. Only one should succeed
+        // (the other sees was_already_set=true from fetch_or).
+        let lengths = test_lengths_4blocks(); // 4 pieces, 4 blocks each
+        let num_pieces = 4u32;
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+
+        // Mark blocks 0, 1, 2 as already requested. Block 3 is the only
+        // unrequested block — both threads will race for it.
+        bm.mark_requested(0, 0);
+        bm.mark_requested(0, 1);
+        bm.mark_requested(0, 2);
+
+        // Two threads race on mark_requested for block 3.
+        let results: Vec<bool> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let bm_ref = Arc::clone(&bm);
+                    s.spawn(move || bm_ref.mark_requested(0, 3))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked"))
+                .collect()
+        });
+
+        // Exactly one thread should have won the race (was_already_set=false).
+        let winners = results.iter().filter(|&&was_set| !was_set).count();
+        let losers = results.iter().filter(|&&was_set| was_set).count();
+        assert_eq!(winners, 1, "exactly one thread should claim the block");
+        assert_eq!(
+            losers, 1,
+            "exactly one thread should see it already claimed"
+        );
+
+        // Block 3 must be marked as requested now.
+        assert!(
+            bm.mark_requested(0, 3),
+            "block 3 should be marked after the race"
+        );
+    }
+
+    #[test]
+    fn block_maps_concurrent_access() {
+        // Spawn N threads, each calling next_unrequested and then mark_requested
+        // on the same piece. Verify no panics, data races, or incorrect results.
+        let lengths = test_lengths_4blocks(); // 4 pieces, 4 blocks each
+        let num_pieces = 4u32;
+        let total_blocks = lengths.chunks_in_piece(0);
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+
+        // Spawn 8 threads, each trying to claim a block from piece 0.
+        let claimed: Vec<Option<u32>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let bm_ref = Arc::clone(&bm);
+                    s.spawn(move || {
+                        // Find an unrequested block and try to claim it.
+                        if let Some(block_idx) = bm_ref.next_unrequested(0, total_blocks) {
+                            let was_set = bm_ref.mark_requested(0, block_idx);
+                            if !was_set {
+                                return Some(block_idx);
+                            }
+                        }
+                        None
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked"))
+                .collect()
+        });
+
+        // Collect successful claims.
+        let successful: Vec<u32> = claimed.into_iter().flatten().collect();
+
+        // With 4 blocks and 8 threads, at most 4 unique claims are possible.
+        assert!(
+            successful.len() <= total_blocks as usize,
+            "cannot claim more blocks than exist: got {} claims for {} blocks",
+            successful.len(),
+            total_blocks
+        );
+
+        // All claimed block indices must be unique and in-range.
+        let unique: std::collections::HashSet<u32> = successful.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            successful.len(),
+            "all claimed blocks must be unique"
+        );
+        for &idx in &successful {
+            assert!(
+                idx < total_blocks,
+                "claimed block index {idx} out of range (total={total_blocks})"
+            );
+        }
+    }
+
+    #[test]
+    fn endgame_fallback_when_steal_disabled() {
+        // When block_maps is None (steal disabled), Endgame pieces should
+        // still be dispatchable via Phase 2 (try_reserve returns true for
+        // Endgame state).
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        // Reserve piece 0 normally, then transition it to Endgame.
+        assert!(states.try_reserve(0));
+        states.transition_to_endgame(0);
+
+        // Reserve pieces 1 and 2 so they're not available.
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(2));
+
+        // Leave piece 3 Available.
+
+        // Build snapshot: includes piece 0 (Endgame) and piece 3 (Available).
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+
+        let peer_bf = peer_has_all(num_pieces);
+
+        // Create PeerDispatchState WITHOUT block_maps (steal disabled).
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+
+        // Collect all dispatched pieces.
+        let mut dispatched_pieces = std::collections::HashSet::new();
+        while let Some(b) = ds.next_block(&peer_bf, &states) {
+            dispatched_pieces.insert(b.piece);
+        }
+
+        // Should have dispatched from Endgame piece 0 and Available piece 3.
+        assert!(
+            dispatched_pieces.contains(&0),
+            "Endgame piece 0 should be dispatched via Phase 2"
+        );
+        assert!(
+            dispatched_pieces.contains(&3),
+            "Available piece 3 should be dispatched via Phase 2"
+        );
+        assert_eq!(
+            dispatched_pieces.len(),
+            2,
+            "only pieces 0 (Endgame) and 3 (Available) should be dispatched"
         );
     }
 }
