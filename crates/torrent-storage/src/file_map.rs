@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use torrent_core::Lengths;
 
 /// A contiguous segment within a single file.
@@ -41,12 +42,12 @@ impl FileMap {
     }
 
     /// Map an absolute byte range to file segments.
-    pub fn byte_range_to_segments(&self, offset: u64, length: u32) -> Vec<FileSegment> {
+    pub fn byte_range_to_segments(&self, offset: u64, length: u32) -> SmallVec<[FileSegment; 4]> {
         if length == 0 || self.file_lengths.is_empty() {
-            return Vec::new();
+            return SmallVec::new();
         }
 
-        let mut segments = Vec::new();
+        let mut segments = SmallVec::new();
         let mut remaining = length as u64;
         let mut pos = offset;
 
@@ -85,13 +86,13 @@ impl FileMap {
     }
 
     /// Map a chunk (piece, begin, length) to file segments.
-    pub fn chunk_segments(&self, piece: u32, begin: u32, length: u32) -> Vec<FileSegment> {
+    pub fn chunk_segments(&self, piece: u32, begin: u32, length: u32) -> SmallVec<[FileSegment; 4]> {
         let abs_offset = self.lengths.piece_offset(piece) + begin as u64;
         self.byte_range_to_segments(abs_offset, length)
     }
 
     /// Map an entire piece to file segments.
-    pub fn piece_segments(&self, piece: u32) -> Vec<FileSegment> {
+    pub fn piece_segments(&self, piece: u32) -> SmallVec<[FileSegment; 4]> {
         let abs_offset = self.lengths.piece_offset(piece);
         let piece_size = self.lengths.piece_size(piece);
         self.byte_range_to_segments(abs_offset, piece_size)
@@ -250,5 +251,21 @@ mod tests {
         assert_eq!(segs[0].file_index, 1);
         assert_eq!(segs[0].file_offset, 100);
         assert_eq!(segs[0].len, 500);
+    }
+
+    #[test]
+    fn smallvec_spills_on_many_files() {
+        // 6 files of 50 bytes each, total 300, one piece spanning all 6.
+        // This forces >4 segments, exercising the SmallVec heap-spill path.
+        let lengths = Lengths::new(300, 300, 16384);
+        let fm = FileMap::new(vec![50, 50, 50, 50, 50, 50], lengths);
+
+        let segs = fm.piece_segments(0);
+        assert_eq!(segs.len(), 6);
+        for (i, seg) in segs.iter().enumerate() {
+            assert_eq!(seg.file_index, i, "segment {i} wrong file_index");
+            assert_eq!(seg.file_offset, 0, "segment {i} wrong file_offset");
+            assert_eq!(seg.len, 50, "segment {i} wrong len");
+        }
     }
 }

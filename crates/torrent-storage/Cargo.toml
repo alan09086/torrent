@@ -12,6 +12,7 @@ workspace = true
 torrent-core = { path = "../torrent-core" }
 memmap2 = "0.9"
 rustc-hash = "2"
+smallvec = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
