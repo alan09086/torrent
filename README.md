@@ -4,9 +4,9 @@ A from-scratch Rust BitTorrent library targeting full **libtorrent-rasterbar** f
 
 Torrent is a modular workspace of focused crates, each handling one layer of the BitTorrent stack. The goal is a clean, well-tested engine that powers [MagneTor](https://codeberg.org/alan090/magnetor) -- a qBittorrent replacement built entirely in Rust.
 
-[![Tests](https://img.shields.io/badge/tests-1505-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1515-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.100.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.101.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -23,7 +23,7 @@ Torrent is a modular workspace of focused crates, each handling one layer of the
 - 🎛️ **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live updates
 - 🧪 **In-process simulation** -- pluggable transport + SimNetwork for deterministic swarm integration tests
 - 🧩 **Extension plugin system** -- trait-based BEP 10 extension interface for custom protocol extensions
-- 📊 **1,527 tests, zero clippy warnings**
+- 📊 **1,515 tests, zero clippy warnings**
 
 ---
 
@@ -51,7 +51,7 @@ To use torrent as a library in your own project, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-torrent = "0.100.0"
+torrent = "0.101.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -178,7 +178,8 @@ Same magnet, same machine, back-to-back trials (2026-03-15):
 
 | Version | Avg Speed | CPU Time | RSS | Ctx Switches | CPU Migrations | Page Faults | Notes |
 |---------|-----------|----------|-----|:------------:|:--------------:|:-----------:|-------|
-| **0.100.0** | 36.4 MB/s | 17.9s | 46-73 MiB | 633K | — | 118K | Direct per-block pwrite, deferred write queue, verify from disk |
+| **0.101.0** | — | — | — | — | — | — | SmallVec segments, batch writer (93K→~1.5K spawns), streaming verify |
+| 0.100.0 | 36.4 MB/s | 17.9s | 46-73 MiB | 633K | — | 118K | Direct per-block pwrite, deferred write queue, verify from disk |
 | 0.99.0 | — | — | ~48 MiB bounded | — | — | — | PieceBufferPool: hard-bounded write pipeline (32 × 512 KiB + 32 MiB store buffer) |
 | 0.98.1 | 31.8 MB/s | 9.8s | 256 MiB | 114K | 645 | 226K | Write coalescer buffer reuse fix, store buffer back-pressure |
 | 0.98.0 | 31.8 MB/s | 9.8s | 256 MiB | 114K | 645 | 226K | Write coalescing, cold-start |
@@ -201,6 +202,7 @@ Profiling baseline: v0.84.0 cold-start (2026-03-14):
 
 | Version | Optimization | Measured Impact |
 |---------|-------------|-----------------|
+| 0.101.0 | Allocation hotspot elimination — SmallVec segments, batch writer, streaming verify | 111K heap allocs eliminated, 93K→~1.5K spawns, 262 KiB/piece alloc eliminated |
 | 0.100.0 | Direct per-block pwrite — deferred write queue replaces WriteCoalescer/StoreBuffer/PieceBufferPool | RSS 46-73 MiB, ~1100 lines deleted, simpler architecture |
 | 0.99.0 | PieceBufferPool — semaphore-gated reusable BytesMut buffers, 32 concurrent pieces | Memory hard-bounded ~48 MiB (was unbounded with peer count) |
 | 0.98.1 | Write coalescer buffer reuse — `copy_from_slice` + `clear()`, store buffer sync fallback | Eliminates ~3 GiB alloc churn on large torrents |
@@ -324,6 +326,8 @@ All 51 parity milestones are complete. Post-parity work focuses on performance o
 | Write Coalescing | M98 | Per-peer block buffering, ~32x fewer disk syscalls, split store-buffer/coalesced-write path | ✅ |
 | Write Coalescer Fix | v0.98.1 | Buffer reuse via `copy_from_slice` + `clear()`, store buffer sync fallback | ✅ |
 | Piece Buffer Pool | M99 | `PieceBufferPool` — semaphore-gated reusable `BytesMut` buffers, hard-bounded ~48 MiB write pipeline | ✅ |
+| Direct Pwrite | M100 | Direct per-block pwrite with deferred write queue, verify from disk, ~1100 lines deleted | ✅ |
+| Allocation Hotspots | M101 | SmallVec segments (111K allocs eliminated), batch writer (93K→~1.5K spawns), streaming verify | ✅ |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 

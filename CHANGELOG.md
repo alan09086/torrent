@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.101.0 | M101 | Performance parity — SmallVec segments (111K allocs eliminated), batch writer (93K→~1.5K spawns), streaming piece verification (262 KiB/piece alloc eliminated) |
 | 0.100.0 | M100 | Direct per-block pwrite — deferred write queue replaces WriteCoalescer/StoreBuffer/PieceBufferPool, verify from disk, ~1100 lines deleted, RSS 46-73 MiB |
 | 0.99.0 | M99 | Piece buffer pool — `PieceBufferPool` with semaphore-gated reusable `BytesMut` buffers, hard-bounded ~48 MiB write pipeline regardless of peer count |
 | 0.98.1 | — | Write coalescer buffer reuse fix — `Bytes::copy_from_slice` + `clear()` eliminates ~3 GiB allocation churn; store buffer back-pressure fallback to sync writes |
@@ -54,6 +55,30 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.101.0] — 2026-03-16
+
+### Added
+- `Sha1Hasher` — incremental SHA-1 API in `torrent-core` for streaming verification
+  (supports all three crypto backends: aws-lc, ring, openssl)
+- `HashJob::Streaming` variant — hash pool workers call `backend.hash_piece()`
+  directly instead of receiving pre-read piece data
+- `smallvec` dependency in `torrent-storage` for stack-allocated file segments
+- 8 new tests (SmallVec spill, batch writer drain/cap, Sha1Hasher, streaming verify)
+
+### Changed
+- **FileMap segments use SmallVec** — `byte_range_to_segments()`, `chunk_segments()`,
+  `piece_segments()` return `SmallVec<[FileSegment; 4]>` instead of `Vec`, eliminating
+  111K heap allocations per download (82% temporary)
+- **Batch writer task** — writer drains up to 64 `WriteJob`s per `spawn_blocking` call,
+  reducing thread pool submissions from ~93K to ~1.5K per download
+- **Streaming piece verification** — `FilesystemStorage::verify_piece()` reads through
+  a 64 KiB reusable buffer with incremental SHA-1, eliminating the 262 KiB per-piece
+  allocation from the default `read_piece()` + `sha1()` path
+- **Simplified `enqueue_verify`** — hash pool path submits `HashJob::Streaming` directly
+  (no `spawn_blocking` + `read_piece` step); non-pool path calls `backend.hash_piece()`
+  directly (~30 lines deleted)
+- `HashJob` converted from struct to enum (`Data` / `Streaming`) with manual `Debug` impl
 
 ## [0.100.0] — 2026-03-15
 
