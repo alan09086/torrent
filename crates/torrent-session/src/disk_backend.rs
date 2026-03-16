@@ -63,6 +63,11 @@ pub trait DiskIoBackend: Send + Sync {
         volatile: bool,
     ) -> crate::Result<Bytes>;
 
+    /// Read an entire piece from storage, returning its raw bytes.
+    ///
+    /// For backends with a write buffer, the piece is flushed before reading.
+    fn read_piece(&self, info_hash: Id20, piece: u32) -> crate::Result<Vec<u8>>;
+
     /// Verify a piece against its expected SHA-1 hash.
     fn hash_piece(&self, info_hash: Id20, piece: u32, expected: &Id20) -> crate::Result<bool>;
 
@@ -129,6 +134,10 @@ impl DiskIoBackend for DisabledDiskIo {
         _volatile: bool,
     ) -> crate::Result<Bytes> {
         Ok(Bytes::from(vec![0u8; length as usize]))
+    }
+
+    fn read_piece(&self, _info_hash: Id20, _piece: u32) -> crate::Result<Vec<u8>> {
+        Ok(Vec::new())
     }
 
     fn hash_piece(&self, _info_hash: Id20, _piece: u32, _expected: &Id20) -> crate::Result<bool> {
@@ -322,6 +331,14 @@ impl DiskIoBackend for PosixDiskIo {
         Ok(bytes)
     }
 
+    fn read_piece(&self, info_hash: Id20, piece: u32) -> crate::Result<Vec<u8>> {
+        self.flush_piece(info_hash, piece)?;
+        let storage = self.get_storage(info_hash)?;
+        let data = storage.read_piece(piece)?;
+        self.stats.lock().unwrap().read_bytes += data.len() as u64;
+        Ok(data)
+    }
+
     fn hash_piece(&self, info_hash: Id20, piece: u32, expected: &Id20) -> crate::Result<bool> {
         self.flush_piece(info_hash, piece)?;
         let storage = self.get_storage(info_hash)?;
@@ -485,6 +502,13 @@ impl DiskIoBackend for MmapDiskIo {
         let bytes = Bytes::from(data);
         self.stats.lock().unwrap().read_bytes += bytes.len() as u64;
         Ok(bytes)
+    }
+
+    fn read_piece(&self, info_hash: Id20, piece: u32) -> crate::Result<Vec<u8>> {
+        let storage = self.get_storage(info_hash)?;
+        let data = storage.read_piece(piece)?;
+        self.stats.lock().unwrap().read_bytes += data.len() as u64;
+        Ok(data)
     }
 
     fn hash_piece(&self, info_hash: Id20, piece: u32, expected: &Id20) -> crate::Result<bool> {
@@ -857,6 +881,40 @@ mod tests {
         backend.read_chunk(ih, 0, 0, 50, false).unwrap();
         let stats = backend.stats();
         assert_eq!(stats.read_bytes, 50);
+    }
+
+    // -----------------------------------------------------------------------
+    // read_piece tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_piece_returns_full_piece() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(20);
+        let chunk_size = 16384u32;
+        let piece_size = u64::from(chunk_size) * 2; // 32768 — two chunks
+        let storage = make_storage_full(piece_size, piece_size, chunk_size);
+        backend.register(ih, storage);
+
+        // Write two chunks via the backend (buffered, not flushed)
+        let chunk0 = vec![0xAAu8; chunk_size as usize];
+        let chunk1 = vec![0xBBu8; chunk_size as usize];
+        backend
+            .write_chunk(ih, 0, 0, &chunk0, false)
+            .expect("write chunk 0");
+        backend
+            .write_chunk(ih, 0, chunk_size, &chunk1, false)
+            .expect("write chunk 1");
+
+        // read_piece should flush the write buffer and return the full piece
+        let piece_data = backend.read_piece(ih, 0).expect("read_piece");
+        assert_eq!(piece_data.len(), piece_size as usize);
+        assert_eq!(&piece_data[..chunk_size as usize], &chunk0[..]);
+        assert_eq!(&piece_data[chunk_size as usize..], &chunk1[..]);
+
+        // Stats should reflect the read
+        let stats = backend.stats();
+        assert!(stats.read_bytes >= piece_size);
     }
 
     // -----------------------------------------------------------------------
