@@ -229,6 +229,10 @@ pub(crate) struct PeerDispatchState {
     current_piece: Option<CurrentPiece>,
     /// Lengths for block arithmetic.
     lengths: Lengths,
+    /// Shared block-level request/receipt tracking for steal visibility.
+    block_maps: Option<Arc<BlockMaps>>,
+    /// Shared queue of pieces available for block-level stealing.
+    steal_candidates: Option<Arc<StealCandidates>>,
 }
 
 /// Tracks block-by-block progress within a single piece.
@@ -238,6 +242,7 @@ struct CurrentPiece {
     total_blocks: u32,
 }
 
+#[allow(dead_code)]
 impl PeerDispatchState {
     pub fn new(snapshot: Arc<AvailabilitySnapshot>, lengths: Lengths) -> Self {
         Self {
@@ -245,7 +250,19 @@ impl PeerDispatchState {
             cursor: 0,
             current_piece: None,
             lengths,
+            block_maps: None,
+            steal_candidates: None,
         }
+    }
+
+    /// Set the shared block maps for steal visibility.
+    pub fn set_block_maps(&mut self, bm: Arc<BlockMaps>) {
+        self.block_maps = Some(bm);
+    }
+
+    /// Set the shared steal candidates queue.
+    pub fn set_steal_candidates(&mut self, sc: Arc<StealCandidates>) {
+        self.steal_candidates = Some(sc);
     }
 
     /// Update the snapshot reference. Resets cursor if generation changed.
@@ -278,6 +295,10 @@ impl PeerDispatchState {
                 let piece = cp.piece;
                 let block_idx = cp.next_block;
                 cp.next_block += 1;
+                // Register in block maps for steal visibility.
+                if let Some(ref bm) = self.block_maps {
+                    bm.mark_requested(piece, block_idx);
+                }
                 return Some(self.make_block_request(piece, block_idx));
             }
             // Piece fully dispatched -- drop it.
@@ -298,6 +319,10 @@ impl PeerDispatchState {
                 if total_blocks == 0 {
                     continue;
                 }
+                // Mark block 0 as requested in block maps.
+                if let Some(ref bm) = self.block_maps {
+                    bm.mark_requested(piece, 0);
+                }
                 self.current_piece = Some(CurrentPiece {
                     piece,
                     next_block: 1,
@@ -307,7 +332,48 @@ impl PeerDispatchState {
             }
         }
 
-        None // cursor exhausted
+        // 3. Steal path: find unrequested blocks in other peers' pieces.
+        if let (Some(bm), Some(sc)) = (&self.block_maps, &self.steal_candidates) {
+            // Try up to a bounded number of candidates to avoid spinning.
+            for _ in 0..32 {
+                let Some(piece) = sc.pop() else { break };
+
+                // Skip if peer doesn't have this piece.
+                if !peer_bitfield.get(piece) {
+                    sc.push(piece); // put it back for other peers
+                    continue;
+                }
+
+                // Skip if piece is already Complete or Unwanted.
+                let state = atomic_states.get(piece);
+                if state == PieceState::Complete || state == PieceState::Unwanted {
+                    continue; // don't put back — it's done
+                }
+
+                let total_blocks = self.lengths.chunks_in_piece(piece);
+
+                // Find an unrequested block.
+                if let Some(block_idx) = bm.next_unrequested(piece, total_blocks) {
+                    // Atomically claim it.
+                    let was_already_set = bm.mark_requested(piece, block_idx);
+                    if was_already_set {
+                        // Another peer beat us — put piece back and try again.
+                        sc.push(piece);
+                        continue;
+                    }
+                    // Check if piece still has more unrequested blocks.
+                    if bm.next_unrequested(piece, total_blocks).is_some() {
+                        sc.push(piece); // still has work — put back for others
+                    }
+                    // DON'T set current_piece — stolen blocks are one-at-a-time.
+                    // (we don't "own" this piece, so we shouldn't dispatch sequential blocks)
+                    return Some(self.make_block_request(piece, block_idx));
+                }
+                // No unrequested blocks — piece is fully requested, don't put back.
+            }
+        }
+
+        None // all phases exhausted
     }
 
     /// Build a `BlockRequest` using `Lengths::chunk_info`.
@@ -834,7 +900,11 @@ mod tests {
         let num_pieces = 5u32;
         // availability: piece 0=3, piece 1=1, piece 2=2, piece 3=1, piece 4=3
         let availability = vec![3u32, 1, 2, 1, 3];
-        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+        let states = AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        );
         let priority = BTreeSet::new();
 
         let snap = AvailabilitySnapshot::build(&availability, &states, &priority, 1);
@@ -860,7 +930,11 @@ mod tests {
     fn snapshot_skips_complete_reserved_unwanted() {
         let num_pieces = 5u32;
         let availability = vec![1u32; 5];
-        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+        let states = AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        );
 
         // Mark some pieces with non-Available states
         states.mark_complete(0);
@@ -879,7 +953,11 @@ mod tests {
     fn snapshot_includes_endgame_pieces() {
         let num_pieces = 3u32;
         let availability = vec![1u32; 3];
-        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+        let states = AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        );
 
         assert!(states.try_reserve(1));
         states.transition_to_endgame(1);
@@ -910,7 +988,11 @@ mod tests {
         let num_pieces = 5u32;
         // piece 2 has the HIGHEST availability (least rare)
         let availability = vec![2u32, 3, 10, 1, 5];
-        let states = AtomicPieceStates::new(num_pieces, &Bitfield::new(num_pieces), &all_pieces_wanted(num_pieces));
+        let states = AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        );
         let mut priority = BTreeSet::new();
         priority.insert(2); // piece 2 is priority despite high availability
 
@@ -1101,7 +1183,10 @@ mod tests {
 
         // Should skip the first 3 (CAS fails) and get the 4th
         let b = ds.next_block(&peer_bf, &states).unwrap();
-        assert!(!first_three.contains(&b.piece), "should skip pre-reserved pieces");
+        assert!(
+            !first_three.contains(&b.piece),
+            "should skip pre-reserved pieces"
+        );
     }
 
     #[test]
@@ -1166,7 +1251,10 @@ mod tests {
 
         // Peer should skip the contested piece (CAS fails) and get the next one
         let b = ds.next_block(&peer_bf, &states).unwrap();
-        assert_ne!(b.piece, contested_piece, "should skip piece reserved by another thread");
+        assert_ne!(
+            b.piece, contested_piece,
+            "should skip piece reserved by another thread"
+        );
     }
 
     #[test]
@@ -1200,7 +1288,11 @@ mod tests {
         let b2 = ds2.next_block(&peer_bf, &states).unwrap();
         reserved.insert(b2.piece);
 
-        assert_eq!(reserved.len(), 2, "two peers should get two different pieces");
+        assert_eq!(
+            reserved.len(),
+            2,
+            "two peers should get two different pieces"
+        );
         assert_ne!(b1.piece, b2.piece);
     }
 
@@ -1514,5 +1606,267 @@ mod tests {
         sc.remove(999);
 
         assert_eq!(sc.pop(), Some(42));
+    }
+
+    // ---- Phase 3 steal dispatch tests ----
+
+    #[test]
+    fn next_block_phase3_steal() {
+        // Peer A reserves piece 0 (via Phase 2 CAS). Peer B has Phase 2 exhausted.
+        // Peer B should enter Phase 3 and steal an unrequested block from piece 0.
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        // Peer A reserves piece 0 via CAS.
+        assert!(states.try_reserve(0));
+
+        // Set up block maps and mark block 0 of piece 0 as requested (peer A's work).
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        bm.mark_requested(0, 0);
+
+        // Put piece 0 in steal candidates.
+        let sc = Arc::new(StealCandidates::new());
+        sc.push(0);
+
+        // Reserve all other pieces so peer B's Phase 2 is exhausted.
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(2));
+        assert!(states.try_reserve(3));
+
+        // Build snapshot (all pieces are Reserved, so snapshot.order is empty).
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        assert!(
+            snap.order.is_empty(),
+            "all pieces reserved — snapshot should be empty"
+        );
+
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        ds.set_block_maps(Arc::clone(&bm));
+        ds.set_steal_candidates(Arc::clone(&sc));
+
+        // Phase 2 is exhausted (empty snapshot). Phase 3 should steal block 1 of piece 0.
+        let stolen = ds.next_block(&peer_bf, &states);
+        assert!(
+            stolen.is_some(),
+            "Phase 3 should find an unrequested block to steal"
+        );
+        let stolen = stolen.expect("just checked is_some");
+        assert_eq!(stolen.piece, 0, "should steal from piece 0");
+        assert_eq!(stolen.begin, 16384, "should steal block 1 (offset 16384)");
+
+        // current_piece should NOT be set (stolen blocks are one-at-a-time).
+        assert!(
+            ds.current_piece_index().is_none(),
+            "steal should not set current_piece"
+        );
+    }
+
+    #[test]
+    fn next_block_steal_skips_complete() {
+        // Put a piece in steal_candidates. Mark it Complete.
+        // Phase 3 should skip it and return None.
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        // Mark piece 0 complete.
+        states.mark_complete(0);
+
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        let sc = Arc::new(StealCandidates::new());
+        sc.push(0); // complete piece in the steal queue
+
+        // Reserve other pieces to exhaust Phase 2.
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(2));
+        assert!(states.try_reserve(3));
+
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+
+        let peer_bf = peer_has_all(num_pieces);
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        ds.set_block_maps(Arc::clone(&bm));
+        ds.set_steal_candidates(Arc::clone(&sc));
+
+        // Phase 3 should skip the complete piece.
+        assert!(ds.next_block(&peer_bf, &states).is_none());
+
+        // The complete piece should NOT have been put back.
+        assert!(
+            sc.pop().is_none(),
+            "complete piece should not be returned to queue"
+        );
+    }
+
+    #[test]
+    fn next_block_steal_requires_peer_has() {
+        // Put a piece in steal_candidates. Peer's bitfield does NOT have this piece.
+        // Phase 3 should skip it and put it back for other peers.
+        let lengths = test_lengths();
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        // Reserve piece 0 (so it's in Reserved state) and put it in steal queue.
+        assert!(states.try_reserve(0));
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        bm.mark_requested(0, 0); // simulate some blocks requested
+        let sc = Arc::new(StealCandidates::new());
+        sc.push(0);
+
+        // Reserve other pieces to exhaust Phase 2.
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(2));
+        assert!(states.try_reserve(3));
+
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+
+        // Peer does NOT have piece 0.
+        let mut peer_bf = Bitfield::new(num_pieces);
+        peer_bf.set(1);
+        peer_bf.set(2);
+        peer_bf.set(3);
+        // peer_bf does NOT have piece 0
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        ds.set_block_maps(Arc::clone(&bm));
+        ds.set_steal_candidates(Arc::clone(&sc));
+
+        // Phase 3 should skip piece 0 (peer doesn't have it).
+        assert!(ds.next_block(&peer_bf, &states).is_none());
+
+        // Piece 0 should have been put back for other peers.
+        assert_eq!(
+            sc.pop(),
+            Some(0),
+            "piece should be returned to queue for other peers"
+        );
+    }
+
+    #[test]
+    fn next_block_phase1_with_block_maps() {
+        // Verify Phase 1 hot path works correctly when block_maps is set —
+        // mark_requested should register the block.
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        ds.set_block_maps(Arc::clone(&bm));
+
+        // First call: Phase 2 cold path — reserves a piece, returns block 0.
+        let b0 = ds
+            .next_block(&peer_bf, &states)
+            .expect("should get block 0");
+        let piece = b0.piece;
+
+        // Block 0 should be marked in block_maps (set by Phase 2).
+        assert!(
+            bm.mark_requested(piece, 0),
+            "block 0 should already be marked requested by Phase 2"
+        );
+
+        // Second call: Phase 1 hot path — returns block 1.
+        let b1 = ds
+            .next_block(&peer_bf, &states)
+            .expect("should get block 1");
+        assert_eq!(b1.piece, piece);
+        assert_eq!(b1.begin, 16384);
+
+        // Block 1 should be marked in block_maps (set by Phase 1).
+        assert!(
+            bm.mark_requested(piece, 1),
+            "block 1 should already be marked requested by Phase 1"
+        );
+    }
+
+    #[test]
+    fn next_block_phase2_with_block_maps() {
+        // Verify Phase 2 cold path marks block 0 in block_maps.
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+        let bm = Arc::new(BlockMaps::new(num_pieces, &lengths));
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        let peer_bf = peer_has_all(num_pieces);
+
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        ds.set_block_maps(Arc::clone(&bm));
+
+        // Phase 2 cold path: reserves first piece, returns block 0.
+        let b0 = ds
+            .next_block(&peer_bf, &states)
+            .expect("should get block from Phase 2");
+        let piece = b0.piece;
+        assert_eq!(b0.begin, 0, "first block should be at offset 0");
+
+        // Block 0 should already be marked in block_maps by Phase 2.
+        let was_set = bm.mark_requested(piece, 0);
+        assert!(
+            was_set,
+            "Phase 2 should have marked block 0 as requested in block_maps"
+        );
+
+        // Block 1 should NOT be marked yet (Phase 1 hasn't dispatched it).
+        let was_set = bm.mark_requested(piece, 1);
+        assert!(
+            !was_set,
+            "block 1 should not be marked yet — Phase 1 hasn't run for it"
+        );
     }
 }
