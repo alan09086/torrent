@@ -792,6 +792,10 @@ pub(crate) enum PeerCommand {
         write_error_tx: tokio::sync::mpsc::Sender<crate::disk::DiskWriteError>,
         /// M92: Piece/chunk arithmetic for PendingBatch piece-completion detection.
         lengths: torrent_core::Lengths,
+        /// M103: Shared block-level request/received bitmaps for per-block stealing.
+        block_maps: Option<std::sync::Arc<crate::piece_reservation::BlockMaps>>,
+        /// M103: Shared queue of pieces available for block stealing.
+        steal_candidates: Option<std::sync::Arc<crate::piece_reservation::StealCandidates>>,
     },
     /// Actor sends an updated availability snapshot to the peer task.
     SnapshotUpdate {

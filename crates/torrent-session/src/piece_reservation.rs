@@ -1870,4 +1870,50 @@ mod tests {
             "block 1 should not be marked yet — Phase 1 hasn't run for it"
         );
     }
+
+    #[test]
+    fn no_steal_when_disabled() {
+        // Scenario: Phase 2 is exhausted, steal candidates exist in the swarm,
+        // but this peer's PeerDispatchState has block_maps=None (simulating
+        // use_block_stealing=false). Phase 3 should NOT activate.
+        let lengths = test_lengths(); // 4 pieces, 2 blocks each
+        let num_pieces = 4u32;
+        let states = Arc::new(AtomicPieceStates::new(
+            num_pieces,
+            &Bitfield::new(num_pieces),
+            &all_pieces_wanted(num_pieces),
+        ));
+
+        // Reserve all pieces so Phase 2 is exhausted.
+        assert!(states.try_reserve(0));
+        assert!(states.try_reserve(1));
+        assert!(states.try_reserve(2));
+        assert!(states.try_reserve(3));
+
+        // Build an empty snapshot (all pieces reserved).
+        let availability = vec![1u32; num_pieces as usize];
+        let snap = Arc::new(AvailabilitySnapshot::build(
+            &availability,
+            &states,
+            &BTreeSet::new(),
+            1,
+        ));
+        assert!(
+            snap.order.is_empty(),
+            "all pieces reserved — snapshot should be empty"
+        );
+
+        let peer_bf = peer_has_all(num_pieces);
+
+        // Construct PeerDispatchState WITHOUT block_maps or steal_candidates
+        // (simulates use_block_stealing=false — torrent.rs passes None).
+        let mut ds = PeerDispatchState::new(Arc::clone(&snap), lengths);
+        // Explicitly do NOT call ds.set_block_maps() or ds.set_steal_candidates().
+
+        // Phase 2 exhausted, no Phase 3 possible → should return None.
+        assert!(
+            ds.next_block(&peer_bf, &states).is_none(),
+            "next_block must return None when block stealing is disabled (no block_maps)"
+        );
+    }
 }

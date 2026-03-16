@@ -166,6 +166,9 @@ fn default_peer_turnover_cutoff() -> f64 {
 fn default_steal_threshold_ratio() -> f64 {
     10.0
 }
+fn default_use_block_stealing() -> bool {
+    true
+}
 fn default_peer_turnover_interval() -> u64 {
     120
 }
@@ -503,6 +506,10 @@ pub struct Settings {
     /// Set to 0.0 to disable stealing.
     #[serde(default = "default_steal_threshold_ratio")]
     pub steal_threshold_ratio: f64,
+    /// Enable per-block stealing: fast peers can steal individual unrequested
+    /// blocks from pieces reserved by slower peers (default: true).
+    #[serde(default = "default_use_block_stealing")]
+    pub use_block_stealing: bool,
 
     // ── Piece picker enhancements (M44) ──
     /// Prefer pieces adjacent to those already downloaded for improved sequential
@@ -785,6 +792,7 @@ impl Default for Settings {
             max_concurrent_stream_reads: 8,
             auto_sequential: true,
             steal_threshold_ratio: 10.0,
+            use_block_stealing: true,
             strict_end_game: true,
             max_web_seeds: 4,
             initial_picker_threshold: 4,
@@ -903,6 +911,7 @@ impl Settings {
             auto_upload_slots_max: 100,
             suggest_mode: true,
             steal_threshold_ratio: 5.0,
+            use_block_stealing: true,
             max_in_flight_pieces: 512,
             ..Self::default()
         }
@@ -1174,6 +1183,7 @@ impl PartialEq for Settings {
             && self.max_concurrent_stream_reads == other.max_concurrent_stream_reads
             && self.auto_sequential == other.auto_sequential
             && self.steal_threshold_ratio.to_bits() == other.steal_threshold_ratio.to_bits()
+            && self.use_block_stealing == other.use_block_stealing
             && self.strict_end_game == other.strict_end_game
             && self.max_web_seeds == other.max_web_seeds
             && self.initial_picker_threshold == other.initial_picker_threshold

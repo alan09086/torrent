@@ -22,7 +22,9 @@ use torrent_wire::{
 
 use crate::disk::{DiskHandle, DiskWriteError};
 use crate::pex::PexMessage;
-use crate::piece_reservation::{AtomicPieceStates, AvailabilitySnapshot, PeerDispatchState};
+use crate::piece_reservation::{
+    AtomicPieceStates, AvailabilitySnapshot, BlockMaps, PeerDispatchState,
+};
 use crate::pipeline::PeerPipelineState;
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 use tokio::sync::Semaphore;
@@ -321,6 +323,10 @@ pub(crate) async fn run_peer(
     let mut dispatch_state: Option<PeerDispatchState> = None;
     let mut pending_snapshot: Option<std::sync::Arc<AvailabilitySnapshot>> = None;
 
+    // M103: Block stealing — shared block maps and chunk size for mark_received.
+    let mut peer_block_maps: Option<std::sync::Arc<BlockMaps>> = None;
+    let mut block_length: u32 = torrent_core::DEFAULT_CHUNK_SIZE;
+
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
 
@@ -379,6 +385,11 @@ pub(crate) async fn run_peer(
                                     if in_flight < current_effective_depth {
                                         semaphore.add_permits(1);
                                     }
+                                }
+                                // M103: Track received blocks in shared BlockMaps for steal visibility.
+                                if let Some(ref bm) = peer_block_maps {
+                                    let block_idx = *begin / block_length;
+                                    bm.mark_received(*index, block_idx);
                                 }
                                 // M100: Direct per-block deferred write
                                 if let Some((_, _, Some(ref disk), _)) = reservation_state {
@@ -523,9 +534,19 @@ pub(crate) async fn run_peer(
                     Some(PeerCommand::Shutdown) => {
                         break None;
                     }
-                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths }) => {
+                    Some(PeerCommand::StartRequesting { atomic_states, availability_snapshot, piece_notify, disk_handle, write_error_tx, lengths, block_maps, steal_candidates }) => {
                         reservation_state = Some((atomic_states, piece_notify, disk_handle, write_error_tx));
-                        dispatch_state = Some(PeerDispatchState::new(availability_snapshot, lengths.clone()));
+                        let mut ds = PeerDispatchState::new(availability_snapshot, lengths.clone());
+                        // M103: Wire up block stealing if provided
+                        if let Some(bm) = block_maps {
+                            peer_block_maps = Some(std::sync::Arc::clone(&bm));
+                            ds.set_block_maps(bm);
+                        }
+                        if let Some(sc) = steal_candidates {
+                            ds.set_steal_candidates(sc);
+                        }
+                        block_length = lengths.chunk_size();
+                        dispatch_state = Some(ds);
                         // M92: Create PendingBatch for block batching
                         if pending_batch.is_none() {
                             pending_batch = Some(PendingBatch::new(&lengths));

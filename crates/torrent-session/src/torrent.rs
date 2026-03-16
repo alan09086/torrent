@@ -3746,6 +3746,8 @@ impl TorrentActor {
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
                             lengths: lengths.clone(),
+                            block_maps: None,
+                            steal_candidates: None,
                         });
                     }
                 }
@@ -5409,6 +5411,8 @@ impl TorrentActor {
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
                                     lengths: lengths.clone(),
+                                    block_maps: None,
+                                    steal_candidates: None,
                                 });
                             }
                         }
@@ -6394,6 +6398,8 @@ impl TorrentActor {
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
                     lengths: lengths.clone(),
+                    block_maps: None,
+                    steal_candidates: None,
                 });
             }
 
@@ -7041,6 +7047,8 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
+                block_maps: None,
+                steal_candidates: None,
             });
         }
 
@@ -7239,6 +7247,8 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
+                block_maps: None,
+                steal_candidates: None,
             });
         }
 
