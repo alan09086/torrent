@@ -574,11 +574,11 @@ impl DiskHandle {
 
     /// Spawn a non-blocking v1 piece hash verification.
     ///
-    /// Reads the piece from disk via the backend's `read_piece()` method.
+    /// M96: If a hash pool is configured, submits the job to the pool.
+    /// M101: Uses `HashJob::Streaming` to delegate reading + hashing to the
+    /// backend, eliminating the full-piece allocation on the caller side.
     ///
-    /// M96: If a hash pool is configured, submits the job to the pool instead
-    /// of using `spawn_blocking`. The `generation` parameter enables staleness
-    /// detection by the caller.
+    /// The `generation` parameter enables staleness detection by the caller.
     pub fn enqueue_verify(
         &self,
         piece: u32,
@@ -586,41 +586,24 @@ impl DiskHandle {
         generation: u64,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        // M96: If hash pool is available, use parallel hashing path
+        // M96/M101: If hash pool is available, submit streaming job.
         if let (Some(pool), Some(hash_tx)) = (&self.hash_pool, &self.hash_result_tx) {
             if let Some(backend) = &self.backend {
                 let pool = pool.clone();
                 let hash_tx = hash_tx.clone();
                 let backend = Arc::clone(backend);
                 let info_hash = self.info_hash;
+                let job = crate::hash_pool::HashJob::Streaming {
+                    piece,
+                    expected,
+                    generation,
+                    info_hash,
+                    backend,
+                    result_tx: hash_tx,
+                };
                 tokio::spawn(async move {
-                    let data =
-                        tokio::task::spawn_blocking(move || backend.read_piece(info_hash, piece))
-                            .await
-                            .expect("read_piece task panicked");
-                    match data {
-                        Ok(data) => {
-                            let job = crate::hash_pool::HashJob {
-                                piece,
-                                expected,
-                                generation,
-                                data,
-                                result_tx: hash_tx,
-                            };
-                            if let Err(_job) = pool.submit(job).await {
-                                tracing::warn!(piece, "hash pool shut down, treating as failed");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(piece, %e, "verify: read_piece failed (hash pool path)");
-                            let _ = hash_tx
-                                .send(crate::hash_pool::HashResult {
-                                    piece,
-                                    passed: false,
-                                    generation,
-                                })
-                                .await;
-                        }
+                    if pool.submit(job).await.is_err() {
+                        tracing::warn!(piece, "hash pool shut down, treating as failed");
                     }
                 });
                 return;
@@ -641,36 +624,20 @@ impl DiskHandle {
             return;
         }
 
-        // Non-pool path: read from disk.
+        // Non-pool path: delegate to backend.hash_piece().
         if let Some(backend) = &self.backend {
             let backend = Arc::clone(backend);
             let info_hash = self.info_hash;
             let result_tx = result_tx.clone();
             tokio::spawn(async move {
                 let passed = tokio::task::spawn_blocking(move || {
-                    match backend.read_piece(info_hash, piece) {
-                        Ok(data) => {
-                            let actual = torrent_core::sha1(&data);
-                            let passed = actual == expected;
-                            if !passed {
-                                warn!(
-                                    piece,
-                                    data_len = data.len(),
-                                    expected = %expected.to_hex(),
-                                    actual = %actual.to_hex(),
-                                    "verify FAILED: hash mismatch"
-                                );
-                            }
-                            passed
-                        }
-                        Err(e) => {
-                            warn!(piece, %e, "verify: read_piece failed");
-                            false
-                        }
-                    }
+                    backend.hash_piece(info_hash, piece, &expected).unwrap_or_else(|e| {
+                        warn!(piece, %e, "verify: hash_piece failed");
+                        false
+                    })
                 })
                 .await
-                .expect("read_piece task panicked");
+                .expect("hash_piece task panicked");
                 let _ = result_tx.send(VerifyResult { piece, passed }).await;
             });
             return;

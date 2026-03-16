@@ -158,6 +158,36 @@ impl TorrentStorage for FilesystemStorage {
         }
         self.read_chunk(piece, 0, piece_size)
     }
+
+    fn verify_piece(&self, piece: u32, expected: &torrent_core::Id20) -> Result<bool> {
+        let piece_size = self.lengths.piece_size(piece);
+        if piece_size == 0 {
+            return Err(Error::PieceOutOfRange {
+                index: piece,
+                num_pieces: self.lengths.num_pieces(),
+            });
+        }
+        let segments = self.file_map.piece_segments(piece);
+        let buf_size = (piece_size as usize).min(65536);
+        let mut buf = vec![0u8; buf_size];
+        let mut hasher = torrent_core::Sha1Hasher::new();
+
+        for seg in &segments {
+            let mut guard = self.open_file(seg.file_index)?;
+            let f = guard.as_mut().unwrap();
+            f.seek(SeekFrom::Start(seg.file_offset))?;
+            let mut remaining = seg.len as usize;
+            while remaining > 0 {
+                let n = remaining.min(buf_size);
+                f.read_exact(&mut buf[..n])?;
+                hasher.update(&buf[..n]);
+                remaining -= n;
+            }
+        }
+
+        let actual = hasher.finish();
+        Ok(actual == *expected)
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +427,61 @@ mod tests {
         s.write_chunk(0, 0, &data).unwrap();
         let read = s.read_chunk(0, 0, 50).unwrap();
         assert_eq!(read, data);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn streaming_verify_matches_full_read() {
+        let dir = temp_dir("streaming_verify");
+        // 262144 bytes = 256 KiB, large enough to exercise 64 KiB chunked reads
+        let total = 262144u64;
+        let lengths = Lengths::new(total, total, 16384);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![total],
+            lengths,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Fill with patterned data
+        let data: Vec<u8> = (0..total as usize).map(|i| (i % 251) as u8).collect();
+        s.write_chunk(0, 0, &data).unwrap();
+
+        // Compute expected hash via full read path
+        let full_piece = s.read_piece(0).unwrap();
+        let expected = torrent_core::sha1(&full_piece);
+
+        // Streaming verify should produce the same result
+        assert!(s.verify_piece(0, &expected).unwrap());
+        assert!(!s.verify_piece(0, &Id20::ZERO).unwrap());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn streaming_verify_small_piece() {
+        let dir = temp_dir("streaming_small");
+        // 100 bytes — smaller than 64 KiB buffer
+        let lengths = Lengths::new(100, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("small.bin")],
+            vec![100],
+            lengths,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let data = vec![0xABu8; 100];
+        s.write_chunk(0, 0, &data).unwrap();
+
+        let expected = torrent_core::sha1(&data);
+        assert!(s.verify_piece(0, &expected).unwrap());
 
         fs::remove_dir_all(&dir).unwrap();
     }

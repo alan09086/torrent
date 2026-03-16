@@ -59,10 +59,10 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     let info_hash = if source.starts_with("magnet:") {
         let magnet = torrent::core::Magnet::parse(source)
             .map_err(|e| anyhow::anyhow!("invalid magnet URI: {e}"))?;
-        if let Some(ref name) = magnet.display_name {
-            if !quiet {
-                eprintln!("Adding: {name}");
-            }
+        if let Some(ref name) = magnet.display_name
+            && !quiet
+        {
+            eprintln!("Adding: {name}");
         }
         session.add_magnet(magnet).await?
     } else {

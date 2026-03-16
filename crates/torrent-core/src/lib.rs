@@ -43,6 +43,8 @@ pub use resume_data::{FastResumeData, UnfinishedPiece};
 pub use storage_mode::StorageMode;
 pub use torrent_version::TorrentVersion;
 
+// Re-export Sha1Hasher at crate root (defined below with crypto cfg blocks).
+
 /// Network address family for dual-stack support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AddressFamily {
@@ -197,6 +199,93 @@ pub fn sha256_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Id32 {
     Id32(id)
 }
 
+// --- Incremental SHA-1 hasher for streaming verification ---
+
+/// Incremental SHA-1 hasher for streaming piece verification.
+///
+/// Eliminates per-piece allocation by allowing callers to feed data in
+/// fixed-size chunks through a reusable buffer rather than reading the
+/// entire piece into memory at once.
+pub struct Sha1Hasher {
+    #[cfg(all(feature = "crypto-ring", not(feature = "crypto-openssl"), not(feature = "crypto-aws-lc")))]
+    ctx: ring::digest::Context,
+    #[cfg(feature = "crypto-openssl")]
+    ctx: openssl::hash::Hasher,
+    #[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+    ctx: aws_lc_rs::digest::Context,
+}
+
+impl Sha1Hasher {
+    /// Create a new incremental SHA-1 hasher.
+    pub fn new() -> Self {
+        Sha1Hasher {
+            #[cfg(all(
+                feature = "crypto-ring",
+                not(feature = "crypto-openssl"),
+                not(feature = "crypto-aws-lc")
+            ))]
+            ctx: ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY),
+            #[cfg(feature = "crypto-openssl")]
+            ctx: openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha1()).unwrap(),
+            #[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+            ctx: aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY),
+        }
+    }
+
+    /// Feed data into the hasher.
+    pub fn update(&mut self, data: &[u8]) {
+        #[cfg(all(
+            feature = "crypto-ring",
+            not(feature = "crypto-openssl"),
+            not(feature = "crypto-aws-lc")
+        ))]
+        self.ctx.update(data);
+
+        #[cfg(feature = "crypto-openssl")]
+        self.ctx.update(data).unwrap();
+
+        #[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+        self.ctx.update(data);
+    }
+
+    /// Finalize the hash and return the SHA-1 digest.
+    #[cfg(all(
+        feature = "crypto-ring",
+        not(feature = "crypto-openssl"),
+        not(feature = "crypto-aws-lc")
+    ))]
+    pub fn finish(self) -> Id20 {
+        let hash = self.ctx.finish();
+        let mut id = [0u8; 20];
+        id.copy_from_slice(hash.as_ref());
+        Id20(id)
+    }
+
+    /// Finalize the hash and return the SHA-1 digest.
+    #[cfg(feature = "crypto-openssl")]
+    pub fn finish(mut self) -> Id20 {
+        let hash = self.ctx.finish().unwrap();
+        let mut id = [0u8; 20];
+        id.copy_from_slice(&hash);
+        Id20(id)
+    }
+
+    /// Finalize the hash and return the SHA-1 digest.
+    #[cfg(all(feature = "crypto-aws-lc", not(feature = "crypto-openssl")))]
+    pub fn finish(self) -> Id20 {
+        let hash = self.ctx.finish();
+        let mut id = [0u8; 20];
+        id.copy_from_slice(hash.as_ref());
+        Id20(id)
+    }
+}
+
+impl Default for Sha1Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Fill a buffer with pseudo-random bytes (xorshift64, not cryptographic).
 pub fn random_bytes(buf: &mut [u8]) {
     for b in buf.iter_mut() {
@@ -232,5 +321,23 @@ mod tests {
         random_bytes(&mut buf);
         // At least some bytes should be non-zero (probability of all-zero is ~0)
         assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn sha1_hasher_matches_oneshot() {
+        let data = b"hello world, this is a streaming hash test";
+        let expected = sha1(data);
+
+        let mut hasher = Sha1Hasher::new();
+        hasher.update(&data[..12]);
+        hasher.update(&data[12..]);
+        assert_eq!(hasher.finish(), expected);
+    }
+
+    #[test]
+    fn sha1_hasher_empty() {
+        let expected = sha1(b"");
+        let hasher = Sha1Hasher::new();
+        assert_eq!(hasher.finish(), expected);
     }
 }

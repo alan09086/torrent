@@ -17,18 +17,56 @@ enum WorkerMsg {
 }
 
 /// Job submitted to the hash pool.
-#[derive(Debug)]
-pub struct HashJob {
-    /// Piece index to verify.
-    pub piece: u32,
-    /// Expected SHA1 hash.
-    pub expected: torrent_core::Id20,
-    /// Generation counter for staleness detection.
-    pub generation: u64,
-    /// Pre-extracted piece data.
-    pub data: Vec<u8>,
-    /// Per-torrent result sender.
-    pub result_tx: tokio::sync::mpsc::Sender<HashResult>,
+pub enum HashJob {
+    /// Pre-read piece data (original path).
+    Data {
+        /// Piece index to verify.
+        piece: u32,
+        /// Expected SHA1 hash.
+        expected: torrent_core::Id20,
+        /// Generation counter for staleness detection.
+        generation: u64,
+        /// Pre-extracted piece data.
+        data: Vec<u8>,
+        /// Per-torrent result sender.
+        result_tx: tokio::sync::mpsc::Sender<HashResult>,
+    },
+    /// Streaming verify via backend (M101 — no full-piece alloc).
+    Streaming {
+        /// Piece index to verify.
+        piece: u32,
+        /// Expected SHA1 hash.
+        expected: torrent_core::Id20,
+        /// Generation counter for staleness detection.
+        generation: u64,
+        /// Info hash for backend lookup.
+        info_hash: torrent_core::Id20,
+        /// Disk I/O backend for streaming verification.
+        backend: std::sync::Arc<dyn crate::disk_backend::DiskIoBackend>,
+        /// Per-torrent result sender.
+        result_tx: tokio::sync::mpsc::Sender<HashResult>,
+    },
+}
+
+impl std::fmt::Debug for HashJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HashJob::Data {
+                piece, generation, ..
+            } => f
+                .debug_struct("HashJob::Data")
+                .field("piece", piece)
+                .field("generation", generation)
+                .finish_non_exhaustive(),
+            HashJob::Streaming {
+                piece, generation, ..
+            } => f
+                .debug_struct("HashJob::Streaming")
+                .field("piece", piece)
+                .field("generation", generation)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// Result of a hash verification.
@@ -130,17 +168,42 @@ impl HashPool {
                 WorkerMsg::Job(job) => job,
             };
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let actual = torrent_core::sha1(&job.data);
-                actual == job.expected
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &job {
+                HashJob::Data {
+                    data, expected, ..
+                } => torrent_core::sha1(data) == *expected,
+                HashJob::Streaming {
+                    info_hash,
+                    piece,
+                    expected,
+                    backend,
+                    ..
+                } => backend
+                    .hash_piece(*info_hash, *piece, expected)
+                    .unwrap_or(false),
             }));
+
+            let (piece, generation, result_tx) = match job {
+                HashJob::Data {
+                    piece,
+                    generation,
+                    result_tx,
+                    ..
+                } => (piece, generation, result_tx),
+                HashJob::Streaming {
+                    piece,
+                    generation,
+                    result_tx,
+                    ..
+                } => (piece, generation, result_tx),
+            };
 
             let passed = match result {
                 Ok(passed) => passed,
                 Err(panic) => {
                     error!(
                         worker = id,
-                        piece = job.piece,
+                        piece,
                         "hash worker panicked: {:?}",
                         panic.downcast_ref::<String>()
                     );
@@ -148,12 +211,11 @@ impl HashPool {
                 }
             };
 
-            if job
-                .result_tx
+            if result_tx
                 .blocking_send(HashResult {
-                    piece: job.piece,
+                    piece,
                     passed,
-                    generation: job.generation,
+                    generation,
                 })
                 .is_err()
             {
@@ -196,7 +258,7 @@ mod tests {
             } else {
                 torrent_core::Id20([0xff; 20])
             };
-            pool.submit(HashJob {
+            pool.submit(HashJob::Data {
                 piece: i,
                 expected,
                 generation: 0,
@@ -229,7 +291,7 @@ mod tests {
 
         let data = b"piece five data".to_vec();
         let expected = torrent_core::sha1(&data);
-        pool.submit(HashJob {
+        pool.submit(HashJob::Data {
             piece: 5,
             expected,
             generation: 1,
@@ -255,7 +317,7 @@ mod tests {
 
         let data1 = b"piece42-attempt1".to_vec();
         let expected1 = torrent_core::sha1(&data1);
-        pool.submit(HashJob {
+        pool.submit(HashJob::Data {
             piece: 42,
             expected: expected1,
             generation: 1,
@@ -267,7 +329,7 @@ mod tests {
 
         let data2 = b"piece42-attempt2".to_vec();
         let expected2 = torrent_core::sha1(&data2);
-        pool.submit(HashJob {
+        pool.submit(HashJob::Data {
             piece: 42,
             expected: expected2,
             generation: 2,
@@ -301,7 +363,7 @@ mod tests {
         for i in 0u32..3 {
             let data = format!("data-{i}").into_bytes();
             let expected = torrent_core::sha1(&data);
-            pool.submit(HashJob {
+            pool.submit(HashJob::Data {
                 piece: i,
                 expected,
                 generation: 0,
@@ -335,7 +397,7 @@ mod tests {
         // Submit a job with mismatched hash
         let data = b"corrupt data".to_vec();
         let expected = torrent_core::Id20([0xAA; 20]); // Wrong hash
-        pool.submit(HashJob {
+        pool.submit(HashJob::Data {
             piece: 0,
             expected,
             generation: 0,
@@ -352,7 +414,7 @@ mod tests {
         // Worker should continue — submit a correct job
         let data2 = b"good data".to_vec();
         let expected2 = torrent_core::sha1(&data2);
-        pool.submit(HashJob {
+        pool.submit(HashJob::Data {
             piece: 1,
             expected: expected2,
             generation: 0,
@@ -365,5 +427,45 @@ mod tests {
         let r2 = rx.recv().await.unwrap();
         assert!(r2.passed, "correct hash should pass");
         assert_eq!(r2.piece, 1);
+    }
+
+    #[tokio::test]
+    async fn hash_pool_streaming_variant() {
+        use std::sync::Arc;
+        use torrent_core::Lengths;
+        use torrent_storage::MemoryStorage;
+
+        let pool = HashPool::new(1, 8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        // Set up a backend with real data
+        let data = vec![0xCDu8; 16384];
+        let expected = torrent_core::sha1(&data);
+        let info_hash = torrent_core::Id20([0x01; 20]);
+        let lengths = Lengths::new(16384, 16384, 16384);
+        let storage: Arc<dyn torrent_storage::TorrentStorage> =
+            Arc::new(MemoryStorage::new(lengths));
+        storage.write_chunk(0, 0, &data).unwrap();
+
+        let config = crate::disk::DiskConfig::default();
+        let backend: Arc<dyn crate::disk_backend::DiskIoBackend> =
+            Arc::new(crate::disk_backend::PosixDiskIo::new(&config));
+        backend.register(info_hash, storage);
+
+        pool.submit(HashJob::Streaming {
+            piece: 0,
+            expected,
+            generation: 0,
+            info_hash,
+            backend,
+            result_tx: tx,
+        })
+        .await
+        .unwrap();
+
+        let r = rx.recv().await.unwrap();
+        assert!(r.passed, "streaming hash should pass");
+        assert_eq!(r.piece, 0);
+        assert_eq!(r.generation, 0);
     }
 }
