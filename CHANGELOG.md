@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.103.0 | M103 | Per-block stealing & reactive dispatch — BlockMaps atomic bit arrays, StealCandidates FIFO queue, 3-phase dispatch, 50ms reactive snapshots, ~250 lines legacy steal code deleted |
 | 0.102.0 | M102 | Unified buffer pool (libtorrent 1.x-style) — replaces separate ARC cache + WriteBuffer with single BufferPool, hash-from-cache, full-piece prefetch, BEP 6 T2-based suggest |
 | 0.101.0 | M101 | Performance parity — SmallVec segments (111K allocs eliminated), batch writer (93K→~1.5K spawns), streaming piece verification (262 KiB/piece alloc eliminated) |
 | 0.100.0 | M100 | Direct per-block pwrite — deferred write queue replaces WriteCoalescer/StoreBuffer/PieceBufferPool, verify from disk, ~1100 lines deleted, RSS 46-73 MiB |
@@ -56,6 +57,28 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.103.0] — 2026-03-16
+
+### Added
+- **BlockMaps** — pre-allocated atomic bit arrays for per-block request/received tracking,
+  replacing coarse piece-level tracking with fine-grained block-level state
+- **StealCandidates** — shared FIFO queue for pieces available for block stealing,
+  populated when a piece has unrequested blocks remaining after initial assignment
+- **3-phase dispatch** in `PeerDispatchState::next_block()`:
+  Phase 1: hot sequential (continue current piece), Phase 2: CAS reserve (new piece),
+  Phase 3: steal unrequested blocks from StealCandidates queue
+- **Reactive snapshot** — 50ms dirty-flag debounce replaces 500ms fixed interval
+  for availability snapshots, responding faster to have/bitfield changes
+- **EndGame bypass** — when block stealing is enabled, EndGame mode is skipped
+  (block stealing subsumes its purpose with less overhead)
+- **`use_block_stealing` setting** — new session setting (default: `true`) to
+  enable/disable per-block stealing dispatch
+- 22 new tests covering BlockMaps, StealCandidates, and 3-phase dispatch
+
+### Changed
+- Deleted ~250 lines of legacy steal code from `piece_selector.rs`
+- Removed 4 dead steal tests and 1 test from piece_selector cleanup (net +19 tests, 1555 total)
 
 ## [0.102.0] — 2026-03-16
 

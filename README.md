@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1536-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1555-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.102.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.103.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,536 tests. Zero clippy warnings.
+12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,555 tests. Zero clippy warnings.
 
 ---
 
@@ -51,7 +51,7 @@ torrent download ./ubuntu.torrent --list
 
 ```toml
 [dependencies]
-torrent = "0.101.0"
+torrent = "0.103.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -180,6 +180,7 @@ The performance work spans 18 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.103.0 | Per-block stealing & reactive dispatch -- BlockMaps, StealCandidates, 3-phase dispatch | Eliminates legacy steal code, 50ms reactive snapshots |
 | 0.102.0 | Unified buffer pool (libtorrent 1.x) -- hash-from-cache, full-piece prefetch, T2 suggest | Eliminates write->read->hash round-trip, 64 MiB unified cache |
 | 0.101.0 | Allocation hotspots -- SmallVec segments, batch writer, streaming verify | 111K allocs eliminated, 93K->~1.5K spawns, 262 KiB/piece alloc eliminated |
 | 0.100.0 | Direct per-block pwrite -- deferred write queue | RSS 46-73 MiB, ~1100 lines deleted |
@@ -273,7 +274,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M102) focuses on performance optimization. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M103) focuses on performance optimization. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -291,7 +292,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Pluggable Interfaces | M49-M50 | Pluggable disk I/O, session statistics (~100 counters) | Done |
 | Simulation | M51 | In-process network simulation framework | Done |
 | API Parity | M52-M53 | API documentation, full torrent operations API | Done |
-| Speed Optimization | M55-M102 | Dispatch architecture, pipeline tuning, CPU efficiency, unified buffer pool | Done |
+| Speed Optimization | M55-M103 | Dispatch architecture, pipeline tuning, CPU efficiency, unified buffer pool, block stealing | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -300,7 +301,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,536 tests
+cargo test --workspace                      # 1,555 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 
