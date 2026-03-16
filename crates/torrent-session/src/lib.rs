@@ -9,7 +9,6 @@ mod settings;
 mod types;
 // These will be added as they're implemented:
 pub(crate) mod ban;
-#[allow(dead_code)] // M102: wired in during Task 3 (PosixDiskIo integration).
 pub(crate) mod buffer_pool;
 pub(crate) mod choker;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use
@@ -53,7 +52,6 @@ pub mod transport;
 pub(crate) mod url_guard;
 pub(crate) mod utp_routing;
 pub(crate) mod web_seed;
-pub(crate) mod write_buffer;
 
 pub use crate::piece_selector::build_wanted_pieces;
 pub use crate::tracker_manager::{TrackerInfo, TrackerStatus};

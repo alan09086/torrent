@@ -4,15 +4,15 @@
 //! allowing custom storage backends (POSIX, mmap, disabled/null, etc.).
 //! [`DisabledDiskIo`] is a no-op backend useful for network throughput benchmarking.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use bytes::Bytes;
 use torrent_core::{Id20, Id32};
-use torrent_storage::{ArcCache, TorrentStorage};
+use torrent_storage::TorrentStorage;
 
+use crate::buffer_pool::BufferPool;
 use crate::disk::DiskConfig;
-use crate::write_buffer::WriteBuffer;
 
 /// Aggregate I/O statistics for a disk backend.
 #[derive(Debug, Clone, Default)]
@@ -27,6 +27,16 @@ pub struct DiskIoStats {
     pub cache_misses: u64,
     /// Current size of the write buffer in bytes.
     pub write_buffer_bytes: usize,
+    /// Current size of the read cache in bytes (M102).
+    pub read_cache_bytes: usize,
+    /// Total number of entries in the buffer pool (M102).
+    pub pool_entries: usize,
+    /// Number of prefetch insertions into the read cache (M102).
+    pub prefetch_count: u64,
+    /// Number of ARC evictions from the read cache (M102).
+    pub eviction_count: u64,
+    /// Number of Writing-to-Skeleton demotions (M102).
+    pub skeleton_count: u64,
 }
 
 /// Trait for pluggable disk I/O backends.
@@ -49,7 +59,7 @@ pub trait DiskIoBackend: Send + Sync {
         info_hash: Id20,
         piece: u32,
         begin: u32,
-        data: &[u8],
+        data: Bytes,
         flush: bool,
     ) -> crate::Result<()>;
 
@@ -119,7 +129,7 @@ impl DiskIoBackend for DisabledDiskIo {
         _info_hash: Id20,
         _piece: u32,
         _begin: u32,
-        _data: &[u8],
+        _data: Bytes,
         _flush: bool,
     ) -> crate::Result<()> {
         Ok(())
@@ -183,34 +193,29 @@ impl DiskIoBackend for DisabledDiskIo {
 }
 
 // ---------------------------------------------------------------------------
-// PosixDiskIo — ARC cache + WriteBuffer backend
+// PosixDiskIo — unified BufferPool backend
 // ---------------------------------------------------------------------------
 
-/// POSIX disk I/O backend with user-space ARC read cache and write buffer.
+/// POSIX disk I/O backend with unified buffer pool (combined read cache +
+/// write buffer under a single byte budget).
 ///
-/// Extracts the caching/buffering logic from `DiskActor` into a standalone
-/// `DiskIoBackend` implementation. All fields use interior mutability since
-/// the trait methods take `&self`.
+/// Replaces the previous separate `ArcCache` + `WriteBuffer` design with
+/// a single [`BufferPool`] that uses a byte-budget ARC for read caching and
+/// tracks in-flight writes as `Writing` entries.
 pub struct PosixDiskIo {
     storages: RwLock<HashMap<Id20, Arc<dyn TorrentStorage>>>,
-    cache: Mutex<ArcCache<(Id20, u32, u32), Bytes>>,
-    write_buffer: Mutex<WriteBuffer>,
+    pool: Mutex<BufferPool>,
     stats: Mutex<DiskIoStats>,
 }
 
 impl PosixDiskIo {
     /// Create a new POSIX disk I/O backend with the given configuration.
     pub fn new(config: &DiskConfig) -> Self {
-        let write_max = (config.cache_size as f32 * config.write_cache_ratio) as usize;
-        let cache_blocks = if config.cache_size > write_max {
-            (config.cache_size - write_max) / 16384
-        } else {
-            64
-        };
+        let mut pool = BufferPool::with_capacity(config.buffer_pool_capacity);
+        pool.set_mlock(config.enable_mlock);
         PosixDiskIo {
             storages: RwLock::new(HashMap::new()),
-            cache: Mutex::new(ArcCache::new(cache_blocks.max(1))),
-            write_buffer: Mutex::new(WriteBuffer::new(write_max)),
+            pool: Mutex::new(pool),
             stats: Mutex::new(DiskIoStats::default()),
         }
     }
@@ -241,11 +246,7 @@ impl DiskIoBackend for PosixDiskIo {
 
     fn unregister(&self, info_hash: Id20) {
         self.storages.write().unwrap().remove(&info_hash);
-        self.write_buffer.lock().unwrap().clear_torrent(info_hash);
-        self.cache
-            .lock()
-            .unwrap()
-            .remove_where(|k| k.0 == info_hash);
+        self.pool.lock().unwrap().clear_torrent(info_hash);
     }
 
     fn write_chunk(
@@ -253,35 +254,24 @@ impl DiskIoBackend for PosixDiskIo {
         info_hash: Id20,
         piece: u32,
         begin: u32,
-        data: &[u8],
+        data: Bytes,
         flush: bool,
     ) -> crate::Result<()> {
         let len = data.len();
 
         if flush {
             let storage = self.get_storage(info_hash)?;
-            storage.write_chunk(piece, begin, data)?;
+            storage.write_chunk(piece, begin, &data)?;
             self.stats.lock().unwrap().write_bytes += len as u64;
             return Ok(());
         }
 
-        // Buffer the write
-        let needs_flush;
-        let oldest;
-        {
-            let mut wb = self.write_buffer.lock().unwrap();
-            wb.write(info_hash, piece, begin, Bytes::from(data.to_vec()));
-            needs_flush = wb.needs_flush();
-            oldest = if needs_flush { wb.oldest_piece() } else { None };
-        }
+        // Buffer the write in the pool. Pass piece_size=0 since we don't know
+        // it here — completion detection is handled by ChunkTracker in
+        // torrent.rs, not by the buffer pool.
+        let key = (info_hash, piece);
+        self.pool.lock().unwrap().write_block(key, begin, data, 0);
         self.stats.lock().unwrap().write_bytes += len as u64;
-
-        if let Some((ih, p)) = oldest
-            && let Err(e) = self.flush_piece(ih, p)
-        {
-            tracing::warn!(%e, "background flush failed");
-        }
-
         Ok(())
     }
 
@@ -293,41 +283,49 @@ impl DiskIoBackend for PosixDiskIo {
         length: u32,
         volatile: bool,
     ) -> crate::Result<Bytes> {
-        // 1. Check write buffer
-        let wb_hit = {
-            let wb = self.write_buffer.lock().unwrap();
-            wb.read(info_hash, piece, begin, length)
-        };
-        if let Some(data) = wb_hit {
-            self.stats.lock().unwrap().cache_hits += 1;
-            return Ok(data);
-        }
+        let key = (info_hash, piece);
 
-        // 2. Check ARC cache (unless volatile)
+        // 1. Check buffer pool (Writing entries + Cached entries)
         if !volatile {
-            let cache_key = (info_hash, piece, begin);
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(data) = cache.get(&cache_key) {
-                let cloned = data.clone();
-                drop(cache);
+            let mut pool = self.pool.lock().unwrap();
+            if let Some(data) = pool.read_block(key, begin, length as usize) {
+                drop(pool);
                 self.stats.lock().unwrap().cache_hits += 1;
-                return Ok(cloned);
+                return Ok(data);
             }
         }
         self.stats.lock().unwrap().cache_misses += 1;
 
-        // 3. Read from storage
+        // 2. Read full piece from storage and cache it (unless volatile)
         let storage = self.get_storage(info_hash)?;
+        if !volatile {
+            match storage.read_piece(piece) {
+                Ok(piece_data) => {
+                    let piece_bytes = Bytes::from(piece_data);
+                    self.stats.lock().unwrap().read_bytes += piece_bytes.len() as u64;
+
+                    let mut pool = self.pool.lock().unwrap();
+                    pool.prefetch_piece(key, piece_bytes.clone());
+                    drop(pool);
+
+                    // Return the requested slice
+                    let end = (begin as usize).saturating_add(length as usize);
+                    if end <= piece_bytes.len() {
+                        return Ok(piece_bytes.slice(begin as usize..end));
+                    }
+                    // Fall through to chunk read if slice is out of bounds
+                    // (shouldn't happen in practice, but defensive)
+                }
+                Err(_) => {
+                    // Fall through to chunk read on piece-level failure
+                }
+            }
+        }
+
+        // 3. Volatile path or fallback: read just the requested chunk
         let data = storage.read_chunk(piece, begin, length)?;
         let bytes = Bytes::from(data);
         self.stats.lock().unwrap().read_bytes += bytes.len() as u64;
-
-        // 4. Cache the result (unless volatile)
-        if !volatile {
-            let cache_key = (info_hash, piece, begin);
-            self.cache.lock().unwrap().insert(cache_key, bytes.clone());
-        }
-
         Ok(bytes)
     }
 
@@ -340,12 +338,62 @@ impl DiskIoBackend for PosixDiskIo {
     }
 
     fn hash_piece(&self, info_hash: Id20, piece: u32, expected: &Id20) -> crate::Result<bool> {
+        let key = (info_hash, piece);
+
+        // Try hash from cache: take all blocks from the Writing entry and hash
+        // them in memory, avoiding a disk round-trip. This works because
+        // hash_piece is only called after ChunkTracker confirms the piece is
+        // complete, so all blocks should be present.
+        let cached_data = {
+            let mut pool = self.pool.lock().unwrap();
+            pool.take_all_blocks(key)
+        };
+
+        if let Some(data) = cached_data {
+            let hash = torrent_core::sha1(&data);
+            if hash == *expected {
+                // Hash pass: flush to disk + promote to read cache.
+                let storage = self.get_storage(info_hash)?;
+                storage.write_chunk(piece, 0, &data)?;
+                self.stats.lock().unwrap().write_bytes += data.len() as u64;
+
+                let mut pool = self.pool.lock().unwrap();
+                pool.promote_to_cached(key, Bytes::from(data));
+                return Ok(true);
+            }
+            // Hash fail: data already removed from pool by take_all_blocks.
+            return Ok(false);
+        }
+
+        // No cached data — flush and verify from disk (legacy path).
         self.flush_piece(info_hash, piece)?;
         let storage = self.get_storage(info_hash)?;
         Ok(storage.verify_piece(piece, expected)?)
     }
 
     fn hash_piece_v2(&self, info_hash: Id20, piece: u32, expected: &Id32) -> crate::Result<bool> {
+        let key = (info_hash, piece);
+
+        // Try hash from cache (same pattern as hash_piece but SHA-256).
+        let cached_data = {
+            let mut pool = self.pool.lock().unwrap();
+            pool.take_all_blocks(key)
+        };
+
+        if let Some(data) = cached_data {
+            let hash = torrent_core::sha256(&data);
+            if hash == *expected {
+                let storage = self.get_storage(info_hash)?;
+                storage.write_chunk(piece, 0, &data)?;
+                self.stats.lock().unwrap().write_bytes += data.len() as u64;
+
+                let mut pool = self.pool.lock().unwrap();
+                pool.promote_to_cached(key, Bytes::from(data));
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+
         self.flush_piece(info_hash, piece)?;
         let storage = self.get_storage(info_hash)?;
         Ok(storage.verify_piece_v2(piece, expected)?)
@@ -364,20 +412,13 @@ impl DiskIoBackend for PosixDiskIo {
     }
 
     fn clear_piece(&self, info_hash: Id20, piece: u32) {
-        self.write_buffer
-            .lock()
-            .unwrap()
-            .clear_piece(info_hash, piece);
-        self.cache
-            .lock()
-            .unwrap()
-            .remove_where(|k| k.0 == info_hash && k.1 == piece);
+        self.pool.lock().unwrap().clear_piece((info_hash, piece));
     }
 
     fn flush_piece(&self, info_hash: Id20, piece: u32) -> crate::Result<()> {
         let blocks = {
-            let mut wb = self.write_buffer.lock().unwrap();
-            match wb.take_piece(info_hash, piece) {
+            let mut pool = self.pool.lock().unwrap();
+            match pool.flush_piece((info_hash, piece)) {
                 Some(b) => b,
                 None => return Ok(()),
             }
@@ -390,30 +431,34 @@ impl DiskIoBackend for PosixDiskIo {
     }
 
     fn flush_all(&self) -> crate::Result<()> {
-        let pending: Vec<(Id20, u32)> = {
-            let wb = self.write_buffer.lock().unwrap();
-            wb.pending_keys().collect()
+        let all_blocks = {
+            let mut pool = self.pool.lock().unwrap();
+            pool.flush_all()
         };
-        for (ih, piece) in pending {
-            self.flush_piece(ih, piece)?;
+        for ((info_hash, piece), blocks) in all_blocks {
+            let storage = self.get_storage(info_hash)?;
+            for (begin, data) in blocks {
+                storage.write_chunk(piece, begin, &data)?;
+            }
         }
         Ok(())
     }
 
     fn cached_pieces(&self, info_hash: Id20) -> Vec<u32> {
-        let cache = self.cache.lock().unwrap();
-        cache
-            .cached_keys()
-            .filter(|(ih, _, _)| *ih == info_hash)
-            .map(|(_, piece, _)| *piece)
-            .collect::<HashSet<u32>>()
-            .into_iter()
-            .collect()
+        let pool = self.pool.lock().unwrap();
+        pool.cached_pieces(info_hash)
     }
 
     fn stats(&self) -> DiskIoStats {
         let mut s = self.stats.lock().unwrap().clone();
-        s.write_buffer_bytes = self.write_buffer.lock().unwrap().total_bytes();
+        let pool = self.pool.lock().unwrap();
+        let ps = pool.stats();
+        s.write_buffer_bytes = ps.write_buffer_bytes;
+        s.read_cache_bytes = ps.read_cache_bytes;
+        s.pool_entries = ps.total_entries;
+        s.prefetch_count = ps.prefetch_count;
+        s.eviction_count = ps.eviction_count;
+        s.skeleton_count = ps.skeleton_count;
         s
     }
 }
@@ -479,12 +524,12 @@ impl DiskIoBackend for MmapDiskIo {
         info_hash: Id20,
         piece: u32,
         begin: u32,
-        data: &[u8],
+        data: Bytes,
         _flush: bool,
     ) -> crate::Result<()> {
         let len = data.len();
         let storage = self.get_storage(info_hash)?;
-        storage.write_chunk(piece, begin, data)?;
+        storage.write_chunk(piece, begin, &data)?;
         self.stats.lock().unwrap().write_bytes += len as u64;
         Ok(())
     }
@@ -562,7 +607,7 @@ impl DiskIoBackend for MmapDiskIo {
 /// Create a disk I/O backend based on the storage mode in the configuration.
 ///
 /// Returns `MmapDiskIo` when `config.storage_mode` is `Mmap`, otherwise
-/// returns `PosixDiskIo` with ARC cache and write buffer.
+/// returns `PosixDiskIo` with unified buffer pool.
 pub fn create_backend_from_config(config: &DiskConfig) -> Arc<dyn DiskIoBackend> {
     if config.storage_mode == torrent_core::StorageMode::Mmap {
         Arc::new(MmapDiskIo::new())
@@ -621,7 +666,8 @@ mod tests {
     #[test]
     fn disabled_backend_write_succeeds() {
         let backend = DisabledDiskIo;
-        let result = backend.write_chunk(make_hash(), 0, 0, &[1, 2, 3, 4], false);
+        let result =
+            backend.write_chunk(make_hash(), 0, 0, Bytes::from_static(&[1, 2, 3, 4]), false);
         assert!(result.is_ok());
     }
 
@@ -704,7 +750,9 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![42u8; 50];
-        backend.write_chunk(ih, 0, 0, &data, true).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .unwrap();
         let read = backend.read_chunk(ih, 0, 0, 50, false).unwrap();
         assert_eq!(&read[..], &data[..]);
     }
@@ -717,14 +765,16 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![99u8; 50];
-        // Write without flush — goes to write buffer
-        backend.write_chunk(ih, 0, 0, &data, false).unwrap();
+        // Write without flush — goes to buffer pool
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), false)
+            .unwrap();
 
-        // Read should find it in write buffer
+        // Read should find it in buffer pool
         let read = backend.read_chunk(ih, 0, 0, 50, false).unwrap();
         assert_eq!(&read[..], &data[..]);
 
-        // Should be a cache hit (from write buffer)
+        // Should be a cache hit (from buffer pool)
         let stats = backend.stats();
         assert!(stats.cache_hits >= 1);
     }
@@ -737,15 +787,17 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![7u8; 50];
-        backend.write_chunk(ih, 0, 0, &data, true).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .unwrap();
 
-        // First read: cache miss, reads from storage
+        // First read: cache miss, reads from storage and prefetches
         let r1 = backend.read_chunk(ih, 0, 0, 50, false).unwrap();
         assert_eq!(&r1[..], &data[..]);
         let s1 = backend.stats();
         assert_eq!(s1.cache_misses, 1);
 
-        // Second read: should be cache hit
+        // Second read: should be cache hit (from prefetched Cached entry)
         let r2 = backend.read_chunk(ih, 0, 0, 50, false).unwrap();
         assert_eq!(&r2[..], &data[..]);
         let s2 = backend.stats();
@@ -760,7 +812,9 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![9u8; 50];
-        backend.write_chunk(ih, 0, 0, &data, true).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .unwrap();
 
         let expected = torrent_core::sha1(&data);
         assert!(backend.hash_piece(ih, 0, &expected).unwrap());
@@ -774,7 +828,9 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![9u8; 50];
-        backend.write_chunk(ih, 0, 0, &data, true).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .unwrap();
 
         let wrong = Id20([0xFF; 20]);
         assert!(!backend.hash_piece(ih, 0, &wrong).unwrap());
@@ -788,7 +844,9 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![0xABu8; 16384];
-        backend.write_chunk(ih, 0, 0, &data, true).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .unwrap();
 
         let expected = torrent_core::sha256(&data);
         assert!(backend.hash_piece_v2(ih, 0, &expected).unwrap());
@@ -803,7 +861,9 @@ mod tests {
 
         let data = vec![55u8; 50];
         // Write buffered (not flushed)
-        backend.write_chunk(ih, 0, 0, &data, false).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data), false)
+            .unwrap();
         assert!(backend.stats().write_buffer_bytes > 0);
 
         backend.clear_piece(ih, 0);
@@ -819,8 +879,12 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![1u8; 25];
-        backend.write_chunk(ih, 0, 0, &data, true).unwrap();
-        backend.write_chunk(ih, 1, 0, &data, true).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .unwrap();
+        backend
+            .write_chunk(ih, 1, 0, Bytes::from(data), true)
+            .unwrap();
 
         // Read piece 0 to populate cache (non-volatile)
         backend.read_chunk(ih, 0, 0, 25, false).unwrap();
@@ -849,7 +913,9 @@ mod tests {
         backend.register(ih, storage);
 
         let data = vec![42u8; 50];
-        backend.write_chunk(ih, 0, 0, &data, false).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), false)
+            .unwrap();
         let read = backend.read_chunk(ih, 0, 0, 50, false).unwrap();
         assert_eq!(&read[..], &data[..]);
     }
@@ -861,7 +927,9 @@ mod tests {
         let storage = make_storage(100);
         backend.register(ih, storage);
 
-        backend.write_chunk(ih, 0, 0, &[1u8; 50], false).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(vec![1u8; 50]), false)
+            .unwrap();
         backend.read_chunk(ih, 0, 0, 50, false).unwrap();
 
         assert!(backend.cached_pieces(ih).is_empty());
@@ -874,7 +942,9 @@ mod tests {
         let storage = make_storage(100);
         backend.register(ih, storage);
 
-        backend.write_chunk(ih, 0, 0, &[1u8; 50], false).unwrap();
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(vec![1u8; 50]), false)
+            .unwrap();
         let stats = backend.stats();
         assert_eq!(stats.write_bytes, 50);
 
@@ -900,13 +970,13 @@ mod tests {
         let chunk0 = vec![0xAAu8; chunk_size as usize];
         let chunk1 = vec![0xBBu8; chunk_size as usize];
         backend
-            .write_chunk(ih, 0, 0, &chunk0, false)
+            .write_chunk(ih, 0, 0, Bytes::from(chunk0.clone()), false)
             .expect("write chunk 0");
         backend
-            .write_chunk(ih, 0, chunk_size, &chunk1, false)
+            .write_chunk(ih, 0, chunk_size, Bytes::from(chunk1.clone()), false)
             .expect("write chunk 1");
 
-        // read_piece should flush the write buffer and return the full piece
+        // read_piece should flush the buffer pool and return the full piece
         let piece_data = backend.read_piece(ih, 0).expect("read_piece");
         assert_eq!(piece_data.len(), piece_size as usize);
         assert_eq!(&piece_data[..chunk_size as usize], &chunk0[..]);
@@ -915,6 +985,64 @@ mod tests {
         // Stats should reflect the read
         let stats = backend.stats();
         assert!(stats.read_bytes >= piece_size);
+    }
+
+    // -----------------------------------------------------------------------
+    // Hash-from-cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn posix_hash_from_cache_pass() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(30);
+        let storage = make_storage(100);
+        backend.register(ih, storage);
+
+        // Write two blocks into the buffer pool (not flushed)
+        let d1 = vec![0xAA_u8; 50];
+        let d2 = vec![0xBB_u8; 50];
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(d1.clone()), false)
+            .unwrap();
+        backend
+            .write_chunk(ih, 0, 50, Bytes::from(d2.clone()), false)
+            .unwrap();
+
+        // Compute expected hash of the full piece
+        let mut full = d1;
+        full.extend_from_slice(&d2);
+        let expected = torrent_core::sha1(&full);
+
+        // hash_piece should hash from cache, write to disk, and promote to Cached
+        assert!(backend.hash_piece(ih, 0, &expected).unwrap());
+
+        // The piece should now be readable from disk via read_piece
+        let piece_data = backend.read_piece(ih, 0).unwrap();
+        assert_eq!(piece_data.len(), 100);
+
+        // And the piece should be in the read cache (promoted)
+        let cached = backend.cached_pieces(ih);
+        assert!(cached.contains(&0));
+    }
+
+    #[test]
+    fn posix_hash_from_cache_fail() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(31);
+        let storage = make_storage(50);
+        backend.register(ih, storage);
+
+        // Write one block into buffer pool
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(vec![0xCC_u8; 50]), false)
+            .unwrap();
+
+        // Wrong hash — should fail, data discarded from pool
+        let wrong = Id20([0xFF; 20]);
+        assert!(!backend.hash_piece(ih, 0, &wrong).unwrap());
+
+        // Buffer pool should no longer hold the data
+        assert_eq!(backend.stats().write_buffer_bytes, 0);
     }
 
     // -----------------------------------------------------------------------

@@ -191,6 +191,21 @@ pub struct DiskStats {
     pub write_buffer_bytes: usize,
     /// Number of pending disk I/O jobs in the queue.
     pub queued_jobs: usize,
+    /// Current size of the read cache in bytes (M102).
+    #[serde(default)]
+    pub read_cache_bytes: usize,
+    /// Total number of entries in the buffer pool (M102).
+    #[serde(default)]
+    pub pool_entries: usize,
+    /// Number of prefetch insertions into the read cache (M102).
+    #[serde(default)]
+    pub prefetch_count: u64,
+    /// Number of ARC evictions from the read cache (M102).
+    #[serde(default)]
+    pub eviction_count: u64,
+    /// Number of Writing-to-Skeleton demotions (M102).
+    #[serde(default)]
+    pub skeleton_count: u64,
 }
 
 impl From<crate::disk_backend::DiskIoStats> for DiskStats {
@@ -202,6 +217,11 @@ impl From<crate::disk_backend::DiskIoStats> for DiskStats {
             cache_misses: s.cache_misses,
             write_buffer_bytes: s.write_buffer_bytes,
             queued_jobs: 0,
+            read_cache_bytes: s.read_cache_bytes,
+            pool_entries: s.pool_entries,
+            prefetch_count: s.prefetch_count,
+            eviction_count: s.eviction_count,
+            skeleton_count: s.skeleton_count,
         }
     }
 }
@@ -894,7 +914,7 @@ impl DiskActor {
                 tokio::spawn(async move {
                     let permit = semaphore.acquire_owned().await.unwrap();
                     let result = tokio::task::spawn_blocking(move || {
-                        backend.write_chunk(info_hash, piece, begin, &data, flush)
+                        backend.write_chunk(info_hash, piece, begin, data, flush)
                     })
                     .await
                     .unwrap();

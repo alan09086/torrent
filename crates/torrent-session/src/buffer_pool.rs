@@ -17,9 +17,11 @@ use torrent_core::Id20;
 type PieceKey = (Id20, u32);
 
 /// Default total byte budget: 64 MiB.
+#[cfg(test)]
 const DEFAULT_CAPACITY: usize = 64 * 1024 * 1024;
 
 /// Maximum number of hot piece indices returned by [`BufferPool::hot_pieces`].
+#[allow(dead_code)] // used by Task 4 (suggest_cached_pieces wiring)
 const MAX_HOT_PIECES: usize = 16;
 
 // ---------------------------------------------------------------------------
@@ -74,12 +76,16 @@ pub(crate) struct BufferPoolStats {
     /// Total entries in the pool (Writing + Skeleton + Cached).
     pub total_entries: usize,
     /// Number of read hits served from cache.
+    #[allow(dead_code)] // exposed for future session-level stats aggregation
     pub cache_hits: u64,
     /// Number of read misses (fell through to disk or not present).
+    #[allow(dead_code)] // exposed for future session-level stats aggregation
     pub cache_misses: u64,
     /// Cumulative bytes served from read cache.
+    #[allow(dead_code)] // exposed for future session-level stats aggregation
     pub read_bytes: u64,
     /// Cumulative bytes written into the pool.
+    #[allow(dead_code)] // exposed for future session-level stats aggregation
     pub write_bytes: u64,
     /// Number of prefetch insertions.
     pub prefetch_count: u64,
@@ -289,6 +295,7 @@ impl PieceArc {
     }
 
     /// Iterate over T2 keys (proven-popular entries for BEP 6 suggest).
+    #[allow(dead_code)] // used by hot_pieces(), wired in Task 4
     fn t2_keys(&self) -> impl Iterator<Item = &PieceKey> {
         self.t2.iter()
     }
@@ -400,7 +407,6 @@ impl PieceArc {
 /// promoted to a Cached entry managed by the ARC eviction policy. Read requests
 /// are served from either Writing or Cached entries; Skeleton entries (flushed
 /// to disk) return `None` so the caller falls through to disk I/O.
-#[allow(dead_code)] // wired in during Task 3 (PosixDiskIo integration)
 pub(crate) struct BufferPool {
     /// All piece entries regardless of state.
     entries: HashMap<PieceKey, CachedPiece>,
@@ -424,9 +430,9 @@ pub(crate) struct BufferPool {
     skeleton_count: u64,
 }
 
-#[allow(dead_code)] // wired in during Task 3 (PosixDiskIo integration)
 impl BufferPool {
     /// Create a new buffer pool with the default 64 MiB capacity.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
@@ -540,6 +546,7 @@ impl BufferPool {
     ///
     /// If the entry is `Writing` and `total_bytes >= piece_size`, concatenates
     /// blocks in offset order and returns them. Removes the entry.
+    #[cfg(test)]
     pub fn take_completed_data(&mut self, key: PieceKey) -> Option<Vec<u8>> {
         match self.entries.get(&key) {
             Some(CachedPiece::Writing {
@@ -564,6 +571,53 @@ impl BufferPool {
             let mut assembled = Vec::with_capacity(total_bytes);
             for (_, block) in blocks {
                 assembled.extend_from_slice(&block);
+            }
+            Some(assembled)
+        } else {
+            None
+        }
+    }
+
+    /// Take all blocks from a Writing entry, assembling them into a contiguous
+    /// `Vec<u8>` regardless of whether `total_bytes >= piece_size`.
+    ///
+    /// Returns `None` if the entry does not exist or is not in `Writing` state.
+    /// Blocks are placed at their byte offset within the piece, so the returned
+    /// buffer may contain zero-filled gaps if blocks are non-contiguous.
+    ///
+    /// The entry is removed on success. This is used by `hash_piece` to hash
+    /// from cache when `piece_size` was not known at write time (the existing
+    /// `ChunkTracker` handles completion detection).
+    pub fn take_all_blocks(&mut self, key: PieceKey) -> Option<Vec<u8>> {
+        if !matches!(self.entries.get(&key), Some(CachedPiece::Writing { .. })) {
+            return None;
+        }
+
+        let entry = self.entries.remove(&key)?;
+        self.remove_from_write_order(&key);
+
+        if let CachedPiece::Writing {
+            blocks,
+            total_bytes,
+            ..
+        } = entry
+        {
+            self.write_bytes = self.write_bytes.saturating_sub(total_bytes);
+
+            // Determine the assembled piece size from the furthest block end.
+            let size = blocks
+                .iter()
+                .map(|(begin, data)| (*begin as usize).saturating_add(data.len()))
+                .max()
+                .unwrap_or(0);
+
+            let mut assembled = vec![0u8; size];
+            for (begin, data) in &blocks {
+                let start = *begin as usize;
+                let end = start.saturating_add(data.len());
+                if end <= assembled.len() {
+                    assembled[start..end].copy_from_slice(data);
+                }
             }
             Some(assembled)
         } else {
@@ -656,12 +710,28 @@ impl BufferPool {
 
     /// Return up to 16 piece indices from the ARC T2 list (proven-popular)
     /// for the given torrent. Used for BEP 6 suggest messages.
+    #[allow(dead_code)] // wired in Task 4 (suggest_cached_pieces)
     pub fn hot_pieces(&self, info_hash: Id20) -> Vec<u32> {
         self.arc
             .t2_keys()
             .filter(|(ih, _)| *ih == info_hash)
             .map(|(_, idx)| *idx)
             .take(MAX_HOT_PIECES)
+            .collect()
+    }
+
+    /// Return all piece indices currently in `Cached` state for the given
+    /// torrent. Used by [`DiskIoBackend::cached_pieces`] for peer suggest.
+    pub fn cached_pieces(&self, info_hash: Id20) -> Vec<u32> {
+        self.entries
+            .iter()
+            .filter_map(|((ih, idx), entry)| {
+                if *ih == info_hash && matches!(entry, CachedPiece::Cached { .. }) {
+                    Some(*idx)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
