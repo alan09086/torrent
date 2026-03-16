@@ -9,7 +9,7 @@ use std::path::PathBuf;
 #[command(name = "torrent", about = "BitTorrent client powered by torrent")]
 struct Cli {
     /// Log level (error, warn, info, debug, trace)
-    #[arg(short, long, default_value = "warn")]
+    #[arg(short, long, default_value = "error")]
     log_level: String,
 
     #[command(subcommand)]
@@ -38,7 +38,7 @@ enum Command {
         #[arg(long)]
         seed: bool,
         /// Listen port
-        #[arg(short, long, default_value = "6881")]
+        #[arg(short, long, default_value = "42020")]
         port: u16,
         /// Quiet mode — suppress progress bar
         #[arg(short, long)]

@@ -23,7 +23,7 @@ fn default_true() -> bool {
     true
 }
 fn default_listen_port() -> u16 {
-    6881
+    42020
 }
 fn default_download_dir() -> PathBuf {
     PathBuf::from(".")
@@ -236,7 +236,7 @@ fn default_runtime_worker_threads() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     // ── General ──
-    /// TCP listen port for incoming peer connections (default: 6881).
+    /// TCP listen port for incoming peer connections (default: 42020).
     #[serde(default = "default_listen_port")]
     pub listen_port: u16,
     /// Default download directory for new torrents (default: ".").
@@ -701,7 +701,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             // General
-            listen_port: 6881,
+            listen_port: 42020,
             download_dir: PathBuf::from("."),
             max_torrents: 100,
             resume_data_dir: None,
@@ -1218,7 +1218,7 @@ mod tests {
     #[test]
     fn default_settings_values() {
         let s = Settings::default();
-        assert_eq!(s.listen_port, 6881);
+        assert_eq!(s.listen_port, 42020);
         assert_eq!(s.download_dir, PathBuf::from("."));
         assert_eq!(s.max_torrents, 100);
         assert!(s.resume_data_dir.is_none());

@@ -109,20 +109,19 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     };
 
     // Poll loop
+    let start_time = Instant::now();
     let mut finished = false;
     let mut peak_peers: usize = 0;
-    let mut last_download_rate: u64 = 0;
+    let mut total_bytes: u64 = 0;
     let mut last_save = Instant::now();
     const SAVE_INTERVAL: Duration = Duration::from_secs(60);
     loop {
         if shutdown.load(Ordering::SeqCst) {
             if let Some(ref pb) = pb {
-                pb.finish_with_message("shutting down...");
+                pb.finish_and_clear();
             }
-            eprintln!("\nShutting down...");
-            save_session_state(&session, &state_path, quiet).await;
+            save_session_state(&session, &state_path, !quiet).await;
             session.shutdown().await?;
-            tokio::time::sleep(Duration::from_secs(1)).await;
             break;
         }
 
@@ -137,28 +136,39 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
 
         if finished {
             if let Some(ref pb) = pb {
-                pb.set_position(100);
-                pb.finish_with_message("download complete!");
+                pb.finish_and_clear();
             }
-            eprintln!(
-                "torrent: peak_peers={peak_peers} final_speed={:.1}MB/s",
-                last_download_rate as f64 / 1_048_576.0
-            );
+
+            let elapsed = start_time.elapsed();
+            let elapsed_secs = elapsed.as_secs_f64();
+            let avg_speed = if elapsed_secs > 0.0 {
+                total_bytes as f64 / elapsed_secs / 1_048_576.0
+            } else {
+                0.0
+            };
+
+            if !quiet {
+                eprintln!(
+                    "Downloaded {} in {:.1}s ({:.1} MB/s avg, {peak_peers} peers)",
+                    format_size(total_bytes),
+                    elapsed_secs,
+                    avg_speed,
+                );
+            }
+
             if seed {
                 eprintln!("Seeding... press Ctrl-C to stop.");
                 tokio::signal::ctrl_c().await?;
-                eprintln!("\nShutting down...");
             }
-            save_session_state(&session, &state_path, quiet).await;
+            save_session_state(&session, &state_path, !quiet).await;
             session.shutdown().await?;
-            tokio::time::sleep(Duration::from_secs(1)).await;
             break;
         }
 
         // Update progress
         if let Ok(stats) = session.torrent_stats(info_hash).await {
             peak_peers = peak_peers.max(stats.peers_connected);
-            last_download_rate = stats.download_rate;
+            total_bytes = stats.total_done;
 
             // Fallback completion check via progress (in case alert is missed)
             if stats.progress >= 1.0 {
@@ -176,7 +186,7 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
                 let peers = stats.peers_connected;
 
                 pb.set_message(format!(
-                    "{:.1}% | {done}/{total} | down {down_rate} up {up_rate} | {peers} peers",
+                    "{:.1}% | {done}/{total} | {down_rate} down {up_rate} up | {peers} peers",
                     stats.progress * 100.0,
                 ));
             }
@@ -185,7 +195,7 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         if last_save.elapsed() >= SAVE_INTERVAL {
-            save_session_state(&session, &state_path, quiet).await;
+            save_session_state(&session, &state_path, false).await;
             last_save = Instant::now();
         }
     }
@@ -368,14 +378,17 @@ mod tests {
 }
 
 /// Save session state (DHT nodes, etc.) to the state file.
+///
+/// `announce`: if true, print how many nodes were saved (for final saves).
+/// Periodic background saves are silent.
 async fn save_session_state(
     session: &torrent::session::SessionHandle,
     state_path: &Path,
-    quiet: bool,
+    announce: bool,
 ) {
     match session.save_session_state().await {
         Ok(state) => {
-            if !quiet && !state.dht_nodes.is_empty() {
+            if announce && !state.dht_nodes.is_empty() {
                 eprintln!(
                     "Saving {} DHT nodes for next session",
                     state.dht_nodes.len()
