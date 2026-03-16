@@ -18,7 +18,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::alert::{Alert, AlertKind, post_alert};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
-use crate::piece_reservation::{AtomicPieceStates, AvailabilitySnapshot, PieceState};
+use crate::piece_reservation::{
+    AtomicPieceStates, AvailabilitySnapshot, BlockMaps, PieceState, StealCandidates,
+};
 
 use torrent_core::{
     DEFAULT_CHUNK_SIZE, FilePriority, Id20, Lengths, Magnet, PeerId, TorrentMetaV1,
@@ -367,6 +369,10 @@ impl TorrentHandle {
             cached_peer_rates: FxHashMap::default(),
             refill_notify: Arc::new(tokio::sync::Notify::new()),
             atomic_states: None,
+            block_maps: None,
+            steal_candidates: None,
+            snapshot_dirty: false,
+            last_snapshot_rebuild: std::time::Instant::now(),
             availability_snapshot: None,
             snapshot_generation: 0,
             piece_owner: Vec::new(),
@@ -660,6 +666,10 @@ impl TorrentHandle {
             cached_peer_rates: FxHashMap::default(),
             refill_notify: Arc::new(tokio::sync::Notify::new()),
             atomic_states: None,
+            block_maps: None,
+            steal_candidates: None,
+            snapshot_dirty: false,
+            last_snapshot_rebuild: std::time::Instant::now(),
             availability_snapshot: None,
             snapshot_generation: 0,
             piece_owner: Vec::new(),
@@ -1382,6 +1392,14 @@ struct TorrentActor {
     refill_notify: Arc<tokio::sync::Notify>,
     /// M93: Lock-free piece states (shared with peers via Arc).
     atomic_states: Option<Arc<crate::piece_reservation::AtomicPieceStates>>,
+    /// M103: Shared block-level request/received bitmaps.
+    block_maps: Option<Arc<BlockMaps>>,
+    /// M103: Shared queue of stealable pieces.
+    steal_candidates: Option<Arc<StealCandidates>>,
+    /// M103: Dirty flag for reactive snapshot rebuild.
+    snapshot_dirty: bool,
+    /// M103: Last snapshot rebuild time for debounce.
+    last_snapshot_rebuild: std::time::Instant,
     /// M93: Current availability snapshot (shared with peers via Arc).
     availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
     /// M93: Snapshot generation counter.
@@ -1688,6 +1706,15 @@ impl TorrentActor {
             self.piece_owner = vec![None; self.num_pieces as usize];
             self.max_in_flight = self.config.max_in_flight_pieces;
 
+            // M103: Initialize block stealing infrastructure
+            if self.config.use_block_stealing {
+                if let Some(ref lengths) = self.lengths {
+                    self.block_maps =
+                        Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
+                }
+                self.steal_candidates = Some(Arc::new(StealCandidates::new()));
+            }
+
             let snapshot = Arc::new(AvailabilitySnapshot::build(
                 &self.availability,
                 &atomic_states,
@@ -1737,7 +1764,8 @@ impl TorrentActor {
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
-        let mut snapshot_rebuild_interval = tokio::time::interval(Duration::from_millis(500));
+        // M103: 50ms debounce for reactive snapshot (was 500ms fixed interval)
+        let mut snapshot_rebuild_interval = tokio::time::interval(Duration::from_millis(50));
 
         // Don't fire immediately for the first tick
         unchoke_interval.tick().await;
@@ -2342,7 +2370,7 @@ impl TorrentActor {
                                 }
                             }
                         }
-                        self.rebuild_availability_snapshot();
+                        self.mark_snapshot_dirty();
                         if let Some(ref notify) = self.reservation_notify {
                             notify.notify_waiters();
                         }
@@ -2406,9 +2434,13 @@ impl TorrentActor {
                         }
                     }
                 }
-                // M93: Periodic availability snapshot rebuild (500ms)
+                // M103: Reactive snapshot rebuild with 50ms debounce (was 500ms fixed)
                 _ = snapshot_rebuild_interval.tick() => {
-                    self.rebuild_availability_snapshot();
+                    if self.snapshot_dirty {
+                        self.snapshot_dirty = false;
+                        self.last_snapshot_rebuild = std::time::Instant::now();
+                        self.rebuild_availability_snapshot();
+                    }
                 }
                 // Rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
@@ -3442,7 +3474,7 @@ impl TorrentActor {
                     }
                     let _slot = self.peer_slab.insert(peer_addr);
                     self.recalc_max_in_flight();
-                    self.rebuild_availability_snapshot();
+                    self.mark_snapshot_dirty();
                 }
                 // M75: Peer-integrated dispatch — no driver spawn needed here.
                 // The peer task's requester arm activates when unchoked + has reservation state.
@@ -3460,6 +3492,8 @@ impl TorrentActor {
                     if (index as usize) < self.availability.len() {
                         self.availability[index as usize] += 1;
                     }
+                    // M103: Mark snapshot dirty for reactive rebuild
+                    self.mark_snapshot_dirty();
                 }
                 // BEP 16: Have-back detection in super-seed mode
                 if let Some(ref mut ss) = self.super_seed
@@ -3655,7 +3689,7 @@ impl TorrentActor {
                         }
                     }
                     self.recalc_max_in_flight();
-                    self.rebuild_availability_snapshot();
+                    self.mark_snapshot_dirty();
                     if let Some(ref notify) = self.reservation_notify {
                         notify.notify_waiters();
                     }
@@ -3746,8 +3780,8 @@ impl TorrentActor {
                             disk_handle: self.disk.clone(),
                             write_error_tx: self.write_error_tx.clone(),
                             lengths: lengths.clone(),
-                            block_maps: None,
-                            steal_candidates: None,
+                            block_maps: self.block_maps.clone(),
+                            steal_candidates: self.steal_candidates.clone(),
                         });
                     }
                 }
@@ -3817,6 +3851,15 @@ impl TorrentActor {
             && self.piece_owner.get(index as usize) == Some(&None)
         {
             self.piece_owner[index as usize] = Some(slab_idx);
+            // M103: Add to steal queue if piece has unrequested blocks
+            if let (Some(sc), Some(bm)) = (&self.steal_candidates, &self.block_maps)
+                && let Some(lengths) = &self.lengths
+            {
+                let total_blocks = lengths.chunks_in_piece(index);
+                if bm.next_unrequested(index, total_blocks).is_some() {
+                    sc.push(index);
+                }
+            }
         }
 
         // Smart banning: track which peers contribute to each piece
@@ -3981,6 +4024,15 @@ impl TorrentActor {
             && self.piece_owner.get(index as usize) == Some(&None)
         {
             self.piece_owner[index as usize] = Some(slab_idx);
+            // M103: Add to steal queue if piece has unrequested blocks
+            if let (Some(sc), Some(bm)) = (&self.steal_candidates, &self.block_maps)
+                && let Some(lengths) = &self.lengths
+            {
+                let total_blocks = lengths.chunks_in_piece(index);
+                if bm.next_unrequested(index, total_blocks).is_some() {
+                    sc.push(index);
+                }
+            }
         }
 
         // Smart banning: track which peers contribute to each piece
@@ -4273,6 +4325,14 @@ impl TorrentActor {
             ));
             self.atomic_states = Some(Arc::clone(&atomic_states));
             self.piece_owner = vec![None; self.num_pieces as usize];
+            // M103: Rebuild block stealing state after recheck
+            if self.config.use_block_stealing {
+                if let Some(ref lengths) = self.lengths {
+                    self.block_maps =
+                        Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
+                }
+                self.steal_candidates = Some(Arc::new(StealCandidates::new()));
+            }
             self.rebuild_availability_snapshot();
         }
 
@@ -4686,7 +4746,16 @@ impl TorrentActor {
         if let Some(ref states) = self.atomic_states {
             states.mark_complete(index);
         }
+        // M103: Clean up block stealing state
+        if let Some(ref sc) = self.steal_candidates {
+            sc.remove(index);
+        }
+        if let (Some(bm), Some(lengths)) = (&self.block_maps, &self.lengths) {
+            bm.clear(index, lengths.chunks_in_piece(index));
+        }
         self.piece_owner[index as usize] = None;
+        // M103: Mark snapshot dirty for reactive rebuild
+        self.mark_snapshot_dirty();
         info!(index, "piece verified");
         post_alert(
             &self.alert_tx,
@@ -4856,8 +4925,15 @@ impl TorrentActor {
         if let Some(ref states) = self.atomic_states {
             states.release(index);
         }
+        // M103: Clean up block stealing state on hash failure
+        if let Some(ref sc) = self.steal_candidates {
+            sc.remove(index);
+        }
+        if let (Some(bm), Some(lengths)) = (&self.block_maps, &self.lengths) {
+            bm.clear(index, lengths.chunks_in_piece(index));
+        }
         self.piece_owner[index as usize] = None;
-        self.rebuild_availability_snapshot();
+        self.mark_snapshot_dirty();
         if let Some(ref notify) = self.reservation_notify {
             notify.notify_one();
         }
@@ -5345,6 +5421,17 @@ impl TorrentActor {
                             self.piece_owner = vec![None; self.num_pieces as usize];
                             self.max_in_flight = self.config.max_in_flight_pieces;
 
+                            // M103: Initialize block stealing infrastructure
+                            if self.config.use_block_stealing {
+                                if let Some(ref lengths) = self.lengths {
+                                    self.block_maps = Some(Arc::new(
+                                        BlockMaps::new(self.num_pieces, lengths),
+                                    ));
+                                }
+                                self.steal_candidates =
+                                    Some(Arc::new(StealCandidates::new()));
+                            }
+
                             let snapshot = Arc::new(AvailabilitySnapshot::build(
                                 &self.availability,
                                 &atomic_states,
@@ -5411,8 +5498,8 @@ impl TorrentActor {
                                     disk_handle: self.disk.clone(),
                                     write_error_tx: self.write_error_tx.clone(),
                                     lengths: lengths.clone(),
-                                    block_maps: None,
-                                    steal_candidates: None,
+                                    block_maps: self.block_maps.clone(),
+                                    steal_candidates: self.steal_candidates.clone(),
                                 });
                             }
                         }
@@ -5685,6 +5772,14 @@ impl TorrentActor {
         }
     }
 
+    /// M103: Mark the availability snapshot as stale for deferred rebuild.
+    ///
+    /// The actual rebuild happens on the next 50ms snapshot tick, batching
+    /// multiple rapid events (bitfield, have, disconnect) into one rebuild.
+    fn mark_snapshot_dirty(&mut self) {
+        self.snapshot_dirty = true;
+    }
+
     /// M93: Rebuild the availability snapshot and broadcast to all peers.
     fn rebuild_availability_snapshot(&mut self) {
         let Some(ref atomic_states) = self.atomic_states else {
@@ -5715,6 +5810,10 @@ impl TorrentActor {
     }
 
     fn check_end_game_activation(&mut self) {
+        // M103: Block stealing replaces endgame when enabled
+        if self.block_maps.is_some() {
+            return;
+        }
         if self.end_game.is_active() || self.state != TorrentState::Downloading {
             return;
         }
@@ -6045,7 +6144,7 @@ impl TorrentActor {
             self.suggested_to_peers.remove(&addr);
         }
         self.recalc_max_in_flight();
-        self.rebuild_availability_snapshot();
+        self.mark_snapshot_dirty();
 
         // Connect replacements
         let peers_before = self.peers.len();
@@ -6170,7 +6269,7 @@ impl TorrentActor {
             }
             if !zombies.is_empty() {
                 self.recalc_max_in_flight();
-                self.rebuild_availability_snapshot();
+                self.mark_snapshot_dirty();
             }
         }
     }
@@ -6398,8 +6497,8 @@ impl TorrentActor {
                     disk_handle: self.disk.clone(),
                     write_error_tx: self.write_error_tx.clone(),
                     lengths: lengths.clone(),
-                    block_maps: None,
-                    steal_candidates: None,
+                    block_maps: self.block_maps.clone(),
+                    steal_candidates: self.steal_candidates.clone(),
                 });
             }
 
@@ -7047,8 +7146,8 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
-                block_maps: None,
-                steal_candidates: None,
+                block_maps: self.block_maps.clone(),
+                steal_candidates: self.steal_candidates.clone(),
             });
         }
 
@@ -7247,8 +7346,8 @@ impl TorrentActor {
                 disk_handle: self.disk.clone(),
                 write_error_tx: self.write_error_tx.clone(),
                 lengths: lengths.clone(),
-                block_maps: None,
-                steal_candidates: None,
+                block_maps: self.block_maps.clone(),
+                steal_candidates: self.steal_candidates.clone(),
             });
         }
 
@@ -7662,6 +7761,7 @@ mod tests {
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
             max_in_flight_pieces: 20,
+            use_block_stealing: true,
         }
     }
 

@@ -139,6 +139,8 @@ pub struct TorrentConfig {
     /// Maximum number of pieces simultaneously in-flight (downloaded but not
     /// yet verified).
     pub max_in_flight_pieces: usize,
+    /// M103: Enable block-level stealing for partially-downloaded pieces.
+    pub use_block_stealing: bool,
 }
 
 impl Default for TorrentConfig {
@@ -209,6 +211,7 @@ impl Default for TorrentConfig {
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
             max_in_flight_pieces: 256,
+            use_block_stealing: true,
         }
     }
 }
@@ -276,6 +279,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_piece_length: s.max_piece_length,
             max_outstanding_requests: s.max_outstanding_requests,
             max_in_flight_pieces: s.max_in_flight_pieces,
+            use_block_stealing: s.use_block_stealing,
         }
     }
 }
