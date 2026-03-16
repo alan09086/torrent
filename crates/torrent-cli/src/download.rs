@@ -1,5 +1,4 @@
 use anyhow::Context;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -30,19 +29,16 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         settings,
     } = opts;
 
-    // Global state file for DHT node persistence across sessions
     let state_path = state_file_path();
 
-    // Build session from pre-loaded settings
+    // Build session
     let mut builder = torrent::ClientBuilder::from_settings(settings);
-
     builder = builder.listen_port(port).download_dir(output);
 
     if no_dht {
         builder = builder.enable_dht(false);
     }
 
-    // Load saved DHT state from previous session for instant peer discovery
     if let Some((saved_nodes, saved_node_id)) = load_dht_state(&state_path) {
         if !quiet {
             eprintln!(
@@ -57,75 +53,90 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
     }
 
     let session = builder.start().await?;
-
-    // Subscribe for all alerts (raw broadcast receiver so we can try_recv)
     let mut alerts = session.subscribe();
 
-    // Parse source and add torrent
+    // Add torrent
     let info_hash = if source.starts_with("magnet:") {
         let magnet = torrent::core::Magnet::parse(source)
             .map_err(|e| anyhow::anyhow!("invalid magnet URI: {e}"))?;
         if let Some(ref name) = magnet.display_name {
-            eprintln!("Adding: {name}");
+            if !quiet {
+                eprintln!("Adding: {name}");
+            }
         }
         session.add_magnet(magnet).await?
     } else {
-        let data = std::fs::read(source)
-            .with_context(|| format!("failed to read torrent file: {source}"))?;
+        let data =
+            std::fs::read(source).with_context(|| format!("failed to read torrent file: {source}"))?;
         let meta = torrent::core::torrent_from_bytes_any(&data)
             .map_err(|e| anyhow::anyhow!("failed to parse torrent: {e}"))?;
         let ih = meta.info_hashes().best_v1();
+        if !quiet {
+            let name = meta
+                .as_v1()
+                .map(|v| v.info.name.as_str())
+                .or_else(|| meta.as_v2().map(|v| v.info.name.as_str()))
+                .unwrap_or("unknown");
+            eprintln!("Adding: {name}");
+        }
         let storage = make_filesystem_storage(&meta, output)?;
         session.add_torrent(meta, Some(storage)).await?;
         ih
     };
 
-    // Shutdown on SIGINT (Ctrl-C) or SIGTERM (kill / systemd stop / benchmark timeout)
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let s = shutdown.clone();
-    tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )
-        .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {},
-            _ = sigterm.recv() => {},
-        }
-        s.store(true, Ordering::SeqCst);
-    });
+    // --- Signal handling (rqbit-style 2-tier shutdown) ---
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let cancelled = cancelled.clone();
+        let force_quit = Arc::new(AtomicBool::new(false));
+        let fq = force_quit.clone();
 
-    // Progress bar
-    let pb = if quiet {
-        None
-    } else {
-        let pb = ProgressBar::new(100);
-        pb.set_style(
-            ProgressStyle::with_template("{spinner:.green} [{bar:40.cyan/blue}] {msg}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        Some(pb)
-    };
+        tokio::spawn(async move {
+            // Register both SIGINT and SIGTERM
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
 
-    // Poll loop
+            // First signal: graceful shutdown
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+            cancelled.store(true, Ordering::SeqCst);
+
+            // Spawn force-quit watchdog: if second signal arrives within 5s, exit immediately
+            let fq2 = fq.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => return,
+                }
+                fq2.store(true, Ordering::SeqCst);
+                std::process::exit(1);
+            });
+        });
+    }
+
+    // --- Progress loop ---
     let start_time = Instant::now();
     let mut finished = false;
     let mut peak_peers: usize = 0;
     let mut total_bytes: u64 = 0;
+    let mut total_wanted: u64 = 0;
     let mut last_save = Instant::now();
     const SAVE_INTERVAL: Duration = Duration::from_secs(60);
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
     loop {
-        if shutdown.load(Ordering::SeqCst) {
-            if let Some(ref pb) = pb {
-                pb.finish_and_clear();
+        // Check for cancellation
+        if cancelled.load(Ordering::SeqCst) {
+            if !quiet {
+                eprintln!();
             }
-            save_session_state(&session, &state_path, !quiet).await;
-            session.shutdown().await?;
             break;
         }
 
-        // Drain alerts (non-blocking)
+        // Drain alerts
         while let Ok(alert) = alerts.try_recv() {
             if let torrent::session::AlertKind::TorrentFinished { info_hash: ih } = alert.kind
                 && ih == info_hash
@@ -134,11 +145,40 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
             }
         }
 
-        if finished {
-            if let Some(ref pb) = pb {
-                pb.finish_and_clear();
+        // Update stats
+        if let Ok(stats) = session.torrent_stats(info_hash).await {
+            peak_peers = peak_peers.max(stats.peers_connected);
+            total_bytes = stats.total_done;
+            total_wanted = stats.total_wanted;
+
+            if stats.progress >= 1.0 {
+                finished = true;
             }
 
+            if !quiet && !finished {
+                let pct = stats.progress * 100.0;
+                let done = format_size(stats.total_done);
+                let total = format_size(stats.total_wanted);
+                let down = format_rate(stats.download_rate);
+                let up = format_rate(stats.upload_rate);
+                let peers = stats.peers_connected;
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let eta = if stats.download_rate > 0 && stats.total_wanted > stats.total_done {
+                    let remaining = stats.total_wanted - stats.total_done;
+                    format!("{:.0}s", remaining as f64 / stats.download_rate as f64)
+                } else if finished {
+                    "done".to_string()
+                } else {
+                    "---".to_string()
+                };
+
+                eprint!(
+                    "\r\x1b[2K{pct:5.1}% ({done}/{total}) \u{2193}{down} \u{2191}{up} | {peers} peers | ETA {eta} [{elapsed:.0}s]",
+                );
+            }
+        }
+
+        if finished {
             let elapsed = start_time.elapsed();
             let elapsed_secs = elapsed.as_secs_f64();
             let avg_speed = if elapsed_secs > 0.0 {
@@ -149,56 +189,38 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
 
             if !quiet {
                 eprintln!(
-                    "Downloaded {} in {:.1}s ({:.1} MB/s avg, {peak_peers} peers)",
-                    format_size(total_bytes),
+                    "\r\x1b[2KDownloaded {} in {:.1}s ({:.1} MB/s avg, {} peers)",
+                    format_size(total_wanted),
                     elapsed_secs,
                     avg_speed,
+                    peak_peers,
                 );
             }
 
             if seed {
-                eprintln!("Seeding... press Ctrl-C to stop.");
-                tokio::signal::ctrl_c().await?;
+                if !quiet {
+                    eprintln!("Seeding... press Ctrl-C to stop");
+                }
+                // Wait for cancellation
+                while !cancelled.load(Ordering::SeqCst) {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
             }
-            save_session_state(&session, &state_path, !quiet).await;
-            session.shutdown().await?;
+
             break;
         }
 
-        // Update progress
-        if let Ok(stats) = session.torrent_stats(info_hash).await {
-            peak_peers = peak_peers.max(stats.peers_connected);
-            total_bytes = stats.total_done;
-
-            // Fallback completion check via progress (in case alert is missed)
-            if stats.progress >= 1.0 {
-                finished = true;
-            }
-
-            if let Some(ref pb) = pb {
-                let pct = (stats.progress * 100.0) as u64;
-                pb.set_position(pct);
-
-                let done = format_size(stats.total_done);
-                let total = format_size(stats.total_wanted);
-                let down_rate = format_rate(stats.download_rate);
-                let up_rate = format_rate(stats.upload_rate);
-                let peers = stats.peers_connected;
-
-                pb.set_message(format!(
-                    "{:.1}% | {done}/{total} | {down_rate} down {up_rate} up | {peers} peers",
-                    stats.progress * 100.0,
-                ));
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
 
         if last_save.elapsed() >= SAVE_INTERVAL {
             save_session_state(&session, &state_path, false).await;
             last_save = Instant::now();
         }
     }
+
+    // --- Shutdown ---
+    save_session_state(&session, &state_path, !quiet).await;
+    session.shutdown().await?;
 
     Ok(())
 }
@@ -209,7 +231,7 @@ fn format_size(bytes: u64) -> String {
     const GIB: u64 = 1024 * MIB;
 
     if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
     } else if bytes >= MIB {
         format!("{:.1} MiB", bytes as f64 / MIB as f64)
     } else if bytes >= KIB {
@@ -263,10 +285,6 @@ fn format_rate(bytes_per_sec: u64) -> String {
     }
 }
 
-/// Return the global state file path (`$XDG_DATA_HOME/torrent/session.dat`).
-///
-/// Respects `XDG_DATA_HOME`, falls back to `~/.local/share/torrent`.
-/// Creates the parent directory if it doesn't exist.
 fn state_file_path() -> PathBuf {
     let dir = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -277,10 +295,6 @@ fn state_file_path() -> PathBuf {
     dir.join("session.dat")
 }
 
-/// Load DHT state from a previously saved state file.
-///
-/// Returns `None` if the file doesn't exist or can't be parsed.
-/// Returns (nodes, optional_node_id).
 fn load_dht_state(state_path: &Path) -> Option<(Vec<String>, Option<torrent::core::Id20>)> {
     let data = std::fs::read(state_path).ok()?;
     let state: SessionState = torrent::bencode::from_bytes(&data).ok()?;
@@ -333,6 +347,39 @@ pub(crate) fn build_runtime(settings: &torrent::session::Settings) -> tokio::run
     builder.build().expect("failed to build tokio runtime")
 }
 
+async fn save_session_state(
+    session: &torrent::session::SessionHandle,
+    state_path: &Path,
+    announce: bool,
+) {
+    match session.save_session_state().await {
+        Ok(state) => {
+            if announce && !state.dht_nodes.is_empty() {
+                eprintln!(
+                    "Saving {} DHT nodes for next session",
+                    state.dht_nodes.len()
+                );
+            }
+            match torrent::bencode::to_bytes(&state) {
+                Ok(bytes) => {
+                    let tmp_path = state_path.with_extension("dat.tmp");
+                    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
+                        eprintln!("warning: failed to write state file: {e}");
+                    } else if let Err(e) = std::fs::rename(&tmp_path, state_path) {
+                        eprintln!("warning: failed to rename state file: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to encode session state: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: failed to save session state: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,47 +416,26 @@ mod tests {
     #[test]
     fn build_runtime_auto_workers() {
         let mut settings = torrent::session::Settings::default();
-        settings.runtime_worker_threads = 0; // auto-detect
+        settings.runtime_worker_threads = 0;
         settings.pin_cores = false;
         let rt = build_runtime(&settings);
         let result = rt.block_on(async { 42 });
         assert_eq!(result, 42);
     }
-}
 
-/// Save session state (DHT nodes, etc.) to the state file.
-///
-/// `announce`: if true, print how many nodes were saved (for final saves).
-/// Periodic background saves are silent.
-async fn save_session_state(
-    session: &torrent::session::SessionHandle,
-    state_path: &Path,
-    announce: bool,
-) {
-    match session.save_session_state().await {
-        Ok(state) => {
-            if announce && !state.dht_nodes.is_empty() {
-                eprintln!(
-                    "Saving {} DHT nodes for next session",
-                    state.dht_nodes.len()
-                );
-            }
-            match torrent::bencode::to_bytes(&state) {
-                Ok(bytes) => {
-                    let tmp_path = state_path.with_extension("dat.tmp");
-                    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
-                        eprintln!("Warning: failed to write state file: {e}");
-                    } else if let Err(e) = std::fs::rename(&tmp_path, state_path) {
-                        eprintln!("Warning: failed to rename state file: {e}");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Warning: failed to encode session state: {e}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Warning: failed to save session state: {e}");
-        }
+    #[test]
+    fn format_size_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1048576), "1.0 MiB");
+        assert_eq!(format_size(1073741824), "1.00 GiB");
+    }
+
+    #[test]
+    fn format_rate_units() {
+        assert_eq!(format_rate(0), "0 B/s");
+        assert_eq!(format_rate(1024), "1.0 KB/s");
+        assert_eq!(format_rate(1048576), "1.0 MB/s");
     }
 }
