@@ -30,8 +30,6 @@ pub(crate) mod peer;
 pub(crate) mod peer_priority;
 mod persistence;
 pub(crate) mod pex;
-#[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
-pub(crate) mod piece_buffer_pool;
 pub(crate) mod piece_reservation;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod piece_selector;
@@ -54,8 +52,6 @@ pub(crate) mod url_guard;
 pub(crate) mod utp_routing;
 pub(crate) mod web_seed;
 pub(crate) mod write_buffer;
-#[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
-pub(crate) mod write_coalescer;
 
 pub use crate::piece_selector::build_wanted_pieces;
 pub use crate::tracker_manager::{TrackerInfo, TrackerStatus};

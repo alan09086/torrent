@@ -137,10 +137,8 @@ pub struct TorrentConfig {
     /// Maximum outstanding incoming requests per peer.
     pub max_outstanding_requests: usize,
     /// Maximum number of pieces simultaneously in-flight (downloaded but not
-    /// yet verified). Caps the store buffer memory usage.
+    /// yet verified).
     pub max_in_flight_pieces: usize,
-    /// M99: Number of buffers in the per-torrent piece buffer pool.
-    pub piece_buffer_pool_size: u32,
 }
 
 impl Default for TorrentConfig {
@@ -211,7 +209,6 @@ impl Default for TorrentConfig {
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
             max_in_flight_pieces: 256,
-            piece_buffer_pool_size: 32,
         }
     }
 }
@@ -279,7 +276,6 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_piece_length: s.max_piece_length,
             max_outstanding_requests: s.max_outstanding_requests,
             max_in_flight_pieces: s.max_in_flight_pieces,
-            piece_buffer_pool_size: s.piece_buffer_pool_size,
         }
     }
 }

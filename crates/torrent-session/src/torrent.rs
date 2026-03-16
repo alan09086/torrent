@@ -3800,29 +3800,9 @@ impl TorrentActor {
 
         let data_len = data.len();
 
-        // Fire-and-forget write (zero-copy: Bytes moved from wire codec -> disk)
+        // M100: Deferred write via per-torrent writer task.
         if let Some(ref disk) = self.disk {
-            match disk.enqueue_write(
-                index,
-                begin,
-                data,
-                DiskJobFlags::empty(),
-                &self.write_error_tx,
-            ) {
-                Ok(()) => {}
-                Err(returned_data) => {
-                    // Channel full — fall back to blocking write
-                    warn!(index, begin, "disk channel full, blocking write");
-                    if let Err(e) = disk
-                        .write_chunk(index, begin, returned_data, DiskJobFlags::empty())
-                        .await
-                    {
-                        warn!(index, begin, "failed to write chunk: {e}");
-                        // M75: Permit already returned by peer task on Piece receipt
-                        return;
-                    }
-                }
-            }
+            disk.write_block_deferred(index, begin, data);
         }
 
         self.downloaded += data_len as u64;
@@ -7672,7 +7652,6 @@ mod tests {
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
             max_in_flight_pieces: 20,
-            piece_buffer_pool_size: 32,
         }
     }
 

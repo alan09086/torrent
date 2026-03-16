@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use bytes::Bytes;
-use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use torrent_core::{Id20, Id32};
 use torrent_storage::TorrentStorage;
 use tracing::warn;
@@ -43,79 +43,6 @@ pub struct VerifyResult {
     pub passed: bool,
 }
 
-/// In-memory store buffer for blocks awaiting piece verification.
-///
-/// Keyed by `(info_hash, piece_index)`, value is a sorted map of
-/// `block_offset -> block_data`. Hash jobs read from here to avoid
-/// waiting for disk writes, matching libtorrent's store_buffer pattern.
-///
-/// Tracks total bytes held so callers can apply back-pressure when the
-/// buffer grows too large.
-#[derive(Debug)]
-pub(crate) struct StoreBufferInner {
-    entries: HashMap<(Id20, u32), BTreeMap<u32, Bytes>>,
-    total_bytes: usize,
-    max_bytes: usize,
-}
-
-impl StoreBufferInner {
-    pub(crate) fn new(max_bytes: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            total_bytes: 0,
-            max_bytes,
-        }
-    }
-
-    /// Insert a block into the store buffer, tracking byte usage.
-    /// If a block at the same offset already exists (retransmission), the old
-    /// block's size is subtracted before adding the new one.
-    pub(crate) fn insert(&mut self, key: (Id20, u32), begin: u32, data: Bytes) {
-        let new_len = data.len();
-        let old_len = self
-            .entries
-            .entry(key)
-            .or_default()
-            .insert(begin, data)
-            .map_or(0, |old| old.len());
-        self.total_bytes = self.total_bytes.saturating_sub(old_len) + new_len;
-    }
-
-    /// Remove all blocks for a `(info_hash, piece)` key, decrementing byte count.
-    pub(crate) fn remove(&mut self, key: &(Id20, u32)) -> Option<BTreeMap<u32, Bytes>> {
-        let blocks = self.entries.remove(key)?;
-        let removed_bytes: usize = blocks.values().map(|b| b.len()).sum();
-        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
-        Some(blocks)
-    }
-
-    /// Remove all entries belonging to the given info_hash.
-    pub(crate) fn remove_by_info_hash(&mut self, info_hash: Id20) {
-        let mut removed_bytes = 0usize;
-        self.entries.retain(|&(ih, _), blocks| {
-            if ih == info_hash {
-                removed_bytes += blocks.values().map(|b| b.len()).sum::<usize>();
-                false
-            } else {
-                true
-            }
-        });
-        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
-    }
-
-    /// Returns true if the store buffer has exceeded its byte limit.
-    pub(crate) fn is_over_limit(&self) -> bool {
-        self.total_bytes > self.max_bytes
-    }
-
-    /// Total bytes currently held in the store buffer.
-    pub(crate) fn total_bytes(&self) -> usize {
-        self.total_bytes
-    }
-}
-
-type StoreBuffer = Mutex<StoreBufferInner>;
-
 /// A single block write job for the deferred writer task.
 pub(crate) struct WriteJob {
     piece: u32,
@@ -129,7 +56,6 @@ pub(crate) struct WriteJob {
 /// drains the channel and calls `block_in_place(storage.write_chunk())`.
 /// A per-piece pending counter + Notify allows callers to wait until
 /// all writes for a piece are flushed before hash verification.
-#[allow(dead_code)] // M100: fields used by write_block_deferred/flush_piece_writes, wired in Task 4
 pub(crate) struct DiskWriteState {
     tx: mpsc::Sender<WriteJob>,
     /// Per-piece outstanding write count.
@@ -155,16 +81,6 @@ pub(crate) enum DiskJob {
         data: Bytes,
         flags: DiskJobFlags,
         reply: oneshot::Sender<torrent_storage::Result<()>>,
-    },
-    WriteAsync {
-        info_hash: Id20,
-        piece: u32,
-        begin: u32,
-        data: Bytes,
-        flags: DiskJobFlags,
-        error_tx: mpsc::Sender<DiskWriteError>,
-        /// M99: Pool permit held until pwrite() completes — bounds entire pipeline.
-        _pool_permit: Option<OwnedSemaphorePermit>,
     },
     Read {
         info_hash: Id20,
@@ -238,8 +154,6 @@ pub struct DiskConfig {
     pub write_cache_ratio: f32,
     /// Bounded channel capacity. Default: 512.
     pub channel_capacity: usize,
-    /// Maximum size of the in-memory store buffer in bytes. Default: 32 MiB.
-    pub store_buffer_max_bytes: usize,
 }
 
 impl Default for DiskConfig {
@@ -250,7 +164,6 @@ impl Default for DiskConfig {
             cache_size: 16 * 1024 * 1024,
             write_cache_ratio: 0.5,
             channel_capacity: 512,
-            store_buffer_max_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -270,9 +183,6 @@ pub struct DiskStats {
     pub write_buffer_bytes: usize,
     /// Number of pending disk I/O jobs in the queue.
     pub queued_jobs: usize,
-    /// Current bytes held in the in-memory store buffer (blocks awaiting
-    /// piece hash verification). M94: tracked for memory monitoring.
-    pub store_buffer_bytes: usize,
 }
 
 impl From<crate::disk_backend::DiskIoStats> for DiskStats {
@@ -284,7 +194,6 @@ impl From<crate::disk_backend::DiskIoStats> for DiskStats {
             cache_misses: s.cache_misses,
             write_buffer_bytes: s.write_buffer_bytes,
             queued_jobs: 0,
-            store_buffer_bytes: 0, // populated by DiskManagerHandle::stats()
         }
     }
 }
@@ -297,7 +206,6 @@ impl From<crate::disk_backend::DiskIoStats> for DiskStats {
 #[derive(Clone)]
 pub struct DiskManagerHandle {
     tx: mpsc::Sender<DiskJob>,
-    store_buffer: Arc<StoreBuffer>,
     /// Backend reference for per-torrent deferred writes (M100).
     backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
 }
@@ -316,21 +224,11 @@ impl DiskManagerHandle {
         config: DiskConfig,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let store_buffer = Arc::new(Mutex::new(StoreBufferInner::new(
-            config.store_buffer_max_bytes,
-        )));
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         let backend_for_actor = Arc::clone(&backend);
-        let actor = DiskActor::new(rx, config, backend_for_actor, Arc::clone(&store_buffer));
+        let actor = DiskActor::new(rx, config, backend_for_actor);
         let join = tokio::spawn(actor.run());
-        (
-            DiskManagerHandle {
-                tx,
-                store_buffer,
-                backend,
-            },
-            join,
-        )
+        (DiskManagerHandle { tx, backend }, join)
     }
 
     /// Register a torrent's storage with the disk subsystem and return a
@@ -393,7 +291,6 @@ impl DiskManagerHandle {
         DiskHandle {
             tx: self.tx.clone(),
             info_hash,
-            store_buffer: Arc::clone(&self.store_buffer),
             hash_pool: None,
             hash_result_tx: None,
             storage: Some(storage_for_handle),
@@ -405,11 +302,6 @@ impl DiskManagerHandle {
     /// Unregister a torrent, flushing and clearing its write buffer and cache.
     pub async fn unregister_torrent(&self, info_hash: Id20) {
         let _ = self.tx.send(DiskJob::Unregister { info_hash }).await;
-    }
-
-    /// Query current store buffer bytes (for stats/monitoring).
-    pub fn store_buffer_bytes(&self) -> usize {
-        self.store_buffer.lock().unwrap().total_bytes()
     }
 
     /// Gracefully shut down the disk subsystem, flushing all buffers.
@@ -429,18 +321,15 @@ impl DiskManagerHandle {
 pub struct DiskHandle {
     tx: mpsc::Sender<DiskJob>,
     info_hash: Id20,
-    store_buffer: Arc<StoreBuffer>,
     /// Hash pool for parallel piece verification (M96).
     hash_pool: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     /// Per-torrent hash result sender (M96).
     hash_result_tx: Option<tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>>,
     /// Direct storage reference for deferred writes (M100).
-    #[allow(dead_code)] // M100: wired in Task 4
     storage: Option<Arc<dyn TorrentStorage>>,
     /// Backend reference for disk-based verify (M100).
     backend: Option<Arc<dyn crate::disk_backend::DiskIoBackend>>,
     /// Deferred write queue state (M100).
-    #[allow(dead_code)] // M100: wired in Task 4
     write_state: Option<Arc<DiskWriteState>>,
 }
 
@@ -459,7 +348,6 @@ impl DiskHandle {
         Self {
             tx,
             info_hash,
-            store_buffer: Arc::new(Mutex::new(StoreBufferInner::new(32 * 1024 * 1024))),
             hash_pool: None,
             hash_result_tx: None,
             storage: None,
@@ -665,113 +553,9 @@ impl DiskHandle {
             ))))
     }
 
-    /// Enqueue a non-blocking write. Returns `Err(data)` if the channel is full
-    /// (back-pressure signal), or `Ok(())` on success or if the actor is gone.
-    ///
-    /// Block data is inserted into the store buffer before queuing, so hash
-    /// verification can read from memory even if the disk write hasn't completed.
-    pub fn enqueue_write(
-        &self,
-        piece: u32,
-        begin: u32,
-        data: Bytes,
-        flags: DiskJobFlags,
-        error_tx: &mpsc::Sender<DiskWriteError>,
-    ) -> Result<(), Bytes> {
-        // Insert into store buffer BEFORE queuing the write job.
-        // This ensures hash verification always sees the block data.
-        // Check the limit after inserting: if over limit, return Err to signal
-        // back-pressure so the caller falls back to a synchronous write.
-        let over_limit = {
-            let mut sb = self.store_buffer.lock().unwrap();
-            sb.insert((self.info_hash, piece), begin, data.clone());
-            sb.is_over_limit()
-        };
-
-        if over_limit {
-            return Err(data);
-        }
-
-        match self.tx.try_send(DiskJob::WriteAsync {
-            info_hash: self.info_hash,
-            piece,
-            begin,
-            data,
-            flags,
-            error_tx: error_tx.clone(),
-            _pool_permit: None,
-        }) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(job)) => {
-                if let DiskJob::WriteAsync { data, .. } = job {
-                    Err(data)
-                } else {
-                    unreachable!()
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
-        }
-    }
-
-    /// Insert a block into the store buffer without queuing a disk write.
-    ///
-    /// Used by write coalescing to populate the store buffer for hash
-    /// verification while deferring the actual disk write to a coalesced flush.
-    ///
-    /// Returns `true` if the store buffer is over the size limit after insertion,
-    /// signalling that the caller should apply back-pressure (e.g. fall back to
-    /// synchronous writes) to bound memory growth.
-    #[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
-    pub(crate) fn store_buffer_insert(&self, piece: u32, begin: u32, data: Bytes) -> bool {
-        let mut sb = self.store_buffer.lock().unwrap();
-        sb.insert((self.info_hash, piece), begin, data);
-        sb.is_over_limit()
-    }
-
-    /// Enqueue a non-blocking coalesced write that SKIPS store buffer insertion.
-    ///
-    /// This is used after write coalescing has already populated the store buffer
-    /// via `store_buffer_insert()` per-block. The coalesced data is the full piece
-    /// (or partial piece on disconnect), written as a single contiguous pwrite().
-    ///
-    /// Returns `Err(data)` on back-pressure (channel full), `Ok(())` otherwise.
-    #[allow(dead_code)] // M100 Task 4: no longer wired; removed in Task 5
-    pub(crate) fn enqueue_write_coalesced(
-        &self,
-        piece: u32,
-        begin: u32,
-        data: Bytes,
-        flags: DiskJobFlags,
-        error_tx: &mpsc::Sender<DiskWriteError>,
-        pool_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(), Bytes> {
-        match self.tx.try_send(DiskJob::WriteAsync {
-            info_hash: self.info_hash,
-            piece,
-            begin,
-            data,
-            flags,
-            error_tx: error_tx.clone(),
-            _pool_permit: pool_permit,
-        }) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(job)) => {
-                if let DiskJob::WriteAsync { data, .. } = job {
-                    Err(data)
-                } else {
-                    unreachable!()
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
-        }
-    }
-
     /// Spawn a non-blocking v1 piece hash verification.
     ///
-    /// M100: Prefers the store buffer (for callers still using `enqueue_write`),
-    /// falls back to reading the piece from disk (for callers using the deferred
-    /// writer task + `flush_piece_writes`). The store buffer path will be removed
-    /// in Task 5 once all callers have been migrated to the deferred write path.
+    /// Reads the piece from disk via the backend's `read_piece()` method.
     ///
     /// M96: If a hash pool is configured, submits the job to the pool instead
     /// of using `spawn_blocking`. The `generation` parameter enables staleness
@@ -783,43 +567,8 @@ impl DiskHandle {
         generation: u64,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        // Try the store buffer first (old write path via enqueue_write).
-        // If the store buffer has data for this piece, use it directly.
-        // If not, fall through to the disk-read path (deferred write path).
-        let blocks = {
-            self.store_buffer
-                .lock()
-                .expect("store buffer lock poisoned")
-                .remove(&(self.info_hash, piece))
-        };
-
         // M96: If hash pool is available, use parallel hashing path
         if let (Some(pool), Some(hash_tx)) = (&self.hash_pool, &self.hash_result_tx) {
-            if let Some(blocks) = blocks {
-                // Store buffer hit — assemble data and submit to hash pool.
-                let pool = pool.clone();
-                let hash_tx = hash_tx.clone();
-                tokio::spawn(async move {
-                    let total_size: usize = blocks.values().map(|b| b.len()).sum();
-                    let mut data = Vec::with_capacity(total_size);
-                    for block in blocks.values() {
-                        data.extend_from_slice(block);
-                    }
-                    let job = crate::hash_pool::HashJob {
-                        piece,
-                        expected,
-                        generation,
-                        data,
-                        result_tx: hash_tx,
-                    };
-                    if let Err(_job) = pool.submit(job).await {
-                        tracing::warn!(piece, "hash pool shut down, treating as failed");
-                    }
-                });
-                return;
-            }
-
-            // M100: Store buffer miss — read from disk (deferred write path).
             if let Some(backend) = &self.backend {
                 let pool = pool.clone();
                 let hash_tx = hash_tx.clone();
@@ -858,10 +607,10 @@ impl DiskHandle {
                 return;
             }
 
-            // No backend and no store buffer — send failure.
+            // No backend — send failure.
             let hash_tx = hash_tx.clone();
             tokio::spawn(async move {
-                tracing::warn!(piece, "verify: no data source (hash pool path)");
+                tracing::warn!(piece, "verify: no backend (hash pool path)");
                 let _ = hash_tx
                     .send(crate::hash_pool::HashResult {
                         piece,
@@ -873,40 +622,7 @@ impl DiskHandle {
             return;
         }
 
-        // Non-pool path: store buffer hit
-        if let Some(blocks) = blocks {
-            let result_tx = result_tx.clone();
-            tokio::spawn(async move {
-                let passed = tokio::task::spawn_blocking(move || {
-                    let actual = torrent_core::sha1_chunks(blocks.values().map(|b| b.as_ref()));
-                    let passed = actual == expected;
-                    if !passed {
-                        let num_blocks = blocks.len();
-                        let total_size: usize = blocks.values().map(|b| b.len()).sum();
-                        let block_info: Vec<(u32, usize)> = blocks
-                            .iter()
-                            .map(|(&offset, data)| (offset, data.len()))
-                            .collect();
-                        warn!(
-                            piece,
-                            num_blocks,
-                            total_size,
-                            ?block_info,
-                            expected = %expected.to_hex(),
-                            actual = %actual.to_hex(),
-                            "verify FAILED: hash mismatch"
-                        );
-                    }
-                    passed
-                })
-                .await
-                .expect("store buffer verify task panicked");
-                let _ = result_tx.send(VerifyResult { piece, passed }).await;
-            });
-            return;
-        }
-
-        // M100: Store buffer miss — read from disk (deferred write path).
+        // Non-pool path: read from disk.
         if let Some(backend) = &self.backend {
             let backend = Arc::clone(backend);
             let info_hash = self.info_hash;
@@ -956,40 +672,13 @@ impl DiskHandle {
 
     /// Spawn a non-blocking v2 piece hash verification (SHA-256).
     ///
-    /// M100: Prefers the store buffer (for callers still using `enqueue_write`),
-    /// falls back to reading the piece from disk (for callers using the deferred
-    /// writer task + `flush_piece_writes`). The store buffer path will be removed
-    /// in Task 5 once all callers have been migrated to the deferred write path.
+    /// Reads the piece from disk via the backend's `read_piece()` method.
     pub fn enqueue_verify_v2(
         &self,
         piece: u32,
         expected: Id32,
         result_tx: &mpsc::Sender<VerifyResult>,
     ) {
-        // Try the store buffer first (old write path via enqueue_write).
-        let blocks = {
-            self.store_buffer
-                .lock()
-                .expect("store buffer lock poisoned")
-                .remove(&(self.info_hash, piece))
-        };
-
-        // Store buffer hit — hash from memory.
-        if let Some(blocks) = blocks {
-            let result_tx = result_tx.clone();
-            tokio::spawn(async move {
-                let passed = tokio::task::spawn_blocking(move || {
-                    let actual = torrent_core::sha256_chunks(blocks.values().map(|b| b.as_ref()));
-                    actual == expected
-                })
-                .await
-                .expect("store buffer verify v2 task panicked");
-                let _ = result_tx.send(VerifyResult { piece, passed }).await;
-            });
-            return;
-        }
-
-        // M100: Store buffer miss — read from disk (deferred write path).
         if let Some(backend) = &self.backend {
             let backend = Arc::clone(backend);
             let info_hash = self.info_hash;
@@ -1014,7 +703,7 @@ impl DiskHandle {
             return;
         }
 
-        // No data source at all — treat as failure.
+        // No backend — treat as failure.
         let result_tx = result_tx.clone();
         tokio::spawn(async move {
             warn!(piece, "verify v2: no data source, treating as failed");
@@ -1034,7 +723,6 @@ impl DiskHandle {
     /// back to a synchronous `block_in_place` write from the calling task.
     ///
     /// Returns early (no-op) if write_state is `None` (pre-M100 code path).
-    #[allow(dead_code)] // M100: wired in Task 4
     pub(crate) fn write_block_deferred(&self, piece: u32, begin: u32, data: Bytes) {
         let (write_state, storage) = match (&self.write_state, &self.storage) {
             (Some(ws), Some(s)) => (ws, s),
@@ -1091,7 +779,6 @@ impl DiskHandle {
     ///
     /// Returns immediately if write_state is `None` (pre-M100 path) or if
     /// there are no pending writes for the given piece.
-    #[allow(dead_code)] // M100: wired in Task 4 (used in tests now)
     pub(crate) async fn flush_piece_writes(&self, piece: u32) {
         let write_state = match &self.write_state {
             Some(ws) => ws,
@@ -1110,7 +797,7 @@ impl DiskHandle {
     }
 
     /// Direct storage reference (M100).
-    #[allow(dead_code)] // M100: wired in Task 3
+    #[allow(dead_code)]
     pub(crate) fn storage(&self) -> Option<Arc<dyn TorrentStorage>> {
         self.storage.clone()
     }
@@ -1124,7 +811,6 @@ struct DiskActor {
     rx: mpsc::Receiver<DiskJob>,
     backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
     semaphore: Arc<tokio::sync::Semaphore>,
-    store_buffer: Arc<StoreBuffer>,
     #[allow(dead_code)]
     config: DiskConfig,
 }
@@ -1134,13 +820,11 @@ impl DiskActor {
         rx: mpsc::Receiver<DiskJob>,
         config: DiskConfig,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
-        store_buffer: Arc<StoreBuffer>,
     ) -> Self {
         DiskActor {
             rx,
             backend,
             semaphore: Arc::new(tokio::sync::Semaphore::new(config.io_threads)),
-            store_buffer,
             config,
         }
     }
@@ -1191,18 +875,9 @@ impl DiskActor {
                 let _ = reply.send(());
             }
             DiskJob::Unregister { info_hash } => {
-                // Clean up store buffer entries for this torrent
-                self.store_buffer
-                    .lock()
-                    .unwrap()
-                    .remove_by_info_hash(info_hash);
                 self.backend.unregister(info_hash);
             }
             DiskJob::ClearPiece { info_hash, piece } => {
-                self.store_buffer
-                    .lock()
-                    .unwrap()
-                    .remove(&(info_hash, piece));
                 self.backend.clear_piece(info_hash, piece);
             }
             DiskJob::CachedPieces { info_hash, reply } => {
@@ -1231,40 +906,6 @@ impl DiskActor {
                     .unwrap();
                     drop(permit);
                     let _ = reply.send(to_storage_result(result));
-                });
-            }
-
-            // --- Async write (fire-and-forget, store buffer already populated) ---
-            DiskJob::WriteAsync {
-                info_hash,
-                piece,
-                begin,
-                data,
-                flags,
-                error_tx,
-                _pool_permit,
-            } => {
-                let flush = flags.contains(DiskJobFlags::FLUSH_PIECE);
-                let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
-                tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || {
-                        backend.write_chunk(info_hash, piece, begin, &data, flush)
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
-                    // _pool_permit is moved into this future and drops here
-                    // (after pwrite completes), releasing the pool semaphore slot.
-                    drop(_pool_permit);
-                    if let Err(e) = to_storage_result(result) {
-                        let _ = error_tx.try_send(DiskWriteError {
-                            piece,
-                            begin,
-                            error: e,
-                        });
-                    }
                 });
             }
 
@@ -1410,64 +1051,6 @@ mod tests {
     use super::*;
     use torrent_core::Lengths;
     use torrent_storage::MemoryStorage;
-
-    // ── StoreBufferInner unit tests ───────────────────────────────────
-
-    #[test]
-    fn store_buffer_tracks_bytes() {
-        let mut sb = StoreBufferInner::new(1024);
-        let key = (Id20::ZERO, 0);
-        let data = Bytes::from(vec![0u8; 100]);
-        sb.insert(key, 0, data.clone());
-        assert_eq!(sb.total_bytes(), 100);
-        sb.insert(key, 100, data.clone());
-        assert_eq!(sb.total_bytes(), 200);
-        assert!(!sb.is_over_limit());
-
-        // Remove piece
-        let removed = sb.remove(&key);
-        assert!(removed.is_some());
-        assert_eq!(sb.total_bytes(), 0);
-    }
-
-    #[test]
-    fn store_buffer_over_limit() {
-        let mut sb = StoreBufferInner::new(150);
-        let key = (Id20::ZERO, 0);
-        sb.insert(key, 0, Bytes::from(vec![0u8; 100]));
-        assert!(!sb.is_over_limit());
-        sb.insert(key, 100, Bytes::from(vec![0u8; 100]));
-        assert!(sb.is_over_limit()); // 200 > 150
-    }
-
-    #[test]
-    fn store_buffer_duplicate_insert_no_leak() {
-        let mut sb = StoreBufferInner::new(1024);
-        let key = (Id20::ZERO, 0);
-        sb.insert(key, 0, Bytes::from(vec![0u8; 100]));
-        assert_eq!(sb.total_bytes(), 100);
-        // Re-insert same block offset (retransmission) — old bytes subtracted
-        sb.insert(key, 0, Bytes::from(vec![0u8; 80]));
-        assert_eq!(sb.total_bytes(), 80); // NOT 180
-    }
-
-    #[test]
-    fn store_buffer_remove_by_info_hash() {
-        let mut sb = StoreBufferInner::new(1024);
-        let ih1 = Id20::ZERO;
-        let ih2 = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-        sb.insert((ih1, 0), 0, Bytes::from(vec![0u8; 100]));
-        sb.insert((ih1, 1), 0, Bytes::from(vec![0u8; 100]));
-        sb.insert((ih2, 0), 0, Bytes::from(vec![0u8; 50]));
-        assert_eq!(sb.total_bytes(), 250);
-
-        sb.remove_by_info_hash(ih1);
-        assert_eq!(sb.total_bytes(), 50);
-        // ih2 entries should remain
-        assert!(sb.entries.contains_key(&(ih2, 0)));
-        assert!(!sb.entries.contains_key(&(ih1, 0)));
-        assert!(!sb.entries.contains_key(&(ih1, 1)));
-    }
 
     // ── DiskActor integration tests ──────────────────────────────────
 
@@ -1742,203 +1325,6 @@ mod tests {
         }
 
         mgr.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn store_buffer_verify_from_memory() {
-        // Verify that enqueue_write + enqueue_verify hashes from the store buffer
-        // without needing disk writes to complete first.
-        let (mgr, _actor) = DiskManagerHandle::new(test_config());
-        let ih = make_hash(20);
-        let lengths = Lengths::new(50, 50, 25);
-        let storage = Arc::new(MemoryStorage::new(lengths));
-        let disk = mgr.register_torrent(ih, storage).await;
-
-        let chunk0 = Bytes::from(vec![0xAAu8; 25]);
-        let chunk1 = Bytes::from(vec![0xBBu8; 25]);
-        let mut piece_data = vec![0xAAu8; 25];
-        piece_data.extend_from_slice(&[0xBBu8; 25]);
-        let expected = torrent_core::sha1(&piece_data);
-
-        let (error_tx, _error_rx) = mpsc::channel(4);
-        let (result_tx, mut result_rx) = mpsc::channel(4);
-
-        // Enqueue writes (populates store buffer)
-        disk.enqueue_write(0, 0, chunk0, DiskJobFlags::empty(), &error_tx)
-            .unwrap();
-        disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
-            .unwrap();
-
-        // Enqueue verify — should hash from store buffer (preferred over disk)
-        disk.enqueue_verify(0, expected, 0, &result_tx);
-
-        // Wait for result
-        let result = result_rx.recv().await.unwrap();
-        assert_eq!(result.piece, 0);
-        assert!(result.passed, "store buffer verify should pass");
-
-        // Store buffer should be empty after verify consumed the entry
-        assert!(
-            disk.store_buffer
-                .lock()
-                .unwrap()
-                .entries
-                .get(&(ih, 0))
-                .is_none(),
-            "store buffer entry should be removed after verify"
-        );
-
-        mgr.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn store_buffer_verify_v2_from_memory() {
-        // Verify that enqueue_write + enqueue_verify_v2 hashes from the store buffer
-        // using SHA-256 without needing disk writes to complete first.
-        let (mgr, _actor) = DiskManagerHandle::new(test_config());
-        let ih = make_hash(21);
-        let lengths = Lengths::new(50, 50, 25);
-        let storage = Arc::new(MemoryStorage::new(lengths));
-        let disk = mgr.register_torrent(ih, storage).await;
-
-        let chunk0 = Bytes::from(vec![0xCCu8; 25]);
-        let chunk1 = Bytes::from(vec![0xDDu8; 25]);
-        let mut piece_data = vec![0xCCu8; 25];
-        piece_data.extend_from_slice(&[0xDDu8; 25]);
-        let expected = torrent_core::sha256(&piece_data);
-
-        let (error_tx, _error_rx) = mpsc::channel(4);
-        let (result_tx, mut result_rx) = mpsc::channel(4);
-
-        // Enqueue writes (populates store buffer)
-        disk.enqueue_write(0, 0, chunk0, DiskJobFlags::empty(), &error_tx)
-            .unwrap();
-        disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
-            .unwrap();
-
-        // Enqueue v2 verify — should hash from store buffer (preferred over disk)
-        disk.enqueue_verify_v2(0, expected, &result_tx);
-
-        // Wait for result
-        let result = result_rx.recv().await.unwrap();
-        assert_eq!(result.piece, 0);
-        assert!(result.passed, "store buffer v2 verify should pass");
-
-        // Store buffer should be empty after verify consumed the entry
-        assert!(
-            disk.store_buffer
-                .lock()
-                .unwrap()
-                .entries
-                .get(&(ih, 0))
-                .is_none(),
-            "store buffer entry should be removed after v2 verify"
-        );
-
-        // Verify wrong hash fails
-        let chunk0 = Bytes::from(vec![0xCCu8; 25]);
-        let chunk1 = Bytes::from(vec![0xDDu8; 25]);
-        disk.enqueue_write(0, 0, chunk0, DiskJobFlags::empty(), &error_tx)
-            .unwrap();
-        disk.enqueue_write(0, 25, chunk1, DiskJobFlags::empty(), &error_tx)
-            .unwrap();
-        disk.enqueue_verify_v2(0, Id32::ZERO, &result_tx);
-
-        let result = result_rx.recv().await.unwrap();
-        assert_eq!(result.piece, 0);
-        assert!(!result.passed, "wrong hash should fail v2 verify");
-
-        mgr.shutdown().await;
-    }
-
-    // ── Write coalescing DiskHandle tests ─────────────────────────────
-
-    #[test]
-    fn store_buffer_insert_populates_buffer() {
-        let (tx, _rx) = mpsc::channel(16);
-        let disk = DiskHandle::new(tx, Id20::ZERO);
-        let data = Bytes::from(vec![0xABu8; 64]);
-
-        let over_limit = disk.store_buffer_insert(0, 0, data.clone());
-        assert!(!over_limit, "64 bytes should not exceed 32 MiB limit");
-
-        let sb = disk.store_buffer.lock().unwrap();
-        let blocks = sb.entries.get(&(disk.info_hash, 0));
-        assert!(blocks.is_some(), "store buffer should contain piece 0");
-        let blocks = blocks.unwrap();
-        assert_eq!(blocks.get(&0), Some(&data));
-    }
-
-    #[test]
-    fn enqueue_write_coalesced_skips_store_buffer() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let disk = DiskHandle::new(tx, Id20::ZERO);
-        let data = Bytes::from(vec![0xCDu8; 128]);
-        let (error_tx, _error_rx) = mpsc::channel(4);
-
-        let result = disk.enqueue_write_coalesced(
-            0,
-            0,
-            data.clone(),
-            DiskJobFlags::empty(),
-            &error_tx,
-            None,
-        );
-        assert!(result.is_ok(), "enqueue should succeed on non-full channel");
-
-        // Store buffer must be empty — coalesced write skips insertion
-        let sb = disk.store_buffer.lock().unwrap();
-        assert!(
-            sb.entries.get(&(disk.info_hash, 0)).is_none(),
-            "store buffer should be empty after coalesced write"
-        );
-        drop(sb);
-
-        // The disk job should have been sent to the channel
-        let job = rx.try_recv();
-        assert!(job.is_ok(), "disk job should be on the channel");
-        if let Ok(DiskJob::WriteAsync {
-            piece,
-            begin,
-            data: job_data,
-            ..
-        }) = job
-        {
-            assert_eq!(piece, 0);
-            assert_eq!(begin, 0);
-            assert_eq!(job_data, data);
-        } else {
-            panic!("expected WriteAsync job");
-        }
-    }
-
-    #[test]
-    fn enqueue_write_coalesced_backpressure() {
-        let (tx, _rx) = mpsc::channel(1);
-        let disk = DiskHandle::new(tx, Id20::ZERO);
-        let (error_tx, _error_rx) = mpsc::channel(4);
-
-        // Fill the channel with a dummy job
-        let dummy = Bytes::from(vec![0u8; 16]);
-        disk.enqueue_write_coalesced(0, 0, dummy, DiskJobFlags::empty(), &error_tx, None)
-            .unwrap();
-
-        // Next send should hit back-pressure
-        let payload = Bytes::from(vec![0xFFu8; 32]);
-        let result = disk.enqueue_write_coalesced(
-            1,
-            0,
-            payload.clone(),
-            DiskJobFlags::empty(),
-            &error_tx,
-            None,
-        );
-        assert!(result.is_err(), "should return Err on full channel");
-        assert_eq!(
-            result.unwrap_err(),
-            payload,
-            "should return the original data on back-pressure"
-        );
     }
 
     // ── Deferred write queue tests (M100) ────────────────────────────
