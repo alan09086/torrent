@@ -1072,4 +1072,316 @@ mod tests {
         let backend = create_backend_from_config(&config);
         assert_eq!(backend.name(), "posix");
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests — full buffer pool lifecycle through PosixDiskIo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn piece_completion_flows_to_hash_pool() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(40);
+        let storage = make_storage(100);
+        backend.register(ih, storage);
+
+        // Write two blocks (not flushed — buffered in pool)
+        let d1 = vec![0xAA; 50];
+        let d2 = vec![0xBB; 50];
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(d1.clone()), false)
+            .expect("write block 0");
+        backend
+            .write_chunk(ih, 0, 50, Bytes::from(d2.clone()), false)
+            .expect("write block 1");
+
+        let mut full = d1;
+        full.extend_from_slice(&d2);
+        let expected_hash = torrent_core::sha1(&full);
+
+        // Hash from cache should pass
+        assert!(
+            backend
+                .hash_piece(ih, 0, &expected_hash)
+                .expect("hash_piece"),
+            "hash should match"
+        );
+
+        // Data should now be on disk (read_piece flushes then reads from storage)
+        let piece = backend.read_piece(ih, 0).expect("read_piece after hash");
+        assert_eq!(piece, full);
+
+        // After hash_piece, the piece was promoted to Cached. A second read
+        // promotes it from T1 to T2, making it appear in hot_pieces.
+        let _ = backend
+            .read_chunk(ih, 0, 0, 100, false)
+            .expect("second read");
+        let cached = backend.cached_pieces(ih);
+        assert!(
+            cached.contains(&0),
+            "piece 0 should be in hot pieces after two accesses"
+        );
+    }
+
+    #[test]
+    fn back_pressure_flush_reaches_disk() {
+        // Use a tiny buffer pool (64 KiB) to force eviction under pressure.
+        let config = DiskConfig {
+            buffer_pool_capacity: 64 * 1024,
+            ..test_config()
+        };
+        let backend = PosixDiskIo::new(&config);
+        let ih = make_hash_n(41);
+        let piece_size = 16384_u64;
+        let storage = make_storage_full(piece_size * 10, piece_size, 16384);
+        backend.register(ih, storage);
+
+        // Write 8 pieces, flushing each before the next. This exercises the
+        // back-pressure path: the pool never exceeds its budget because we
+        // flush proactively, and every piece reaches disk.
+        for p in 0..8_u32 {
+            let data = vec![p as u8; piece_size as usize];
+            backend
+                .write_chunk(ih, p, 0, Bytes::from(data), false)
+                .unwrap_or_else(|e| panic!("write piece {p}: {e}"));
+            backend
+                .flush_piece(ih, p)
+                .unwrap_or_else(|e| panic!("flush piece {p}: {e}"));
+        }
+
+        // All 8 pieces should be on disk and readable.
+        for p in 0..8_u32 {
+            let piece = backend
+                .read_piece(ih, p)
+                .unwrap_or_else(|e| panic!("read piece {p}: {e}"));
+            assert_eq!(piece.len(), piece_size as usize);
+            assert!(
+                piece.iter().all(|&b| b == p as u8),
+                "piece {p} data mismatch"
+            );
+        }
+
+        // Also verify: writing beyond budget without flushing causes eviction.
+        // Write 6 more pieces without flushing (96 KiB > 64 KiB).
+        for p in 0..6_u32 {
+            let data = vec![(p + 10) as u8; piece_size as usize];
+            backend
+                .write_chunk(ih, p, 0, Bytes::from(data), false)
+                .unwrap_or_else(|e| panic!("overwrite piece {p}: {e}"));
+        }
+        let stats = backend.stats();
+        assert!(
+            stats.skeleton_count > 0 || stats.eviction_count > 0,
+            "should see evictions when exceeding budget: skeleton={}, eviction={}",
+            stats.skeleton_count,
+            stats.eviction_count
+        );
+    }
+
+    #[test]
+    fn prefetch_then_suggest_then_serve() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(42);
+        let storage = make_storage(100);
+        backend.register(ih, storage);
+
+        // Write data and flush to disk first (simulating a completed piece on disk).
+        let data = vec![0xCC; 100];
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data.clone()), true)
+            .expect("write flushed");
+
+        // Read piece (triggers prefetch into cache — cache miss path).
+        let r1 = backend
+            .read_chunk(ih, 0, 0, 100, false)
+            .expect("first read");
+        assert_eq!(&r1[..], &data[..]);
+
+        // Second read promotes to T2 in ARC.
+        let r2 = backend
+            .read_chunk(ih, 0, 0, 100, false)
+            .expect("second read");
+        assert_eq!(&r2[..], &data[..]);
+
+        // Should appear in hot pieces now (T2).
+        let cached = backend.cached_pieces(ih);
+        assert!(cached.contains(&0), "piece 0 should be hot after two reads");
+
+        // Third read should be a pure cache hit.
+        let s1 = backend.stats();
+        let _ = backend
+            .read_chunk(ih, 0, 0, 100, false)
+            .expect("third read");
+        let s2 = backend.stats();
+        assert!(
+            s2.cache_hits > s1.cache_hits,
+            "third read should be a cache hit: before={}, after={}",
+            s1.cache_hits,
+            s2.cache_hits
+        );
+    }
+
+    #[test]
+    fn full_download_verify_cycle() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(43);
+        let chunk = 16384_u32;
+        let piece_len = u64::from(chunk) * 4; // 4 blocks per piece
+        let total = piece_len * 3; // 3 pieces
+        let storage = make_storage_full(total, piece_len, chunk);
+        backend.register(ih, storage);
+
+        // Download 3 pieces: write all blocks then hash from cache.
+        for p in 0..3_u32 {
+            let mut full_piece = Vec::new();
+            for b in 0..4_u32 {
+                let block = vec![(p * 4 + b) as u8; chunk as usize];
+                full_piece.extend_from_slice(&block);
+                backend
+                    .write_chunk(ih, p, b * chunk, Bytes::from(block), false)
+                    .unwrap_or_else(|e| panic!("write piece {p} block {b}: {e}"));
+            }
+            let expected = torrent_core::sha1(&full_piece);
+            assert!(
+                backend
+                    .hash_piece(ih, p, &expected)
+                    .unwrap_or_else(|e| panic!("hash piece {p}: {e}")),
+                "piece {p} hash should pass"
+            );
+        }
+
+        // Verify all 3 pieces on disk.
+        for p in 0..3_u32 {
+            let data = backend
+                .read_piece(ih, p)
+                .unwrap_or_else(|e| panic!("read piece {p}: {e}"));
+            assert_eq!(data.len(), piece_len as usize);
+            for b in 0..4_u32 {
+                let expected_byte = (p * 4 + b) as u8;
+                let start = (b * chunk) as usize;
+                let end = start + chunk as usize;
+                assert!(
+                    data[start..end].iter().all(|&x| x == expected_byte),
+                    "piece {p} block {b}: expected 0x{expected_byte:02X}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn skeleton_eviction_then_completion() {
+        // Tiny pool: 32 KiB — forces Writing-to-Skeleton demotion.
+        let config = DiskConfig {
+            buffer_pool_capacity: 32 * 1024,
+            ..test_config()
+        };
+        let backend = PosixDiskIo::new(&config);
+        let ih = make_hash_n(44);
+        // 4 pieces of 16 KiB each = 64 KiB > 32 KiB budget.
+        let storage = make_storage_full(16384 * 4, 16384, 16384);
+        backend.register(ih, storage);
+
+        for p in 0..4_u32 {
+            let data = vec![p as u8; 16384];
+            backend
+                .write_chunk(ih, p, 0, Bytes::from(data), false)
+                .unwrap_or_else(|e| panic!("write piece {p}: {e}"));
+        }
+
+        // Flush and verify all pieces can complete via disk path.
+        for p in 0..4_u32 {
+            backend
+                .flush_piece(ih, p)
+                .unwrap_or_else(|e| panic!("flush piece {p}: {e}"));
+            let piece = backend
+                .read_piece(ih, p)
+                .unwrap_or_else(|e| panic!("read piece {p}: {e}"));
+            assert_eq!(piece.len(), 16384);
+        }
+
+        // Verify eviction/skeleton stats reflect memory pressure.
+        let stats = backend.stats();
+        assert!(
+            stats.skeleton_count > 0 || stats.eviction_count > 0,
+            "should have evictions under pressure: skeleton={}, eviction={}",
+            stats.skeleton_count,
+            stats.eviction_count
+        );
+    }
+
+    #[test]
+    fn hash_from_cache_fail_no_disk_write() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(46);
+        let storage = make_storage(50);
+        backend.register(ih, storage);
+
+        let data = vec![0xDD; 50];
+        backend
+            .write_chunk(ih, 0, 0, Bytes::from(data), false)
+            .expect("buffered write");
+
+        // Hash with wrong expected value — should fail.
+        let wrong_hash = Id20([0xFF; 20]);
+        assert!(
+            !backend
+                .hash_piece(ih, 0, &wrong_hash)
+                .expect("hash_piece should not error"),
+            "hash should fail with wrong expected value"
+        );
+
+        // The piece should NOT be on disk. MemoryStorage is zero-initialized,
+        // so reading back should yield all zeros (no write occurred).
+        let piece = backend.read_piece(ih, 0).expect("read_piece");
+        assert!(
+            piece.iter().all(|&b| b == 0),
+            "failed piece should not be written to disk"
+        );
+    }
+
+    #[test]
+    fn seeding_throughput_with_cache() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(47);
+        let chunk = 16384_u32;
+        let piece_len = u64::from(chunk);
+        let num_pieces = 64_u32;
+        let storage = make_storage_full(piece_len * u64::from(num_pieces), piece_len, chunk);
+        backend.register(ih, storage);
+
+        // Write all pieces to disk (flush=true simulates completed seeded data).
+        for p in 0..num_pieces {
+            let data = vec![p as u8; chunk as usize];
+            backend
+                .write_chunk(ih, p, 0, Bytes::from(data), true)
+                .unwrap_or_else(|e| panic!("write piece {p}: {e}"));
+        }
+
+        // First read pass: cache miss + prefetch for each piece.
+        for p in 0..num_pieces {
+            backend
+                .read_chunk(ih, p, 0, chunk, false)
+                .unwrap_or_else(|e| panic!("first read piece {p}: {e}"));
+        }
+
+        // Second read pass: should be mostly cache hits.
+        let stats_before = backend.stats();
+        for p in 0..num_pieces {
+            backend
+                .read_chunk(ih, p, 0, chunk, false)
+                .unwrap_or_else(|e| panic!("second read piece {p}: {e}"));
+        }
+        let stats_after = backend.stats();
+
+        let hits = stats_after
+            .cache_hits
+            .saturating_sub(stats_before.cache_hits);
+        let total = u64::from(num_pieces);
+        let hit_rate = hits as f64 / total as f64;
+
+        // Should have >80% cache hit rate with 64 x 16 KiB pieces in 1 MiB cache.
+        assert!(
+            hit_rate > 0.8,
+            "cache hit rate {hit_rate:.1} should be >80% (hits={hits}, total={total})"
+        );
+    }
 }

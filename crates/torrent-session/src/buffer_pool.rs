@@ -721,6 +721,7 @@ impl BufferPool {
 
     /// Return all piece indices currently in `Cached` state for the given
     /// torrent. Used by [`DiskIoBackend::cached_pieces`] for peer suggest.
+    #[allow(dead_code)] // reserved for future use; hot_pieces() is the primary API
     pub fn cached_pieces(&self, info_hash: Id20) -> Vec<u32> {
         self.entries
             .iter()
