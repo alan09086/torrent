@@ -536,8 +536,14 @@ impl BlockMaps {
     fn word_and_mask(&self, piece: u32, block: u32) -> (usize, u64) {
         let base = (piece as usize).saturating_mul(self.words_per_piece as usize);
         let word_offset = (block / 64) as usize;
+        let idx = base + word_offset;
+        debug_assert!(
+            idx < self.requested.len(),
+            "BlockMaps: piece={piece} block={block} out of range (idx={idx}, len={})",
+            self.requested.len()
+        );
         let bit = block % 64;
-        (base + word_offset, 1u64 << bit)
+        (idx, 1u64 << bit)
     }
 }
 
@@ -563,10 +569,12 @@ impl StealCandidates {
         }
     }
 
-    /// Add a piece to the back of the steal queue.
+    /// Add a piece to the back of the steal queue (no-op if already present).
     pub fn push(&self, piece: u32) {
         let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
-        guard.push_back(piece);
+        if !guard.contains(&piece) {
+            guard.push_back(piece);
+        }
     }
 
     /// Take a piece from the front of the steal queue.
