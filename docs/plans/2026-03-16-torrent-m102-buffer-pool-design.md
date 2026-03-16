@@ -31,14 +31,14 @@ pub struct BufferPool {
     read_ceiling: AtomicUsize,
 
     // Write side: blocks buffered per piece, awaiting completion
-    write_cache: Mutex<HashMap<(InfoHash, u32), PieceWriteBuffer>>,
+    write_cache: Mutex<HashMap<(Id20, u32), PieceWriteBuffer>>,
 
-    // Read side: ARC cache keyed by (info_hash, piece_index)
+    // Read side: byte-aware ARC cache keyed by (info_hash, piece_index)
     // Values are full pieces (Bytes), not individual blocks
-    read_cache: Mutex<ArcCache<(InfoHash, u32), Bytes>>,
+    read_cache: Mutex<ByteArcCache<(Id20, u32), Bytes>>,
 
-    // Storage backends for prefetch reads
-    storages: RwLock<HashMap<InfoHash, Arc<dyn TorrentStorage>>>,
+    // Storage backends + piece lengths for prefetch reads and completion detection
+    storages: RwLock<HashMap<Id20, (Arc<dyn TorrentStorage>, Lengths)>>,
 
     // Channel to M101's batched writer task
     write_tx: mpsc::Sender<WriteJob>,
@@ -50,9 +50,23 @@ pub struct BufferPool {
 struct PieceWriteBuffer {
     blocks: BTreeMap<u32, Bytes>,  // begin_offset -> data (sorted for sequential flush)
     total_bytes: usize,
-    piece_size: usize,             // expected total for completion detection
+    piece_size: usize,             // from Lengths, set at first write via storages lookup
 }
 ```
+
+**Type notes:**
+- `Id20` (from `torrent_core`) is the info hash type used throughout the codebase — no `InfoHash` alias exists
+- `Lengths` is stored alongside each `TorrentStorage` to provide `piece_size(idx)` for write completion detection
+
+**ByteArcCache adapter (~60 lines):**
+
+The existing `ArcCache<K, V>` is count-based (capacity = number of entries). We wrap it in a `ByteArcCache` that:
+- Tracks `used_bytes: usize` based on `Bytes::len()` of inserted values
+- Enforces a byte-budget ceiling instead of entry count
+- Provides an `on_evict` callback so the `BufferPool` can call `munlock()` and decrement `read_used`
+- Exposes `t2_keys() -> Vec<K>` for the hot_pieces query (entries in the frequency list)
+
+This adapter lives in `torrent-storage/src/cache.rs` alongside the existing `ArcCache`.
 
 **Key properties:**
 - Read cache stores **full pieces** as `Bytes`, not individual blocks
@@ -60,6 +74,7 @@ struct PieceWriteBuffer {
 - `write_used + read_used` must never exceed `total_capacity`
 - Writes always get priority over reads (same as libtorrent 1.x)
 - ARC algorithm for reads: adaptive recency/frequency balance with ghost lists
+- Mutex contention on read/write paths is a known limitation (same as prior `PosixDiskIo`); follow-up milestone could explore `parking_lot::Mutex` or lock-free structures if profiling shows contention
 
 ### Write Path
 
@@ -70,13 +85,13 @@ pub enum WriteStatus {
     BackPressure,     // pool full, flushed oldest incomplete piece to make room
 }
 
-fn write_chunk(&self, info_hash: InfoHash, piece: u32, begin: u32, data: Bytes)
+fn write_chunk(&self, info_hash: Id20, piece: u32, begin: u32, data: Bytes)
     -> Result<WriteStatus>
 ```
 
 **Flow:**
 
-1. Insert block into `write_cache[(info_hash, piece)].blocks`
+1. Insert block into `write_cache[(info_hash, piece)].blocks`. On first block for a new piece, look up `piece_size` from the `Lengths` stored in `storages[(info_hash)]`
 2. Check completion — if `total_bytes == piece_size`:
    - Drain all blocks from `PieceWriteBuffer`
    - Send as `WriteJob`s through `write_tx` to M101's batched writer
@@ -87,14 +102,16 @@ fn write_chunk(&self, info_hash: InfoHash, piece: u32, begin: u32, data: Bytes)
    - If read cache is at its 8 MiB floor, evict the oldest incomplete piece from write cache — flush its blocks to M101's writer (partial flush, re-read from disk during verification)
    - Return `BackPressure`
 
-**Zero-copy:** Accept `Bytes` directly from the wire. `Bytes` is reference-counted — storing it in BTreeMap is an Arc bump, no data copy.
+**Zero-copy (write path):** Accept `Bytes` directly from the wire. `Bytes` is reference-counted — storing it in BTreeMap is an Arc bump, no data copy.
 
 **Flush ordering:** BTreeMap sorts blocks by offset, so flushed blocks go to disk in order — sequential writes friendly to both HDD and SSD.
+
+**Relationship to existing code:** This replaces `PosixDiskIo`'s write buffering and the `WriteBuffer` struct (both from pre-M100, already deleted in M100). The BufferPool owns the write-side responsibility that `PosixDiskIo` formerly had.
 
 ### Read Path + Prefetching
 
 ```rust
-fn read_chunk(&self, info_hash: InfoHash, piece: u32, begin: u32, length: usize)
+fn read_chunk(&self, info_hash: Id20, piece: u32, begin: u32, length: usize)
     -> Result<Bytes>
 ```
 
@@ -103,11 +120,13 @@ fn read_chunk(&self, info_hash: InfoHash, piece: u32, begin: u32, length: usize)
 1. **Check write cache** — if block exists in `write_cache[(info_hash, piece)].blocks`, return it directly (hot data, not yet flushed)
 2. **Check read cache** — if ARC has the full piece, slice `[begin..begin+length]` and return
 3. **Cache miss → prefetch entire piece:**
-   - Read full piece from storage via `storage.read_piece(piece)` (one I/O per file segment)
-   - Insert full piece into ARC read cache
-   - ARC evicts least valuable entry if over capacity
-   - Slice out requested block and return
+   - Read full piece from storage via `storage.read_piece(piece)` — returns `Vec<u8>`, converted to `Bytes` via `Bytes::from()` (move, not copy — but the `Vec` itself was allocated by the storage backend, so this is one allocation per prefetch, not zero-copy)
+   - Insert full piece into byte-aware ARC read cache
+   - ARC evicts least valuable entry if over byte ceiling
+   - Slice out requested block and return (`Bytes::slice()` is zero-copy — shares backing memory)
 4. Update ARC hit/miss stats for dynamic split decisions
+
+**Zero-copy scope:** The write path is truly zero-copy (wire `Bytes` → BTreeMap with no clone). The read cache *hit* path is zero-copy (`Bytes::slice()`). The read cache *miss* path has one allocation (storage reads into `Vec<u8>` → `Bytes`). This is inherent — data must be read from disk into memory.
 
 **Seeding scenario (why this works):**
 - Peer A requests block 0 of piece 42 → cache miss → read full piece → cache it → return block 0
@@ -120,7 +139,7 @@ fn read_chunk(&self, info_hash: InfoHash, piece: u32, begin: u32, length: usize)
 ### Cache-Aware BEP 6 Suggest
 
 ```rust
-fn hot_pieces(&self, info_hash: InfoHash) -> Vec<u32>
+fn hot_pieces(&self, info_hash: Id20) -> Vec<u32>
 ```
 
 **Flow:**
@@ -145,7 +164,9 @@ Every 5 seconds (piggybacks on session tick):
 
 ```rust
 fn rebalance(&self) {
-    let read_hit_rate = stats.read_hits / (stats.read_hits + stats.read_misses);
+    let total_reads = stats.read_hits + stats.read_misses;
+    if total_reads == 0 { return; }  // no data yet, keep current split
+    let read_hit_rate = stats.read_hits as f64 / total_reads as f64;
     let write_pressure = write_used as f64 / total_capacity as f64;
 
     if read_hit_rate < 0.5 && write_pressure < 0.3 {
@@ -172,6 +193,8 @@ fn rebalance(&self) {
 On `#[cfg(unix)]` platforms, call `libc::mlock()` on cache entry backing memory at insert, `munlock()` on evict. Prevents OS from paging cache to swap under memory pressure.
 
 Silently no-op on non-Unix. Cost: one syscall per piece insert/evict — ~245 calls across cache lifecycle for 64 MiB pool. Negligible.
+
+**Caveat:** `mlock` is best-effort for `Bytes` values. `Bytes` uses reference-counted backing memory; `Bytes::slice()` shares the same allocation. We only `mlock`/`munlock` full-piece entries in the ARC (not slices returned to callers), so the lifecycle is predictable: lock on ARC insert, unlock on ARC evict via the `ByteArcCache` eviction callback. If the backing `Bytes` is dropped while a slice is alive, the memory remains valid (refcounted) but unlocked — acceptable since the slice is short-lived (in-flight to a peer).
 
 ### Statistics
 
@@ -219,14 +242,15 @@ pub struct BufferPoolConfig {
 
 | File | Change | Est. Lines |
 |------|--------|------------|
-| `torrent-session/src/buffer_pool.rs` | **New** — BufferPool, PieceWriteBuffer, BufferPoolStats, config | ~400 |
-| `torrent-session/src/disk.rs` | Wire BufferPool into DiskIoBackend read/write paths | ~60 |
-| `torrent-session/src/disk_backend.rs` | Route reads/writes through BufferPool | ~40 |
-| `torrent-session/src/torrent.rs` | Register storage with BufferPool on torrent add | ~10 |
+| `torrent-session/src/buffer_pool.rs` | **New** — BufferPool, PieceWriteBuffer, BufferPoolStats, BufferPoolConfig | ~600 |
+| `torrent-storage/src/cache.rs` | **Add** ByteArcCache adapter (byte-budget, eviction callback, t2_keys) | ~80 |
+| `torrent-session/src/disk.rs` | Wire BufferPool into write path, pass to DiskIoBackend | ~60 |
+| `torrent-session/src/disk_backend.rs` | Route reads/writes through BufferPool, remove direct storage calls | ~80 |
+| `torrent-session/src/torrent.rs` | Register storage+Lengths with BufferPool on torrent add; modify `suggest_cached_pieces()` to use `hot_pieces()` | ~30 |
 | `torrent-session/src/settings.rs` | Add BufferPoolConfig fields to SessionSettings | ~15 |
-| `torrent-wire/src/handler.rs` | Send SuggestPiece from hot_pieces() on peer connect | ~20 |
-| `torrent-storage/src/cache.rs` | Expose ARC T2 entries for hot_pieces query | ~15 |
-| **Total** | | **~560 lines** |
+| **Total** | | **~865 lines** |
+
+**Note:** SuggestPiece sending already exists in `torrent-session/src/torrent.rs` (`suggest_cached_pieces()` method). M102 modifies it to call `BufferPool::hot_pieces()` instead of the old `cached_pieces()`. No changes needed in `torrent-wire` — the wire crate only defines `Message::SuggestPiece`.
 
 ## Testing
 
