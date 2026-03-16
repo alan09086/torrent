@@ -9,6 +9,8 @@ mod settings;
 mod types;
 // These will be added as they're implemented:
 pub(crate) mod ban;
+#[allow(dead_code)] // M102: wired in during Task 3 (PosixDiskIo integration).
+pub(crate) mod buffer_pool;
 pub(crate) mod choker;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use
 pub(crate) mod chunk_mask;
