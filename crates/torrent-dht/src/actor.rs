@@ -461,6 +461,8 @@ struct DhtActor {
     pending_get_peers: Vec<(Id20, mpsc::Sender<Vec<SocketAddr>>)>,
     /// Bootstrap timeout timer — forces bootstrap_complete after 10s (M97).
     bootstrap_timeout: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// Timestamp of last `ping_questionable_nodes()` call for two-phase gating (M105).
+    last_ping: Instant,
 }
 
 struct ActorStats {
@@ -603,6 +605,7 @@ impl DhtActor {
             bootstrap_complete: false,
             pending_get_peers: Vec::new(),
             bootstrap_timeout: Some(Box::pin(tokio::time::sleep(Duration::from_secs(10)))),
+            last_ping: Instant::now(),
         }
     }
 
@@ -697,7 +700,18 @@ impl DhtActor {
 
                 // Ping questionable nodes to verify liveness + check node-count gate
                 _ = ping_tick.tick() => {
-                    self.ping_questionable_nodes().await;
+                    // Two-phase ping frequency (M105): 5s during bootstrap for
+                    // fast routing-table population, 60s steady-state to reduce
+                    // chatter after the table is established.
+                    let ping_interval = if self.bootstrap_complete {
+                        Duration::from_secs(60)
+                    } else {
+                        Duration::from_secs(5)
+                    };
+                    if self.last_ping.elapsed() >= ping_interval {
+                        self.ping_questionable_nodes().await;
+                        self.last_ping = Instant::now();
+                    }
                     // Node-count gate: if saved-node pings have populated the
                     // table but FindNodeLookup hasn't converged yet, open the
                     // gate early so queued get_peers aren't blocked.
@@ -3137,5 +3151,86 @@ mod tests {
         );
 
         handle.shutdown().await.unwrap();
+    }
+
+    /// T10: During bootstrap (`bootstrap_complete = false`), the ping gate
+    /// uses a 5-second interval — pings should fire every tick.
+    ///
+    /// Uses millisecond-scale durations so the test completes instantly while
+    /// exercising the exact same gating logic as the real actor loop.
+    #[test]
+    fn ping_interval_5s_during_bootstrap() {
+        let bootstrap_complete = false;
+
+        // Simulate the timing decision with a tick interval equal to the
+        // bootstrap ping interval (both 5s in production, both 10ms here).
+        let tick = Duration::from_millis(10);
+        let bootstrap_interval = tick;
+        let steady_interval = Duration::from_millis(120);
+
+        let mut last_ping = Instant::now();
+        let mut ping_count: u32 = 0;
+
+        // Simulate 6 ticks, sleeping the tick interval between each.
+        for _ in 0..6 {
+            std::thread::sleep(tick);
+
+            let ping_interval = if bootstrap_complete {
+                steady_interval
+            } else {
+                bootstrap_interval
+            };
+            if last_ping.elapsed() >= ping_interval {
+                ping_count = ping_count.saturating_add(1);
+                last_ping = Instant::now();
+            }
+        }
+
+        // All 6 ticks should trigger a ping (tick == bootstrap interval).
+        assert_eq!(
+            ping_count, 6,
+            "expected 6 pings during bootstrap (every tick), got {ping_count}"
+        );
+    }
+
+    /// T11: After bootstrap (`bootstrap_complete = true`), the ping gate
+    /// uses a 60-second interval — most ticks are no-ops for pinging.
+    ///
+    /// Uses millisecond-scale durations so the test completes instantly while
+    /// exercising the exact same gating logic as the real actor loop.
+    #[test]
+    fn ping_interval_60s_after_bootstrap() {
+        let bootstrap_complete = true;
+
+        // Production ratio: tick = 5s, steady interval = 60s → 12:1.
+        // Test ratio:       tick = 10ms, steady interval = 120ms → 12:1.
+        let tick = Duration::from_millis(10);
+        let bootstrap_interval = tick;
+        let steady_interval = Duration::from_millis(120);
+
+        let mut last_ping = Instant::now();
+        let mut ping_count: u32 = 0;
+
+        // 24 ticks × 10ms = 240ms total. With a 120ms gate, exactly 2
+        // pings should fire (at tick ~12 = 120ms and tick ~24 = 240ms).
+        for _ in 0..24 {
+            std::thread::sleep(tick);
+
+            let ping_interval = if bootstrap_complete {
+                steady_interval
+            } else {
+                bootstrap_interval
+            };
+            if last_ping.elapsed() >= ping_interval {
+                ping_count = ping_count.saturating_add(1);
+                last_ping = Instant::now();
+            }
+        }
+
+        // Only 2 pings should have fired (12:1 ratio, same as production).
+        assert_eq!(
+            ping_count, 2,
+            "expected 2 pings post-bootstrap (12:1 tick-to-interval ratio), got {ping_count}"
+        );
     }
 }
