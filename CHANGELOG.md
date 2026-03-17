@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.105.0 | M105 | DHT reliability & simplification — routing table node cap (512), two-phase ping (5s→60s), background DNS backoff, unified IterativeLookup\<C\> (~90 lines removed), JSON routing table persistence |
 | 0.104.0 | M104 | Fixed-depth pipeline & connection overhaul — AIMD→fixed Semaphore(128), three-phase connect→fixed 500ms + per-peer backoff, snub→disconnect, max_in_flight 256→512, DHT diagnostic logging |
 | 0.103.0 | M103 | Per-block stealing & reactive dispatch — BlockMaps atomic bit arrays, StealCandidates FIFO queue, 3-phase dispatch, 50ms reactive snapshots, ~250 lines legacy steal code deleted |
 | 0.102.0 | M102 | Unified buffer pool (libtorrent 1.x-style) — replaces separate ARC cache + WriteBuffer with single BufferPool, hash-from-cache, full-piece prefetch, BEP 6 T2-based suggest |
@@ -58,6 +59,24 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.105.0] — 2026-03-17
+
+### Added
+- **Configurable routing table node cap** — `max_nodes` setting (default 512) prevents
+  unbounded routing table growth
+- **Two-phase ping frequency** — 5s pings during bootstrap, 60s after stable (12x
+  reduction in steady-state DHT traffic)
+- **Background DNS bootstrap backoff** — DNS resolution spawned as background tasks with
+  exponential backoff (1s→30s, 120s deadline), Phase 3 connect interval starts immediately
+  without waiting for DNS
+- **JSON routing table persistence** — actor-owned save/load with atomic writes
+  (temp file + rename), 60s save interval
+- 17 new tests (1565 total)
+
+### Changed
+- **Unified iterative lookup** — `IterativeLookup<C>` generic replaces duplicated
+  `LookupState` and `FindNodeLookup` implementations (~90 lines removed)
 
 ## [0.104.0] — 2026-03-17
 
