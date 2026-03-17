@@ -7767,7 +7767,7 @@ mod tests {
             max_outstanding_requests: 500,
             max_in_flight_pieces: 20,
             use_block_stealing: true,
-            fixed_pipeline_depth: 128,
+            fixed_pipeline_depth: 250,
         }
     }
 

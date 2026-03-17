@@ -79,8 +79,10 @@ impl PendingBatch {
 const BATCH_INITIAL_CAPACITY: usize = 32;
 
 /// M104: Fixed per-peer queue depth — number of concurrent requests per peer.
-/// Replaces AIMD dynamic depth. Matches `fixed_pipeline_depth` setting default.
-const INITIAL_QUEUE_DEPTH: usize = 128;
+/// Replaces AIMD dynamic depth. Set to 250 to match M103's effective depth
+/// (AIMD slow-start doubled 128 → 250 within 1–2 ticks). TODO: wire from
+/// `fixed_pipeline_depth` setting via run_peer() parameter.
+const INITIAL_QUEUE_DEPTH: usize = 250;
 
 /// M93: State needed for lock-free dispatch and direct peer-to-disk writes.
 /// Tuple: (atomic_states, piece_notify, disk_handle, write_error_tx)
@@ -3198,7 +3200,7 @@ mod tests {
         #[test]
         fn unchoke_sets_full_permits() {
             let semaphore = tokio::sync::Semaphore::new(0);
-            let depth: usize = 128;
+            let depth: usize = 250;
 
             // Simulate unchoke: drain stale permits, then add fixed depth
             while let Ok(permit) = semaphore.try_acquire() {

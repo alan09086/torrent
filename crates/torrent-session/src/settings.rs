@@ -218,7 +218,7 @@ fn default_max_in_flight_pieces() -> usize {
     512
 }
 fn default_fixed_pipeline_depth() -> usize {
-    128
+    250
 }
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
@@ -802,7 +802,7 @@ impl Default for Settings {
             auto_sequential: true,
             steal_threshold_ratio: 10.0,
             use_block_stealing: true,
-            fixed_pipeline_depth: 128,
+            fixed_pipeline_depth: 250,
             strict_end_game: true,
             max_web_seeds: 4,
             initial_picker_threshold: 4,
@@ -1951,7 +1951,7 @@ mod tests {
     fn max_in_flight_512_default() {
         let s = Settings::default();
         assert_eq!(s.max_in_flight_pieces, 512);
-        assert_eq!(s.fixed_pipeline_depth, 128);
+        assert_eq!(s.fixed_pipeline_depth, 250);
 
         // Presets
         let mm = Settings::min_memory();
@@ -1960,7 +1960,7 @@ mod tests {
 
         let hp = Settings::high_performance();
         assert_eq!(hp.max_in_flight_pieces, 512);
-        assert_eq!(hp.fixed_pipeline_depth, 128); // inherits default
+        assert_eq!(hp.fixed_pipeline_depth, 250); // inherits default
     }
 
     #[test]
