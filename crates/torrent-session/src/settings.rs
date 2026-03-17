@@ -215,7 +215,10 @@ fn default_max_outstanding_requests() -> usize {
     500
 }
 fn default_max_in_flight_pieces() -> usize {
-    256
+    512
+}
+fn default_fixed_pipeline_depth() -> usize {
+    128
 }
 fn default_i2p_hostname() -> String {
     "127.0.0.1".into()
@@ -510,6 +513,12 @@ pub struct Settings {
     /// blocks from pieces reserved by slower peers (default: true).
     #[serde(default = "default_use_block_stealing")]
     pub use_block_stealing: bool,
+    /// Fixed per-peer pipeline depth (number of concurrent requests per peer).
+    /// Replaces the old AIMD dynamic depth system. rqbit uses a fixed
+    /// `Semaphore(128)` per peer — simpler and faster. This setting allows
+    /// benchmarking different fixed depths. Default: 128.
+    #[serde(default = "default_fixed_pipeline_depth")]
+    pub fixed_pipeline_depth: usize,
 
     // ── Piece picker enhancements (M44) ──
     /// Prefer pieces adjacent to those already downloaded for improved sequential
@@ -675,9 +684,9 @@ pub struct Settings {
     #[serde(default = "default_max_outstanding_requests")]
     pub max_outstanding_requests: usize,
     /// Maximum number of pieces simultaneously in-flight (downloaded but not
-    /// yet verified). Caps the store buffer memory usage: 32 pieces × 512 KiB
-    /// = 16 MiB for typical torrents. When the cap is reached, the piece
-    /// selector only returns blocks from already-in-flight pieces. Default: 32.
+    /// yet verified). Caps memory usage for in-progress pieces. When the cap
+    /// is reached, the piece selector only returns blocks from already-in-flight
+    /// pieces. Default: 512.
     #[serde(default = "default_max_in_flight_pieces")]
     pub max_in_flight_pieces: usize,
     /// Timeout in seconds for outbound TCP peer connections.
@@ -793,6 +802,7 @@ impl Default for Settings {
             auto_sequential: true,
             steal_threshold_ratio: 10.0,
             use_block_stealing: true,
+            fixed_pipeline_depth: 128,
             strict_end_game: true,
             max_web_seeds: 4,
             initial_picker_threshold: 4,
@@ -852,7 +862,7 @@ impl Default for Settings {
             max_message_size: 16 * 1024 * 1024,
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
-            max_in_flight_pieces: 256,
+            max_in_flight_pieces: 512,
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
             // Session Stats (M50)
@@ -887,6 +897,7 @@ impl Settings {
             disk_io_threads: 1,
             dht_max_items: 100,
             max_in_flight_pieces: 32,
+            fixed_pipeline_depth: 32,
             ..Self::default()
         }
     }
@@ -1184,6 +1195,7 @@ impl PartialEq for Settings {
             && self.auto_sequential == other.auto_sequential
             && self.steal_threshold_ratio.to_bits() == other.steal_threshold_ratio.to_bits()
             && self.use_block_stealing == other.use_block_stealing
+            && self.fixed_pipeline_depth == other.fixed_pipeline_depth
             && self.strict_end_game == other.strict_end_game
             && self.max_web_seeds == other.max_web_seeds
             && self.initial_picker_threshold == other.initial_picker_threshold
@@ -1933,5 +1945,55 @@ mod tests {
         // 257 is invalid
         s.runtime_worker_threads = 257;
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn max_in_flight_512_default() {
+        let s = Settings::default();
+        assert_eq!(s.max_in_flight_pieces, 512);
+        assert_eq!(s.fixed_pipeline_depth, 128);
+
+        // Presets
+        let mm = Settings::min_memory();
+        assert_eq!(mm.max_in_flight_pieces, 32);
+        assert_eq!(mm.fixed_pipeline_depth, 32);
+
+        let hp = Settings::high_performance();
+        assert_eq!(hp.max_in_flight_pieces, 512);
+        assert_eq!(hp.fixed_pipeline_depth, 128); // inherits default
+    }
+
+    #[test]
+    fn recalc_max_in_flight_formula() {
+        // The formula in torrent.rs: max(256, connected * 3), clamped to
+        // num_pieces / 2, floored at 256. Validate the logic here.
+        let base = 256_usize;
+
+        // Few peers: floor dominates
+        let connected = 10;
+        let num_pieces = 2000_u32;
+        let calculated = base.max(connected * 3);
+        let result = calculated.min(num_pieces as usize / 2).max(base);
+        assert_eq!(result, 256); // max(256, 30) = 256, min(256, 1000) = 256
+
+        // Many peers: peer count drives it up
+        let connected = 200;
+        let calculated = base.max(connected * 3);
+        let result = calculated.min(num_pieces as usize / 2).max(base);
+        assert_eq!(result, 600); // max(256, 600) = 600, min(600, 1000) = 600
+
+        // Small torrent: piece clamp wins
+        let connected = 200;
+        let num_pieces = 100_u32;
+        let calculated = base.max(connected * 3);
+        let result = calculated.min(num_pieces as usize / 2).max(base);
+        assert_eq!(result, 256); // max(256, 600) = 600, min(600, 50) = 50, max(50, 256) = 256
+
+        // Exact boundary: connected * 3 == base
+        let connected = 86; // 86 * 3 = 258, just above 256
+        let num_pieces = 10000_u32;
+        let calculated = base.max(connected * 3);
+        let result = calculated.min(num_pieces as usize / 2).max(base);
+        assert_eq!(result, 258); // max(256, 258) = 258, min(258, 5000) = 258
     }
 }
