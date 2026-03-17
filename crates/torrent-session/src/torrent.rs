@@ -1725,7 +1725,11 @@ impl TorrentActor {
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
-        let mut connect_interval = tokio::time::interval(Duration::from_millis(500));
+        // M104.1: Two-phase connect — 100ms ramp for first 15s (fast peer discovery),
+        // then 500ms steady state. Simpler than old ConnectPhase enum; per-peer backoff
+        // prevents hammering failed peers during the aggressive phase.
+        let mut connect_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut connect_ramped_down = false;
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(
@@ -2121,8 +2125,14 @@ impl TorrentActor {
                 _ = optimistic_interval.tick() => {
                     self.rotate_optimistic();
                 }
-                // Connect timer — fixed 500ms interval (M104: replaced three-phase ramp)
+                // Connect timer — 100ms ramp → 500ms steady (M104.1)
                 _ = connect_interval.tick() => {
+                    // Ramp down from 100ms to 500ms after 15s of peer discovery
+                    if !connect_ramped_down && self.started_at.elapsed() >= Duration::from_secs(15) {
+                        connect_ramped_down = true;
+                        connect_interval = tokio::time::interval(Duration::from_millis(500));
+                        connect_interval.reset();
+                    }
                     self.try_connect_peers();
                     self.assign_pieces_to_web_seeds();
                     // Re-trigger DHT search if no active search and we still need peers.
