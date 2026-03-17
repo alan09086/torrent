@@ -214,7 +214,7 @@ impl Default for TorrentConfig {
             max_outstanding_requests: 500,
             max_in_flight_pieces: 512,
             use_block_stealing: true,
-            fixed_pipeline_depth: 250,
+            fixed_pipeline_depth: 128,
         }
     }
 }
