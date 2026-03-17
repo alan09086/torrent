@@ -99,6 +99,9 @@ pub struct DhtConfig {
     pub dht_max_items: usize,
     /// BEP 44: Lifetime of DHT items in seconds before expiry.
     pub dht_item_lifetime_secs: u64,
+    /// Maximum number of nodes in the routing table. Prevents unbounded growth
+    /// from adversarial node injection. Default: 512 (matches rqbit).
+    pub max_routing_nodes: usize,
 }
 
 impl Default for DhtConfig {
@@ -118,6 +121,7 @@ impl Default for DhtConfig {
             restrict_routing_ips: true,
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
+            max_routing_nodes: 512,
         }
     }
 }
@@ -139,6 +143,7 @@ impl DhtConfig {
             restrict_routing_ips: true,
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
+            max_routing_nodes: 512,
         }
     }
 }
@@ -568,6 +573,7 @@ impl DhtActor {
         let own_id = config.own_id.unwrap_or_else(generate_node_id);
         let address_family = config.address_family;
         let restrict_ips = config.restrict_routing_ips;
+        let max_routing_nodes = config.max_routing_nodes;
         debug!(id = %own_id, family = ?address_family, "DHT node ID");
 
         let max_items = config.dht_max_items;
@@ -577,7 +583,7 @@ impl DhtActor {
             address_family,
             socket,
             rx,
-            routing_table: RoutingTable::new_with_config(own_id, restrict_ips),
+            routing_table: RoutingTable::with_config(own_id, restrict_ips, max_routing_nodes),
             peer_store: PeerStore::new(),
             item_store: Box::new(InMemoryDhtStorage::new(max_items)),
             pending: HashMap::new(),
@@ -2428,6 +2434,7 @@ impl DhtActor {
         let r = self.routing_table.own_id().0[19] & 0x07;
         let new_id = node_id::generate_node_id(external_ip, r);
         let restrict_ips = self.config.restrict_routing_ips;
+        let max_routing_nodes = self.config.max_routing_nodes;
         let mut old_nodes = self.routing_table.all_nodes();
         debug!(
             old_id = %self.routing_table.own_id(),
@@ -2435,7 +2442,7 @@ impl DhtActor {
             preserved_nodes = old_nodes.len(),
             "BEP 42: regenerating node ID"
         );
-        self.routing_table = RoutingTable::new_with_config(new_id, restrict_ips);
+        self.routing_table = RoutingTable::with_config(new_id, restrict_ips, max_routing_nodes);
 
         // Sort nodes by XOR distance to the new ID (closest first).
         // This maximizes bucket splits: close nodes fill the home bucket,

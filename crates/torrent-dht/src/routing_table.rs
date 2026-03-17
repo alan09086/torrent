@@ -103,6 +103,10 @@ impl KBucket {
     }
 }
 
+/// Default maximum number of nodes in the routing table.
+/// Matches rqbit's default and prevents unbounded growth from adversarial injection.
+const DEFAULT_MAX_NODES: usize = 512;
+
 /// Kademlia routing table.
 #[derive(Debug, Clone)]
 pub struct RoutingTable {
@@ -112,6 +116,8 @@ pub struct RoutingTable {
     ip_set: HashSet<IpAddr>,
     /// Whether to enforce one-node-per-IP restriction.
     restrict_ips: bool,
+    /// Maximum number of nodes allowed in the routing table.
+    max_nodes: usize,
 }
 
 /// Result of an insert operation.
@@ -128,16 +134,22 @@ pub enum InsertResult {
 impl RoutingTable {
     /// Create a new routing table with the given own node ID.
     pub fn new(own_id: Id20) -> Self {
-        Self::new_with_config(own_id, false)
+        Self::with_config(own_id, false, DEFAULT_MAX_NODES)
     }
 
     /// Create a new routing table with IP restriction setting.
     pub fn new_with_config(own_id: Id20, restrict_ips: bool) -> Self {
+        Self::with_config(own_id, restrict_ips, DEFAULT_MAX_NODES)
+    }
+
+    /// Create a new routing table with full configuration.
+    pub fn with_config(own_id: Id20, restrict_ips: bool, max_nodes: usize) -> Self {
         RoutingTable {
             own_id,
             buckets: vec![KBucket::new()],
             ip_set: HashSet::new(),
             restrict_ips,
+            max_nodes,
         }
     }
 
@@ -181,14 +193,13 @@ impl RoutingTable {
         }
 
         let bucket_idx = self.bucket_index(&id);
-        let bucket = &mut self.buckets[bucket_idx];
 
         // Already known — update last_seen and address
-        if let Some(pos) = bucket.find(&id) {
-            let old_ip = bucket.nodes[pos].addr.ip();
-            bucket.nodes[pos].last_seen = Instant::now();
-            bucket.nodes[pos].addr = addr;
-            bucket.nodes[pos].fail_count = 0;
+        if let Some(pos) = self.buckets[bucket_idx].find(&id) {
+            let old_ip = self.buckets[bucket_idx].nodes[pos].addr.ip();
+            self.buckets[bucket_idx].nodes[pos].last_seen = Instant::now();
+            self.buckets[bucket_idx].nodes[pos].addr = addr;
+            self.buckets[bucket_idx].nodes[pos].fail_count = 0;
             // Update IP tracking if address changed
             if self.restrict_ips && old_ip != ip {
                 self.ip_set.remove(&old_ip);
@@ -197,9 +208,38 @@ impl RoutingTable {
             return true;
         }
 
+        // Global node cap — when at limit, only allow insertion by evicting a
+        // bad node (fail_count > 0) from this bucket. This keeps the table
+        // bounded while still allowing fresh nodes to replace stale ones.
+        let at_cap = self.len() >= self.max_nodes;
+        if at_cap {
+            if let Some(worst_idx) = self.buckets[bucket_idx].worst_node()
+                && self.buckets[bucket_idx].nodes[worst_idx].fail_count > 0
+            {
+                if self.restrict_ips {
+                    self.ip_set
+                        .remove(&self.buckets[bucket_idx].nodes[worst_idx].addr.ip());
+                }
+                self.buckets[bucket_idx].nodes[worst_idx] = RoutingNode {
+                    id,
+                    addr,
+                    last_seen: Instant::now(),
+                    fail_count: 0,
+                    last_response: None,
+                    last_query: None,
+                };
+                if self.restrict_ips {
+                    self.ip_set.insert(ip);
+                }
+                return true;
+            }
+            // No bad nodes to evict — reject
+            return false;
+        }
+
         // Room in bucket
-        if !bucket.is_full() {
-            bucket.nodes.push(RoutingNode {
+        if !self.buckets[bucket_idx].is_full() {
+            self.buckets[bucket_idx].nodes.push(RoutingNode {
                 id,
                 addr,
                 last_seen: Instant::now(),
@@ -214,14 +254,15 @@ impl RoutingTable {
         }
 
         // Bucket full — try to evict a failed node
-        if let Some(worst_idx) = bucket.worst_node()
-            && bucket.nodes[worst_idx].fail_count > 0
+        if let Some(worst_idx) = self.buckets[bucket_idx].worst_node()
+            && self.buckets[bucket_idx].nodes[worst_idx].fail_count > 0
         {
             // Remove old node's IP from tracking (gap fix #7)
             if self.restrict_ips {
-                self.ip_set.remove(&bucket.nodes[worst_idx].addr.ip());
+                self.ip_set
+                    .remove(&self.buckets[bucket_idx].nodes[worst_idx].addr.ip());
             }
-            bucket.nodes[worst_idx] = RoutingNode {
+            self.buckets[bucket_idx].nodes[worst_idx] = RoutingNode {
                 id,
                 addr,
                 last_seen: Instant::now(),
@@ -801,6 +842,65 @@ mod tests {
         // The old IP (10.0.0.1) should be freed
         let old_addr: SocketAddr = "10.0.0.1:6882".parse().unwrap();
         assert!(rt.insert(id(200), old_addr));
+    }
+
+    // ── Node cap tests ─────────────────────────────────────────────
+
+    #[test]
+    fn routing_table_node_cap_rejects_at_limit() {
+        // With max_nodes=4, inserting a 5th node should fail when no bad nodes
+        // exist in the target bucket.
+        let mut rt = RoutingTable::with_config(Id20::ZERO, false, 4);
+        for i in 1..=4u8 {
+            assert!(rt.insert(id(i), addr(i as u16)), "insert {i} should succeed");
+        }
+        assert_eq!(rt.len(), 4);
+        // 5th insert — all nodes are good, should be rejected
+        assert!(!rt.insert(id(5), addr(5)));
+        assert_eq!(rt.len(), 4);
+    }
+
+    #[test]
+    fn routing_table_node_cap_allows_eviction() {
+        // At the cap, a new node can still be inserted if a bad node (fail_count > 0)
+        // exists in the target bucket and can be evicted.
+        let mut rt = RoutingTable::with_config(Id20::ZERO, false, 4);
+        for i in 1..=4u8 {
+            rt.insert(id(i), addr(i as u16));
+        }
+        assert_eq!(rt.len(), 4);
+
+        // Mark node 1 as failed so it can be evicted
+        rt.mark_failed(&id(1));
+
+        // Insert at cap succeeds by evicting the failed node
+        assert!(rt.insert(id(5), addr(5)));
+        assert_eq!(rt.len(), 4);
+        assert!(rt.get(&id(5)).is_some());
+        assert!(rt.get(&id(1)).is_none());
+    }
+
+    #[test]
+    fn routing_table_node_cap_allows_update() {
+        // Updating an existing node must succeed even when at the cap.
+        let mut rt = RoutingTable::with_config(Id20::ZERO, false, 4);
+        for i in 1..=4u8 {
+            rt.insert(id(i), addr(i as u16));
+        }
+        assert_eq!(rt.len(), 4);
+
+        // Update existing node — new address, same ID
+        assert!(rt.insert(id(2), addr(200)));
+        assert_eq!(rt.len(), 4);
+        assert_eq!(rt.get(&id(2)).unwrap().addr, addr(200));
+    }
+
+    #[test]
+    fn routing_table_default_cap_512() {
+        let rt = RoutingTable::new(Id20::ZERO);
+        // The default max_nodes should be 512
+        assert_eq!(rt.max_nodes, DEFAULT_MAX_NODES);
+        assert_eq!(rt.max_nodes, 512);
     }
 
     #[test]
