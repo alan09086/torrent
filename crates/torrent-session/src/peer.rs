@@ -4,7 +4,7 @@
 //! and communicates with the TorrentActor via channels.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -25,7 +25,6 @@ use crate::pex::PexMessage;
 use crate::piece_reservation::{
     AtomicPieceStates, AvailabilitySnapshot, BlockMaps, PeerDispatchState,
 };
-use crate::pipeline::PeerPipelineState;
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 use tokio::sync::Semaphore;
 
@@ -79,8 +78,8 @@ impl PendingBatch {
 /// Matches a standard 512 KiB piece (512 * 1024 / 16384 = 32 blocks).
 const BATCH_INITIAL_CAPACITY: usize = 32;
 
-/// M83: Initial per-peer queue depth — matches settings default (128).
-/// AIMD slow-start still applies (can grow to 250, shrink to 8).
+/// M104: Fixed per-peer queue depth — number of concurrent requests per peer.
+/// Replaces AIMD dynamic depth. Matches `fixed_pipeline_depth` setting default.
 const INITIAL_QUEUE_DEPTH: usize = 128;
 
 /// M93: State needed for lock-free dispatch and direct peer-to-disk writes.
@@ -330,12 +329,9 @@ pub(crate) async fn run_peer(
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
 
-    // M82: Pipeline state for EWMA throughput tracking
+    // M104: Pipeline depth is fixed — no AIMD, no EWMA in peer task
     let mut in_flight: usize = 0;
-    let mut peer_pipeline = PeerPipelineState::new();
-    let mut current_effective_depth: usize = INITIAL_QUEUE_DEPTH;
-    let mut pipeline_tick = tokio::time::interval(Duration::from_millis(1000));
-    pipeline_tick.tick().await; // skip initial tick
+    let current_effective_depth: usize = INITIAL_QUEUE_DEPTH;
 
     // M92: Pending batch for accumulating block completions
     let mut pending_batch: Option<PendingBatch> = None;
@@ -379,7 +375,6 @@ pub(crate) async fn run_peer(
                         match &msg {
                             Message::Piece { index, begin, data } => {
                                 if reservation_state.is_some() {
-                                    peer_pipeline.block_received(*index, *begin, data.len() as u32, Instant::now());
                                     in_flight = in_flight.saturating_sub(1);
                                     // M82: Permit absorption — only return permit if below target depth
                                     if in_flight < current_effective_depth {
@@ -398,8 +393,6 @@ pub(crate) async fn run_peer(
                             }
                             Message::Unchoke => {
                                 peer_choking = false;
-                                // M104: No AIMD reset — depth is fixed
-                                current_effective_depth = INITIAL_QUEUE_DEPTH;
                                 in_flight = 0;
                                 // M82: Drain stale permits from previous cycle before refilling.
                                 // Late Piece arrivals after a Choke/Unchoke cycle would otherwise
@@ -637,7 +630,6 @@ pub(crate) async fn run_peer(
                 match ds.next_block(&local_bitfield, atomic_states) {
                     Some(block) => {
                         permit.forget();
-                        peer_pipeline.request_sent(block.piece, block.begin, Instant::now());
                         in_flight += 1;
                         framed_write.send(Message::Request {
                             index: block.piece,
@@ -653,11 +645,6 @@ pub(crate) async fn run_peer(
                         piece_notify.notified().await;
                     }
                 }
-            }
-
-            // M104: Pipeline tick — EWMA throughput tracking only (no depth adjustment)
-            _ = pipeline_tick.tick() => {
-                peer_pipeline.tick();
             }
 
             // M92: 25ms batch flush timer — sends partial batches for stats/UI/endgame
@@ -3204,6 +3191,36 @@ mod tests {
             assert!(!batch.push(1, 2 * 16384, 16384));
             assert!(!batch.push(1, 3 * 16384, 16384)); // only 2 in this batch
             assert_eq!(batch.blocks.len(), 2);
+        }
+
+        /// M104: Verify that on unchoke, the semaphore is reset to the fixed
+        /// pipeline depth (drain stale permits, then add exactly `depth`).
+        #[test]
+        fn unchoke_sets_full_permits() {
+            let semaphore = tokio::sync::Semaphore::new(0);
+            let depth: usize = 128;
+
+            // Simulate unchoke: drain stale permits, then add fixed depth
+            while let Ok(permit) = semaphore.try_acquire() {
+                permit.forget();
+            }
+            semaphore.add_permits(depth);
+
+            assert_eq!(semaphore.available_permits(), depth);
+
+            // Simulate some in-flight requests reducing available permits
+            let p1 = semaphore.try_acquire().expect("permit should be available");
+            let p2 = semaphore.try_acquire().expect("permit should be available");
+            assert_eq!(semaphore.available_permits(), depth - 2);
+
+            // Re-unchoke: drain and refill
+            drop(p1);
+            drop(p2);
+            while let Ok(permit) = semaphore.try_acquire() {
+                permit.forget();
+            }
+            semaphore.add_permits(depth);
+            assert_eq!(semaphore.available_permits(), depth);
         }
     }
 }
