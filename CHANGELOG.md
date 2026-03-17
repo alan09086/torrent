@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.104.0 | M104 | Fixed-depth pipeline & connection overhaul — AIMD→fixed Semaphore(128), three-phase connect→fixed 500ms + per-peer backoff, snub→disconnect, max_in_flight 256→512, DHT diagnostic logging |
 | 0.103.0 | M103 | Per-block stealing & reactive dispatch — BlockMaps atomic bit arrays, StealCandidates FIFO queue, 3-phase dispatch, 50ms reactive snapshots, ~250 lines legacy steal code deleted |
 | 0.102.0 | M102 | Unified buffer pool (libtorrent 1.x-style) — replaces separate ARC cache + WriteBuffer with single BufferPool, hash-from-cache, full-piece prefetch, BEP 6 T2-based suggest |
 | 0.101.0 | M101 | Performance parity — SmallVec segments (111K allocs eliminated), batch writer (93K→~1.5K spawns), streaming piece verification (262 KiB/piece alloc eliminated) |
@@ -57,6 +58,35 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.104.0] — 2026-03-17
+
+### Added
+- **`fixed_pipeline_depth` setting** — new session setting (default: 128) for A/B
+  benchmarking of per-peer pipeline depth
+- **DHT diagnostic logging** — ~10 structured log lines at bootstrap stages (saved
+  nodes, DNS resolution, node-count gate, timeout, get_peers) for cold-start failure
+  diagnosis
+- **Per-peer exponential backoff** — 200ms × 2^attempt (capped at 30s) prevents
+  hammering peers that repeatedly fail to connect
+
+### Changed
+- **AIMD pipeline removed** — replaced dynamic AIMD queue depth (additive increase /
+  multiplicative decrease) with fixed `Semaphore(128)` per peer, matching rqbit's
+  simpler and faster approach. `pipeline.rs` gutted from 585→151 lines. EWMA
+  throughput tracking and RTT measurement retained for snub detection and peer rate
+  comparison.
+- **Connection strategy simplified** — replaced three-phase `ConnectPhase`
+  (RampUp 100ms → Normal 500ms → Steady 5s) with fixed 500ms connect interval
+- **Snub → Disconnect** — snubbed peers (no data for `snub_timeout_secs`) are now
+  fully disconnected instead of throttled to depth=1, freeing slots for healthy peers
+- **`max_in_flight_pieces` raised** — default 256→512. Formula: `max(512, connected×4)`
+  capped at `pieces/2`
+
+### Removed
+- AIMD congestion control logic (additive increase / multiplicative decrease)
+- `ConnectPhase` enum and three-phase connection interval state machine
+- ~430 lines of pipeline complexity
 
 ## [0.103.0] — 2026-03-16
 

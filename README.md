@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1555-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1548-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.103.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.104.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,555 tests. Zero clippy warnings.
+12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,548 tests. Zero clippy warnings.
 
 ---
 
@@ -51,7 +51,7 @@ torrent download ./ubuntu.torrent --list
 
 ```toml
 [dependencies]
-torrent = "0.103.0"
+torrent = "0.104.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -107,7 +107,7 @@ torrent-cli           CLI binary: download, create, info subcommands
 | Category | Features |
 |----------|----------|
 | **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange, BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange, BEP 53 `so=` file selection |
-| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, AIMD pipeline with per-peer congestion control, lock-free piece dispatch (atomic CAS), file streaming (`AsyncRead` + `AsyncSeek`), sequential download with auto-hysteresis, SuggestPiece, predictive announce |
+| **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, fixed-depth pipeline (Semaphore(128) per peer), lock-free piece dispatch (atomic CAS), file streaming (`AsyncRead` + `AsyncSeek`), sequential download with auto-hysteresis, SuggestPiece, predictive announce |
 | **Disk I/O** | Pluggable `DiskIoBackend` (POSIX/mmap/disabled), async DiskActor, deferred write queue with batch `spawn_blocking` (64 jobs/call), ARC read cache, streaming piece verification (64 KiB buffer, `Sha1Hasher`), parallel hashing (`HashPool` with `Data`/`Streaming` variants) |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode algorithm, automatic upload slot optimization |
 | **Networking** | MSE/PE encryption, uTP integration, UPnP/NAT-PMP/PCP, dual-stack IPv6, HTTP/web seeding (BEP 17/19), SOCKS5/HTTP proxy, SSL/TLS transport, I2P (SAM), pluggable transport (`NetworkFactory`) |
@@ -174,12 +174,13 @@ Page f:  44K avg
 
 CPU parity with rqbit. Context switches reduced 63% (from 3x gap to 1.1x). Speed variance is DHT bootstrap latency, not a regression -- the 53.6 MB/s peak exceeds v0.100.0's average.
 
-### Optimization Stack (M85--M102)
+### Optimization Stack (M85--M104)
 
-The performance work spans 18 milestones of profiler-driven optimization:
+The performance work spans 19 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.104.0 | Fixed-depth pipeline & connection overhaul -- AIMD→Semaphore(128), fixed 500ms connect, per-peer backoff | Eliminates ~430 lines pipeline complexity |
 | 0.103.0 | Per-block stealing & reactive dispatch -- BlockMaps, StealCandidates, 3-phase dispatch | Eliminates legacy steal code, 50ms reactive snapshots |
 | 0.102.0 | Unified buffer pool (libtorrent 1.x) -- hash-from-cache, full-piece prefetch, T2 suggest | Eliminates write->read->hash round-trip, 64 MiB unified cache |
 | 0.101.0 | Allocation hotspots -- SmallVec segments, batch writer, streaming verify | 111K allocs eliminated, 93K->~1.5K spawns, 262 KiB/piece alloc eliminated |
@@ -266,7 +267,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 - **Binary search file lookup** -- O(log n) piece-to-file mapping via sorted `FileMap` with SmallVec segments
 - **No `rand` dependency** -- thread-local xorshift64 seeded from `SystemTime`
 - **Deterministic serialization** -- `SortedMapSerializer` ensures BEP 3 dict key ordering for correct info hashes
-- **AIMD pipeline** -- per-peer congestion control with additive increase, multiplicative decrease, slow-start
+- **Fixed-depth pipeline** -- per-peer Semaphore(128) with EWMA throughput tracking for snub detection
 - **Lock-free hot path** -- atomic CAS piece dispatch, batched writes, streaming verification
 - **Streaming verification** -- `Sha1Hasher` incremental API avoids full-piece allocation; hash pool supports both pre-read (`Data`) and streaming (`Streaming`) verification modes
 
@@ -274,7 +275,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M103) focuses on performance optimization. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M104) focuses on performance optimization. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -292,7 +293,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Pluggable Interfaces | M49-M50 | Pluggable disk I/O, session statistics (~100 counters) | Done |
 | Simulation | M51 | In-process network simulation framework | Done |
 | API Parity | M52-M53 | API documentation, full torrent operations API | Done |
-| Speed Optimization | M55-M103 | Dispatch architecture, pipeline tuning, CPU efficiency, unified buffer pool, block stealing | Done |
+| Speed Optimization | M55-M104 | Dispatch architecture, pipeline tuning, CPU efficiency, unified buffer pool, block stealing | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -301,7 +302,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,555 tests
+cargo test --workspace                      # 1,548 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 
