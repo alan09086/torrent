@@ -1965,35 +1965,35 @@ mod tests {
 
     #[test]
     fn recalc_max_in_flight_formula() {
-        // The formula in torrent.rs: max(256, connected * 3), clamped to
-        // num_pieces / 2, floored at 256. Validate the logic here.
-        let base = 256_usize;
+        // M104: The formula in torrent.rs: max(512, connected * 4), clamped to
+        // num_pieces / 2, floored at 512. Validate the logic here.
+        let base = 512_usize;
 
         // Few peers: floor dominates
         let connected = 10;
         let num_pieces = 2000_u32;
-        let calculated = base.max(connected * 3);
+        let calculated = base.max(connected * 4);
         let result = calculated.min(num_pieces as usize / 2).max(base);
-        assert_eq!(result, 256); // max(256, 30) = 256, min(256, 1000) = 256
+        assert_eq!(result, 512); // max(512, 40) = 512, min(512, 1000) = 512
 
         // Many peers: peer count drives it up
         let connected = 200;
-        let calculated = base.max(connected * 3);
+        let calculated = base.max(connected * 4);
         let result = calculated.min(num_pieces as usize / 2).max(base);
-        assert_eq!(result, 600); // max(256, 600) = 600, min(600, 1000) = 600
+        assert_eq!(result, 800); // max(512, 800) = 800, min(800, 1000) = 800
 
         // Small torrent: piece clamp wins
         let connected = 200;
         let num_pieces = 100_u32;
-        let calculated = base.max(connected * 3);
+        let calculated = base.max(connected * 4);
         let result = calculated.min(num_pieces as usize / 2).max(base);
-        assert_eq!(result, 256); // max(256, 600) = 600, min(600, 50) = 50, max(50, 256) = 256
+        assert_eq!(result, 512); // max(512, 800) = 800, min(800, 50) = 50, max(50, 512) = 512
 
-        // Exact boundary: connected * 3 == base
-        let connected = 86; // 86 * 3 = 258, just above 256
+        // Exact boundary: connected * 4 == base
+        let connected = 129; // 129 * 4 = 516, just above 512
         let num_pieces = 10000_u32;
-        let calculated = base.max(connected * 3);
+        let calculated = base.max(connected * 4);
         let result = calculated.min(num_pieces as usize / 2).max(base);
-        assert_eq!(result, 258); // max(256, 258) = 258, min(258, 5000) = 258
+        assert_eq!(result, 516); // max(512, 516) = 516, min(516, 5000) = 516
     }
 }
