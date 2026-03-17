@@ -330,10 +330,10 @@ pub(crate) async fn run_peer(
     // M76: Local copy of the peer's bitfield for dispatch (avoids shared state lookup).
     let mut local_bitfield = Bitfield::new(num_pieces);
 
-    // M82: AIMD pipeline state for adaptive queue depth with permit absorption
+    // M82: Pipeline state for EWMA throughput tracking
     let mut in_flight: usize = 0;
-    let mut peer_pipeline = PeerPipelineState::new(250, 3.0, INITIAL_QUEUE_DEPTH);
-    let mut current_effective_depth: usize = peer_pipeline.target_depth();
+    let mut peer_pipeline = PeerPipelineState::new();
+    let mut current_effective_depth: usize = INITIAL_QUEUE_DEPTH;
     let mut pipeline_tick = tokio::time::interval(Duration::from_millis(1000));
     pipeline_tick.tick().await; // skip initial tick
 
@@ -398,8 +398,8 @@ pub(crate) async fn run_peer(
                             }
                             Message::Unchoke => {
                                 peer_choking = false;
-                                peer_pipeline.reset_to_slow_start();
-                                current_effective_depth = peer_pipeline.target_depth();
+                                // M104: No AIMD reset — depth is fixed
+                                current_effective_depth = INITIAL_QUEUE_DEPTH;
                                 in_flight = 0;
                                 // M82: Drain stale permits from previous cycle before refilling.
                                 // Late Piece arrivals after a Choke/Unchoke cycle would otherwise
@@ -655,27 +655,9 @@ pub(crate) async fn run_peer(
                 }
             }
 
-            // M82: AIMD pipeline tick — adjusts queue depth periodically
+            // M104: Pipeline tick — EWMA throughput tracking only (no depth adjustment)
             _ = pipeline_tick.tick() => {
                 peer_pipeline.tick();
-                let new_target = peer_pipeline.target_depth();
-                if new_target > current_effective_depth {
-                    semaphore.add_permits(new_target - current_effective_depth);
-                } else if new_target < current_effective_depth {
-                    // Drain excess idle permits immediately. Absorption on block
-                    // receive only works when the pipe is busy; idle permits must
-                    // be removed here to honour the depth reduction.
-                    let wanted_idle = new_target.saturating_sub(in_flight);
-                    let excess = semaphore.available_permits().saturating_sub(wanted_idle);
-                    for _ in 0..excess {
-                        if let Ok(permit) = semaphore.try_acquire() {
-                            permit.forget();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                current_effective_depth = new_target;
             }
 
             // M92: 25ms batch flush timer — sends partial batches for stats/UI/endgame

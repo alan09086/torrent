@@ -2345,7 +2345,7 @@ impl TorrentActor {
                                 .unwrap_or(false);
                             if idle {
                                 peer.snubbed = true;
-                                peer.pipeline.set_queue_depth_override(1);
+                                // TODO(M104): snub handling will be updated in Task 4
                                 snubbed_peers.push(*addr);
                                 debug!(%addr, "peer snubbed — no data for {}s", self.config.snub_timeout_secs);
                             }
@@ -2422,7 +2422,6 @@ impl TorrentActor {
                             trace!(%addr,
                                    choking = p.peer_choking,
                                    pending = p.pending_requests.len(),
-                                   depth = p.pipeline.queue_depth(),
                                    ewma_rate = p.pipeline.ewma_rate() as u64,
                                    last_data_secs = last_data,
                                    bf_ones = p.bitfield.count_ones(),
@@ -3873,7 +3872,6 @@ impl TorrentActor {
             // Clear snub if snubbed
             if peer.snubbed {
                 peer.snubbed = false;
-                peer.pipeline.reset_to_slow_start();
             }
         }
 
@@ -4045,7 +4043,6 @@ impl TorrentActor {
             // Clear snub if snubbed
             if peer.snubbed {
                 peer.snubbed = false;
-                peer.pipeline.reset_to_slow_start();
             }
         }
 
@@ -6464,9 +6461,6 @@ impl TorrentActor {
                     self.num_pieces,
                     cmd_tx,
                     source,
-                    self.config.max_request_queue_depth,
-                    self.config.request_queue_time,
-                    self.config.initial_queue_depth,
                 ),
             );
             post_alert(
@@ -7104,9 +7098,6 @@ impl TorrentActor {
                 self.num_pieces,
                 cmd_tx,
                 PeerSource::Incoming,
-                self.config.max_request_queue_depth,
-                self.config.request_queue_time,
-                self.config.initial_queue_depth,
             ),
         );
         // Identify transport for incoming peers (M45)
@@ -7313,9 +7304,6 @@ impl TorrentActor {
                 self.num_pieces,
                 cmd_tx,
                 PeerSource::Pex,
-                self.config.max_request_queue_depth,
-                self.config.request_queue_time,
-                self.config.initial_queue_depth,
             ),
         );
         post_alert(
