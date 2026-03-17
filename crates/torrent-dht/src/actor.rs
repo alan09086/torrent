@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
@@ -103,6 +104,10 @@ pub struct DhtConfig {
     /// Maximum number of nodes in the routing table. Prevents unbounded growth
     /// from adversarial node injection. Default: 512 (matches rqbit).
     pub max_routing_nodes: usize,
+    /// Directory for persisting DHT routing table state as JSON.
+    /// When set, the actor saves/loads `dht_state.json` (V4) or
+    /// `dht_state_v6.json` (V6) via atomic temp-file + rename.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl Default for DhtConfig {
@@ -123,6 +128,7 @@ impl Default for DhtConfig {
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
             max_routing_nodes: 512,
+            state_dir: None,
         }
     }
 }
@@ -145,6 +151,7 @@ impl DhtConfig {
             dht_max_items: 700,
             dht_item_lifetime_secs: 7200,
             max_routing_nodes: 512,
+            state_dir: None,
         }
     }
 }
@@ -544,6 +551,24 @@ struct PutItemParams {
     salt: Option<Vec<u8>>,
 }
 
+/// JSON serialization format for persisted DHT routing table state.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DhtState {
+    /// Our node ID as a hex string.
+    node_id: String,
+    /// All nodes from the routing table.
+    nodes: Vec<DhtNodeEntry>,
+}
+
+/// A single node entry in the persisted JSON state.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DhtNodeEntry {
+    /// Node ID as a hex string.
+    id: String,
+    /// Socket address as "ip:port".
+    addr: String,
+}
+
 /// Interval for routing table maintenance.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 /// Interval for peer store cleanup.
@@ -566,7 +591,7 @@ impl DhtActor {
 
         let max_items = config.dht_max_items;
         let queries_per_second = config.queries_per_second;
-        DhtActor {
+        let mut actor = DhtActor {
             config,
             address_family,
             socket,
@@ -593,7 +618,13 @@ impl DhtActor {
             bootstrap_timeout: Some(Box::pin(tokio::time::sleep(Duration::from_secs(10)))),
             last_ping: Instant::now(),
             dns_bootstrap_rx: None,
-        }
+        };
+
+        // Load persisted routing table from JSON (if state_dir is configured).
+        // Loaded nodes are marked Questionable and will be verified via pings.
+        actor.load_routing_table();
+
+        actor
     }
 
     async fn run(mut self) {
@@ -1844,6 +1875,139 @@ impl DhtActor {
         }
     }
 
+    // ---- JSON routing table persistence ----
+
+    /// Return the JSON state file path for this address family.
+    fn state_file_path(state_dir: &std::path::Path, family: AddressFamily) -> PathBuf {
+        match family {
+            AddressFamily::V4 => state_dir.join("dht_state.json"),
+            AddressFamily::V6 => state_dir.join("dht_state_v6.json"),
+        }
+    }
+
+    /// Persist the routing table to a JSON file via atomic temp-file + rename.
+    ///
+    /// Skips silently when `state_dir` is `None`. On any I/O or serialization
+    /// error, logs a warning and continues (never crashes the actor).
+    fn save_routing_table(&self) {
+        let state_dir = match &self.config.state_dir {
+            Some(dir) => dir,
+            None => return,
+        };
+
+        let nodes = self.routing_table.all_nodes();
+        let own_id = *self.routing_table.own_id();
+
+        let state = DhtState {
+            node_id: own_id.to_hex(),
+            nodes: nodes
+                .iter()
+                .map(|(id, addr)| DhtNodeEntry {
+                    id: id.to_hex(),
+                    addr: addr.to_string(),
+                })
+                .collect(),
+        };
+
+        let json = match serde_json::to_string_pretty(&state) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(error = %e, "failed to serialize DHT state to JSON");
+                return;
+            }
+        };
+
+        let final_path = Self::state_file_path(state_dir, self.address_family);
+        let tmp_path = state_dir.join(format!(
+            ".dht_state_{}.tmp",
+            match self.address_family {
+                AddressFamily::V4 => "v4",
+                AddressFamily::V6 => "v6",
+            }
+        ));
+
+        if let Err(e) = std::fs::write(&tmp_path, json.as_bytes()) {
+            warn!(error = %e, path = %tmp_path.display(), "failed to write DHT state temp file");
+            return;
+        }
+
+        if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
+            warn!(
+                error = %e,
+                tmp = %tmp_path.display(),
+                dst = %final_path.display(),
+                "failed to rename DHT state temp file"
+            );
+        }
+    }
+
+    /// Load the routing table from a JSON state file.
+    ///
+    /// Skips silently when `state_dir` is `None`. On missing file (first run),
+    /// logs at debug level and returns. On corrupt/parse errors, logs a warning
+    /// and falls through to normal bootstrap. On success, inserts all nodes as
+    /// Questionable and filters `bootstrap_nodes` to hostnames only (since the
+    /// JSON file has fresher saved-node data).
+    fn load_routing_table(&mut self) {
+        let state_dir = match &self.config.state_dir {
+            Some(dir) => dir.clone(),
+            None => return,
+        };
+
+        let path = Self::state_file_path(&state_dir, self.address_family);
+
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!(path = %path.display(), "no saved DHT state (first run)");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "failed to read DHT state file");
+                return;
+            }
+        };
+
+        let state: DhtState = match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "corrupt DHT state file, ignoring");
+                return;
+            }
+        };
+
+        let mut loaded = 0u32;
+        for entry in &state.nodes {
+            let id = match Id20::from_hex(&entry.id) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            let addr: SocketAddr = match entry.addr.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            if self.routing_table.insert(id, addr) {
+                loaded = loaded.saturating_add(1);
+            }
+        }
+
+        if loaded > 0 {
+            // Mark all as Questionable — they may be stale, must be re-verified
+            self.routing_table.mark_all_questionable();
+
+            // Filter bootstrap_nodes to hostnames only (remove IP:port entries)
+            // since the JSON file has fresher saved-node addresses.
+            self.config.bootstrap_nodes.retain(|s| s.parse::<SocketAddr>().is_err());
+
+            debug!(
+                loaded,
+                table_size = self.routing_table.len(),
+                family = ?self.address_family,
+                "loaded DHT routing table from JSON"
+            );
+        }
+    }
+
     async fn maintenance(&mut self) {
         // Query timeouts are now handled by expire_queries_and_advance_lookups()
 
@@ -1901,6 +2065,9 @@ impl DhtActor {
                 self.send_find_node(node.addr, target, Some(node.id)).await;
             }
         }
+
+        // Persist routing table to JSON (atomic write)
+        self.save_routing_table();
     }
 
     async fn send_find_node(&mut self, addr: SocketAddr, target: Id20, node_id: Option<Id20>) {
@@ -3359,5 +3526,216 @@ mod tests {
 
         // Cleanup: drop sender so actor doesn't hang.
         drop(tx);
+    }
+
+    // ---- JSON routing table persistence tests (M105 Task 5) ----
+
+    /// T12: Save routing table to JSON, read it back, verify nodes restored as
+    /// Questionable. Also test that corrupt JSON is handled gracefully.
+    #[tokio::test]
+    async fn json_persistence_round_trip_and_corrupt() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            state_dir: Some(dir.path().to_path_buf()),
+            ..DhtConfig::default()
+        };
+
+        let socket = UdpSocket::bind(config.bind_addr).await.unwrap();
+        let (_tx, rx) = mpsc::channel(256);
+        let (ip_tx, _ip_rx) = mpsc::channel(4);
+        let mut actor = DhtActor::new(config.clone(), socket, rx, ip_tx);
+
+        // Insert some nodes
+        let node1_id = Id20::from_hex("1111111111111111111111111111111111111111").unwrap();
+        let node2_id = Id20::from_hex("2222222222222222222222222222222222222222").unwrap();
+        let addr1: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        let addr2: SocketAddr = "10.0.0.2:6882".parse().unwrap();
+        actor.routing_table.insert(node1_id, addr1);
+        actor.routing_table.insert(node2_id, addr2);
+        // Mark one as Good to confirm mark_all_questionable works on load
+        actor.routing_table.mark_response(&node1_id);
+
+        // Save
+        actor.save_routing_table();
+
+        // Verify file exists
+        let path = DhtActor::state_file_path(dir.path(), AddressFamily::V4);
+        assert!(path.exists(), "JSON state file should exist after save");
+
+        // Load into a new actor
+        let config2 = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            state_dir: Some(dir.path().to_path_buf()),
+            ..DhtConfig::default()
+        };
+        let socket2 = UdpSocket::bind(config2.bind_addr).await.unwrap();
+        let (_tx2, rx2) = mpsc::channel(256);
+        let (ip_tx2, _ip_rx2) = mpsc::channel(4);
+        let actor2 = DhtActor::new(config2, socket2, rx2, ip_tx2);
+
+        // Verify nodes were loaded
+        assert_eq!(actor2.routing_table.len(), 2);
+        assert!(actor2.routing_table.get(&node1_id).is_some());
+        assert!(actor2.routing_table.get(&node2_id).is_some());
+
+        // All nodes should be Questionable (mark_all_questionable was called)
+        use crate::routing_table::NodeStatus;
+        assert_eq!(
+            actor2.routing_table.get(&node1_id).unwrap().status(),
+            NodeStatus::Questionable
+        );
+        assert_eq!(
+            actor2.routing_table.get(&node2_id).unwrap().status(),
+            NodeStatus::Questionable
+        );
+
+        // --- Corrupt JSON test ---
+        std::fs::write(&path, b"{{not valid json at all!!}}")
+            .expect("failed to write corrupt data");
+
+        let config3 = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            state_dir: Some(dir.path().to_path_buf()),
+            ..DhtConfig::default()
+        };
+        let socket3 = UdpSocket::bind(config3.bind_addr).await.unwrap();
+        let (_tx3, rx3) = mpsc::channel(256);
+        let (ip_tx3, _ip_rx3) = mpsc::channel(4);
+        let actor3 = DhtActor::new(config3, socket3, rx3, ip_tx3);
+
+        // Corrupt JSON should result in an empty routing table (graceful fallback)
+        assert_eq!(actor3.routing_table.len(), 0);
+    }
+
+    /// T13: Verify atomic write — temp file is written first, then renamed.
+    /// A partial (interrupted) write should not corrupt the final state file.
+    #[tokio::test]
+    async fn json_persistence_atomic_write() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            state_dir: Some(dir.path().to_path_buf()),
+            ..DhtConfig::default()
+        };
+
+        let socket = UdpSocket::bind(config.bind_addr).await.unwrap();
+        let (_tx, rx) = mpsc::channel(256);
+        let (ip_tx, _ip_rx) = mpsc::channel(4);
+        let mut actor = DhtActor::new(config, socket, rx, ip_tx);
+
+        let node_id = Id20::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let addr: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        actor.routing_table.insert(node_id, addr);
+
+        // Write a known value to the final path first (simulate existing state)
+        let final_path = DhtActor::state_file_path(dir.path(), AddressFamily::V4);
+        std::fs::write(&final_path, b"old data").unwrap();
+
+        // Save — should atomically replace via rename
+        actor.save_routing_table();
+
+        // Final file should contain valid JSON with our node
+        let content = std::fs::read_to_string(&final_path).unwrap();
+        let state: DhtState = serde_json::from_str(&content)
+            .expect("final file should contain valid JSON");
+        assert_eq!(state.nodes.len(), 1);
+        assert_eq!(state.nodes[0].id, node_id.to_hex());
+
+        // Temp file should NOT exist (it was renamed away)
+        let tmp_path = dir.path().join(".dht_state_v4.tmp");
+        assert!(!tmp_path.exists(), "temp file should be cleaned up by rename");
+    }
+
+    /// T14: Verify persistence is silently skipped when `state_dir` is `None`.
+    #[tokio::test]
+    async fn json_persistence_no_state_dir() {
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            state_dir: None, // No state dir
+            ..DhtConfig::default()
+        };
+
+        let socket = UdpSocket::bind(config.bind_addr).await.unwrap();
+        let (_tx, rx) = mpsc::channel(256);
+        let (ip_tx, _ip_rx) = mpsc::channel(4);
+        let mut actor = DhtActor::new(config, socket, rx, ip_tx);
+
+        // Insert a node — save should be a no-op
+        let node_id = Id20::from_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        actor.routing_table.insert(node_id, "10.0.0.1:6881".parse().unwrap());
+
+        // This should not panic or do anything
+        actor.save_routing_table();
+
+        // load_routing_table in new() already ran silently (no state_dir)
+        assert_eq!(actor.routing_table.len(), 1); // only the node we just inserted
+    }
+
+    /// T17: When JSON loads successfully, IP:port entries in bootstrap_nodes
+    /// should be filtered out (hostnames remain).
+    #[tokio::test]
+    async fn json_persistence_priority_over_config() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        // First: create a state file with saved nodes.
+        let config_save = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: Vec::new(),
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            state_dir: Some(dir.path().to_path_buf()),
+            ..DhtConfig::default()
+        };
+
+        let socket = UdpSocket::bind(config_save.bind_addr).await.unwrap();
+        let (_tx, rx) = mpsc::channel(256);
+        let (ip_tx, _ip_rx) = mpsc::channel(4);
+        let mut actor = DhtActor::new(config_save, socket, rx, ip_tx);
+
+        let node_id = Id20::from_hex("cccccccccccccccccccccccccccccccccccccccc").unwrap();
+        actor.routing_table.insert(node_id, "10.0.0.1:6881".parse().unwrap());
+        actor.save_routing_table();
+        drop(actor);
+
+        // Now load with bootstrap_nodes containing both IP:port and hostnames.
+        let config_load = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: vec![
+                "192.168.1.100:6881".to_owned(), // IP:port — should be filtered out
+                "10.0.0.50:6881".to_owned(),      // IP:port — should be filtered out
+                "router.bittorrent.com:6881".to_owned(), // hostname — should remain
+                "dht.transmissionbt.com:6881".to_owned(), // hostname — should remain
+            ],
+            own_id: Some(Id20::from_hex("0000000000000000000000000000000000000001").unwrap()),
+            state_dir: Some(dir.path().to_path_buf()),
+            ..DhtConfig::default()
+        };
+
+        let socket2 = UdpSocket::bind(config_load.bind_addr).await.unwrap();
+        let (_tx2, rx2) = mpsc::channel(256);
+        let (ip_tx2, _ip_rx2) = mpsc::channel(4);
+        let actor2 = DhtActor::new(config_load, socket2, rx2, ip_tx2);
+
+        // Routing table should have the loaded node
+        assert_eq!(actor2.routing_table.len(), 1);
+
+        // bootstrap_nodes should only contain hostnames (IP:port entries filtered)
+        assert_eq!(actor2.config.bootstrap_nodes.len(), 2);
+        assert!(actor2.config.bootstrap_nodes.contains(&"router.bittorrent.com:6881".to_owned()));
+        assert!(actor2.config.bootstrap_nodes.contains(&"dht.transmissionbt.com:6881".to_owned()));
+        // IP:port entries should be gone
+        assert!(!actor2.config.bootstrap_nodes.contains(&"192.168.1.100:6881".to_owned()));
+        assert!(!actor2.config.bootstrap_nodes.contains(&"10.0.0.50:6881".to_owned()));
     }
 }

@@ -1073,6 +1073,7 @@ impl Settings {
             restrict_routing_ips: self.dht_restrict_routing_ips,
             dht_max_items: self.dht_max_items,
             dht_item_lifetime_secs: self.dht_item_lifetime_secs,
+            state_dir: self.resume_data_dir.clone(),
             ..default
         }
     }
@@ -1089,6 +1090,7 @@ impl Settings {
             restrict_routing_ips: self.dht_restrict_routing_ips,
             dht_max_items: self.dht_max_items,
             dht_item_lifetime_secs: self.dht_item_lifetime_secs,
+            state_dir: self.resume_data_dir.clone(),
             ..default
         }
     }
