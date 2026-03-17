@@ -14,6 +14,7 @@ use torrent_core::{AddressFamily, Id20};
 use crate::bep44::{self, ImmutableItem, MAX_SALT_SIZE, MAX_VALUE_SIZE, MutableItem};
 use crate::compact::CompactNodeInfo;
 use crate::error::{Error, Result};
+use crate::lookup::{FindNodeCallbacks, GetPeersCallbacks, IterativeLookup};
 use crate::krpc::{
     GetPeersResponse, KrpcBody, KrpcMessage, KrpcQuery, KrpcResponse, SampleInfohashesResponse,
     TransactionId,
@@ -440,7 +441,7 @@ struct DhtActor {
     next_txn_id: u16,
     stats: ActorStats,
     /// Active get_peers lookups.
-    lookups: HashMap<Id20, LookupState>,
+    lookups: HashMap<Id20, IterativeLookup<GetPeersCallbacks>>,
     /// Active BEP 44 get lookups.
     item_lookups: HashMap<Id20, ItemLookupState>,
     /// Active BEP 44 put operations (waiting for tokens before sending puts).
@@ -454,7 +455,7 @@ struct DhtActor {
     /// Token-bucket rate limiter for outgoing KRPC queries.
     rate_limiter: QueryRateLimiter,
     /// Active iterative bootstrap lookup (find_node self-lookup after initial bootstrap).
-    bootstrap_lookup: Option<FindNodeLookup>,
+    bootstrap_lookup: Option<IterativeLookup<FindNodeCallbacks>>,
     /// Whether initial bootstrap (FindNodeLookup) has completed (M97).
     bootstrap_complete: bool,
     /// Queued get_peers requests waiting for bootstrap to complete (M97).
@@ -497,25 +498,6 @@ enum PendingQueryKind {
     PutItem,
     /// BEP 51: outgoing sample_infohashes query.
     SampleInfohashes,
-}
-
-struct LookupState {
-    reply: mpsc::Sender<Vec<SocketAddr>>,
-    /// Nodes we've already queried.
-    queried: std::collections::HashSet<Id20>,
-    /// Nodes with tokens (for announce).
-    tokens: HashMap<Id20, (SocketAddr, Vec<u8>)>,
-    /// Best (closest) nodes we know about.
-    closest: Vec<CompactNodeInfo>,
-}
-
-/// State for an active iterative find_node bootstrap lookup.
-struct FindNodeLookup {
-    target: Id20,
-    closest: Vec<CompactNodeInfo>,
-    queried: std::collections::HashSet<Id20>,
-    round: u8,
-    max_rounds: u8,
 }
 
 /// State for an active BEP 44 get lookup.
@@ -833,13 +815,15 @@ impl DhtActor {
             "bootstrap: starting iterative lookup"
         );
 
-        self.bootstrap_lookup = Some(FindNodeLookup {
-            target: own_id,
-            closest: initial_closest,
-            queried: std::collections::HashSet::new(),
-            round: 0,
-            max_rounds: 6,
-        });
+        let mut lookup = IterativeLookup::new(
+            own_id,
+            FindNodeCallbacks {
+                round: 0,
+                max_rounds: 6,
+            },
+        );
+        lookup.closest = initial_closest;
+        self.bootstrap_lookup = Some(lookup);
     }
 
     async fn handle_packet(&mut self, data: &[u8], addr: SocketAddr) {
@@ -1299,59 +1283,30 @@ impl DhtActor {
                 }
 
                 // Advance iterative bootstrap lookup if active
+                if let Some(ref mut lookup) = self.bootstrap_lookup {
+                    // Merge nodes4 + nodes6 into a single feed (CompactNodeInfo)
+                    let mut all_nodes: Vec<CompactNodeInfo> = nodes.to_vec();
+                    all_nodes.extend(nodes6.iter().map(|n| CompactNodeInfo {
+                        id: n.id,
+                        addr: n.addr,
+                    }));
+                    lookup.feed_nodes(all_nodes, self.address_family);
+                }
+
                 if self.bootstrap_lookup.is_some() {
-                    let family = self.address_family;
-                    let family_match = |a: &SocketAddr| match family {
-                        AddressFamily::V4 => a.is_ipv4(),
-                        AddressFamily::V6 => a.is_ipv6(),
-                    };
-
-                    // Accumulate returned nodes into the lookup's closest list
-                    if let Some(ref mut lookup) = self.bootstrap_lookup {
-                        for node in nodes {
-                            if family_match(&node.addr)
-                                && !lookup.closest.iter().any(|n| n.id == node.id)
-                            {
-                                lookup.closest.push(*node);
-                            }
-                        }
-                        for node in nodes6 {
-                            if family_match(&node.addr)
-                                && !lookup.closest.iter().any(|n| n.id == node.id)
-                            {
-                                lookup.closest.push(CompactNodeInfo {
-                                    id: node.id,
-                                    addr: node.addr,
-                                });
-                            }
-                        }
-                        let target = lookup.target;
-                        lookup.closest.sort_by_key(|n| n.id.xor_distance(&target));
-                        lookup.closest.truncate(K * 2);
-                    }
-
                     // Extract data needed before calling send_find_node (drops borrow)
                     let (to_query, target, terminate) = if let Some(ref mut lookup) =
                         self.bootstrap_lookup
                     {
-                        if lookup.round >= lookup.max_rounds {
+                        if lookup.callbacks.round >= lookup.callbacks.max_rounds {
                             (Vec::new(), lookup.target, true)
                         } else {
-                            let to_query: Vec<CompactNodeInfo> = lookup
-                                .closest
-                                .iter()
-                                .filter(|n| !lookup.queried.contains(&n.id))
-                                .take(3)
-                                .copied()
-                                .collect();
+                            let to_query = lookup.next_to_query(3);
                             let target = lookup.target;
                             if to_query.is_empty() {
                                 (Vec::new(), target, true)
                             } else {
-                                for node in &to_query {
-                                    lookup.queried.insert(node.id);
-                                }
-                                lookup.round += 1;
+                                lookup.callbacks.round += 1;
                                 (to_query, target, false)
                             }
                         }
@@ -1392,73 +1347,39 @@ impl DhtActor {
                 if let Some(lookup) = self.lookups.get_mut(info_hash) {
                     // Store token for later announce
                     if let Some(token) = &gp.token {
-                        lookup.tokens.insert(sender_id, (addr, token.clone()));
+                        lookup.callbacks.tokens.insert(sender_id, (addr, token.clone()));
                     }
 
                     // Send discovered peers to caller
                     if !gp.peers.is_empty() {
-                        let _ = lookup.reply.try_send(gp.peers.clone());
+                        let _ = lookup.callbacks.reply.try_send(gp.peers.clone());
                     }
 
-                    // Collect nodes from both nodes and nodes6 that match our family
-                    let family = self.address_family;
-                    let family_match = |addr: &SocketAddr| match family {
-                        AddressFamily::V4 => addr.is_ipv4(),
-                        AddressFamily::V6 => addr.is_ipv6(),
-                    };
-                    let all_matching_nodes: Vec<CompactNodeInfo> = gp
-                        .nodes
-                        .iter()
-                        .filter(|n| family_match(&n.addr))
-                        .copied()
-                        .chain(gp.nodes6.iter().filter(|n| family_match(&n.addr)).map(|n| {
-                            CompactNodeInfo {
-                                id: n.id,
-                                addr: n.addr,
-                            }
-                        }))
-                        .collect();
+                    // Merge nodes4 + nodes6 into a single feed
+                    let mut all_nodes: Vec<CompactNodeInfo> = gp.nodes.clone();
+                    all_nodes.extend(gp.nodes6.iter().map(|n| CompactNodeInfo {
+                        id: n.id,
+                        addr: n.addr,
+                    }));
+                    lookup.feed_nodes(all_nodes, self.address_family);
 
-                    // Continue iterative lookup with new closer nodes
-                    let new_nodes: Vec<CompactNodeInfo> = all_matching_nodes
-                        .iter()
-                        .filter(|n| !lookup.queried.contains(&n.id))
-                        .copied()
-                        .collect();
-
-                    for node in &new_nodes {
-                        lookup.closest.push(*node);
-                    }
-
-                    // Sort by distance and keep closest
-                    lookup.closest.sort_by_key(|n| n.id.xor_distance(info_hash));
-                    lookup.closest.truncate(K * 2);
-
-                    // Query new closest unqueried nodes
-                    let to_query: Vec<CompactNodeInfo> = lookup
-                        .closest
-                        .iter()
-                        .filter(|n| !lookup.queried.contains(&n.id))
-                        .take(3) // Alpha = 3 concurrent queries
-                        .copied()
-                        .collect();
-
+                    // Query next closest unqueried nodes
+                    let to_query = lookup.next_to_query(3);
                     let info_hash = *info_hash;
-                    if to_query.is_empty() {
-                        // No new nodes to query — check if lookup is complete
+
+                    if !to_query.is_empty() {
+                        for node in to_query {
+                            self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
+                        }
+                    } else {
                         let has_pending = self.pending.values().any(|p| {
                             matches!(p.kind, PendingQueryKind::GetPeers { info_hash: ih } if ih == info_hash)
                         });
-                        if !has_pending {
+                        if let Some(lookup) = self.lookups.get(&info_hash)
+                            && lookup.is_exhausted(has_pending)
+                        {
                             debug!(%info_hash, "get_peers lookup exhausted all nodes");
                             self.lookups.remove(&info_hash);
-                        }
-                    } else {
-                        for node in to_query {
-                            if let Some(lookup) = self.lookups.get_mut(&info_hash) {
-                                lookup.queried.insert(node.id);
-                            }
-                            self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
                         }
                     }
                 }
@@ -1726,26 +1647,25 @@ impl DhtActor {
             "get_peers: starting lookup"
         );
 
-        let mut queried = std::collections::HashSet::new();
+        let mut lookup = IterativeLookup::new(
+            info_hash,
+            GetPeersCallbacks {
+                reply,
+                tokens: HashMap::new(),
+            },
+        );
+        lookup.closest = initial_nodes;
 
         // Query ALL initial closest nodes in parallel (alpha = K).
         // libtorrent uses alpha=8 for get_peers — querying all K closest
         // nodes immediately maximizes the chance of fast convergence.
-        let to_query: Vec<_> = initial_nodes.to_vec();
+        let to_query: Vec<_> = lookup.closest.to_vec();
         for node in &to_query {
-            queried.insert(node.id);
+            lookup.queried.insert(node.id);
             self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
         }
 
-        self.lookups.insert(
-            info_hash,
-            LookupState {
-                reply,
-                queried,
-                tokens: HashMap::new(),
-                closest: initial_nodes,
-            },
-        );
+        self.lookups.insert(info_hash, lookup);
     }
 
     /// M97: Called when bootstrap (FindNodeLookup) completes or times out.
@@ -1778,7 +1698,7 @@ impl DhtActor {
         let tokens: Vec<(SocketAddr, Vec<u8>)> = self
             .lookups
             .get(&info_hash)
-            .map(|lookup| lookup.tokens.values().cloned().collect())
+            .map(|lookup| lookup.callbacks.tokens.values().cloned().collect())
             .unwrap_or_default();
 
         if tokens.is_empty() {
@@ -1879,25 +1799,19 @@ impl DhtActor {
                 .any(|p| matches!(p.kind, PendingQueryKind::GetPeers { info_hash: ih } if ih == info_hash));
 
             if let Some(lookup) = self.lookups.get_mut(&info_hash) {
-                let to_query: Vec<CompactNodeInfo> = lookup
-                    .closest
-                    .iter()
-                    .filter(|n| !lookup.queried.contains(&n.id))
-                    .take(3)
-                    .copied()
-                    .collect();
+                let to_query = lookup.next_to_query(3);
 
                 if !to_query.is_empty() {
-                    for node in &to_query {
-                        lookup.queried.insert(node.id);
-                    }
                     for node in to_query {
                         self.send_get_peers(node.addr, info_hash, Some(node.id)).await;
                     }
-                } else if !has_pending {
-                    debug!(%info_hash, "get_peers lookup exhausted all nodes");
-                    self.lookups.remove(&info_hash);
                 }
+            }
+            if let Some(lookup) = self.lookups.get(&info_hash)
+                && lookup.is_exhausted(has_pending)
+            {
+                debug!(%info_hash, "get_peers lookup exhausted all nodes");
+                self.lookups.remove(&info_hash);
             }
         }
 
@@ -1906,20 +1820,11 @@ impl DhtActor {
             // Extract queries before calling send_find_node (borrow-checker)
             let (to_query, target, terminate) =
                 if let Some(ref mut lookup) = self.bootstrap_lookup {
-                    let to_query: Vec<CompactNodeInfo> = lookup
-                        .closest
-                        .iter()
-                        .filter(|n| !lookup.queried.contains(&n.id))
-                        .take(3)
-                        .copied()
-                        .collect();
+                    let to_query = lookup.next_to_query(3);
                     let target = lookup.target;
                     if to_query.is_empty() {
                         (Vec::new(), target, true)
                     } else {
-                        for node in &to_query {
-                            lookup.queried.insert(node.id);
-                        }
                         (to_query, target, false)
                     }
                 } else {
@@ -1943,7 +1848,8 @@ impl DhtActor {
         // Query timeouts are now handled by expire_queries_and_advance_lookups()
 
         // Clean up completed lookups (where the reply channel is closed)
-        self.lookups.retain(|_, lookup| !lookup.reply.is_closed());
+        self.lookups
+            .retain(|_, lookup| !lookup.callbacks.reply.is_closed());
 
         // Gap 12: Clean up item lookups — send best result before dropping stale lookups
         self.item_lookups.retain(|_, lookup| match lookup {
@@ -2537,13 +2443,15 @@ impl DhtActor {
                 seed_nodes = initial_closest.len(),
                 "BEP 42: re-bootstrapping with new node ID"
             );
-            self.bootstrap_lookup = Some(FindNodeLookup {
-                target: new_id,
-                closest: initial_closest,
-                queried: std::collections::HashSet::new(),
-                round: 0,
-                max_rounds: 6,
-            });
+            let mut lookup = IterativeLookup::new(
+                new_id,
+                FindNodeCallbacks {
+                    round: 0,
+                    max_rounds: 6,
+                },
+            );
+            lookup.closest = initial_closest;
+            self.bootstrap_lookup = Some(lookup);
             // M97: Re-gate get_peers until the new bootstrap completes
             self.bootstrap_complete = false;
             self.bootstrap_timeout = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));

@@ -11,6 +11,8 @@
 //! returned `DhtHandle` is a cheap, cloneable sender for submitting commands.
 
 mod actor;
+/// Generic iterative Kademlia lookup (shared by get_peers and find_node).
+pub(crate) mod lookup;
 /// BEP 44 immutable and mutable item storage.
 pub mod bep44;
 /// Compact node encoding (26-byte IPv4, 38-byte IPv6).
