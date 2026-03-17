@@ -695,12 +695,19 @@ impl DhtActor {
                     // Node-count gate: if saved-node pings have populated the
                     // table but FindNodeLookup hasn't converged yet, open the
                     // gate early so queued get_peers aren't blocked.
-                    if !self.bootstrap_complete && self.routing_table.len() >= 8 {
+                    if !self.bootstrap_complete {
                         debug!(
                             table_size = self.routing_table.len(),
-                            "node-count gate: opening bootstrap gate early"
+                            threshold = 8,
+                            "node-count gate: checking bootstrap readiness"
                         );
-                        self.on_bootstrap_complete().await;
+                        if self.routing_table.len() >= 8 {
+                            debug!(
+                                table_size = self.routing_table.len(),
+                                "node-count gate: opening bootstrap gate early"
+                            );
+                            self.on_bootstrap_complete().await;
+                        }
                     }
                 }
 
@@ -711,7 +718,10 @@ impl DhtActor {
                         None => std::future::pending().await,
                     }
                 }, if self.bootstrap_timeout.is_some() && !self.bootstrap_complete => {
-                    warn!("bootstrap timeout (10s), proceeding with current routing table");
+                    warn!(
+                        table_size = self.routing_table.len(),
+                        "bootstrap timeout (10s), proceeding with current routing table"
+                    );
                     self.on_bootstrap_complete().await;
                 }
             }
@@ -729,6 +739,13 @@ impl DhtActor {
                 s.parse::<SocketAddr>().is_ok()
             });
 
+        debug!(
+            saved_nodes = saved_addrs.len(),
+            dns_nodes = hostname_strs.len(),
+            family = ?self.address_family,
+            "bootstrap: starting (pinging saved nodes, resolving DNS nodes)"
+        );
+
         // Phase 1: Ping saved nodes (validates liveness, inserts into routing
         // table via the normal ping response handler — no PingVerify needed)
         for addr_str in &saved_addrs {
@@ -740,6 +757,8 @@ impl DhtActor {
         // Phase 2: FindNode to DNS bootstrap nodes ONLY (fresh neighbour discovery).
         // Saved nodes are NOT sent find_node — this prevents stale neighbourhood
         // data from flooding the routing table before DNS responses arrive.
+        let mut dns_resolved = 0usize;
+        let mut dns_failed = 0usize;
         for addr_str in &hostname_strs {
             match tokio::net::lookup_host(addr_str.as_str()).await {
                 Ok(addrs) => {
@@ -749,16 +768,24 @@ impl DhtActor {
                             AddressFamily::V6 => a.is_ipv6(),
                         })
                         .collect();
+                    dns_resolved += matching.len();
                     for addr in matching {
                         debug!(node = %addr_str, resolved = %addr, family = ?self.address_family, "bootstrapping");
                         self.send_find_node(addr, own_id, None).await;
                     }
                 }
                 Err(e) => {
+                    dns_failed += 1;
                     warn!(node = %addr_str, error = %e, "bootstrap DNS failed");
                 }
             }
         }
+
+        debug!(
+            dns_resolved,
+            dns_failed,
+            "bootstrap: DNS resolution complete"
+        );
 
         // Phase 3: Initiate iterative bootstrap — follow returned nodes to discover more
         let initial_closest: Vec<CompactNodeInfo> = self
@@ -767,6 +794,13 @@ impl DhtActor {
             .into_iter()
             .map(|n| CompactNodeInfo { id: n.id, addr: n.addr })
             .collect();
+
+        debug!(
+            initial_nodes = initial_closest.len(),
+            table_size = self.routing_table.len(),
+            "bootstrap: starting iterative lookup"
+        );
+
         self.bootstrap_lookup = Some(FindNodeLookup {
             target: own_id,
             closest: initial_closest,
@@ -1399,6 +1433,13 @@ impl DhtActor {
             }
             (PendingQueryKind::Ping, KrpcResponse::NodeId { .. }) => {
                 // Ping response — node is alive, already updated routing table
+                if !self.bootstrap_complete {
+                    debug!(
+                        from = %pending.addr,
+                        table_size = self.routing_table.len(),
+                        "bootstrap: ping response received"
+                    );
+                }
             }
             (PendingQueryKind::AnnouncePeer, KrpcResponse::NodeId { .. }) => {
                 // Announce response — success
@@ -1618,6 +1659,11 @@ impl DhtActor {
     }
 
     async fn start_get_peers_inner(&mut self, info_hash: Id20, reply: mpsc::Sender<Vec<SocketAddr>>) {
+        debug!(
+            %info_hash,
+            table_size = self.routing_table.len(),
+            "starting get_peers query"
+        );
         let closest = self.routing_table.closest(&info_hash, K);
         let initial_nodes: Vec<CompactNodeInfo> = closest
             .iter()
@@ -3051,5 +3097,38 @@ mod tests {
             "expected ~50 permits after 0.5s refill at rate 100, got {}",
             limiter.permits
         );
+    }
+
+    /// Exercises the bootstrap path with saved-node addresses (no DNS).
+    /// Verifies the bootstrap code path (including new diagnostic logging)
+    /// runs without panicking.
+    #[tokio::test]
+    async fn dht_bootstrap_logging() {
+        // Use a fake saved-node address (loopback) that won't resolve to a
+        // real DHT node — the important thing is that the bootstrap code path
+        // executes all three phases without panicking.
+        let config = DhtConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_nodes: vec![
+                "127.0.0.1:16881".to_owned(),
+                "127.0.0.1:16882".to_owned(),
+            ],
+            ..DhtConfig::default()
+        };
+        let (handle, _ip_rx) = DhtHandle::start(config).await.unwrap();
+
+        // Allow time for bootstrap() to run (pings sent, iterative lookup started).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stats = handle.stats().await.unwrap();
+        // The pings will have been sent (queries_sent >= 2) but won't get
+        // responses from the fake addresses.
+        assert!(
+            stats.total_queries_sent >= 2,
+            "expected at least 2 ping queries, got {}",
+            stats.total_queries_sent
+        );
+
+        handle.shutdown().await.unwrap();
     }
 }

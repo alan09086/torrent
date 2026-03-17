@@ -58,18 +58,6 @@ enum HashResult {
     NotApplicable,
 }
 
-/// Three-phase connection interval for peer discovery.
-///
-/// - **RampUp** (0–15s): 100ms interval for aggressive initial peer discovery.
-/// - **Normal** (15–60s): 500ms interval once initial peers are connected.
-/// - **Steady** (60s+): 5s interval for long-running maintenance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectPhase {
-    RampUp,
-    Normal,
-    Steady,
-}
-
 /// Relocate torrent files from `src_base` to `dst_base`.
 ///
 /// For each file, tries `rename` first (fast, same-filesystem), then falls
@@ -378,10 +366,11 @@ impl TorrentHandle {
             peer_slab: crate::piece_reservation::PeerSlab::new(),
             availability: Vec::new(),
             priority_pieces: BTreeSet::new(),
-            max_in_flight: 256,
+            max_in_flight: 512,
             reservation_notify: None,
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
+            connect_backoff: HashMap::new(),
             choker,
             max_connections: 0,
             metadata_downloader: None,
@@ -674,10 +663,11 @@ impl TorrentHandle {
             peer_slab: crate::piece_reservation::PeerSlab::new(),
             availability: Vec::new(),
             priority_pieces: BTreeSet::new(),
-            max_in_flight: 256,
+            max_in_flight: 512,
             reservation_notify: None,
             available_peers: Vec::new(),
             available_peers_set: std::collections::HashSet::new(),
+            connect_backoff: HashMap::new(),
             choker,
             max_connections: 0,
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
@@ -1415,6 +1405,9 @@ struct TorrentActor {
     available_peers: Vec<(SocketAddr, PeerSource)>,
     /// O(1) dedup set for available_peers — kept in sync with the Vec.
     available_peers_set: std::collections::HashSet<SocketAddr>,
+    /// M104: Per-peer exponential backoff for failed connections.
+    /// Maps peer address → (earliest_retry_time, attempt_count).
+    connect_backoff: HashMap<SocketAddr, (std::time::Instant, u32)>,
     choker: Choker,
     /// Per-torrent connection limit override (0 = use config.max_peers).
     max_connections: usize,
@@ -1443,6 +1436,7 @@ struct TorrentActor {
     seeding_duration: i64,
     active_since: Option<std::time::Instant>,
     state_duration_since: Option<std::time::Instant>,
+    #[allow(dead_code)] // M104: ConnectPhase removed; kept for future diagnostics
     started_at: std::time::Instant,
     moving_storage: bool,
     has_incoming: bool,
@@ -1705,8 +1699,7 @@ impl TorrentActor {
             // M103: Initialize block stealing infrastructure
             if self.config.use_block_stealing {
                 if let Some(ref lengths) = self.lengths {
-                    self.block_maps =
-                        Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
+                    self.block_maps = Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
                 }
                 self.steal_candidates = Some(Arc::new(StealCandidates::new()));
             }
@@ -1732,8 +1725,7 @@ impl TorrentActor {
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
-        let mut connect_interval = tokio::time::interval(Duration::from_millis(100));
-        let mut connect_phase = ConnectPhase::RampUp;
+        let mut connect_interval = tokio::time::interval(Duration::from_millis(500));
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(
@@ -2129,21 +2121,8 @@ impl TorrentActor {
                 _ = optimistic_interval.tick() => {
                     self.rotate_optimistic();
                 }
-                // Connect timer
+                // Connect timer — fixed 500ms interval (M104: replaced three-phase ramp)
                 _ = connect_interval.tick() => {
-                    match connect_phase {
-                        ConnectPhase::RampUp if self.started_at.elapsed() >= Duration::from_secs(15) => {
-                            connect_phase = ConnectPhase::Normal;
-                            connect_interval = tokio::time::interval(Duration::from_millis(500));
-                            connect_interval.reset();
-                        }
-                        ConnectPhase::Normal if self.started_at.elapsed() >= Duration::from_secs(60) => {
-                            connect_phase = ConnectPhase::Steady;
-                            connect_interval = tokio::time::interval(Duration::from_secs(5));
-                            connect_interval.reset();
-                        }
-                        _ => {}
-                    }
                     self.try_connect_peers();
                     self.assign_pieces_to_web_seeds();
                     // Re-trigger DHT search if no active search and we still need peers.
@@ -2345,14 +2324,14 @@ impl TorrentActor {
                                 .unwrap_or(false);
                             if idle {
                                 peer.snubbed = true;
-                                peer.pipeline.set_queue_depth_override(1);
                                 snubbed_peers.push(*addr);
-                                debug!(%addr, "peer snubbed — no data for {}s", self.config.snub_timeout_secs);
+                                debug!(%addr, "peer snubbed — disconnecting (no data for {}s)", self.config.snub_timeout_secs);
                             }
                         }
                     }
 
-                    // M93: Release pieces from snubbed peers
+                    // M104: Release pieces from snubbed peers, then disconnect them.
+                    // Follows the same cleanup pattern as run_peer_turnover().
                     if !snubbed_peers.is_empty() {
                         for snubbed_addr in &snubbed_peers {
                             if let Some(slab_idx) = self.peer_slab.slot_of(snubbed_addr) {
@@ -2366,6 +2345,38 @@ impl TorrentActor {
                                 }
                             }
                         }
+                        // Disconnect snubbed peers (free the slot for healthy peers)
+                        for &snubbed_addr in &snubbed_peers {
+                            if let Some(ref mut ss) = self.super_seed {
+                                ss.peer_disconnected(snubbed_addr);
+                            }
+                            if let Some(peer) = self.peers.remove(&snubbed_addr) {
+                                if self.end_game.is_active() {
+                                    self.end_game.peer_disconnected(snubbed_addr);
+                                }
+                                // Slab already handled in piece release above;
+                                // remove_by_addr is idempotent.
+                                self.peer_slab.remove_by_addr(&snubbed_addr);
+                                for piece in 0..self.num_pieces {
+                                    if peer.bitfield.get(piece) {
+                                        self.availability[piece as usize] =
+                                            self.availability[piece as usize].saturating_sub(1);
+                                    }
+                                }
+                                let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
+                                post_alert(
+                                    &self.alert_tx,
+                                    &self.alert_mask,
+                                    AlertKind::PeerDisconnected {
+                                        info_hash: self.info_hash,
+                                        addr: snubbed_addr,
+                                        reason: Some("snubbed".into()),
+                                    },
+                                );
+                            }
+                            self.suggested_to_peers.remove(&snubbed_addr);
+                        }
+                        self.recalc_max_in_flight();
                         self.mark_snapshot_dirty();
                         if let Some(ref notify) = self.reservation_notify {
                             notify.notify_waiters();
@@ -2422,7 +2433,6 @@ impl TorrentActor {
                             trace!(%addr,
                                    choking = p.peer_choking,
                                    pending = p.pending_requests.len(),
-                                   depth = p.pipeline.queue_depth(),
                                    ewma_rate = p.pipeline.ewma_rate() as u64,
                                    last_data_secs = last_data,
                                    bf_ones = p.bitfield.count_ones(),
@@ -3689,6 +3699,16 @@ impl TorrentActor {
                         notify.notify_waiters();
                     }
                 }
+                // M104: Per-peer exponential backoff — prevent hammering failed peers
+                let attempt = self.connect_backoff.get(&peer_addr).map_or(0, |&(_, a)| a);
+                let next_attempt = attempt.saturating_add(1);
+                let delay_ms = 200u64
+                    .saturating_mul(1u64 << next_attempt.min(10))
+                    .min(30_000);
+                let earliest_retry = std::time::Instant::now() + Duration::from_millis(delay_ms);
+                self.connect_backoff
+                    .insert(peer_addr, (earliest_retry, next_attempt));
+
                 self.suggested_to_peers.remove(&peer_addr);
                 self.i2p_destinations.remove(&peer_addr);
             }
@@ -3873,9 +3893,10 @@ impl TorrentActor {
             // Clear snub if snubbed
             if peer.snubbed {
                 peer.snubbed = false;
-                peer.pipeline.reset_to_slow_start();
             }
         }
+        // M104: Clear backoff — peer sent real data, so connection is healthy
+        self.connect_backoff.remove(&peer_addr);
 
         // End-game: cancel this block on all other peers. The 200ms end-game
         // refill tick will re-stock freed peers — no reactive cascade needed.
@@ -4045,9 +4066,10 @@ impl TorrentActor {
             // Clear snub if snubbed
             if peer.snubbed {
                 peer.snubbed = false;
-                peer.pipeline.reset_to_slow_start();
             }
         }
+        // M104: Clear backoff — peer sent real data, so connection is healthy
+        self.connect_backoff.remove(&peer_addr);
 
         // End-game: cancel this block on all other peers. The 200ms end-game
         // refill tick will re-stock freed peers — no reactive cascade needed.
@@ -4323,8 +4345,7 @@ impl TorrentActor {
             // M103: Rebuild block stealing state after recheck
             if self.config.use_block_stealing {
                 if let Some(ref lengths) = self.lengths {
-                    self.block_maps =
-                        Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
+                    self.block_maps = Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
                 }
                 self.steal_candidates = Some(Arc::new(StealCandidates::new()));
             }
@@ -5419,12 +5440,10 @@ impl TorrentActor {
                             // M103: Initialize block stealing infrastructure
                             if self.config.use_block_stealing {
                                 if let Some(ref lengths) = self.lengths {
-                                    self.block_maps = Some(Arc::new(
-                                        BlockMaps::new(self.num_pieces, lengths),
-                                    ));
+                                    self.block_maps =
+                                        Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
                                 }
-                                self.steal_candidates =
-                                    Some(Arc::new(StealCandidates::new()));
+                                self.steal_candidates = Some(Arc::new(StealCandidates::new()));
                             }
 
                             let snapshot = Arc::new(AvailabilitySnapshot::build(
@@ -5800,8 +5819,8 @@ impl TorrentActor {
     /// M93: Recalculate max_in_flight based on connected peer count.
     fn recalc_max_in_flight(&mut self) {
         let connected = self.peers.len();
-        let calculated = 256usize.max(connected * 3);
-        self.max_in_flight = calculated.min(self.num_pieces as usize / 2).max(256);
+        let calculated = 512usize.max(connected.saturating_mul(4));
+        self.max_in_flight = calculated.min(self.num_pieces as usize / 2).max(512);
     }
 
     fn check_end_game_activation(&mut self) {
@@ -6431,6 +6450,13 @@ impl TorrentActor {
                 continue;
             }
 
+            // M104: Skip peers with active backoff
+            if let Some(&(next_attempt, _)) = self.connect_backoff.get(&addr)
+                && std::time::Instant::now() < next_attempt
+            {
+                continue;
+            }
+
             // Skip banned peers
             if self.ban_manager.read().unwrap().is_banned(&addr.ip()) {
                 continue;
@@ -6457,18 +6483,8 @@ impl TorrentActor {
                     .unwrap_or_else(|| Bitfield::new(self.num_pieces))
             };
 
-            self.peers.insert(
-                addr,
-                PeerState::new(
-                    addr,
-                    self.num_pieces,
-                    cmd_tx,
-                    source,
-                    self.config.max_request_queue_depth,
-                    self.config.request_queue_time,
-                    self.config.initial_queue_depth,
-                ),
-            );
+            self.peers
+                .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, source));
             post_alert(
                 &self.alert_tx,
                 &self.alert_mask,
@@ -7099,15 +7115,7 @@ impl TorrentActor {
 
         self.peers.insert(
             addr,
-            PeerState::new(
-                addr,
-                self.num_pieces,
-                cmd_tx,
-                PeerSource::Incoming,
-                self.config.max_request_queue_depth,
-                self.config.request_queue_time,
-                self.config.initial_queue_depth,
-            ),
+            PeerState::new(addr, self.num_pieces, cmd_tx, PeerSource::Incoming),
         );
         // Identify transport for incoming peers (M45)
         let transport = if mode_override.is_some() {
@@ -7308,15 +7316,7 @@ impl TorrentActor {
 
         self.peers.insert(
             target,
-            PeerState::new(
-                target,
-                self.num_pieces,
-                cmd_tx,
-                PeerSource::Pex,
-                self.config.max_request_queue_depth,
-                self.config.request_queue_time,
-                self.config.initial_queue_depth,
-            ),
+            PeerState::new(target, self.num_pieces, cmd_tx, PeerSource::Pex),
         );
         post_alert(
             &self.alert_tx,
@@ -7757,6 +7757,7 @@ mod tests {
             max_outstanding_requests: 500,
             max_in_flight_pieces: 20,
             use_block_stealing: true,
+            fixed_pipeline_depth: 128,
         }
     }
 
@@ -12909,5 +12910,107 @@ mod tests {
                 "count={count}: expected {expected}ms, got {delay_ms}ms"
             );
         }
+    }
+
+    // ---- M104: Per-peer backoff and max_in_flight formula tests ----
+
+    #[test]
+    fn peer_backoff_exponential() {
+        // Verify the M104 backoff formula: 200ms * 2^attempt, capped at 30s.
+        // attempt starts at 1 (first failure increments 0 → 1).
+        let expected_ms: Vec<u64> = vec![400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000];
+        for (i, &expected) in expected_ms.iter().enumerate() {
+            let attempt = (i as u32) + 1; // attempt counts start at 1
+            let delay_ms = 200u64.saturating_mul(1u64 << attempt.min(10)).min(30_000);
+            assert_eq!(
+                delay_ms, expected,
+                "attempt={attempt}: expected {expected}ms, got {delay_ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_backoff_clears_on_data() {
+        // Verify that backoff map operations work correctly:
+        // insert on disconnect, remove on data received.
+        let mut backoff: HashMap<SocketAddr, (std::time::Instant, u32)> = HashMap::new();
+        let addr: SocketAddr = "1.2.3.4:6881".parse().unwrap();
+
+        // No backoff initially
+        assert!(backoff.get(&addr).is_none());
+
+        // First disconnect: attempt 1
+        let attempt = backoff.get(&addr).map_or(0, |&(_, a)| a);
+        let next = attempt.saturating_add(1);
+        let delay_ms = 200u64.saturating_mul(1u64 << next.min(10)).min(30_000);
+        let earliest = std::time::Instant::now() + Duration::from_millis(delay_ms);
+        backoff.insert(addr, (earliest, next));
+        assert_eq!(backoff.get(&addr).unwrap().1, 1);
+
+        // Second disconnect: attempt 2
+        let attempt = backoff.get(&addr).map_or(0, |&(_, a)| a);
+        let next = attempt.saturating_add(1);
+        let delay_ms = 200u64.saturating_mul(1u64 << next.min(10)).min(30_000);
+        let earliest = std::time::Instant::now() + Duration::from_millis(delay_ms);
+        backoff.insert(addr, (earliest, next));
+        assert_eq!(backoff.get(&addr).unwrap().1, 2);
+
+        // Data received: clear
+        backoff.remove(&addr);
+        assert!(backoff.get(&addr).is_none());
+    }
+
+    #[test]
+    fn backoff_prevents_hammering() {
+        // Verify that a peer with a future backoff time would be skipped.
+        let mut backoff: HashMap<SocketAddr, (std::time::Instant, u32)> = HashMap::new();
+        let addr: SocketAddr = "1.2.3.4:6881".parse().unwrap();
+
+        // Set backoff 10 seconds in the future
+        let future = std::time::Instant::now() + Duration::from_secs(10);
+        backoff.insert(addr, (future, 3));
+
+        // Should be skipped (now < next_attempt)
+        if let Some(&(next_attempt, _)) = backoff.get(&addr) {
+            assert!(std::time::Instant::now() < next_attempt);
+        }
+
+        // Set backoff in the past — should NOT be skipped
+        let past = std::time::Instant::now() - Duration::from_secs(1);
+        backoff.insert(addr, (past, 3));
+        if let Some(&(next_attempt, _)) = backoff.get(&addr) {
+            assert!(std::time::Instant::now() >= next_attempt);
+        }
+    }
+
+    #[test]
+    fn max_in_flight_formula_updated() {
+        // M104: max(512, connected*4) clamped to pieces/2, floored at 512.
+        let formula = |connected: usize, num_pieces: u32| -> usize {
+            let calculated = 512usize.max(connected.saturating_mul(4));
+            calculated.min(num_pieces as usize / 2).max(512)
+        };
+
+        // Few peers: floor dominates
+        assert_eq!(formula(10, 2000), 512);
+
+        // Many peers: connected * 4 takes over
+        assert_eq!(formula(200, 2000), 800);
+
+        // Very many peers: clamped by pieces/2
+        assert_eq!(formula(500, 2000), 1000); // 2000 clamped to 1000
+
+        // Tiny torrent: floor dominates even with many peers
+        assert_eq!(formula(200, 100), 512); // 800 clamped to 50, floored to 512
+
+        // Exact boundary
+        assert_eq!(formula(128, 10000), 512); // 128*4=512, max(512,512)=512
+        assert_eq!(formula(129, 10000), 516); // 129*4=516, max(512,516)=516
+
+        // Zero peers
+        assert_eq!(formula(0, 10000), 512);
+
+        // Zero pieces (edge case — would give pieces/2=0, floor=512)
+        assert_eq!(formula(100, 0), 512);
     }
 }

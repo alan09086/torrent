@@ -141,6 +141,8 @@ pub struct TorrentConfig {
     pub max_in_flight_pieces: usize,
     /// M103: Enable block-level stealing for partially-downloaded pieces.
     pub use_block_stealing: bool,
+    /// M104: Fixed per-peer pipeline depth (concurrent requests per peer).
+    pub fixed_pipeline_depth: usize,
 }
 
 impl Default for TorrentConfig {
@@ -210,8 +212,9 @@ impl Default for TorrentConfig {
             max_message_size: 16 * 1024 * 1024,
             max_piece_length: 32 * 1024 * 1024,
             max_outstanding_requests: 500,
-            max_in_flight_pieces: 256,
+            max_in_flight_pieces: 512,
             use_block_stealing: true,
+            fixed_pipeline_depth: 128,
         }
     }
 }
@@ -280,6 +283,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_outstanding_requests: s.max_outstanding_requests,
             max_in_flight_pieces: s.max_in_flight_pieces,
             use_block_stealing: s.use_block_stealing,
+            fixed_pipeline_depth: s.fixed_pipeline_depth,
         }
     }
 }
