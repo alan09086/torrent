@@ -134,6 +134,14 @@ pub(crate) struct PeerState {
     pub appears_nated: bool,
     /// Transport protocol used for this peer connection.
     pub transport: Option<crate::rate_limiter::PeerTransport>,
+    /// Composite peer quality score (0.0–1.0).
+    pub score: f64,
+    /// Number of successfully received blocks.
+    pub blocks_completed: u64,
+    /// Number of blocks that timed out.
+    pub blocks_timed_out: u64,
+    /// Exponentially weighted moving average of RTT in seconds.
+    pub avg_rtt: Option<f64>,
 }
 
 #[allow(dead_code)]
@@ -172,6 +180,10 @@ impl PeerState {
             supports_holepunch: false,
             appears_nated: false,
             transport: None,
+            score: 0.0,
+            blocks_completed: 0,
+            blocks_timed_out: 0,
+            avg_rtt: None,
         }
     }
 }
