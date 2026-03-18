@@ -22,7 +22,6 @@ pub(crate) enum SwarmPhase {
 
 /// Aggregated swarm-level statistics used for score normalisation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used in later tasks (Task 4/5: tick scoring, scored turnover).
 pub(crate) struct SwarmContext {
     /// Maximum EWMA download rate across all peers (bytes/sec).
     pub max_rate: f64,
@@ -36,7 +35,6 @@ pub(crate) struct SwarmContext {
 ///
 /// Constructed with tuneable durations and thresholds. Tracks download start
 /// time and last churn timestamp for phase-aware churn scheduling.
-#[allow(dead_code)]
 pub(crate) struct PeerScorer {
     /// How long a newly-connected peer is protected from eviction.
     probation_duration: Duration,
@@ -68,15 +66,10 @@ const WEIGHT_AVAILABILITY: f64 = 0.15;
 const DEFAULT_RTT_NORM: f64 = 0.5;
 
 /// EWMA smoothing factor for RTT updates (same convention as pipeline.rs).
-#[allow(dead_code)] // Used in Task 3 (RTT capture at block receipt).
 pub(crate) const RTT_EWMA_ALPHA: f64 = 0.3;
 
-#[allow(dead_code)]
 impl PeerScorer {
     /// Create a new scorer with explicit timing parameters.
-    ///
-    /// Task 2 will add these fields to `TorrentConfig`; Task 4 will wire up
-    /// construction from config. Until then, callers pass values directly.
     pub fn new(
         probation_duration: Duration,
         discovery_phase_duration: Duration,
@@ -132,11 +125,7 @@ impl PeerScorer {
             SwarmPhase::Discovery => self.discovery_churn_percent,
             SwarmPhase::Steady => self.steady_churn_percent,
         };
-        if median_score > 0.7 {
-            base * 0.5
-        } else {
-            base
-        }
+        if median_score > 0.7 { base * 0.5 } else { base }
     }
 
     /// Check whether it is time to perform a churn cycle.
@@ -267,15 +256,20 @@ impl PeerScorer {
         let len = scores.len();
         let mid = len / 2;
         // select_nth_unstable_by for O(n) median without full sort.
-        scores.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        scores.select_nth_unstable_by(mid, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
         let median_score = if len % 2 == 1 {
             scores[mid]
         } else {
             // For even counts, average the two middle values.
-            let lower = *scores.get(..mid).and_then(|s| {
-                s.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            }).unwrap_or(&scores[mid]);
+            let lower = *scores
+                .get(..mid)
+                .and_then(|s| {
+                    s.iter()
+                        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                })
+                .unwrap_or(&scores[mid]);
             (lower + scores[mid]) * 0.5
         };
 
@@ -292,7 +286,6 @@ impl PeerScorer {
 /// `current` is the existing average (or 0.0 for the first sample),
 /// `sample` is the new observation, and `alpha` controls responsiveness.
 /// Returns the updated average.
-#[allow(dead_code)]
 pub(crate) fn ewma_update(current: f64, sample: f64, alpha: f64) -> f64 {
     alpha * sample + (1.0 - alpha) * current
 }
@@ -305,13 +298,13 @@ mod tests {
     /// Helper: create a PeerScorer with typical test defaults.
     fn test_scorer() -> PeerScorer {
         PeerScorer::new(
-            Duration::from_secs(30),  // probation
-            Duration::from_secs(60),  // discovery phase
-            Duration::from_secs(10),  // discovery churn interval
-            0.20,                     // discovery churn percent
-            Duration::from_secs(30),  // steady churn interval
-            0.10,                     // steady churn percent
-            0.2,                      // min score threshold
+            Duration::from_secs(30), // probation
+            Duration::from_secs(60), // discovery phase
+            Duration::from_secs(10), // discovery churn interval
+            0.20,                    // discovery churn percent
+            Duration::from_secs(30), // steady churn interval
+            0.10,                    // steady churn percent
+            0.2,                     // min score threshold
         )
     }
 
@@ -329,13 +322,13 @@ mod tests {
         let ctx = test_ctx();
         // Peer downloading at half max rate, 40ms RTT, perfect reliability, has half the pieces
         let score = PeerScorer::compute_score(
-            500_000.0,    // ewma_rate
-            Some(0.040),  // avg_rtt = 40ms
-            100,          // blocks_completed
-            0,            // blocks_timed_out
-            500,          // piece_count
-            1000,         // total_pieces
-            false,        // not snubbed
+            500_000.0,   // ewma_rate
+            Some(0.040), // avg_rtt = 40ms
+            100,         // blocks_completed
+            0,           // blocks_timed_out
+            500,         // piece_count
+            1000,        // total_pieces
+            false,       // not snubbed
             &ctx,
         );
 
@@ -364,13 +357,13 @@ mod tests {
     fn snubbed_peer_scores_zero() {
         let ctx = test_ctx();
         let score = PeerScorer::compute_score(
-            1_000_000.0,  // max rate — would be 1.0 bandwidth
-            Some(0.020),  // best RTT — would be 1.0 rtt
-            1000,         // perfect reliability
+            1_000_000.0, // max rate — would be 1.0 bandwidth
+            Some(0.020), // best RTT — would be 1.0 rtt
+            1000,        // perfect reliability
             0,
-            1000,         // full availability
+            1000, // full availability
             1000,
-            true,         // SNUBBED
+            true, // SNUBBED
             &ctx,
         );
         assert_eq!(score, 0.0, "snubbed peer must score exactly 0.0");
@@ -471,7 +464,10 @@ mod tests {
         let score = PeerScorer::compute_score(100.0, Some(0.050), 10, 0, 50, 100, false, &ctx);
         // bw=1.0, rtt=1.0, rel=1.0, avail=0.5
         // 0.4*1.0 + 0.2*1.0 + 0.25*1.0 + 0.15*0.5 = 0.925
-        assert!((score - 0.925).abs() < 1e-10, "single best peer score: {score}");
+        assert!(
+            (score - 0.925).abs() < 1e-10,
+            "single best peer score: {score}"
+        );
 
         // Zero rates: max_rate = 0 → bandwidth_norm = 0.0
         let zero_ctx = SwarmContext {
@@ -485,8 +481,7 @@ mod tests {
         assert!((score - 0.35).abs() < 1e-10, "zero-rate peer: {score}");
 
         // No RTT data: uses default 0.5, bandwidth capped at 1.0
-        let score_no_rtt =
-            PeerScorer::compute_score(500.0, None, 10, 0, 50, 100, false, &ctx);
+        let score_no_rtt = PeerScorer::compute_score(500.0, None, 10, 0, 50, 100, false, &ctx);
         // bw = (500/100).min(1.0) = 1.0
         // rtt = 0.5 (default), rel = 1.0, avail = 0.5
         // raw = 0.4*1.0 + 0.2*0.5 + 0.25*1.0 + 0.15*0.5 = 0.4+0.1+0.25+0.075 = 0.825
@@ -508,9 +503,9 @@ mod tests {
         let peers = vec![
             (100_000.0, Some(0.030), 0.6),
             (200_000.0, Some(0.020), 0.8),
-            (50_000.0,  Some(0.050), 0.3),
-            (150_000.0, None,        0.5),
-            (80_000.0,  Some(0.040), 0.7),
+            (50_000.0, Some(0.050), 0.3),
+            (150_000.0, None, 0.5),
+            (80_000.0, Some(0.040), 0.7),
         ];
 
         let ctx = PeerScorer::build_swarm_context(peers.into_iter());
