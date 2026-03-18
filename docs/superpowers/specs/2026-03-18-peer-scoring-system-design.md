@@ -129,9 +129,9 @@ pub min_score_threshold: f64,           // default 0.15
 ### Deprecated Settings (removed)
 
 The following existing settings are replaced by the scoring system and should be removed:
-- `peer_turnover` → replaced by `discovery_churn_percent` / `steady_churn_percent`
-- `peer_turnover_cutoff` → replaced by median-score adaptive dampening
-- `peer_turnover_interval` → replaced by `discovery_churn_interval_secs` / `steady_churn_interval_secs`
+- `peer_turnover` (was 0.08) → replaced by `discovery_churn_percent` / `steady_churn_percent`
+- `peer_turnover_cutoff` (was 0.9) → replaced by median-score adaptive dampening
+- `peer_turnover_interval` (was 120s) → replaced by `discovery_churn_interval_secs` / `steady_churn_interval_secs`
 
 ### Tick Loop Integration
 
@@ -158,8 +158,8 @@ New `run_scored_turnover()`:
 6. Existing cleanup — release owned pieces, update availability, free slab slots
 
 **Replaces these old turnover settings** (they become dead code and should be removed):
-- `peer_turnover` (was 0.04) → replaced by `discovery_churn_percent` / `steady_churn_percent`
-- `peer_turnover_interval` (was 300s) → replaced by `discovery_churn_interval_secs` / `steady_churn_interval_secs`
+- `peer_turnover` (was 0.08) → replaced by `discovery_churn_percent` / `steady_churn_percent`
+- `peer_turnover_interval` (was 120s) → replaced by `discovery_churn_interval_secs` / `steady_churn_interval_secs`
 - `peer_turnover_cutoff` (was 0.9) → replaced by adaptive dampening based on `median_score`
 
 **Adaptive dampening:** If the median peer score > 0.7, reduce churn percentage by half. The swarm is already high quality. This replaces the old `peer_turnover_cutoff` check (which compared download rate to 90% of peak rate).
@@ -235,7 +235,6 @@ Evicted peers return to the `connect_backoff` map with their existing backoff ti
 - Connection admission replaces low-scorer with new peer
 - Small swarm (< 10) disables eviction
 - Endgame suppresses eviction
-- Steal-candidate filtering skips high-scorer blocks
 - SwarmPhase Discovery → Steady transition changes churn parameters
 
 ### Benchmark validation
