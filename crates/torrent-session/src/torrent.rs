@@ -1807,6 +1807,8 @@ impl TorrentActor {
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
+        // M107: 5s metadata piece timeout — only meaningful in FetchingMetadata state
+        let mut metadata_timeout_interval = tokio::time::interval(Duration::from_secs(5));
         // M103: 50ms debounce for reactive snapshot (was 500ms fixed interval)
         let mut snapshot_rebuild_interval = tokio::time::interval(Duration::from_millis(50));
 
@@ -1822,6 +1824,7 @@ impl TorrentActor {
         pipeline_tick_interval.tick().await;
         end_game_tick_interval.tick().await;
         diag_interval.tick().await;
+        metadata_timeout_interval.tick().await;
         snapshot_rebuild_interval.tick().await;
 
         // Initial tracker announce (Started event) — non-blocking, fires via select! arm
@@ -2428,6 +2431,51 @@ impl TorrentActor {
                         .collect();
                     for addr in addrs {
                         self.request_end_game_block(addr).await;
+                    }
+                }
+                // M107: Metadata piece timeout — re-request timed-out pieces from
+                // all non-rejected peers that support ut_metadata.
+                _ = metadata_timeout_interval.tick(), if self.state == TorrentState::FetchingMetadata => {
+                    // Collect timed-out pieces (immutable borrow, then release).
+                    let timed_out: Vec<u32> = self
+                        .metadata_downloader
+                        .as_ref()
+                        .map(|dl| dl.timed_out_pieces(Duration::from_secs(5)))
+                        .unwrap_or_default();
+
+                    if !timed_out.is_empty() {
+                        debug!(count = timed_out.len(), "metadata pieces timed out, re-requesting");
+
+                        // Collect eligible peers (non-rejected, support ut_metadata).
+                        // Clone cmd_tx to avoid holding borrows across the send loop.
+                        let eligible_senders: Vec<mpsc::Sender<PeerCommand>> = self
+                            .peers
+                            .iter()
+                            .filter(|(addr, peer)| {
+                                self.metadata_downloader
+                                    .as_ref()
+                                    .is_some_and(|dl| !dl.is_rejected(addr))
+                                    && peer
+                                        .ext_handshake
+                                        .as_ref()
+                                        .is_some_and(|h| h.metadata_size.is_some())
+                            })
+                            .map(|(_, peer)| peer.cmd_tx.clone())
+                            .collect();
+
+                        // Send requests (uses cloned senders, no borrow conflict).
+                        for cmd_tx in &eligible_senders {
+                            for &piece in &timed_out {
+                                let _ = cmd_tx.try_send(PeerCommand::RequestMetadata { piece });
+                            }
+                        }
+
+                        // Update request times in the downloader.
+                        if let Some(ref mut dl) = self.metadata_downloader {
+                            for piece in timed_out {
+                                dl.reset_request_time(piece);
+                            }
+                        }
                     }
                 }
                 // Periodic download status report (5s)
@@ -3528,7 +3576,9 @@ impl TorrentActor {
                 peer_addr,
                 handshake,
             } => {
-                // In FetchingMetadata mode, if we learn the metadata_size, start requesting
+                // In FetchingMetadata mode, if we learn the metadata_size, start requesting.
+                // M107: Request ALL missing pieces from this peer (full redundancy —
+                // every peer gets all pieces, first complete set wins).
                 if self.state == TorrentState::FetchingMetadata
                     && let Some(size) = handshake.metadata_size
                     && let Some(ref mut dl) = self.metadata_downloader
@@ -3542,9 +3592,9 @@ impl TorrentActor {
                         );
                     } else {
                         dl.set_total_size(size);
-                        let missing = dl.missing_pieces();
-                        for piece in missing {
-                            if let Some(peer) = self.peers.get(&peer_addr) {
+                        let pieces = dl.request_all_from_peer(peer_addr);
+                        if let Some(peer) = self.peers.get(&peer_addr) {
+                            for piece in pieces {
                                 let _ = peer
                                     .cmd_tx
                                     .send(PeerCommand::RequestMetadata { piece })
@@ -3576,11 +3626,11 @@ impl TorrentActor {
                     }
                 }
             }
-            PeerEvent::MetadataReject {
-                peer_addr: _,
-                piece: _,
-            } => {
-                // Could retry from a different peer; for now, ignore.
+            PeerEvent::MetadataReject { peer_addr, piece } => {
+                if let Some(ref mut dl) = self.metadata_downloader {
+                    dl.mark_rejected(peer_addr);
+                    debug!(%peer_addr, piece, "peer rejected metadata request, blacklisted");
+                }
             }
             PeerEvent::PexPeers { new_peers } => {
                 if self.config.enable_pex {
