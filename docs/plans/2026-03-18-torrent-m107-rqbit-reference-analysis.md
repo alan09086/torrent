@@ -1,7 +1,29 @@
 # M107 rqbit Reference Analysis — Actual Source Code Review
 
 Generated 2026-03-18 during eng review of M107 plan.
-Source: rqbit 8.x (latest main branch, cloned to /tmp/rqbit)
+Source: rqbit 8.x (latest main branch)
+
+## rqbit Source Location
+
+Local copy: `docs/reference/rqbit-source/` (gitignored)
+
+### Quick Reference — Key Files for M107 Review
+
+| Topic | rqbit File (relative to `docs/reference/rqbit-source/`) | Lines |
+|-------|----------------------------------------------------------|-------|
+| TCP+uTP racing | `crates/librqbit/src/stream_connect.rs` | 240-324 |
+| Unchoke on connect | `crates/librqbit/src/peer_connection.rs` | 330-339 |
+| Parallel metadata (orchestrator) | `crates/librqbit/src/dht_utils.rs` | 30-106 |
+| Parallel metadata (per-peer reader) | `crates/librqbit/src/peer_info_reader/mod.rs` | 223-251 |
+| DHT re-query loop | `crates/dht/src/dht.rs` | 339-391 |
+| REQUERY_INTERVAL constant | `crates/dht/src/lib.rs` | 24 |
+| num_want (None for all) | `crates/tracker_comms/src/tracker_comms.rs` | 280 |
+| HTTP num_want serialization | `crates/tracker_comms/src/tracker_comms_http.rs` | 194-195 |
+| UDP num_want serialization | `crates/tracker_comms/src/tracker_comms_udp.rs` (in our crate) | 160 |
+| Peer backoff (10s/6x/1h) | `crates/librqbit/src/torrent_state/live/peer/stats/atomic.rs` | 52-61 |
+| Peer limit (128 default) | `crates/librqbit/src/torrent_state/live/mod.rs` | 282 |
+| Semaphore-based connection pacing | `crates/librqbit/src/torrent_state/live/mod.rs` | 602-661 |
+| Peer adder task (unbounded queue) | `crates/librqbit/src/torrent_state/live/mod.rs` | 197-198, 602-661 |
 
 ## Purpose
 
