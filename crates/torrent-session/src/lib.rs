@@ -28,6 +28,7 @@ pub(crate) mod ip_filter;
 pub(crate) mod lsd;
 pub(crate) mod lt_trackers;
 pub(crate) mod peer;
+pub(crate) mod peer_adder;
 pub(crate) mod peer_priority;
 pub(crate) mod peer_scorer;
 mod persistence;
