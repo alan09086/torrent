@@ -2,3 +2,4 @@
 Cargo.lock
 .worktrees/
 .ctx/
+docs/reference/rqbit-source/
