@@ -123,6 +123,8 @@ pub struct TorrentConfig {
     pub steady_churn_percent: f64,
     /// Minimum score threshold — peers below this are eligible for eviction.
     pub min_score_threshold: f64,
+    /// M107: Disable peer scoring for A/B benchmarking.
+    pub disable_peer_scoring: bool,
     /// URL security configuration for SSRF mitigation and IDNA checking.
     pub url_security: crate::url_guard::UrlSecurityConfig,
     /// Timeout in seconds for outbound TCP peer connections (0 = OS default).
@@ -214,6 +216,7 @@ impl Default for TorrentConfig {
             steady_churn_interval_secs: 120,
             steady_churn_percent: 0.05,
             min_score_threshold: 0.15,
+            disable_peer_scoring: false,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
@@ -287,6 +290,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             steady_churn_interval_secs: s.steady_churn_interval_secs,
             steady_churn_percent: s.steady_churn_percent,
             min_score_threshold: s.min_score_threshold,
+            disable_peer_scoring: s.disable_peer_scoring,
             url_security: crate::url_guard::UrlSecurityConfig::from(s),
             peer_connect_timeout: s.peer_connect_timeout,
             peer_dscp: s.peer_dscp,

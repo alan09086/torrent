@@ -39,6 +39,7 @@ pub(crate) struct ConnectPeer {
 /// - The input channel closes (all senders dropped = torrent stopped).
 /// - The semaphore is closed (session shutting down).
 /// - The `connect_tx` channel is closed (actor gone).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn peer_adder_task(
     mut rx: mpsc::UnboundedReceiver<(SocketAddr, PeerSource)>,
     semaphore: Arc<Semaphore>,
@@ -47,12 +48,25 @@ pub(crate) async fn peer_adder_task(
     ban_manager: SharedBanManager,
     ip_filter: SharedIpFilter,
     connect_tx: mpsc::Sender<ConnectPeer>,
+    mut clear_seen_rx: tokio::sync::watch::Receiver<u64>,
 ) {
     let mut seen = HashSet::new();
     loop {
-        let (addr, source) = match rx.recv().await {
-            Some(pair) => pair,
-            None => return, // channel closed = torrent stopped
+        let (addr, source) = {
+            tokio::select! {
+                biased;
+                // M107: Clear seen set when DHT re-query triggers
+                Ok(()) = clear_seen_rx.changed() => {
+                    seen.clear();
+                    continue;
+                }
+                result = rx.recv() => {
+                    match result {
+                        Some(pair) => pair,
+                        None => return, // channel closed = torrent stopped
+                    }
+                }
+            }
         };
 
         // Pre-permit validation (cheap checks first)
@@ -157,6 +171,7 @@ mod tests {
         SharedBanManager,
         SharedIpFilter,
         tokio::task::JoinHandle<()>,
+        tokio::sync::watch::Sender<u64>,
     ) {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
         let (connect_tx, connect_rx) = mpsc::channel(64);
@@ -164,6 +179,7 @@ mod tests {
         let connect_backoff = Arc::new(DashMap::new());
         let ban_manager = test_ban_manager();
         let ip_filter = test_ip_filter();
+        let (clear_seen_tx, clear_seen_rx) = tokio::sync::watch::channel(0u64);
 
         let handle = tokio::spawn(peer_adder_task(
             peer_rx,
@@ -173,6 +189,7 @@ mod tests {
             Arc::clone(&ban_manager),
             Arc::clone(&ip_filter),
             connect_tx,
+            clear_seen_rx,
         ));
 
         (
@@ -183,6 +200,7 @@ mod tests {
             ban_manager,
             ip_filter,
             handle,
+            clear_seen_tx,
         )
     }
 
@@ -342,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn adder_exits_on_channel_close() {
         let sem = Arc::new(Semaphore::new(10));
-        let (peer_tx, _connect_rx, _, _, _, _, handle) = spawn_adder(sem);
+        let (peer_tx, _connect_rx, _, _, _, _, handle, _) = spawn_adder(sem);
 
         drop(peer_tx);
 
@@ -356,7 +374,7 @@ mod tests {
     async fn adder_exits_on_semaphore_close() {
         let sem = Arc::new(Semaphore::new(10));
         let sem_clone = Arc::clone(&sem);
-        let (peer_tx, _connect_rx, _, _, _, _, handle) = spawn_adder(sem);
+        let (peer_tx, _connect_rx, _, _, _, _, handle, _) = spawn_adder(sem);
 
         // Close semaphore — adder should exit on next acquire
         sem_clone.close();
@@ -369,5 +387,39 @@ mod tests {
             .await
             .expect("timed out")
             .expect("task panicked");
+    }
+
+    #[tokio::test]
+    async fn clear_seen_allows_resubmission() {
+        let sem = Arc::new(Semaphore::new(10));
+        let (peer_tx, mut connect_rx, _, _, _, _, _, clear_seen_tx) = spawn_adder(sem);
+
+        let addr = test_addr(6881);
+        peer_tx.send((addr, PeerSource::Dht)).unwrap();
+
+        // First submission should go through
+        let cp = tokio::time::timeout(Duration::from_secs(1), connect_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert_eq!(cp.addr, addr);
+
+        // Second submission of same addr should be deduped
+        peer_tx.send((addr, PeerSource::Dht)).unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(100), connect_rx.recv()).await;
+        assert!(result.is_err(), "duplicate should not produce ConnectPeer");
+
+        // Signal clear_seen
+        let _ = clear_seen_tx.send(1);
+        // Give the adder task a moment to process the clear signal
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now the same addr should go through again
+        peer_tx.send((addr, PeerSource::Dht)).unwrap();
+        let cp2 = tokio::time::timeout(Duration::from_secs(1), connect_rx.recv())
+            .await
+            .expect("timed out after clear_seen")
+            .expect("channel closed after clear_seen");
+        assert_eq!(cp2.addr, addr);
     }
 }

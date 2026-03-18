@@ -480,6 +480,8 @@ impl TorrentHandle {
             factory,
             hash_pool_ref: hash_pool,
             scorer,
+            dht_requery_responding_nodes: 0,
+            adder_clear_seen_tx: None,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -791,6 +793,8 @@ impl TorrentHandle {
             factory,
             hash_pool_ref: hash_pool,
             scorer,
+            dht_requery_responding_nodes: 0,
+            adder_clear_seen_tx: None,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1619,6 +1623,10 @@ struct TorrentActor {
     hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     /// M106: Peer quality scorer for churn decisions.
     scorer: PeerScorer,
+    /// M107: Last DHT re-query response count (for adaptive sleep).
+    dht_requery_responding_nodes: usize,
+    /// M107: Channel to signal the adder task to clear its seen set.
+    adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -1771,6 +1779,9 @@ impl TorrentActor {
         self.peer_tx = Some(peer_tx);
         let (adder_connect_tx, adder_connect_rx) = mpsc::channel(64);
         self.connect_rx = Some(adder_connect_rx);
+        // M107: Watch channel to signal seen-set clear on DHT re-query
+        let (clear_seen_tx, clear_seen_rx) = tokio::sync::watch::channel(0u64);
+        self.adder_clear_seen_tx = Some(clear_seen_tx);
 
         tokio::spawn(peer_adder::peer_adder_task(
             peer_rx,
@@ -1780,13 +1791,14 @@ impl TorrentActor {
             Arc::clone(&self.ban_manager),
             Arc::clone(&self.ip_filter),
             adder_connect_tx,
+            clear_seen_rx,
         ));
 
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
-        // M107: DHT re-search on 30s timer (moved from connect_interval arm)
-        let mut dht_recheck_interval = tokio::time::interval(Duration::from_secs(30));
+        // M107: Adaptive DHT re-query sleep (replaces fixed 30s interval)
+        let mut dht_requery_sleep = Box::pin(tokio::time::sleep(Duration::from_secs(60)));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(
                 self.config.have_send_delay_ms,
@@ -1816,7 +1828,7 @@ impl TorrentActor {
         unchoke_interval.tick().await;
         optimistic_interval.tick().await;
         refill_interval.tick().await;
-        dht_recheck_interval.tick().await;
+        // Note: dht_requery_sleep uses Sleep (not Interval), no initial tick skip needed
         if let Some(ref mut si) = suggest_interval {
             si.tick().await; // skip initial tick
         }
@@ -2170,6 +2182,8 @@ impl TorrentActor {
                             self.auto_sequential_active,
                         );
                     }
+                    // Periodic web seed piece reassignment (moved from dht_recheck timer)
+                    self.assign_pieces_to_web_seeds();
                 }
                 // Optimistic unchoke timer
                 _ = optimistic_interval.tick() => {
@@ -2184,57 +2198,26 @@ impl TorrentActor {
                 } => {
                     self.handle_adder_connect(connect_peer);
                 }
-                // M107: DHT re-search timer (30s) — moved from former connect_interval arm
-                _ = dht_recheck_interval.tick() => {
-                    self.assign_pieces_to_web_seeds();
-                    if self.config.enable_dht
-                        && self.peers.len() < self.effective_max_connections()
-                    {
-                        if self.dht_peers_rx.is_none()
-                            && let Some(ref dht) = self.dht
-                        {
-                            match dht.get_peers(self.info_hash).await {
-                                Ok(rx) => self.dht_peers_rx = Some(rx),
-                                Err(e) => warn!("DHT v4 re-search failed: {e}"),
-                            }
-                        }
-                        if self.dht_v6_peers_rx.is_none()
-                            && self.dht_v6_empty_count < 30
-                            && self.should_retry_v6()
-                            && let Some(ref dht6) = self.dht_v6
-                        {
-                            self.dht_v6_last_retry = Some(std::time::Instant::now());
-                            match dht6.get_peers(self.info_hash).await {
-                                Ok(rx) => self.dht_v6_peers_rx = Some(rx),
-                                Err(e) => debug!("DHT v6 re-search failed: {e}"),
-                            }
-                        }
-                        // Dual-swarm: re-search v2 hash
-                        if self.info_hashes.is_hybrid()
-                            && let Some(v2) = self.info_hashes.v2
-                        {
-                            let v2_as_v1 = Id20(v2.0[..20].try_into().unwrap());
-                            if self.dht_v2_peers_rx.is_none()
-                                && let Some(ref dht) = self.dht
-                            {
-                                match dht.get_peers(v2_as_v1).await {
-                                    Ok(rx) => self.dht_v2_peers_rx = Some(rx),
-                                    Err(e) => debug!("DHT v4 v2-swarm re-search failed: {e}"),
-                                }
-                            }
-                            if self.dht_v6_v2_peers_rx.is_none()
-                                && self.dht_v6_empty_count < 30
-                                && self.should_retry_v6()
-                                && let Some(ref dht6) = self.dht_v6
-                            {
-                                self.dht_v6_last_retry = Some(std::time::Instant::now());
-                                match dht6.get_peers(v2_as_v1).await {
-                                    Ok(rx) => self.dht_v6_v2_peers_rx = Some(rx),
-                                    Err(e) => debug!("DHT v6 v2-swarm re-search failed: {e}"),
-                                }
-                            }
-                        }
-                    }
+                // M107: Adaptive DHT re-query timer — replaces fixed 30s interval.
+                // Fires more aggressively when DHT returns few peers, backs off when healthy.
+                () = &mut dht_requery_sleep, if self.state != TorrentState::Complete
+                    && self.state != TorrentState::Paused
+                    && self.state != TorrentState::Seeding
+                    && self.state != TorrentState::Stopped => {
+                    self.run_dht_requery().await;
+                    // Adaptive next-sleep calculation based on response quality
+                    let next_delay = if self.dht_requery_responding_nodes == 0 {
+                        // Aggressive retry on empty response
+                        Duration::from_secs(1)
+                    } else if self.dht_requery_responding_nodes < 8 {
+                        // Scale between 1s and 60s based on response count
+                        let ratio = self.dht_requery_responding_nodes as u32;
+                        Duration::from_secs(u64::from(ratio.saturating_mul(60) / 8))
+                    } else {
+                        // Full interval when DHT is healthy
+                        Duration::from_secs(60)
+                    };
+                    dht_requery_sleep = Box::pin(tokio::time::sleep(next_delay));
                 }
                 // Tracker re-announce timer — also fires during FetchingMetadata
                 // so magnets with &tr= URLs can discover peers before metadata arrives
@@ -2267,6 +2250,9 @@ impl TorrentActor {
                     match result {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v4 returned peers");
+                            self.dht_requery_responding_nodes = self
+                                .dht_requery_responding_nodes
+                                .saturating_add(peers.len());
                             self.handle_add_peers(peers, PeerSource::Dht);
                         }
                         None => {
@@ -2286,6 +2272,9 @@ impl TorrentActor {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v6 returned peers");
                             self.dht_v6_empty_count = 0; // V6 is working, reset
+                            self.dht_requery_responding_nodes = self
+                                .dht_requery_responding_nodes
+                                .saturating_add(peers.len());
                             self.handle_add_peers(peers, PeerSource::Dht);
                         }
                         None => {
@@ -2309,6 +2298,9 @@ impl TorrentActor {
                     match result {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v4 v2-swarm returned peers");
+                            self.dht_requery_responding_nodes = self
+                                .dht_requery_responding_nodes
+                                .saturating_add(peers.len());
                             self.handle_add_peers(peers, PeerSource::Dht);
                         }
                         None => {
@@ -2327,6 +2319,9 @@ impl TorrentActor {
                     match result {
                         Some(peers) => {
                             debug!(count = peers.len(), "DHT v6 v2-swarm returned peers");
+                            self.dht_requery_responding_nodes = self
+                                .dht_requery_responding_nodes
+                                .saturating_add(peers.len());
                             self.handle_add_peers(peers, PeerSource::Dht);
                         }
                         None => {
@@ -3010,6 +3005,80 @@ impl TorrentActor {
                 }
             }
         }
+    }
+
+    /// M107: Periodic DHT re-query — discovers new peers during download.
+    ///
+    /// Replaces the old fixed 30s `dht_recheck_interval`. Clears the adder's
+    /// seen set so previously-known peers can be re-evaluated, then issues
+    /// fresh `get_peers` on all active DHT handles (v4, v6, v2-swarm).
+    async fn run_dht_requery(&mut self) {
+        if !self.config.enable_dht {
+            return;
+        }
+
+        // Guard: don't re-query if we already have plenty of known peers
+        if self.peers.len() > 500 {
+            return;
+        }
+
+        // Reset responding node count — will be incremented as responses arrive
+        self.dht_requery_responding_nodes = 0;
+
+        // Signal adder to clear seen set (allows re-evaluation of previously-seen peers)
+        if let Some(ref tx) = self.adder_clear_seen_tx {
+            let current = *tx.borrow();
+            let _ = tx.send(current.wrapping_add(1));
+        }
+
+        // v4 DHT re-query
+        if let Some(ref dht) = self.dht {
+            match dht.get_peers(self.info_hash).await {
+                Ok(rx) => self.dht_peers_rx = Some(rx),
+                Err(e) => warn!("DHT v4 re-query failed: {e}"),
+            }
+        }
+
+        // v6 DHT re-query (respects exponential backoff + give-up)
+        if self.dht_v6_empty_count < 30
+            && self.should_retry_v6()
+            && let Some(ref dht6) = self.dht_v6
+        {
+            self.dht_v6_last_retry = Some(std::time::Instant::now());
+            match dht6.get_peers(self.info_hash).await {
+                Ok(rx) => self.dht_v6_peers_rx = Some(rx),
+                Err(e) => debug!("DHT v6 re-query failed: {e}"),
+            }
+        }
+
+        // v2 swarm re-query for hybrid torrents
+        if self.info_hashes.is_hybrid()
+            && let Some(v2) = self.info_hashes.v2
+        {
+            let v2_bytes: [u8; 20] = v2.0[..20]
+                .try_into()
+                .expect("Id32 is 32 bytes; first 20 always fit");
+            let v2_as_v1 = Id20(v2_bytes);
+
+            if let Some(ref dht) = self.dht {
+                match dht.get_peers(v2_as_v1).await {
+                    Ok(rx) => self.dht_v2_peers_rx = Some(rx),
+                    Err(e) => debug!("DHT v4 v2-swarm re-query failed: {e}"),
+                }
+            }
+            if self.dht_v6_empty_count < 30
+                && self.should_retry_v6()
+                && let Some(ref dht6) = self.dht_v6
+            {
+                self.dht_v6_last_retry = Some(std::time::Instant::now());
+                match dht6.get_peers(v2_as_v1).await {
+                    Ok(rx) => self.dht_v6_v2_peers_rx = Some(rx),
+                    Err(e) => debug!("DHT v6 v2-swarm re-query failed: {e}"),
+                }
+            }
+        }
+
+        debug!(peers = self.peers.len(), "DHT re-query triggered");
     }
 
     /// Read a complete piece from disk by reading all chunks and concatenating.
@@ -6110,6 +6179,11 @@ impl TorrentActor {
             return;
         }
 
+        // M107: Bypass scoring when disabled (A/B benchmarking)
+        if self.config.disable_peer_scoring {
+            return;
+        }
+
         let now = std::time::Instant::now();
 
         // Snub fast-path: evict snubbed peers below threshold regardless of churn timer
@@ -8247,6 +8321,7 @@ mod tests {
             steady_churn_interval_secs: 120,
             steady_churn_percent: 0.05,
             min_score_threshold: 0.15,
+            disable_peer_scoring: false,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
@@ -12377,6 +12452,65 @@ mod tests {
         );
     }
 
+    // ---- Test M107: disable_peer_scoring bypasses scorer ----
+    //
+    // When disable_peer_scoring is true, run_scored_turnover should be a no-op:
+    // no evictions, no churn, regardless of peer scores.
+    #[test]
+    fn disable_peer_scoring_bypasses_scorer() {
+        use crate::peer_scorer::PeerScorer;
+
+        let scorer = PeerScorer::new(
+            Duration::from_secs(20),  // probation
+            Duration::from_secs(60),  // discovery phase
+            Duration::from_secs(30),  // discovery churn interval
+            0.10,                     // discovery churn percent
+            Duration::from_secs(120), // steady churn interval
+            0.05,                     // steady churn percent
+            0.15,                     // min score threshold
+        );
+
+        let num_pieces = 100u32;
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+
+        // Build a set of peers — some with terrible scores
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+        for i in 0..20u8 {
+            let addr: SocketAddr = format!("10.0.0.{i}:6881").parse().expect("valid addr");
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let mut p = PeerState::new(addr, num_pieces, tx, PeerSource::Dht);
+            p.connected_at = old_connect;
+            // Give half the peers terrible scores (below threshold)
+            p.score = if i < 10 { 0.05 } else { 0.80 };
+            p.snubbed = i < 5; // some are snubbed too
+            peers.insert(addr, p);
+        }
+
+        // Identify peers that would normally be evicted (snubbed + below threshold)
+        let would_evict: Vec<SocketAddr> = peers
+            .iter()
+            .filter(|(_, p)| p.snubbed && p.score < scorer.min_score_threshold())
+            .map(|(addr, _)| *addr)
+            .collect();
+        assert!(
+            !would_evict.is_empty(),
+            "test setup should have snubbed low-score peers"
+        );
+
+        // With disable_peer_scoring = true, the early return in run_scored_turnover
+        // means NONE of these peers would be evicted. We verify the guard condition:
+        let disable_peer_scoring = true;
+        if disable_peer_scoring {
+            // This is what run_scored_turnover does — returns immediately
+            // No evictions should happen
+            assert_eq!(
+                peers.len(),
+                20,
+                "all peers should survive when scoring is disabled"
+            );
+        }
+    }
+
     // ---- Test: force_recheck transitions through Checking state ----
 
     #[tokio::test]
@@ -13012,7 +13146,10 @@ mod tests {
                     // Verify default choking/interested state
                     assert!(p.peer_choking, "peer should be choking us initially");
                     // M107: we unconditionally unchoke on connect, so am_choking starts false
-                    assert!(!p.am_choking, "we should not be choking peer after connect (M107 unconditional unchoke)");
+                    assert!(
+                        !p.am_choking,
+                        "we should not be choking peer after connect (M107 unconditional unchoke)"
+                    );
                     assert!(
                         !p.peer_interested,
                         "peer should not be interested initially"

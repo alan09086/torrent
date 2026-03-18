@@ -678,6 +678,10 @@ pub struct Settings {
     /// Minimum score threshold — peers below this are eligible for eviction (default: 0.15).
     #[serde(default = "default_min_score_threshold")]
     pub min_score_threshold: f64,
+    /// M107: Disable peer scoring for A/B benchmarking.
+    /// When true, all peers are treated equally — no scoring, turnover, or score-based eviction.
+    #[serde(default)]
+    pub disable_peer_scoring: bool,
 
     // ── Security ──
     /// Enable SSRF mitigation: restrict localhost tracker paths, block
@@ -882,6 +886,7 @@ impl Default for Settings {
             steady_churn_interval_secs: 120,
             steady_churn_percent: 0.05,
             min_score_threshold: 0.15,
+            disable_peer_scoring: false,
             // Security
             ssrf_mitigation: true,
             allow_idna: false,
@@ -1275,6 +1280,7 @@ impl PartialEq for Settings {
             && self.steady_churn_interval_secs == other.steady_churn_interval_secs
             && self.steady_churn_percent.to_bits() == other.steady_churn_percent.to_bits()
             && self.min_score_threshold.to_bits() == other.min_score_threshold.to_bits()
+            && self.disable_peer_scoring == other.disable_peer_scoring
             && self.ssrf_mitigation == other.ssrf_mitigation
             && self.allow_idna == other.allow_idna
             && self.validate_https_trackers == other.validate_https_trackers
@@ -1833,6 +1839,7 @@ mod tests {
         assert_eq!(s.steady_churn_interval_secs, 120);
         assert!((s.steady_churn_percent - 0.05).abs() < f64::EPSILON);
         assert!((s.min_score_threshold - 0.15).abs() < f64::EPSILON);
+        assert!(!s.disable_peer_scoring);
     }
 
     #[test]
@@ -1845,6 +1852,7 @@ mod tests {
         s.steady_churn_interval_secs = 180;
         s.steady_churn_percent = 0.08;
         s.min_score_threshold = 0.25;
+        s.disable_peer_scoring = true;
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.probation_duration_secs, 30);
@@ -1854,6 +1862,7 @@ mod tests {
         assert_eq!(decoded.steady_churn_interval_secs, 180);
         assert!((decoded.steady_churn_percent - 0.08).abs() < f64::EPSILON);
         assert!((decoded.min_score_threshold - 0.25).abs() < f64::EPSILON);
+        assert!(decoded.disable_peer_scoring);
     }
 
     #[test]
