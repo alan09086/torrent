@@ -773,6 +773,22 @@ impl DhtActor {
                     let own_id = *self.routing_table.own_id();
                     match result {
                         Some(addrs) => {
+                            // If the bootstrap lookup already exhausted (cold start
+                            // with no saved nodes), restart it so DNS-resolved nodes
+                            // get properly iterated through the Kademlia lookup.
+                            if self.bootstrap_lookup.is_none() && !self.bootstrap_complete {
+                                debug!(
+                                    dns_addrs = addrs.len(),
+                                    "restarting bootstrap lookup from DNS results"
+                                );
+                                self.bootstrap_lookup = Some(IterativeLookup::new(
+                                    own_id,
+                                    FindNodeCallbacks {
+                                        round: 0,
+                                        max_rounds: 6,
+                                    },
+                                ));
+                            }
                             for addr in addrs {
                                 self.send_find_node(addr, own_id, None).await;
                             }
