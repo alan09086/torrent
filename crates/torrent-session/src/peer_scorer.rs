@@ -198,13 +198,13 @@ impl PeerScorer {
         }
 
         let bandwidth_norm = if ctx.max_rate > 0.0 {
-            ewma_rate / ctx.max_rate
+            (ewma_rate / ctx.max_rate).min(1.0)
         } else {
             0.0
         };
 
         let rtt_norm = match (avg_rtt, ctx.min_rtt > 0.0) {
-            (Some(rtt), true) => (ctx.min_rtt / rtt).min(1.0),
+            (Some(rtt), true) if rtt > 0.0 => (ctx.min_rtt / rtt).min(1.0),
             _ => DEFAULT_RTT_NORM,
         };
 
@@ -484,17 +484,15 @@ mod tests {
         // 0.4*0.0 + 0.2*0.5 + 0.25*1.0 + 0.15*0.0 = 0.35
         assert!((score - 0.35).abs() < 1e-10, "zero-rate peer: {score}");
 
-        // No RTT data: uses default 0.5
+        // No RTT data: uses default 0.5, bandwidth capped at 1.0
         let score_no_rtt =
             PeerScorer::compute_score(500.0, None, 10, 0, 50, 100, false, &ctx);
-        // bw=5.0 → capped by clamp, but 500/100=5.0 → clamp(0,1) = 1.0
-        // Actually, bw = 500/100 = 5.0, but the raw sum is then clamped.
-        // rtt = 0.5 (default), rel=1.0, avail=0.5
-        // raw = 0.4*5.0 + 0.2*0.5 + 0.25*1.0 + 0.15*0.5 = 2.0+0.1+0.25+0.075 = 2.425
-        // clamped to 1.0
+        // bw = (500/100).min(1.0) = 1.0
+        // rtt = 0.5 (default), rel = 1.0, avail = 0.5
+        // raw = 0.4*1.0 + 0.2*0.5 + 0.25*1.0 + 0.15*0.5 = 0.4+0.1+0.25+0.075 = 0.825
         assert!(
-            (score_no_rtt - 1.0).abs() < 1e-10,
-            "clamped high score: {score_no_rtt}"
+            (score_no_rtt - 0.825).abs() < 1e-10,
+            "capped bandwidth score: {score_no_rtt}"
         );
 
         // Zero total_pieces: availability = 0.0
@@ -532,6 +530,27 @@ mod tests {
         assert!(
             (ctx.median_score - 0.6).abs() < 1e-10,
             "median_score: {}",
+            ctx.median_score
+        );
+    }
+
+    // ---- Test 7b: SwarmContext with even peer count ----
+    #[test]
+    fn swarm_context_even_count() {
+        // 4 peers — even count should average two middle values
+        let peers = vec![
+            (1000.0, Some(0.020), 0.3),
+            (5000.0, Some(0.050), 0.5),
+            (3000.0, Some(0.030), 0.7),
+            (8000.0, Some(0.010), 0.9),
+        ];
+        let ctx = PeerScorer::build_swarm_context(peers.into_iter());
+        assert!((ctx.max_rate - 8000.0).abs() < 1e-10);
+        assert!((ctx.min_rtt - 0.010).abs() < 1e-10);
+        // Scores sorted: [0.3, 0.5, 0.7, 0.9] — median = (0.5 + 0.7) / 2 = 0.6
+        assert!(
+            (ctx.median_score - 0.6).abs() < 1e-10,
+            "expected 0.6, got {}",
             ctx.median_score
         );
     }
