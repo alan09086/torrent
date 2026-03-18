@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.107.0 | M107 | Aggressive peer pipeline — semaphore-paced `peer_adder_task` replaces timer-based admission (~570 lines deleted), TCP+uTP parallel race, parallel metadata fetch with full redundancy, adaptive DHT re-query, max_peers 200, unconditional Unchoke |
 | 0.106.0 | M106 | Peer scoring system — composite score from bandwidth/RTT/reliability/availability, phase-aware turnover (Discovery 30s / Steady 120s), score-based admission, hybrid snub eviction, disconnect_peer DRY helper |
 | 0.105.0 | M105 | DHT reliability & simplification — routing table node cap (512), two-phase ping (5s→60s), background DNS backoff, unified IterativeLookup\<C\> (~90 lines removed), JSON routing table persistence |
 | 0.104.0 | M104 | Fixed-depth pipeline & connection overhaul — AIMD→fixed Semaphore(128), three-phase connect→fixed 500ms + per-peer backoff, snub→disconnect, max_in_flight 256→512, DHT diagnostic logging |
@@ -60,6 +61,23 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.107.0] — 2026-03-18
+
+### Added
+- Semaphore-paced peer admission — dedicated `peer_adder_task` replaces timer-based `try_connect_peers()` (~570 lines deleted). DashMap for lock-free shared state. Permit-based connection lifecycle.
+- TCP+uTP parallel race — TCP starts immediately, uTP after 1s delay or on TCP failure. Eliminates 5s sequential fallback penalty.
+- Parallel metadata fetch with full redundancy — request ALL pieces from EVERY peer with ut_metadata. 5s piece timeout with re-request. MetadataReject tracking excludes uncooperative peers.
+- Adaptive DHT re-query — 60s interval with adaptive timing (1s aggressive on empty, proportional, 60s steady). Clears peer adder seen set on re-query.
+- `disable_peer_scoring` setting for A/B benchmarking (default: false)
+- 20 new tests (10 peer_adder, 8 metadata, 2 integration)
+
+### Changed
+- `max_peers_per_torrent` default raised from 128 to 200
+- `num_want` changed from `Some(50)` to `None` (trackers return their default, typically 200 peers)
+- Unconditional Unchoke sent on connect (matches rqbit, improves tit-for-tat reciprocity)
+- BEP 40 peer priority sorting removed (FIFO via channel, matches rqbit)
+- Score-based admission eviction replaced by periodic turnover + instant semaphore refill
 
 ## [0.106.0] — 2026-03-18
 
