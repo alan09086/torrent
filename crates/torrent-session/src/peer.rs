@@ -275,6 +275,13 @@ pub(crate) async fn run_peer(
         }
     }
 
+    // M107: Send unchoke unconditionally on connect (matches rqbit).
+    // Costs nothing for a downloader; improves tit-for-tat reciprocity.
+    framed_write
+        .send(Message::Unchoke)
+        .await
+        .map_err(crate::Error::Wire)?;
+
     // Track extension ID mappings:
     // - peer_ut_*: IDs from the remote's ext handshake (used when SENDING to them)
     // - our_ut_*: IDs from OUR ext handshake (used for matching INCOMING messages)
@@ -1665,6 +1672,8 @@ mod tests {
 
         // Read ext handshake
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send SetInterested command
         cmd_tx.send(PeerCommand::SetInterested(true)).await.unwrap();
@@ -1723,6 +1732,8 @@ mod tests {
 
         // Read ext handshake
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         cmd_tx.send(PeerCommand::Have(5)).await.unwrap();
 
@@ -1771,6 +1782,8 @@ mod tests {
 
         // Read ext handshake
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send Request command
         cmd_tx
@@ -1858,6 +1871,8 @@ mod tests {
 
         // Read ext handshake
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send KeepAlive from remote
         write_framed_message(&mut server_stream, &Message::KeepAlive).await;
@@ -1964,6 +1979,8 @@ mod tests {
 
         // Do extension handshake (remote advertises ut_metadata=3)
         let _our_ext = do_remote_ext_handshake(&mut server_stream).await;
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Consume the ext handshake event
         let evt = event_rx.recv().await.unwrap();
@@ -2345,6 +2362,8 @@ mod tests {
 
         // Read ext handshake
         let _ext_hs_msg = read_framed_message(&mut server_stream).await;
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send a piece via SendPiece command
         let piece_data = Bytes::from(vec![0xAB; 16384]);
@@ -2417,6 +2436,8 @@ mod tests {
             }
             other => panic!("expected ext handshake, got: {other:?}"),
         };
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send a remote ext handshake that advertises ut_metadata=5
         let mut remote_ext = ExtHandshake::new();
@@ -2580,6 +2601,8 @@ mod tests {
         };
         let our_ut_echo_id = our_ext_hs.ext_id("ut_echo").unwrap();
         assert_eq!(our_ut_echo_id, 10);
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send remote ext handshake advertising ut_echo=42
         let mut remote_ext = ExtHandshake::default();
@@ -2838,6 +2861,8 @@ mod tests {
             Message::Extended { ext_id: 0, payload } => ExtHandshake::from_bytes(payload).unwrap(),
             other => panic!("expected ext handshake, got: {other:?}"),
         };
+        // M107: drain the unconditional Unchoke sent on connect
+        let _unchoke = read_framed_message(&mut server_stream).await;
 
         // Send remote ext handshake with ut_holepunch=7
         let mut remote_ext = ExtHandshake::default();

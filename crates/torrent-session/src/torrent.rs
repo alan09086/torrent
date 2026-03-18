@@ -12439,7 +12439,8 @@ mod tests {
                     let p = &peer_info[0];
                     // Verify default choking/interested state
                     assert!(p.peer_choking, "peer should be choking us initially");
-                    assert!(p.am_choking, "we should be choking peer initially");
+                    // M107: we unconditionally unchoke on connect, so am_choking starts false
+                    assert!(!p.am_choking, "we should not be choking peer after connect (M107 unconditional unchoke)");
                     assert!(
                         !p.peer_interested,
                         "peer should not be interested initially"

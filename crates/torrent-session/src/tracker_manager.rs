@@ -434,7 +434,7 @@ impl TrackerManager {
             downloaded,
             left,
             event,
-            num_want: Some(50),
+            num_want: None,
             compact: true,
             i2p_destination: self.i2p_destination.clone(),
         };

@@ -191,7 +191,7 @@ fn default_peer_dscp() -> u8 {
     0x08 // CS1 (scavenger/low-priority)
 }
 fn default_max_peers_per_torrent() -> usize {
-    128
+    200
 }
 fn default_stats_report_interval() -> u64 {
     1000
@@ -873,7 +873,7 @@ impl Default for Settings {
             seed_choking_algorithm: SeedChokingAlgorithm::FastestUpload,
             choking_algorithm: ChokingAlgorithm::FixedSlots,
             // Peer connections
-            max_peers_per_torrent: 128,
+            max_peers_per_torrent: 200,
             // Peer scoring
             probation_duration_secs: 20,
             discovery_phase_secs: 60,
@@ -1362,7 +1362,7 @@ mod tests {
         assert_eq!(s.snub_timeout_secs, 15);
         assert_eq!(s.readahead_pieces, 8);
         assert!(s.streaming_timeout_escalation);
-        assert_eq!(s.max_peers_per_torrent, 128);
+        assert_eq!(s.max_peers_per_torrent, 200);
         assert_eq!(s.runtime_worker_threads, default_runtime_worker_threads());
         assert!(s.pin_cores);
     }

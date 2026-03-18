@@ -156,7 +156,7 @@ impl PeerState {
             addr,
             peer_choking: true,
             peer_interested: false,
-            am_choking: true,
+            am_choking: false, // M107: unconditional Unchoke is sent on connect
             am_interested: false,
             bitfield: Bitfield::new(bitfield_len),
             download_rate: 0,
