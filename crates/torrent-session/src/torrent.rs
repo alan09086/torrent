@@ -6586,82 +6586,253 @@ impl TorrentActor {
 
         tokio::spawn(async move {
             let _permit = permit; // M107: hold for peer lifetime
-            // Try uTP first (5s timeout), fall back to TCP
-            // Note: uTP is not proxied — if proxy is active, skip uTP
+
+            // M107 Change 5: TCP+uTP race with 1s TCP head start.
+            //
+            // When uTP is available, we race TCP (starts immediately) against
+            // uTP (starts after 1s delay, or immediately if TCP fails first).
+            // First transport to connect wins; the loser is cancelled by select!.
+            //
+            // When uTP is unavailable (proxy active, disabled, or no socket),
+            // we fall through to the TCP-only path.
             if enable_utp
                 && !use_proxy
                 && let Some(socket) = utp_socket
             {
-                match tokio::time::timeout(Duration::from_secs(5), socket.connect(addr)).await {
-                    Ok(Ok(stream)) => {
-                        debug!(%addr, "uTP connection established");
-                        let _ = event_tx
-                            .send(PeerEvent::TransportIdentified {
-                                peer_addr: addr,
-                                transport: crate::rate_limiter::PeerTransport::Utp,
-                            })
-                            .await;
-                        match run_peer(
-                            addr,
-                            stream,
-                            info_hash,
-                            peer_id,
-                            bitfield.clone(),
-                            num_pieces,
-                            event_tx.clone(),
-                            cmd_rx,
-                            enable_dht,
-                            enable_fast,
-                            encryption_mode,
-                            true, // outbound
-                            anonymous_mode,
-                            info_bytes.clone(),
-                            Arc::clone(&plugins),
-                            enable_holepunch,
-                            max_message_size,
+                // Signal from TCP future: notify uTP to start early if TCP fails
+                let tcp_failed = Arc::new(tokio::sync::Notify::new());
+
+                let tcp_notify = Arc::clone(&tcp_failed);
+                let tcp_factory = Arc::clone(&factory);
+                // Note: use_proxy is guaranteed false here (checked above),
+                // so TCP connects directly via the transport factory.
+                let tcp_fut = async move {
+                    let result = if peer_connect_timeout > 0 {
+                        match tokio::time::timeout(
+                            Duration::from_secs(peer_connect_timeout),
+                            tcp_factory.connect_tcp(addr),
                         )
                         .await
                         {
-                            Ok(()) => debug!(%addr, "uTP peer session ended normally"),
-                            Err(e) => {
-                                // MSE fallback: determine retry mode based on encryption setting.
-                                let retry_mode = match encryption_mode {
-                                    torrent_wire::mse::EncryptionMode::Enabled => {
-                                        Some(torrent_wire::mse::EncryptionMode::Disabled)
-                                    }
-                                    torrent_wire::mse::EncryptionMode::PreferPlaintext => {
-                                        Some(torrent_wire::mse::EncryptionMode::Enabled)
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(fallback_mode) = retry_mode {
-                                    debug!(%addr, error = %e, ?fallback_mode, "uTP MSE failed, retrying with fallback");
-                                    if let Ok(Ok(stream2)) = tokio::time::timeout(
-                                        Duration::from_secs(5),
-                                        socket.connect(addr),
+                            Ok(r) => r,
+                            Err(_) => {
+                                debug!(%addr, timeout_secs = peer_connect_timeout, "TCP connect timed out");
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "connect timeout",
+                                ))
+                            }
+                        }
+                    } else {
+                        tcp_factory.connect_tcp(addr).await
+                    };
+                    if result.is_err() {
+                        tcp_notify.notify_one();
+                    }
+                    result
+                };
+
+                let utp_fut = async {
+                    // Wait for either: 1s head-start delay OR early TCP failure
+                    tokio::select! {
+                        biased;
+                        () = tcp_failed.notified() => {
+                            debug!(%addr, "TCP failed early, starting uTP immediately");
+                        }
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {
+                            debug!(%addr, "1s head-start elapsed, starting uTP");
+                        }
+                    }
+                    socket.connect(addr).await
+                };
+
+                // Pin both futures for select!
+                tokio::pin!(tcp_fut);
+                tokio::pin!(utp_fut);
+
+                // Race the two transports. `biased` gives TCP slight priority
+                // when both complete in the same poll cycle (expected: TCP
+                // started first, so it should win ties).
+                tokio::select! {
+                    biased;
+                    tcp_result = &mut tcp_fut => {
+                        match tcp_result {
+                            Ok(stream) => {
+                                debug!(%addr, "TCP won the race");
+                                let _ = event_tx
+                                    .send(PeerEvent::TransportIdentified {
+                                        peer_addr: addr,
+                                        transport: crate::rate_limiter::PeerTransport::Tcp,
+                                    })
+                                    .await;
+                                // SSL torrent: wrap TCP stream in TLS (M42)
+                                if let Some(ref client_config) = ssl_client_config {
+                                    match torrent_wire::ssl::connect_tls(
+                                        stream,
+                                        info_hash,
+                                        Arc::clone(client_config),
                                     )
                                     .await
                                     {
-                                        let (retry_tx, retry_rx) = mpsc::channel(256);
+                                        Ok(tls_stream) => {
+                                            debug!(%addr, "SSL/TLS connection established");
+                                            let _ = run_peer(
+                                                addr,
+                                                tls_stream,
+                                                info_hash,
+                                                peer_id,
+                                                bitfield,
+                                                num_pieces,
+                                                event_tx,
+                                                cmd_rx,
+                                                enable_dht,
+                                                enable_fast,
+                                                torrent_wire::mse::EncryptionMode::Disabled,
+                                                true, // outbound
+                                                anonymous_mode,
+                                                info_bytes,
+                                                plugins,
+                                                enable_holepunch,
+                                                max_message_size,
+                                            )
+                                            .await;
+                                        }
+                                        Err(e) => {
+                                            debug!(%addr, error = %e, "SSL/TLS handshake failed");
+                                            let _ = event_tx
+                                                .send(PeerEvent::Disconnected {
+                                                    peer_addr: addr,
+                                                    reason: Some(format!("TLS handshake failed: {e}")),
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                } else {
+                                    match run_peer(
+                                        addr,
+                                        stream,
+                                        info_hash,
+                                        peer_id,
+                                        bitfield.clone(),
+                                        num_pieces,
+                                        event_tx.clone(),
+                                        cmd_rx,
+                                        enable_dht,
+                                        enable_fast,
+                                        encryption_mode,
+                                        true, // outbound
+                                        anonymous_mode,
+                                        info_bytes.clone(),
+                                        Arc::clone(&plugins),
+                                        enable_holepunch,
+                                        max_message_size,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => debug!(%addr, "TCP peer session ended normally"),
+                                        Err(e) => {
+                                            // MSE fallback for TCP
+                                            let retry_mode = match encryption_mode {
+                                                torrent_wire::mse::EncryptionMode::Enabled => {
+                                                    Some(torrent_wire::mse::EncryptionMode::Disabled)
+                                                }
+                                                torrent_wire::mse::EncryptionMode::PreferPlaintext => {
+                                                    Some(torrent_wire::mse::EncryptionMode::Enabled)
+                                                }
+                                                _ => None,
+                                            };
+                                            if let Some(fallback_mode) = retry_mode {
+                                                debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
+                                                if let Ok(tcp2) = factory.connect_tcp(addr).await {
+                                                    let (retry_tx, retry_rx) = mpsc::channel(256);
+                                                    let _ = event_tx
+                                                        .send(PeerEvent::MseRetry {
+                                                            peer_addr: addr,
+                                                            cmd_tx: retry_tx,
+                                                        })
+                                                        .await;
+                                                    match run_peer(
+                                                        addr,
+                                                        tcp2,
+                                                        info_hash,
+                                                        peer_id,
+                                                        bitfield,
+                                                        num_pieces,
+                                                        event_tx.clone(),
+                                                        retry_rx,
+                                                        enable_dht,
+                                                        enable_fast,
+                                                        fallback_mode,
+                                                        true,
+                                                        anonymous_mode,
+                                                        info_bytes,
+                                                        plugins,
+                                                        enable_holepunch,
+                                                        max_message_size,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(()) => {
+                                                            debug!(%addr, "TCP fallback session ended normally")
+                                                        }
+                                                        Err(e2) => {
+                                                            debug!(%addr, error = %e2, "TCP fallback also failed");
+                                                            let _ = event_tx
+                                                                .send(PeerEvent::Disconnected {
+                                                                    peer_addr: addr,
+                                                                    reason: Some(e2.to_string()),
+                                                                })
+                                                                .await;
+                                                        }
+                                                    }
+                                                } else {
+                                                    debug!(%addr, "TCP fallback reconnect failed");
+                                                    let _ = event_tx
+                                                        .send(PeerEvent::Disconnected {
+                                                            peer_addr: addr,
+                                                            reason: Some(e.to_string()),
+                                                        })
+                                                        .await;
+                                                }
+                                            } else {
+                                                debug!(%addr, error = %e, "TCP peer session failed");
+                                                let _ = event_tx
+                                                    .send(PeerEvent::Disconnected {
+                                                        peer_addr: addr,
+                                                        reason: Some(e.to_string()),
+                                                    })
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(tcp_err) => {
+                                // TCP failed; wait for uTP result (already unblocked
+                                // via Notify, so it should be connecting or will soon)
+                                debug!(%addr, error = %tcp_err, "TCP lost the race (failed)");
+                                match utp_fut.await {
+                                    Ok(stream) => {
+                                        debug!(%addr, "uTP connected after TCP failure");
                                         let _ = event_tx
-                                            .send(PeerEvent::MseRetry {
+                                            .send(PeerEvent::TransportIdentified {
                                                 peer_addr: addr,
-                                                cmd_tx: retry_tx,
+                                                transport: crate::rate_limiter::PeerTransport::Utp,
                                             })
                                             .await;
                                         match run_peer(
                                             addr,
-                                            stream2,
+                                            stream,
                                             info_hash,
                                             peer_id,
-                                            bitfield,
+                                            bitfield.clone(),
                                             num_pieces,
                                             event_tx.clone(),
-                                            retry_rx,
+                                            cmd_rx,
                                             enable_dht,
                                             enable_fast,
-                                            fallback_mode,
-                                            true,
+                                            encryption_mode,
+                                            true, // outbound
                                             anonymous_mode,
                                             info_bytes.clone(),
                                             Arc::clone(&plugins),
@@ -6670,51 +6841,402 @@ impl TorrentActor {
                                         )
                                         .await
                                         {
-                                            Ok(()) => {
-                                                debug!(%addr, "uTP fallback session ended normally")
-                                            }
-                                            Err(e2) => {
-                                                debug!(%addr, error = %e2, "uTP fallback also failed");
-                                                let _ = event_tx
-                                                    .send(PeerEvent::Disconnected {
-                                                        peer_addr: addr,
-                                                        reason: Some(e2.to_string()),
-                                                    })
-                                                    .await;
+                                            Ok(()) => debug!(%addr, "uTP peer session ended normally"),
+                                            Err(e) => {
+                                                // MSE fallback for uTP
+                                                let retry_mode = match encryption_mode {
+                                                    torrent_wire::mse::EncryptionMode::Enabled => {
+                                                        Some(torrent_wire::mse::EncryptionMode::Disabled)
+                                                    }
+                                                    torrent_wire::mse::EncryptionMode::PreferPlaintext => {
+                                                        Some(torrent_wire::mse::EncryptionMode::Enabled)
+                                                    }
+                                                    _ => None,
+                                                };
+                                                if let Some(fallback_mode) = retry_mode {
+                                                    debug!(%addr, error = %e, ?fallback_mode, "uTP MSE failed, retrying with fallback");
+                                                    if let Ok(Ok(stream2)) = tokio::time::timeout(
+                                                        Duration::from_secs(5),
+                                                        socket.connect(addr),
+                                                    )
+                                                    .await
+                                                    {
+                                                        let (retry_tx, retry_rx) = mpsc::channel(256);
+                                                        let _ = event_tx
+                                                            .send(PeerEvent::MseRetry {
+                                                                peer_addr: addr,
+                                                                cmd_tx: retry_tx,
+                                                            })
+                                                            .await;
+                                                        match run_peer(
+                                                            addr,
+                                                            stream2,
+                                                            info_hash,
+                                                            peer_id,
+                                                            bitfield,
+                                                            num_pieces,
+                                                            event_tx.clone(),
+                                                            retry_rx,
+                                                            enable_dht,
+                                                            enable_fast,
+                                                            fallback_mode,
+                                                            true,
+                                                            anonymous_mode,
+                                                            info_bytes.clone(),
+                                                            Arc::clone(&plugins),
+                                                            enable_holepunch,
+                                                            max_message_size,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(()) => {
+                                                                debug!(%addr, "uTP fallback session ended normally")
+                                                            }
+                                                            Err(e2) => {
+                                                                debug!(%addr, error = %e2, "uTP fallback also failed");
+                                                                let _ = event_tx
+                                                                    .send(PeerEvent::Disconnected {
+                                                                        peer_addr: addr,
+                                                                        reason: Some(e2.to_string()),
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        debug!(%addr, "uTP fallback reconnect failed");
+                                                        let _ = event_tx
+                                                            .send(PeerEvent::Disconnected {
+                                                                peer_addr: addr,
+                                                                reason: Some(e.to_string()),
+                                                            })
+                                                            .await;
+                                                    }
+                                                } else {
+                                                    debug!(%addr, error = %e, "uTP peer session failed");
+                                                    let _ = event_tx
+                                                        .send(PeerEvent::Disconnected {
+                                                            peer_addr: addr,
+                                                            reason: Some(e.to_string()),
+                                                        })
+                                                        .await;
+                                                }
                                             }
                                         }
-                                    } else {
-                                        debug!(%addr, "uTP fallback reconnect failed");
+                                    }
+                                    Err(utp_err) => {
+                                        // Both transports failed
+                                        debug!(
+                                            %addr,
+                                            tcp_error = %tcp_err,
+                                            utp_error = %utp_err,
+                                            "both TCP and uTP failed"
+                                        );
                                         let _ = event_tx
                                             .send(PeerEvent::Disconnected {
                                                 peer_addr: addr,
-                                                reason: Some(e.to_string()),
+                                                reason: Some(format!(
+                                                    "TCP: {tcp_err}; uTP: {utp_err}"
+                                                )),
                                             })
                                             .await;
                                     }
-                                } else {
-                                    debug!(%addr, error = %e, "uTP peer session failed");
-                                    let _ = event_tx
-                                        .send(PeerEvent::Disconnected {
-                                            peer_addr: addr,
-                                            reason: Some(e.to_string()),
-                                        })
-                                        .await;
                                 }
                             }
                         }
-                        return;
                     }
-                    Ok(Err(e)) => {
-                        debug!(%addr, error = %e, "uTP connect failed, falling back to TCP");
-                    }
-                    Err(_) => {
-                        debug!(%addr, "uTP connect timed out, falling back to TCP");
+                    utp_result = &mut utp_fut => {
+                        match utp_result {
+                            Ok(stream) => {
+                                debug!(%addr, "uTP won the race");
+                                let _ = event_tx
+                                    .send(PeerEvent::TransportIdentified {
+                                        peer_addr: addr,
+                                        transport: crate::rate_limiter::PeerTransport::Utp,
+                                    })
+                                    .await;
+                                match run_peer(
+                                    addr,
+                                    stream,
+                                    info_hash,
+                                    peer_id,
+                                    bitfield.clone(),
+                                    num_pieces,
+                                    event_tx.clone(),
+                                    cmd_rx,
+                                    enable_dht,
+                                    enable_fast,
+                                    encryption_mode,
+                                    true, // outbound
+                                    anonymous_mode,
+                                    info_bytes.clone(),
+                                    Arc::clone(&plugins),
+                                    enable_holepunch,
+                                    max_message_size,
+                                )
+                                .await
+                                {
+                                    Ok(()) => debug!(%addr, "uTP peer session ended normally"),
+                                    Err(e) => {
+                                        // MSE fallback for uTP
+                                        let retry_mode = match encryption_mode {
+                                            torrent_wire::mse::EncryptionMode::Enabled => {
+                                                Some(torrent_wire::mse::EncryptionMode::Disabled)
+                                            }
+                                            torrent_wire::mse::EncryptionMode::PreferPlaintext => {
+                                                Some(torrent_wire::mse::EncryptionMode::Enabled)
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(fallback_mode) = retry_mode {
+                                            debug!(%addr, error = %e, ?fallback_mode, "uTP MSE failed, retrying with fallback");
+                                            if let Ok(Ok(stream2)) = tokio::time::timeout(
+                                                Duration::from_secs(5),
+                                                socket.connect(addr),
+                                            )
+                                            .await
+                                            {
+                                                let (retry_tx, retry_rx) = mpsc::channel(256);
+                                                let _ = event_tx
+                                                    .send(PeerEvent::MseRetry {
+                                                        peer_addr: addr,
+                                                        cmd_tx: retry_tx,
+                                                    })
+                                                    .await;
+                                                match run_peer(
+                                                    addr,
+                                                    stream2,
+                                                    info_hash,
+                                                    peer_id,
+                                                    bitfield,
+                                                    num_pieces,
+                                                    event_tx.clone(),
+                                                    retry_rx,
+                                                    enable_dht,
+                                                    enable_fast,
+                                                    fallback_mode,
+                                                    true,
+                                                    anonymous_mode,
+                                                    info_bytes.clone(),
+                                                    Arc::clone(&plugins),
+                                                    enable_holepunch,
+                                                    max_message_size,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(()) => {
+                                                        debug!(%addr, "uTP fallback session ended normally")
+                                                    }
+                                                    Err(e2) => {
+                                                        debug!(%addr, error = %e2, "uTP fallback also failed");
+                                                        let _ = event_tx
+                                                            .send(PeerEvent::Disconnected {
+                                                                peer_addr: addr,
+                                                                reason: Some(e2.to_string()),
+                                                            })
+                                                            .await;
+                                                    }
+                                                }
+                                            } else {
+                                                debug!(%addr, "uTP fallback reconnect failed");
+                                                let _ = event_tx
+                                                    .send(PeerEvent::Disconnected {
+                                                        peer_addr: addr,
+                                                        reason: Some(e.to_string()),
+                                                    })
+                                                    .await;
+                                            }
+                                        } else {
+                                            debug!(%addr, error = %e, "uTP peer session failed");
+                                            let _ = event_tx
+                                                .send(PeerEvent::Disconnected {
+                                                    peer_addr: addr,
+                                                    reason: Some(e.to_string()),
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(utp_err) => {
+                                // uTP finished first with error; TCP still running.
+                                // Wait for TCP result.
+                                debug!(%addr, error = %utp_err, "uTP lost the race (failed), waiting for TCP");
+                                match tcp_fut.await {
+                                    Ok(stream) => {
+                                        debug!(%addr, "TCP connected after uTP failure");
+                                        let _ = event_tx
+                                            .send(PeerEvent::TransportIdentified {
+                                                peer_addr: addr,
+                                                transport: crate::rate_limiter::PeerTransport::Tcp,
+                                            })
+                                            .await;
+                                        if let Some(ref client_config) = ssl_client_config {
+                                            match torrent_wire::ssl::connect_tls(
+                                                stream,
+                                                info_hash,
+                                                Arc::clone(client_config),
+                                            )
+                                            .await
+                                            {
+                                                Ok(tls_stream) => {
+                                                    debug!(%addr, "SSL/TLS connection established");
+                                                    let _ = run_peer(
+                                                        addr,
+                                                        tls_stream,
+                                                        info_hash,
+                                                        peer_id,
+                                                        bitfield,
+                                                        num_pieces,
+                                                        event_tx,
+                                                        cmd_rx,
+                                                        enable_dht,
+                                                        enable_fast,
+                                                        torrent_wire::mse::EncryptionMode::Disabled,
+                                                        true, // outbound
+                                                        anonymous_mode,
+                                                        info_bytes,
+                                                        plugins,
+                                                        enable_holepunch,
+                                                        max_message_size,
+                                                    )
+                                                    .await;
+                                                }
+                                                Err(e) => {
+                                                    debug!(%addr, error = %e, "SSL/TLS handshake failed");
+                                                    let _ = event_tx
+                                                        .send(PeerEvent::Disconnected {
+                                                            peer_addr: addr,
+                                                            reason: Some(format!("TLS handshake failed: {e}")),
+                                                        })
+                                                        .await;
+                                                }
+                                            }
+                                        } else {
+                                            match run_peer(
+                                                addr,
+                                                stream,
+                                                info_hash,
+                                                peer_id,
+                                                bitfield.clone(),
+                                                num_pieces,
+                                                event_tx.clone(),
+                                                cmd_rx,
+                                                enable_dht,
+                                                enable_fast,
+                                                encryption_mode,
+                                                true, // outbound
+                                                anonymous_mode,
+                                                info_bytes.clone(),
+                                                Arc::clone(&plugins),
+                                                enable_holepunch,
+                                                max_message_size,
+                                            )
+                                            .await
+                                            {
+                                                Ok(()) => debug!(%addr, "TCP peer session ended normally"),
+                                                Err(e) => {
+                                                    // MSE fallback for TCP
+                                                    let retry_mode = match encryption_mode {
+                                                        torrent_wire::mse::EncryptionMode::Enabled => {
+                                                            Some(torrent_wire::mse::EncryptionMode::Disabled)
+                                                        }
+                                                        torrent_wire::mse::EncryptionMode::PreferPlaintext => {
+                                                            Some(torrent_wire::mse::EncryptionMode::Enabled)
+                                                        }
+                                                        _ => None,
+                                                    };
+                                                    if let Some(fallback_mode) = retry_mode {
+                                                        debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
+                                                        if let Ok(tcp2) = factory.connect_tcp(addr).await {
+                                                            let (retry_tx, retry_rx) = mpsc::channel(256);
+                                                            let _ = event_tx
+                                                                .send(PeerEvent::MseRetry {
+                                                                    peer_addr: addr,
+                                                                    cmd_tx: retry_tx,
+                                                                })
+                                                                .await;
+                                                            match run_peer(
+                                                                addr,
+                                                                tcp2,
+                                                                info_hash,
+                                                                peer_id,
+                                                                bitfield,
+                                                                num_pieces,
+                                                                event_tx.clone(),
+                                                                retry_rx,
+                                                                enable_dht,
+                                                                enable_fast,
+                                                                fallback_mode,
+                                                                true,
+                                                                anonymous_mode,
+                                                                info_bytes,
+                                                                plugins,
+                                                                enable_holepunch,
+                                                                max_message_size,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(()) => {
+                                                                    debug!(%addr, "TCP fallback session ended normally")
+                                                                }
+                                                                Err(e2) => {
+                                                                    debug!(%addr, error = %e2, "TCP fallback also failed");
+                                                                    let _ = event_tx
+                                                                        .send(PeerEvent::Disconnected {
+                                                                            peer_addr: addr,
+                                                                            reason: Some(e2.to_string()),
+                                                                        })
+                                                                        .await;
+                                                                }
+                                                            }
+                                                        } else {
+                                                            debug!(%addr, "TCP fallback reconnect failed");
+                                                            let _ = event_tx
+                                                                .send(PeerEvent::Disconnected {
+                                                                    peer_addr: addr,
+                                                                    reason: Some(e.to_string()),
+                                                                })
+                                                                .await;
+                                                        }
+                                                    } else {
+                                                        debug!(%addr, error = %e, "TCP peer session failed");
+                                                        let _ = event_tx
+                                                            .send(PeerEvent::Disconnected {
+                                                                peer_addr: addr,
+                                                                reason: Some(e.to_string()),
+                                                            })
+                                                            .await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(tcp_err) => {
+                                        // Both transports failed
+                                        debug!(
+                                            %addr,
+                                            tcp_error = %tcp_err,
+                                            utp_error = %utp_err,
+                                            "both TCP and uTP failed"
+                                        );
+                                        let _ = event_tx
+                                            .send(PeerEvent::Disconnected {
+                                                peer_addr: addr,
+                                                reason: Some(format!(
+                                                    "TCP: {tcp_err}; uTP: {utp_err}"
+                                                )),
+                                            })
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+                return;
             }
 
-            // TCP connection — through proxy if configured, or via transport factory
+            // TCP-only path — uTP unavailable (proxy active, disabled, or no socket)
             let tcp_result = if use_proxy {
                 crate::proxy::connect_through_proxy(&proxy_config, addr)
                     .await
