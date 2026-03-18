@@ -12,7 +12,7 @@ An intelligent peer scoring system for IronTide that maximises download throughp
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Decision points | All three (admission, eviction, dispatch-adjacent) | Unified scoring avoids fragmented heuristics |
+| Decision points | Admission + eviction (dispatch untouched) | Scoring controls who is in the pool; lock-free dispatch handles what they download |
 | Scoring emphasis | Bandwidth-dominant | Maximises raw throughput in well-seeded swarms |
 | New peer handling | Probation window (20s) | Simple, uses existing `connected_at` field |
 | Low-scorer handling | Hard cutoff (full disconnect) | No shortage of replacement peers in target swarms |
@@ -37,7 +37,7 @@ score = (0.70 × bandwidth_norm)
 | Component | Weight | Signal | Normalisation |
 |-----------|--------|--------|---------------|
 | `bandwidth_norm` | 0.70 | `pipeline.ewma_rate()` (bytes/sec) | `peer_rate / max_rate` across swarm. Best peer = 1.0. |
-| `rtt_norm` | 0.15 | Average RTT from `pipeline.request_times` | `min_rtt / peer_rtt` (inverted). Fastest = 1.0. No data = 0.5. |
+| `rtt_norm` | 0.15 | EWMA RTT from new `PeerState::avg_rtt` field | `min_rtt / peer_rtt` (inverted). Fastest = 1.0. No data = 0.5. Single peer with data = 1.0. |
 | `reliability_norm` | 0.10 | `blocks_timed_out / blocks_completed` | `1.0 - timeout_ratio`, clamped to [0.0, 1.0]. Zero timeouts = 1.0. |
 | `availability_norm` | 0.05 | `bitfield.count_ones() / total_pieces` | Seed = 1.0, partial peers proportional. |
 
@@ -90,13 +90,26 @@ struct SwarmContext {
 }
 ```
 
+`median_score` is computed via `select_nth_unstable()` on a scratch `Vec<f64>` of scores — O(n) partial sort, no allocation for ≤128 peers (use `SmallVec<[f64; 128]>`).
+
 ### New Fields on `PeerState`
 
 ```rust
 pub score: f64,              // composite score, updated every tick
 pub blocks_completed: u64,   // lifetime completed blocks
 pub blocks_timed_out: u64,   // lifetime timed-out blocks
+pub avg_rtt: Option<f64>,    // EWMA of per-block RTT in seconds (α=0.3)
 ```
+
+### RTT Tracking
+
+`PeerPipelineState::block_received()` already returns the RTT `Duration` for each completed block. The `PieceData`/`PieceBlocksBatch` handler in `TorrentActor` will feed each RTT sample into `PeerState::avg_rtt` using an EWMA (α=0.3, matching the existing throughput EWMA):
+
+```
+avg_rtt = α × sample + (1 - α) × avg_rtt
+```
+
+This avoids touching the private `request_times` field in `PeerPipelineState` — the RTT is captured at the point where it's already returned as a public value.
 
 `blocks_completed` incremented on `PieceData`/`PieceBlocksBatch` events.
 `blocks_timed_out` incremented when `timed_out_blocks()` detects stale requests.
@@ -113,6 +126,13 @@ pub steady_churn_percent: f64,          // default 0.05
 pub min_score_threshold: f64,           // default 0.15
 ```
 
+### Deprecated Settings (removed)
+
+The following existing settings are replaced by the scoring system and should be removed:
+- `peer_turnover` → replaced by `discovery_churn_percent` / `steady_churn_percent`
+- `peer_turnover_cutoff` → replaced by median-score adaptive dampening
+- `peer_turnover_interval` → replaced by `discovery_churn_interval_secs` / `steady_churn_interval_secs`
+
 ### Tick Loop Integration
 
 On every 500ms pipeline tick in `TorrentActor`:
@@ -128,13 +148,21 @@ On every 500ms pipeline tick in `TorrentActor`:
 New `run_scored_turnover()`:
 
 1. Check `SwarmPhase` to determine churn interval and percentage
-2. Skip peers in probation window
-3. Collect all scored peers below `min_score_threshold` (0.15)
+2. Build the eligible-for-eviction set by **excluding**:
+   - Peers in probation window (new connections)
+   - Seeds (they only upload — evicting them hurts reciprocity)
+   - Peers in parole (ban manager is still evaluating them — let that system decide)
+3. Collect all eligible peers with score below `min_score_threshold` (0.15)
 4. Sort by `score` ascending (worst first)
-5. Disconnect bottom N peers (N = `churn_percent × scored_peer_count`)
+5. Disconnect bottom N peers (N = `churn_percent × eligible_count`)
 6. Existing cleanup — release owned pieces, update availability, free slab slots
 
-**Adaptive dampening:** If the median peer score > 0.7, reduce churn percentage by half. The swarm is already high quality.
+**Replaces these old turnover settings** (they become dead code and should be removed):
+- `peer_turnover` (was 0.04) → replaced by `discovery_churn_percent` / `steady_churn_percent`
+- `peer_turnover_interval` (was 300s) → replaced by `discovery_churn_interval_secs` / `steady_churn_interval_secs`
+- `peer_turnover_cutoff` (was 0.9) → replaced by adaptive dampening based on `median_score`
+
+**Adaptive dampening:** If the median peer score > 0.7, reduce churn percentage by half. The swarm is already high quality. This replaces the old `peer_turnover_cutoff` check (which compared download rate to 90% of peak rate).
 
 ### 2. Connection Admission — modifies `try_connect_peers()`
 
@@ -150,18 +178,21 @@ The lock-free `AtomicPieceStates` + `PeerDispatchState` dispatch system is untou
 
 - Low-scoring peers get evicted → fewer competitors for pieces
 - Existing choker already unchokes best downloaders (tit-for-tat)
-- **One targeted addition:** when building `StealCandidates`, skip blocks currently owned by high-scoring peers (score > 0.8). Don't steal from top contributors.
+- **Steal-candidate filtering removed from scope.** `StealCandidates` stores only piece indices (not peer associations), and `AtomicPieceStates` tracks piece state but not which peer reserved it. Adding piece-to-peer ownership tracking solely for steal filtering would be over-engineered for the marginal benefit. The scoring system operates through eviction/admission — low-quality peers are removed entirely, so steal interactions with them don't arise.
 
-**Rationale:** The M93 lock-free dispatch is the engine's highest-throughput path. Adding score-based branching would reintroduce complexity in the exact place where the biggest performance gains were achieved.
+**Rationale:** The M93 lock-free dispatch is the engine's highest-throughput path. Adding score-based branching or ownership tracking would reintroduce complexity in the exact place where the biggest performance gains were achieved.
 
 ## Snub Integration
 
-Snubbing becomes a score event rather than a standalone disconnect system:
+**Reverts M104 snub behaviour.** M104 changed snubbed peers from throttled to immediately disconnected. This design deliberately reverts that: snubbed peers stay connected momentarily so the scoring system can handle them through the unified eviction pipeline.
 
-- When a peer is idle for `snub_timeout_secs`, set `peer.snubbed = true` as before
-- Snubbed peers: `reliability_norm = 0.0`, `bandwidth_norm = 0.0`
+- When a peer is idle for `snub_timeout_secs`, set `peer.snubbed = true` (as before M104)
+- **Do NOT immediately disconnect** — instead, force their score components: `reliability_norm = 0.0`, `bandwidth_norm = 0.0`
 - Score drops to ~`0.05 × availability_norm` — well below `min_score_threshold`
 - Next turnover cycle evicts them through the normal scoring pipeline
+- In practice, snubbed peers survive at most one churn interval (30s in Discovery, 120s in Steady) before eviction
+
+**Why revert M104:** The scoring system provides a strictly better eviction mechanism. Immediate disconnect is a blunt instrument that doesn't account for peers that may recover from transient stalls. A peer that resumes sending data before the next churn tick will have its score recalculated and may survive if performance recovers. This is a net improvement over the binary snub→disconnect path.
 
 **Benefit:** Single code path for all peer eviction. No separate snub disconnect logic.
 
@@ -221,7 +252,7 @@ Evicted peers return to the `connect_backoff` map with their existing backoff ti
 | `crates/torrent-session/src/peer_scorer.rs` | **New** — `PeerScorer`, `SwarmPhase`, `SwarmContext`, score computation |
 | `crates/torrent-session/src/peer_state.rs` | Add `score`, `blocks_completed`, `blocks_timed_out` fields |
 | `crates/torrent-session/src/torrent.rs` | Integrate scorer into tick loop, replace `run_peer_turnover()` with `run_scored_turnover()`, modify admission in `try_connect_peers()` |
-| `crates/torrent-session/src/piece_reservation.rs` | Steal-candidate filtering for high-scoring peers |
+| `crates/torrent-session/src/peer.rs` | Feed RTT samples from `block_received()` into `PeerState::avg_rtt` via peer events |
 | `crates/torrent-session/src/settings.rs` | Add scoring settings |
 | `crates/torrent-session/src/lib.rs` | Add `mod peer_scorer` |
 
