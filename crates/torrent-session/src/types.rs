@@ -109,12 +109,20 @@ pub struct TorrentConfig {
     pub force_proxy: bool,
     /// Steal blocks from peers this many times slower than the requesting peer (0.0 = disabled).
     pub steal_threshold_ratio: f64,
-    /// Fraction of peers to disconnect per turnover interval (0.0–1.0).
-    pub peer_turnover: f64,
-    /// Only trigger turnover if download rate < this fraction of peak rate (0.0–1.0).
-    pub peer_turnover_cutoff: f64,
-    /// Seconds between turnover checks (0 = disabled).
-    pub peer_turnover_interval: u64,
+    /// Duration in seconds that newly connected peers are exempt from scoring.
+    pub probation_duration_secs: u64,
+    /// Duration in seconds of the Discovery phase with aggressive churn.
+    pub discovery_phase_secs: u64,
+    /// Seconds between churn cycles during Discovery phase.
+    pub discovery_churn_interval_secs: u64,
+    /// Fraction of low-scoring peers to evict per churn cycle during Discovery.
+    pub discovery_churn_percent: f64,
+    /// Seconds between churn cycles during Steady phase.
+    pub steady_churn_interval_secs: u64,
+    /// Fraction of low-scoring peers to evict per churn cycle during Steady.
+    pub steady_churn_percent: f64,
+    /// Minimum score threshold — peers below this are eligible for eviction.
+    pub min_score_threshold: f64,
     /// URL security configuration for SSRF mitigation and IDNA checking.
     pub url_security: crate::url_guard::UrlSecurityConfig,
     /// Timeout in seconds for outbound TCP peer connections (0 = OS default).
@@ -199,9 +207,13 @@ impl Default for TorrentConfig {
             enable_lsd: true,
             force_proxy: false,
             steal_threshold_ratio: 10.0,
-            peer_turnover: 0.08,
-            peer_turnover_cutoff: 0.9,
-            peer_turnover_interval: 120,
+            probation_duration_secs: 20,
+            discovery_phase_secs: 60,
+            discovery_churn_interval_secs: 30,
+            discovery_churn_percent: 0.10,
+            steady_churn_interval_secs: 120,
+            steady_churn_percent: 0.05,
+            min_score_threshold: 0.15,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
@@ -268,9 +280,13 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             enable_lsd: s.enable_lsd,
             force_proxy: s.force_proxy,
             steal_threshold_ratio: s.steal_threshold_ratio,
-            peer_turnover: s.peer_turnover,
-            peer_turnover_cutoff: s.peer_turnover_cutoff,
-            peer_turnover_interval: s.peer_turnover_interval,
+            probation_duration_secs: s.probation_duration_secs,
+            discovery_phase_secs: s.discovery_phase_secs,
+            discovery_churn_interval_secs: s.discovery_churn_interval_secs,
+            discovery_churn_percent: s.discovery_churn_percent,
+            steady_churn_interval_secs: s.steady_churn_interval_secs,
+            steady_churn_percent: s.steady_churn_percent,
+            min_score_threshold: s.min_score_threshold,
             url_security: crate::url_guard::UrlSecurityConfig::from(s),
             peer_connect_timeout: s.peer_connect_timeout,
             peer_dscp: s.peer_dscp,
@@ -1430,23 +1446,35 @@ mod tests {
     }
 
     #[test]
-    fn torrent_config_peer_turnover_defaults() {
+    fn torrent_config_scoring_defaults() {
         let cfg = TorrentConfig::default();
-        assert!((cfg.peer_turnover - 0.08).abs() < f64::EPSILON);
-        assert!((cfg.peer_turnover_cutoff - 0.9).abs() < f64::EPSILON);
-        assert_eq!(cfg.peer_turnover_interval, 120);
+        assert_eq!(cfg.probation_duration_secs, 20);
+        assert_eq!(cfg.discovery_phase_secs, 60);
+        assert_eq!(cfg.discovery_churn_interval_secs, 30);
+        assert!((cfg.discovery_churn_percent - 0.10).abs() < f64::EPSILON);
+        assert_eq!(cfg.steady_churn_interval_secs, 120);
+        assert!((cfg.steady_churn_percent - 0.05).abs() < f64::EPSILON);
+        assert!((cfg.min_score_threshold - 0.15).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn torrent_config_from_settings_peer_turnover() {
+    fn torrent_config_from_settings_scoring() {
         let mut s = crate::settings::Settings::default();
-        s.peer_turnover = 0.1;
-        s.peer_turnover_cutoff = 0.75;
-        s.peer_turnover_interval = 120;
+        s.probation_duration_secs = 30;
+        s.discovery_phase_secs = 90;
+        s.discovery_churn_interval_secs = 45;
+        s.discovery_churn_percent = 0.20;
+        s.steady_churn_interval_secs = 180;
+        s.steady_churn_percent = 0.08;
+        s.min_score_threshold = 0.25;
         let cfg = TorrentConfig::from(&s);
-        assert!((cfg.peer_turnover - 0.1).abs() < f64::EPSILON);
-        assert!((cfg.peer_turnover_cutoff - 0.75).abs() < f64::EPSILON);
-        assert_eq!(cfg.peer_turnover_interval, 120);
+        assert_eq!(cfg.probation_duration_secs, 30);
+        assert_eq!(cfg.discovery_phase_secs, 90);
+        assert_eq!(cfg.discovery_churn_interval_secs, 45);
+        assert!((cfg.discovery_churn_percent - 0.20).abs() < f64::EPSILON);
+        assert_eq!(cfg.steady_churn_interval_secs, 180);
+        assert!((cfg.steady_churn_percent - 0.08).abs() < f64::EPSILON);
+        assert!((cfg.min_score_threshold - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]
