@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.106.0 | M106 | Peer scoring system — composite score from bandwidth/RTT/reliability/availability, phase-aware turnover (Discovery 30s / Steady 120s), score-based admission, hybrid snub eviction, disconnect_peer DRY helper |
 | 0.105.0 | M105 | DHT reliability & simplification — routing table node cap (512), two-phase ping (5s→60s), background DNS backoff, unified IterativeLookup\<C\> (~90 lines removed), JSON routing table persistence |
 | 0.104.0 | M104 | Fixed-depth pipeline & connection overhaul — AIMD→fixed Semaphore(128), three-phase connect→fixed 500ms + per-peer backoff, snub→disconnect, max_in_flight 256→512, DHT diagnostic logging |
 | 0.103.0 | M103 | Per-block stealing & reactive dispatch — BlockMaps atomic bit arrays, StealCandidates FIFO queue, 3-phase dispatch, 50ms reactive snapshots, ~250 lines legacy steal code deleted |
@@ -59,6 +60,30 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.106.0] — 2026-03-18
+
+### Added
+
+- **Peer scoring system** — composite score from 4 weighted signals: bandwidth (0.40), RTT (0.20), reliability (0.25), and availability (0.15). Pure `compute_score()` function with per-component normalisation, snub short-circuit (score = 0.0), and `build_swarm_context()` for O(n) median via `select_nth_unstable`.
+- **Phase-aware turnover** — `SwarmPhase::Discovery` (first 60s, 30s churn interval, 10% eviction) and `SwarmPhase::Steady` (after 60s, 120s interval, 5% eviction). Adaptive dampening halves churn when median score > 0.7.
+- **Score-based admission** — when at connection capacity, `try_connect_peers()` evicts the worst-scoring non-probation peer below `min_score_threshold` to make room for new candidates.
+- **Hybrid snub eviction** — snubbed peers below threshold are evicted immediately on the 1s turnover tick (fast-path), while scoring handles non-snubbed underperformers through regular churn cycles.
+- **Probation window** — newly connected peers are exempt from scoring and eviction for `probation_duration_secs` (default: 20s), scored at 0.5 during that window.
+- **RTT tracking** — EWMA RTT captured from `pipeline.block_received()` return value (alpha=0.3), stored per-peer as `avg_rtt`.
+- **`disconnect_peer()` DRY helper** — consolidated peer disconnect/cleanup pattern (super-seed, end-game, slab, piece_owner, availability, shutdown, alert) from 3+ call sites into one method.
+- 7 new configuration settings: `probation_duration_secs`, `discovery_phase_secs`, `discovery_churn_interval_secs`, `discovery_churn_percent`, `steady_churn_interval_secs`, `steady_churn_percent`, `min_score_threshold`.
+- 20 new tests (12 unit + 8 integration). 1581 total.
+
+### Changed
+
+- **Turnover timer** — changed from configurable `peer_turnover_interval`-based to unconditional 1s tick gated by `should_churn()`.
+- **Snub handling** — reverted M104 immediate disconnect; snub detection still sets `peer.snubbed = true` but cleanup is handled by the scoring system.
+
+### Removed
+
+- `peer_turnover`, `peer_turnover_cutoff`, `peer_turnover_interval` settings (replaced by 7 scoring settings).
+- `run_peer_turnover()` function (replaced by `run_scored_turnover()`).
 
 ## [0.105.0] — 2026-03-17
 

@@ -32,6 +32,7 @@ tokio-rustls = "0.26"
 libc = "0.2"
 futures = "0.3"
 slab = { workspace = true }
+smallvec = "1"
 url = "2"
 
 [dev-dependencies]

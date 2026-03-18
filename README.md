@@ -2,9 +2,9 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1565-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1581-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.105.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.106.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -51,7 +51,7 @@ torrent download ./ubuntu.torrent --list
 
 ```toml
 [dependencies]
-torrent = "0.105.0"
+torrent = "0.106.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -180,6 +180,7 @@ The performance work spans 19 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.106.0 | Peer scoring system -- composite score (bandwidth/RTT/reliability/availability), phase-aware turnover, score-based admission, hybrid snub eviction | 36.9 MB/s mean (10 trials), +20 tests |
 | 0.105.0 | DHT reliability & simplification -- routing table node cap, two-phase ping, background DNS backoff, unified iterative lookup, JSON persistence | ~90 lines removed, 12x steady-state traffic reduction |
 | 0.104.0 | Fixed-depth pipeline & connection overhaul -- AIMD→Semaphore(128), fixed 500ms connect, per-peer backoff | Eliminates ~430 lines pipeline complexity |
 | 0.103.0 | Per-block stealing & reactive dispatch -- BlockMaps, StealCandidates, 3-phase dispatch | Eliminates legacy steal code, 50ms reactive snapshots |

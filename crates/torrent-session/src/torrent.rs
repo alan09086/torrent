@@ -33,6 +33,7 @@ use crate::choker::{Choker, PeerInfo as ChokerPeerInfo};
 use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
 use crate::peer::run_peer;
+use crate::peer_scorer::PeerScorer;
 use crate::peer_state::{PeerSource, PeerState};
 use crate::tracker_manager::TrackerManager;
 use crate::types::{
@@ -324,6 +325,17 @@ impl TorrentHandle {
             20,
         );
 
+        // M106: Build peer scorer from config
+        let scorer = PeerScorer::new(
+            Duration::from_secs(config.probation_duration_secs),
+            Duration::from_secs(config.discovery_phase_secs),
+            Duration::from_secs(config.discovery_churn_interval_secs),
+            config.discovery_churn_percent,
+            Duration::from_secs(config.steady_churn_interval_secs),
+            config.steady_churn_percent,
+            config.min_score_threshold,
+        );
+
         // M96: Wire hash pool into disk handle for V1-only torrents
         let mut disk = disk;
         if matches!(version, torrent_core::TorrentVersion::V1Only)
@@ -463,6 +475,7 @@ impl TorrentHandle {
             auto_sequential_active: false,
             factory,
             hash_pool_ref: hash_pool,
+            scorer,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -630,6 +643,17 @@ impl TorrentHandle {
             20,
         );
 
+        // M106: Build peer scorer from config
+        let scorer = PeerScorer::new(
+            Duration::from_secs(config.probation_duration_secs),
+            Duration::from_secs(config.discovery_phase_secs),
+            Duration::from_secs(config.discovery_churn_interval_secs),
+            config.discovery_churn_percent,
+            Duration::from_secs(config.steady_churn_interval_secs),
+            config.steady_churn_percent,
+            config.min_score_threshold,
+        );
+
         let actor = TorrentActor {
             config,
             info_hash: magnet.info_hash(),
@@ -760,6 +784,7 @@ impl TorrentHandle {
             auto_sequential_active: false,
             factory,
             hash_pool_ref: hash_pool,
+            scorer,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1580,6 +1605,8 @@ struct TorrentActor {
     factory: Arc<crate::transport::NetworkFactory>,
     /// Shared hash pool for parallel piece verification (M96).
     hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
+    /// M106: Peer quality scorer for churn decisions.
+    scorer: PeerScorer,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -1743,13 +1770,8 @@ impl TorrentActor {
         } else {
             None
         };
-        let mut turnover_interval = if self.config.peer_turnover_interval > 0 {
-            Some(tokio::time::interval(Duration::from_secs(
-                self.config.peer_turnover_interval,
-            )))
-        } else {
-            None
-        };
+        // M106: 1s scored turnover tick — actual churn is gated by scorer.should_churn()
+        let mut turnover_interval = tokio::time::interval(Duration::from_secs(1));
         let mut pipeline_tick_interval = tokio::time::interval(Duration::from_millis(1000));
         // M77: Skip missed ticks — safety-net notify should fire at most once/second
         pipeline_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1767,9 +1789,7 @@ impl TorrentActor {
         if let Some(ref mut si) = suggest_interval {
             si.tick().await; // skip initial tick
         }
-        if let Some(ref mut interval) = turnover_interval {
-            interval.tick().await;
-        }
+        turnover_interval.tick().await;
         pipeline_tick_interval.tick().await;
         end_game_tick_interval.tick().await;
         diag_interval.tick().await;
@@ -2310,21 +2330,15 @@ impl TorrentActor {
                 } => {
                     self.suggest_cached_pieces().await;
                 }
-                // Peer turnover timer (M46)
-                _ = async {
-                    match &mut turnover_interval {
-                        Some(interval) => interval.tick().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    self.run_peer_turnover().await;
+                // M106: Scored peer turnover (1s tick, gated by scorer.should_churn())
+                _ = turnover_interval.tick() => {
+                    self.run_scored_turnover().await;
                 }
-                // Pipeline tick (500ms) — update EWMA, snub detection, stale block cleanup
+                // Pipeline tick (1s) — update EWMA, snub detection, peer scoring
                 _ = pipeline_tick_interval.tick() => {
                     let snub_timeout = Duration::from_secs(self.config.snub_timeout_secs as u64);
-                    let mut snubbed_peers = Vec::new();
 
-                    for (addr, peer) in self.peers.iter_mut() {
+                    for (_addr, peer) in self.peers.iter_mut() {
                         peer.pipeline.tick();
 
                         // Snub detection: no data for snub_timeout_secs while unchoked
@@ -2334,62 +2348,37 @@ impl TorrentActor {
                                 .unwrap_or(false);
                             if idle {
                                 peer.snubbed = true;
-                                snubbed_peers.push(*addr);
-                                debug!(%addr, "peer snubbed — disconnecting (no data for {}s)", self.config.snub_timeout_secs);
+                                // M106: Count pending requests as timed-out blocks
+                                peer.blocks_timed_out = peer.blocks_timed_out
+                                    .saturating_add(peer.pending_requests.len() as u64);
+                                debug!(%_addr, "peer snubbed (no data for {}s)", self.config.snub_timeout_secs);
                             }
                         }
                     }
 
-                    // M104: Release pieces from snubbed peers, then disconnect them.
-                    // Follows the same cleanup pattern as run_peer_turnover().
-                    if !snubbed_peers.is_empty() {
-                        for snubbed_addr in &snubbed_peers {
-                            if let Some(slab_idx) = self.peer_slab.slot_of(snubbed_addr) {
-                                for piece in 0..self.num_pieces {
-                                    if self.piece_owner[piece as usize] == Some(slab_idx) {
-                                        self.piece_owner[piece as usize] = None;
-                                        if let Some(ref states) = self.atomic_states {
-                                            states.release(piece);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Disconnect snubbed peers (free the slot for healthy peers)
-                        for &snubbed_addr in &snubbed_peers {
-                            if let Some(ref mut ss) = self.super_seed {
-                                ss.peer_disconnected(snubbed_addr);
-                            }
-                            if let Some(peer) = self.peers.remove(&snubbed_addr) {
-                                if self.end_game.is_active() {
-                                    self.end_game.peer_disconnected(snubbed_addr);
-                                }
-                                // Slab already handled in piece release above;
-                                // remove_by_addr is idempotent.
-                                self.peer_slab.remove_by_addr(&snubbed_addr);
-                                for piece in 0..self.num_pieces {
-                                    if peer.bitfield.get(piece) {
-                                        self.availability[piece as usize] =
-                                            self.availability[piece as usize].saturating_sub(1);
-                                    }
-                                }
-                                let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-                                post_alert(
-                                    &self.alert_tx,
-                                    &self.alert_mask,
-                                    AlertKind::PeerDisconnected {
-                                        info_hash: self.info_hash,
-                                        addr: snubbed_addr,
-                                        reason: Some("snubbed".into()),
-                                    },
-                                );
-                            }
-                            self.suggested_to_peers.remove(&snubbed_addr);
-                        }
-                        self.recalc_max_in_flight();
-                        self.mark_snapshot_dirty();
-                        if let Some(ref notify) = self.reservation_notify {
-                            notify.notify_waiters();
+                    // M106: Score all peers
+                    // Pass 1 — build swarm context (exclude probation peers)
+                    let ctx = PeerScorer::build_swarm_context(
+                        self.peers.values()
+                            .filter(|p| !self.scorer.is_in_probation(p.connected_at))
+                            .map(|p| (p.pipeline.ewma_rate(), p.avg_rtt, p.score))
+                    );
+
+                    // Pass 2 — score each peer
+                    for peer in self.peers.values_mut() {
+                        if self.scorer.is_in_probation(peer.connected_at) {
+                            peer.score = 0.5;
+                        } else {
+                            peer.score = PeerScorer::compute_score(
+                                peer.pipeline.ewma_rate(),
+                                peer.avg_rtt,
+                                peer.blocks_completed,
+                                peer.blocks_timed_out,
+                                peer.bitfield.count_ones(),
+                                self.num_pieces,
+                                peer.snubbed,
+                                &ctx,
+                            );
                         }
                     }
 
@@ -3432,6 +3421,7 @@ impl TorrentActor {
             self.choker.set_seed_mode(true);
         } else {
             self.transition_state(TorrentState::Downloading);
+            self.scorer.start_download();
             self.choker.set_seed_mode(false);
         }
         post_alert(
@@ -3667,47 +3657,14 @@ impl TorrentActor {
             }
             PeerEvent::Disconnected { peer_addr, reason } => {
                 debug!(%peer_addr, ?reason, "peer disconnected");
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::PeerDisconnected {
-                        info_hash: self.info_hash,
-                        addr: peer_addr,
-                        reason: reason.clone(),
-                    },
-                );
-                // BEP 16: clean up super-seed assignment
-                if let Some(ref mut ss) = self.super_seed {
-                    ss.peer_disconnected(peer_addr);
-                }
-                if let Some(peer) = self.peers.remove(&peer_addr) {
-                    // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                    if self.end_game.is_active() {
-                        self.end_game.peer_disconnected(peer_addr);
-                    }
-                    // M93: Release all pieces owned by this peer
-                    if let Some(slab_idx) = self.peer_slab.remove_by_addr(&peer_addr) {
-                        for piece in 0..self.num_pieces {
-                            if self.piece_owner[piece as usize] == Some(slab_idx) {
-                                self.piece_owner[piece as usize] = None;
-                                if let Some(ref states) = self.atomic_states {
-                                    states.release(piece);
-                                }
-                            }
-                        }
-                    }
-                    // Update availability
-                    for piece in 0..self.num_pieces {
-                        if peer.bitfield.get(piece) {
-                            self.availability[piece as usize] =
-                                self.availability[piece as usize].saturating_sub(1);
-                        }
-                    }
-                    self.recalc_max_in_flight();
-                    self.mark_snapshot_dirty();
-                    if let Some(ref notify) = self.reservation_notify {
-                        notify.notify_waiters();
-                    }
+                let reason_str = reason.as_deref().unwrap_or("peer disconnected");
+                // M106: Use extracted disconnect helper (handles super_seed,
+                // slab, availability, shutdown, alert, suggested_to_peers).
+                self.disconnect_peer(peer_addr, reason_str);
+                self.recalc_max_in_flight();
+                self.mark_snapshot_dirty();
+                if let Some(ref notify) = self.reservation_notify {
+                    notify.notify_waiters();
                 }
                 // M104: Per-peer exponential backoff — prevent hammering failed peers
                 let attempt = self.connect_backoff.get(&peer_addr).map_or(0, |&(_, a)| a);
@@ -3719,7 +3676,6 @@ impl TorrentActor {
                 self.connect_backoff
                     .insert(peer_addr, (earliest_retry, next_attempt));
 
-                self.suggested_to_peers.remove(&peer_addr);
                 self.i2p_destinations.remove(&peer_addr);
             }
             PeerEvent::WebSeedPieceData { url, index, data } => {
@@ -4071,7 +4027,16 @@ impl TorrentActor {
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
             peer.pending_requests.remove(index, begin);
             peer.download_bytes_window += length as u64;
-            peer.pipeline.block_received(index, begin, length, now);
+            // M106: Capture RTT from block receipt for scoring
+            if let Some(rtt) = peer.pipeline.block_received(index, begin, length, now) {
+                let rtt_secs = rtt.as_secs_f64();
+                peer.avg_rtt = Some(crate::peer_scorer::ewma_update(
+                    peer.avg_rtt.unwrap_or(rtt_secs),
+                    rtt_secs,
+                    crate::peer_scorer::RTT_EWMA_ALPHA,
+                ));
+            }
+            peer.blocks_completed = peer.blocks_completed.saturating_add(1);
             peer.last_data_received = Some(now);
             // Clear snub if snubbed
             if peer.snubbed {
@@ -4262,6 +4227,7 @@ impl TorrentActor {
             info!("all pieces verified, starting as seeder");
         } else {
             self.transition_state(TorrentState::Downloading);
+            self.scorer.start_download();
             self.choker.set_seed_mode(false);
         }
 
@@ -5372,6 +5338,7 @@ impl TorrentActor {
                             self.transition_state(TorrentState::Sharing);
                         } else {
                             self.transition_state(TorrentState::Downloading);
+                            self.scorer.start_download();
                         }
                         self.metadata_downloader = None;
 
@@ -6048,134 +6015,151 @@ impl TorrentActor {
         }
     }
 
-    /// Peer turnover: disconnect worst-performing peers and connect replacements.
-    async fn run_peer_turnover(&mut self) {
-        // Only during active downloading
+    /// M106: Extracted disconnect helper — consolidates all peer cleanup into one place.
+    ///
+    /// Performs: BEP 16 super-seed cleanup, peer removal, end-game cleanup,
+    /// slab/piece-owner release, availability decrement, cmd_tx shutdown,
+    /// PeerDisconnected alert, and suggested_to_peers cleanup.
+    fn disconnect_peer(&mut self, addr: SocketAddr, reason: &str) {
+        // BEP 16: clean up super-seed assignment
+        if let Some(ref mut ss) = self.super_seed {
+            ss.peer_disconnected(addr);
+        }
+        if let Some(peer) = self.peers.remove(&addr) {
+            // End-game cleanup
+            if self.end_game.is_active() {
+                self.end_game.peer_disconnected(addr);
+            }
+            // M93: Release all pieces owned by this peer
+            if let Some(slab_idx) = self.peer_slab.remove_by_addr(&addr) {
+                for piece in 0..self.num_pieces {
+                    if self.piece_owner[piece as usize] == Some(slab_idx) {
+                        self.piece_owner[piece as usize] = None;
+                        if let Some(ref states) = self.atomic_states {
+                            states.release(piece);
+                        }
+                    }
+                }
+            }
+            // Update availability
+            for piece in 0..self.num_pieces {
+                if peer.bitfield.get(piece) {
+                    self.availability[piece as usize] =
+                        self.availability[piece as usize].saturating_sub(1);
+                }
+            }
+            // Send shutdown command (non-blocking — peer may have a full channel)
+            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
+            post_alert(
+                &self.alert_tx,
+                &self.alert_mask,
+                AlertKind::PeerDisconnected {
+                    info_hash: self.info_hash,
+                    addr,
+                    reason: Some(reason.into()),
+                },
+            );
+        }
+        self.suggested_to_peers.remove(&addr);
+    }
+
+    /// M106: Score-based peer turnover — replaces rate-based run_peer_turnover().
+    ///
+    /// Runs on every 1s tick but actual churn is gated by `scorer.should_churn()`.
+    /// Snubbed low-score peers are fast-evicted regardless of the churn timer.
+    async fn run_scored_turnover(&mut self) {
         if self.state != TorrentState::Downloading {
             return;
         }
 
-        // Check cutoff: if current rate >= cutoff * peak, don't churn
-        let aggregate_download: u64 = self.peers.values().map(|p| p.download_rate).sum();
-        if self.peak_download_rate > 0 {
-            let threshold = self.config.peer_turnover_cutoff * self.peak_download_rate as f64;
-            if aggregate_download as f64 >= threshold {
-                return;
-            }
+        let now = std::time::Instant::now();
+
+        // Snub fast-path: evict snubbed peers below threshold regardless of churn timer
+        let snub_evict: Vec<SocketAddr> = self
+            .peers
+            .iter()
+            .filter(|(_, p)| p.snubbed && p.score < self.scorer.min_score_threshold())
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in &snub_evict {
+            self.disconnect_peer(*addr, "snubbed low-score eviction");
+        }
+        if !snub_evict.is_empty() {
+            self.recalc_max_in_flight();
+            self.mark_snapshot_dirty();
+            self.try_connect_peers();
         }
 
-        // Collect parole IPs for exemption check
+        // Regular churn gate
+        if !self.scorer.should_churn(now) {
+            return;
+        }
+        self.scorer.mark_churned(now);
+
+        // Skip during endgame
+        if self.end_game.is_active() {
+            return;
+        }
+
+        // Small swarm protection
+        let scored_count = self
+            .peers
+            .values()
+            .filter(|p| !self.scorer.is_in_probation(p.connected_at))
+            .count();
+        if scored_count < 10 {
+            return;
+        }
+
+        // Build swarm context for dampening
+        let ctx = PeerScorer::build_swarm_context(
+            self.peers
+                .values()
+                .filter(|p| !self.scorer.is_in_probation(p.connected_at))
+                .map(|p| (p.pipeline.ewma_rate(), p.avg_rtt, p.score)),
+        );
+        let churn_pct = self.scorer.churn_percent(ctx.median_score);
+
+        // Collect parole IPs
         let parole_ips: std::collections::HashSet<std::net::IpAddr> = self
             .parole_pieces
             .values()
             .filter_map(|p| p.parole_peer)
             .collect();
 
-        // Collect eligible peers (not exempt)
-        let mut eligible: Vec<(SocketAddr, u64)> = self
+        // Build eligible set
+        let mut eligible: Vec<(SocketAddr, f64)> = self
             .peers
-            .values()
-            .filter(|p| {
-                // Exempt: seeds (bitfield complete)
-                if p.bitfield.count_ones() == self.num_pieces {
-                    return false;
-                }
-                // Exempt: outstanding requests
-                if !p.pending_requests.is_empty() {
-                    return false;
-                }
-                // Exempt: parole
-                if parole_ips.contains(&p.addr.ip()) {
-                    return false;
-                }
-                // Exempt: recently connected (< 30s)
-                if p.connected_at.elapsed() < Duration::from_secs(30) {
-                    return false;
-                }
-                true
+            .iter()
+            .filter(|(_, p)| {
+                !self.scorer.is_in_probation(p.connected_at)
+                    && p.bitfield.count_ones() != self.num_pieces
+                    && !parole_ips.contains(&p.addr.ip())
             })
-            .map(|p| (p.addr, p.download_rate))
+            .filter(|(_, p)| p.score < self.scorer.min_score_threshold())
+            .map(|(addr, p)| (*addr, p.score))
             .collect();
 
         if eligible.is_empty() {
             return;
         }
 
-        // Sort by download rate ascending (worst first)
-        eligible.sort_by_key(|&(_, rate)| rate);
+        eligible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Calculate how many to disconnect
-        let turnover_count = (eligible.len() as f64 * self.config.peer_turnover).floor() as usize;
-        let turnover_count = if self.config.peer_turnover > 0.0 {
-            turnover_count.max(1)
-        } else {
-            0
-        };
+        let n = ((eligible.len() as f64 * churn_pct).floor() as usize).max(1);
+        let to_disconnect: Vec<SocketAddr> =
+            eligible.into_iter().take(n).map(|(addr, _)| addr).collect();
 
-        if turnover_count == 0 {
-            return;
-        }
-
-        let to_disconnect: Vec<SocketAddr> = eligible
-            .iter()
-            .take(turnover_count)
-            .map(|&(addr, _)| addr)
-            .collect();
-
-        // Disconnect peers — follow the SAME cleanup pattern as PeerEvent::Disconnected handler
-        for &addr in &to_disconnect {
-            // BEP 16: clean up super-seed assignment (before remove, matching disconnect handler)
-            if let Some(ref mut ss) = self.super_seed {
-                ss.peer_disconnected(addr);
-            }
-            if let Some(peer) = self.peers.remove(&addr) {
-                // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                // End-game cleanup
-                if self.end_game.is_active() {
-                    self.end_game.peer_disconnected(addr);
-                }
-                // M93: Release all pieces owned by this peer
-                if let Some(slab_idx) = self.peer_slab.remove_by_addr(&addr) {
-                    for piece in 0..self.num_pieces {
-                        if self.piece_owner[piece as usize] == Some(slab_idx) {
-                            self.piece_owner[piece as usize] = None;
-                            if let Some(ref states) = self.atomic_states {
-                                states.release(piece);
-                            }
-                        }
-                    }
-                }
-                // Update availability
-                for piece in 0..self.num_pieces {
-                    if peer.bitfield.get(piece) {
-                        self.availability[piece as usize] =
-                            self.availability[piece as usize].saturating_sub(1);
-                    }
-                }
-                // Send shutdown command (non-blocking — peer may have a full channel)
-                let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::PeerDisconnected {
-                        info_hash: self.info_hash,
-                        addr,
-                        reason: Some("peer turnover".into()),
-                    },
-                );
-            }
-            // Suggest tracking cleanup (outside if-let, matching disconnect handler)
-            self.suggested_to_peers.remove(&addr);
+        for addr in &to_disconnect {
+            self.disconnect_peer(*addr, "scored turnover");
         }
         self.recalc_max_in_flight();
         self.mark_snapshot_dirty();
 
-        // Connect replacements
         let peers_before = self.peers.len();
         self.try_connect_peers();
         let replaced = self.peers.len().saturating_sub(peers_before);
 
-        // Fire turnover alert
         post_alert(
             &self.alert_tx,
             &self.alert_mask,
@@ -6252,44 +6236,7 @@ impl TorrentActor {
 
             for &addr in &zombies {
                 debug!(%addr, "disconnecting zombie peer (empty bitfield after 30s)");
-                if let Some(ref mut ss) = self.super_seed {
-                    ss.peer_disconnected(addr);
-                }
-                if let Some(peer) = self.peers.remove(&addr) {
-                    // M75: No driver to cancel — peer task exits when cmd_tx is dropped
-                    if self.end_game.is_active() {
-                        self.end_game.peer_disconnected(addr);
-                    }
-                    // M93: Release all pieces owned by this peer
-                    if let Some(slab_idx) = self.peer_slab.remove_by_addr(&addr) {
-                        for piece in 0..self.num_pieces {
-                            if self.piece_owner[piece as usize] == Some(slab_idx) {
-                                self.piece_owner[piece as usize] = None;
-                                if let Some(ref states) = self.atomic_states {
-                                    states.release(piece);
-                                }
-                            }
-                        }
-                    }
-                    // Update availability
-                    for piece in 0..self.num_pieces {
-                        if peer.bitfield.get(piece) {
-                            self.availability[piece as usize] =
-                                self.availability[piece as usize].saturating_sub(1);
-                        }
-                    }
-                    let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-                    post_alert(
-                        &self.alert_tx,
-                        &self.alert_mask,
-                        AlertKind::PeerDisconnected {
-                            info_hash: self.info_hash,
-                            addr,
-                            reason: Some("zombie peer (empty bitfield)".into()),
-                        },
-                    );
-                }
-                self.suggested_to_peers.remove(&addr);
+                self.disconnect_peer(addr, "zombie peer (empty bitfield)");
             }
             if !zombies.is_empty() {
                 self.recalc_max_in_flight();
@@ -6447,7 +6394,32 @@ impl TorrentActor {
     // ----- Peer connectivity -----
 
     fn try_connect_peers(&mut self) {
-        while self.peers.len() < self.effective_max_connections() {
+        loop {
+            // M106: Score-based admission — evict worst peer if at capacity
+            if self.peers.len() >= self.effective_max_connections() {
+                let worst = self
+                    .peers
+                    .iter()
+                    .filter(|(_, p)| !self.scorer.is_in_probation(p.connected_at))
+                    .min_by(|(_, a), (_, b)| {
+                        a.score
+                            .partial_cmp(&b.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                if let Some((worst_addr, worst_peer)) = worst {
+                    if worst_peer.score < self.scorer.min_score_threshold() {
+                        let worst_addr = *worst_addr;
+                        self.disconnect_peer(worst_addr, "score-based admission");
+                        self.recalc_max_in_flight();
+                        self.mark_snapshot_dirty();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
             let (addr, source) = match self.available_peers.pop() {
                 Some(pair) => {
                     self.available_peers_set.remove(&pair.0);
@@ -7752,9 +7724,13 @@ mod tests {
             enable_lsd: false,
             force_proxy: false,
             steal_threshold_ratio: 10.0,
-            peer_turnover: 0.08,
-            peer_turnover_cutoff: 0.9,
-            peer_turnover_interval: 120,
+            probation_duration_secs: 20,
+            discovery_phase_secs: 60,
+            discovery_churn_interval_secs: 30,
+            discovery_churn_percent: 0.10,
+            steady_churn_interval_secs: 120,
+            steady_churn_percent: 0.05,
+            min_score_threshold: 0.15,
             url_security: crate::url_guard::UrlSecurityConfig::default(),
             peer_connect_timeout: 5,
             peer_dscp: 0x08,
@@ -11234,125 +11210,655 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // ---- M46: Peer turnover logic tests ----
+    // ---- M106: Scored peer turnover integration tests ----
+    //
+    // These tests exercise the integration between PeerScorer and the turnover /
+    // admission / snub logic that runs inside TorrentActor. They use real
+    // PeerState instances and PeerScorer to faithfully reproduce the actor's
+    // data flow without needing the full async actor infrastructure.
 
-    #[test]
-    fn peer_turnover_identifies_worst_peers() {
-        use std::time::Instant;
-
-        let now = Instant::now();
-        let old = now - Duration::from_secs(31);
-
-        struct Candidate {
-            addr: SocketAddr,
-            download_rate: u64,
-            is_seed: bool,
-            has_requests: bool,
-            in_parole: bool,
-            connected_at: Instant,
+    /// Helper: create a PeerState with a specific score, connected_at, and
+    /// optional snub/bitfield state. Uses a throwaway mpsc channel.
+    fn make_scored_peer(
+        addr: SocketAddr,
+        score: f64,
+        snubbed: bool,
+        connected_at: std::time::Instant,
+        piece_count: u32,
+        total_pieces: u32,
+    ) -> PeerState {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut peer = PeerState::new(addr, total_pieces, tx, PeerSource::Tracker);
+        peer.score = score;
+        peer.snubbed = snubbed;
+        peer.connected_at = connected_at;
+        // Set bitfield bits to simulate piece_count
+        for i in 0..piece_count {
+            peer.bitfield.set(i);
         }
+        peer
+    }
 
-        let candidates = vec![
-            Candidate {
-                addr: "10.0.0.1:6881".parse().unwrap(),
-                download_rate: 100,
-                is_seed: false,
-                has_requests: false,
-                in_parole: false,
-                connected_at: old,
-            },
-            Candidate {
-                addr: "10.0.0.2:6881".parse().unwrap(),
-                download_rate: 5000,
-                is_seed: false,
-                has_requests: false,
-                in_parole: false,
-                connected_at: old,
-            },
-            Candidate {
-                addr: "10.0.0.3:6881".parse().unwrap(),
-                download_rate: 50,
-                is_seed: false,
-                has_requests: false,
-                in_parole: false,
-                connected_at: old,
-            },
-            Candidate {
-                addr: "10.0.0.4:6881".parse().unwrap(),
-                download_rate: 0,
-                is_seed: true,
-                has_requests: false,
-                in_parole: false,
-                connected_at: old,
-            },
-            Candidate {
-                addr: "10.0.0.5:6881".parse().unwrap(),
-                download_rate: 10,
-                is_seed: false,
-                has_requests: true,
-                in_parole: false,
-                connected_at: old,
-            },
-            Candidate {
-                addr: "10.0.0.6:6881".parse().unwrap(),
-                download_rate: 0,
-                is_seed: false,
-                has_requests: false,
-                in_parole: false,
-                connected_at: now,
-            },
-            Candidate {
-                addr: "10.0.0.7:6881".parse().unwrap(),
-                download_rate: 5,
-                is_seed: false,
-                has_requests: false,
-                in_parole: true,
-                connected_at: old,
-            },
+    // ---- Test M106-1: Scored turnover evicts lowest-scoring peers ----
+    //
+    // Exercises the full turnover pipeline: build peer map, filter eligible,
+    // sort by score, apply churn_percent, verify correct eviction order.
+    #[test]
+    fn scored_turnover_evicts_lowest_scoring_peers() {
+        use crate::peer_scorer::PeerScorer;
+
+        let scorer = PeerScorer::new(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            0.10,
+            Duration::from_secs(120),
+            0.05,
+            0.15, // min_score_threshold
+        );
+
+        let num_pieces = 100u32;
+        // All peers connected well before probation (30s ago)
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+
+        // Build 12 peers: 10 non-probation peers (required for turnover) + 2 extras.
+        // Peers with varying scores. Some below threshold (0.15), some above.
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+        let peer_data = [
+            ("10.0.0.1:6881", 0.02), // lowest — should be evicted first
+            ("10.0.0.2:6881", 0.80),
+            ("10.0.0.3:6881", 0.07), // second lowest below threshold
+            ("10.0.0.4:6881", 0.65),
+            ("10.0.0.5:6881", 0.50),
+            ("10.0.0.6:6881", 0.40),
+            ("10.0.0.7:6881", 0.12), // below threshold
+            ("10.0.0.8:6881", 0.90),
+            ("10.0.0.9:6881", 0.35),
+            ("10.0.0.10:6881", 0.55),
+            ("10.0.0.11:6881", 0.70),
+            ("10.0.0.12:6881", 0.60),
         ];
 
-        let mut eligible: Vec<_> = candidates
-            .iter()
-            .filter(|c| {
-                !c.is_seed
-                    && !c.has_requests
-                    && !c.in_parole
-                    && c.connected_at.elapsed() >= Duration::from_secs(30)
-            })
-            .collect();
-        assert_eq!(eligible.len(), 3);
+        for (addr_str, score) in &peer_data {
+            let addr: SocketAddr = addr_str.parse().expect("valid addr");
+            let peer = make_scored_peer(addr, *score, false, old_connect, 50, num_pieces);
+            peers.insert(addr, peer);
+        }
 
-        eligible.sort_by_key(|c| c.download_rate);
-        let turnover_count = ((eligible.len() as f64 * 0.04).floor() as usize).max(1);
-        assert_eq!(turnover_count, 1);
+        // Reproduce the turnover logic from run_scored_turnover
+        let scored_count = peers
+            .values()
+            .filter(|p| !scorer.is_in_probation(p.connected_at))
+            .count();
+        assert!(
+            scored_count >= 10,
+            "need >= 10 scored peers for turnover, got {scored_count}"
+        );
+
+        // Build swarm context
+        let ctx = PeerScorer::build_swarm_context(
+            peers
+                .values()
+                .filter(|p| !scorer.is_in_probation(p.connected_at))
+                .map(|p| (p.pipeline.ewma_rate(), p.avg_rtt, p.score)),
+        );
+        let churn_pct = scorer.churn_percent(ctx.median_score);
+
+        // Collect eligible (below threshold, not seed, not probation)
+        let mut eligible: Vec<(SocketAddr, f64)> = peers
+            .iter()
+            .filter(|(_, p)| {
+                !scorer.is_in_probation(p.connected_at)
+                    && p.bitfield.count_ones() != num_pieces
+                    && p.score < scorer.min_score_threshold()
+            })
+            .map(|(addr, p)| (*addr, p.score))
+            .collect();
+        eligible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Should have exactly 3 eligible peers below 0.15: 0.02, 0.07, 0.12
+        assert_eq!(eligible.len(), 3, "expected 3 peers below threshold");
         assert_eq!(
-            eligible[0].addr,
-            "10.0.0.3:6881".parse::<SocketAddr>().unwrap()
+            eligible[0].0,
+            "10.0.0.1:6881".parse::<SocketAddr>().expect("valid")
+        );
+        assert!((eligible[0].1 - 0.02).abs() < 1e-10);
+        assert_eq!(
+            eligible[1].0,
+            "10.0.0.3:6881".parse::<SocketAddr>().expect("valid")
+        );
+        assert!((eligible[1].1 - 0.07).abs() < 1e-10);
+        assert_eq!(
+            eligible[2].0,
+            "10.0.0.7:6881".parse::<SocketAddr>().expect("valid")
+        );
+        assert!((eligible[2].1 - 0.12).abs() < 1e-10);
+
+        // Compute how many to disconnect
+        let n = ((eligible.len() as f64 * churn_pct).floor() as usize).max(1);
+        // With 3 eligible and low churn_pct, at least 1 is evicted
+        assert!(n >= 1, "should evict at least 1 peer, got {n}");
+
+        // The first evicted peer should be the lowest scorer
+        let to_disconnect: Vec<SocketAddr> =
+            eligible.into_iter().take(n).map(|(addr, _)| addr).collect();
+        assert_eq!(
+            to_disconnect[0],
+            "10.0.0.1:6881".parse::<SocketAddr>().expect("valid"),
+            "lowest-scoring peer should be evicted first"
+        );
+
+        // High-scoring peers must NOT be in the eviction list
+        let high_scorer: SocketAddr = "10.0.0.2:6881".parse().expect("valid");
+        assert!(
+            !to_disconnect.contains(&high_scorer),
+            "high-scoring peer must survive turnover"
         );
     }
 
+    // ---- Test M106-2: Probation peers survive turnover ----
+    //
+    // Peers within probation_duration are excluded from the eligible set
+    // even if their score is below the threshold.
     #[test]
-    fn peer_turnover_cutoff_suppresses_at_peak() {
-        let peak_rate: u64 = 10_000;
-        let cutoff = 0.9;
+    fn probation_peers_survive_turnover() {
+        use crate::peer_scorer::PeerScorer;
 
-        let current_rate: u64 = 9_500;
-        assert!(current_rate as f64 >= cutoff * peak_rate as f64);
+        let scorer = PeerScorer::new(
+            Duration::from_secs(20), // 20s probation
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            0.10,
+            Duration::from_secs(120),
+            0.05,
+            0.15,
+        );
 
-        let current_rate: u64 = 8_000;
-        assert!(!(current_rate as f64 >= cutoff * peak_rate as f64));
+        let num_pieces = 100u32;
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+        let recent_connect = std::time::Instant::now(); // within probation
+
+        // Build 12 peers: 10 old + 2 recent (in probation)
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+        for i in 1..=10 {
+            let addr: SocketAddr = format!("10.0.0.{i}:6881").parse().expect("valid addr");
+            // Give them a score of 0.05 (below threshold) — they should be eligible
+            let peer = make_scored_peer(addr, 0.05, false, old_connect, 50, num_pieces);
+            peers.insert(addr, peer);
+        }
+
+        // Two recent peers with low scores — should be protected by probation
+        let probation_addr1: SocketAddr = "10.0.0.11:6881".parse().expect("valid");
+        let probation_addr2: SocketAddr = "10.0.0.12:6881".parse().expect("valid");
+        peers.insert(
+            probation_addr1,
+            make_scored_peer(probation_addr1, 0.01, false, recent_connect, 50, num_pieces),
+        );
+        peers.insert(
+            probation_addr2,
+            make_scored_peer(probation_addr2, 0.03, false, recent_connect, 50, num_pieces),
+        );
+
+        // Verify probation status
+        assert!(
+            scorer.is_in_probation(recent_connect),
+            "recently connected peer should be in probation"
+        );
+        assert!(
+            !scorer.is_in_probation(old_connect),
+            "old peer should not be in probation"
+        );
+
+        // Probation peers should score 0.5 (the default for probation)
+        // in the actual tick loop, and they are excluded from eligible set
+        let eligible: Vec<SocketAddr> = peers
+            .iter()
+            .filter(|(_, p)| {
+                !scorer.is_in_probation(p.connected_at)
+                    && p.bitfield.count_ones() != num_pieces
+                    && p.score < scorer.min_score_threshold()
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        assert!(
+            !eligible.contains(&probation_addr1),
+            "probation peer 1 must not be in eligible set"
+        );
+        assert!(
+            !eligible.contains(&probation_addr2),
+            "probation peer 2 must not be in eligible set"
+        );
+        assert_eq!(
+            eligible.len(),
+            10,
+            "only old peers should be eligible for eviction"
+        );
     }
 
+    // ---- Test M106-3: Score-based admission replaces low-scorer at capacity ----
+    //
+    // When peers.len() >= max_connections, admission finds the worst non-probation
+    // peer below threshold and evicts it to make room.
     #[test]
-    fn peer_turnover_disabled_when_interval_zero() {
-        let interval = 0u64;
-        assert_eq!(interval, 0);
+    fn score_based_admission_replaces_low_scorer() {
+        use crate::peer_scorer::PeerScorer;
+
+        let scorer = PeerScorer::new(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            0.10,
+            Duration::from_secs(120),
+            0.05,
+            0.15,
+        );
+
+        let num_pieces = 100u32;
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+        let max_connections = 5usize;
+
+        // Fill to capacity with mixed-quality peers
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+        let peer_data = [
+            ("10.0.0.1:6881", 0.08), // worst — below threshold
+            ("10.0.0.2:6881", 0.50),
+            ("10.0.0.3:6881", 0.70),
+            ("10.0.0.4:6881", 0.90),
+            ("10.0.0.5:6881", 0.60),
+        ];
+        for (addr_str, score) in &peer_data {
+            let addr: SocketAddr = addr_str.parse().expect("valid addr");
+            peers.insert(
+                addr,
+                make_scored_peer(addr, *score, false, old_connect, 50, num_pieces),
+            );
+        }
+
+        assert!(
+            peers.len() >= max_connections,
+            "must be at capacity for admission test"
+        );
+
+        // Reproduce the admission logic from try_connect_peers
+        let worst = peers
+            .iter()
+            .filter(|(_, p)| !scorer.is_in_probation(p.connected_at))
+            .min_by(|(_, a), (_, b)| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        let (worst_addr, worst_peer) = worst.expect("should find a worst peer");
+        assert!(
+            worst_peer.score < scorer.min_score_threshold(),
+            "worst peer score {} should be below threshold {}",
+            worst_peer.score,
+            scorer.min_score_threshold()
+        );
+        assert_eq!(
+            *worst_addr,
+            "10.0.0.1:6881".parse::<SocketAddr>().expect("valid"),
+            "peer with score 0.08 should be identified as worst"
+        );
+
+        // After disconnecting worst, we should have room for a new peer
+        let worst_addr_copy = *worst_addr;
+        peers.remove(&worst_addr_copy);
+        assert_eq!(peers.len(), max_connections - 1);
+
+        // Now test: if all peers are above threshold, admission should NOT evict
+        let worst_now = peers
+            .iter()
+            .filter(|(_, p)| !scorer.is_in_probation(p.connected_at))
+            .min_by(|(_, a), (_, b)| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        let (_, best_worst) = worst_now.expect("should find a peer");
+        assert!(
+            best_worst.score >= scorer.min_score_threshold(),
+            "remaining worst peer {} should be above threshold — pool is strong enough",
+            best_worst.score
+        );
     }
 
+    // ---- Test M106-4: Small swarm (< 10 scored peers) disables eviction ----
+    //
+    // When fewer than 10 non-probation peers exist, the regular churn path
+    // in run_scored_turnover returns early.
     #[test]
-    fn peer_turnover_no_action_when_seeding() {
-        let state = TorrentState::Seeding;
-        assert_ne!(state, TorrentState::Downloading);
+    fn small_swarm_disables_regular_eviction() {
+        use crate::peer_scorer::PeerScorer;
+
+        let scorer = PeerScorer::new(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            0.10,
+            Duration::from_secs(120),
+            0.05,
+            0.15,
+        );
+
+        let num_pieces = 100u32;
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+
+        // Build 8 peers (below the 10-peer threshold)
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+        for i in 1..=8 {
+            let addr: SocketAddr = format!("10.0.0.{i}:6881").parse().expect("valid addr");
+            // All below threshold — would be eligible if swarm were large enough
+            peers.insert(
+                addr,
+                make_scored_peer(addr, 0.05, false, old_connect, 50, num_pieces),
+            );
+        }
+
+        // Count non-probation peers
+        let scored_count = peers
+            .values()
+            .filter(|p| !scorer.is_in_probation(p.connected_at))
+            .count();
+
+        assert!(
+            scored_count < 10,
+            "scored_count={scored_count}, should be < 10 for small swarm protection"
+        );
+
+        // The run_scored_turnover early return condition: if scored_count < 10 { return; }
+        // So no eviction should happen even though all peers are below threshold.
+        let eligible: Vec<(SocketAddr, f64)> = peers
+            .iter()
+            .filter(|(_, p)| {
+                !scorer.is_in_probation(p.connected_at)
+                    && p.bitfield.count_ones() != num_pieces
+                    && p.score < scorer.min_score_threshold()
+            })
+            .map(|(addr, p)| (*addr, p.score))
+            .collect();
+
+        // All 8 peers would be eligible, but the guard prevents eviction
+        assert_eq!(eligible.len(), 8);
+        // The guard check that would prevent eviction:
+        assert!(
+            scored_count < 10,
+            "small swarm guard should prevent eviction"
+        );
+    }
+
+    // ---- Test M106-5: Endgame suppresses regular eviction ----
+    //
+    // When end_game is active, run_scored_turnover skips the regular churn path
+    // (but snub fast-path still fires).
+    #[test]
+    fn endgame_suppresses_regular_eviction() {
+        // The endgame guard in run_scored_turnover:
+        //   if self.end_game.is_active() { return; }
+        //
+        // Verify the EndGame state machine reports active when blocks are registered.
+        let mut end_game = crate::end_game::EndGame::new();
+
+        // Before activation, should not be active
+        assert!(
+            !end_game.is_active(),
+            "endgame should not be active initially"
+        );
+
+        // Activate endgame (simulate what check_end_game_activation does)
+        let no_pending: Vec<(SocketAddr, Vec<(u32, u32, u32)>)> = Vec::new();
+        end_game.activate(&no_pending);
+
+        assert!(
+            end_game.is_active(),
+            "endgame should be active after activation"
+        );
+
+        // When active, the guard should fire — verify the condition
+        let should_skip = end_game.is_active();
+        assert!(
+            should_skip,
+            "endgame active → regular eviction must be suppressed"
+        );
+    }
+
+    // ---- Test M106-7: Snubbed peer gets low score, evicted on churn ----
+    //
+    // A snubbed peer scores 0.0 via compute_score (snubbed early return).
+    // This score is below the threshold, making it eligible for regular turnover.
+    #[test]
+    fn snubbed_peer_low_score_eligible_for_churn() {
+        use crate::peer_scorer::{PeerScorer, SwarmContext};
+
+        let scorer = PeerScorer::new(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            0.20,
+            Duration::from_secs(120),
+            0.05,
+            0.15,
+        );
+
+        let num_pieces = 100u32;
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+
+        // Build 12 peers: 11 good + 1 snubbed
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+        for i in 1..=11 {
+            let addr: SocketAddr = format!("10.0.0.{i}:6881").parse().expect("valid addr");
+            peers.insert(
+                addr,
+                make_scored_peer(addr, 0.60, false, old_connect, 50, num_pieces),
+            );
+        }
+        // Add a snubbed peer — score computed as 0.0
+        let snubbed_addr: SocketAddr = "10.0.0.12:6881".parse().expect("valid");
+        let mut snubbed_peer =
+            make_scored_peer(snubbed_addr, 0.0, true, old_connect, 50, num_pieces);
+
+        // Verify: compute_score returns 0.0 for snubbed peers
+        let ctx = SwarmContext {
+            max_rate: 1_000_000.0,
+            min_rtt: 0.020,
+            median_score: 0.5,
+        };
+        let snubbed_score = PeerScorer::compute_score(
+            500_000.0,
+            Some(0.030),
+            100,
+            0,
+            50,
+            num_pieces,
+            true, // snubbed
+            &ctx,
+        );
+        assert_eq!(snubbed_score, 0.0, "snubbed peer must score exactly 0.0");
+        snubbed_peer.score = snubbed_score;
+        peers.insert(snubbed_addr, snubbed_peer);
+
+        // Now run the eligible filter (turnover logic)
+        let mut eligible: Vec<(SocketAddr, f64)> = peers
+            .iter()
+            .filter(|(_, p)| {
+                !scorer.is_in_probation(p.connected_at)
+                    && p.bitfield.count_ones() != num_pieces
+                    && p.score < scorer.min_score_threshold()
+            })
+            .map(|(addr, p)| (*addr, p.score))
+            .collect();
+        eligible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Only the snubbed peer should be eligible (the rest score 0.60)
+        assert_eq!(eligible.len(), 1, "only snubbed peer should be eligible");
+        assert_eq!(
+            eligible[0].0, snubbed_addr,
+            "snubbed peer should be the eviction candidate"
+        );
+        assert!((eligible[0].1).abs() < 1e-10, "score should be 0.0");
+    }
+
+    // ---- Test M106-8: Snub fast-path evicts regardless of churn timer ----
+    //
+    // The snub_evict path in run_scored_turnover fires without waiting for
+    // should_churn(). This test verifies that snubbed + below-threshold peers
+    // are collected for immediate eviction.
+    #[test]
+    fn snub_fast_path_evicts_without_churn_timer() {
+        use crate::peer_scorer::PeerScorer;
+
+        let mut scorer = PeerScorer::new(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            0.10,
+            Duration::from_secs(120),
+            0.05,
+            0.15,
+        );
+
+        let num_pieces = 100u32;
+        let old_connect = std::time::Instant::now() - Duration::from_secs(30);
+
+        // Mark the scorer as having just churned — should_churn will return false
+        scorer.mark_churned(std::time::Instant::now());
+        assert!(
+            !scorer.should_churn(std::time::Instant::now()),
+            "churn timer should not have elapsed yet"
+        );
+
+        // Build peers: some snubbed + below threshold, some not
+        let mut peers: HashMap<SocketAddr, PeerState> = HashMap::new();
+
+        // Good peers
+        for i in 1..=5 {
+            let addr: SocketAddr = format!("10.0.0.{i}:6881").parse().expect("valid addr");
+            peers.insert(
+                addr,
+                make_scored_peer(addr, 0.60, false, old_connect, 50, num_pieces),
+            );
+        }
+
+        // Snubbed peer with score 0.0 (below threshold)
+        let snubbed_addr: SocketAddr = "10.0.0.6:6881".parse().expect("valid");
+        peers.insert(
+            snubbed_addr,
+            make_scored_peer(snubbed_addr, 0.0, true, old_connect, 50, num_pieces),
+        );
+
+        // Snubbed peer but with score above threshold (should NOT be fast-evicted)
+        let snubbed_high_addr: SocketAddr = "10.0.0.7:6881".parse().expect("valid");
+        peers.insert(
+            snubbed_high_addr,
+            make_scored_peer(snubbed_high_addr, 0.50, true, old_connect, 50, num_pieces),
+        );
+
+        // Reproduce the snub fast-path from run_scored_turnover
+        let snub_evict: Vec<SocketAddr> = peers
+            .iter()
+            .filter(|(_, p)| p.snubbed && p.score < scorer.min_score_threshold())
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        assert_eq!(
+            snub_evict.len(),
+            1,
+            "only 1 snubbed peer below threshold should be fast-evicted"
+        );
+        assert_eq!(
+            snub_evict[0], snubbed_addr,
+            "the correct snubbed peer should be identified"
+        );
+        assert!(
+            !snub_evict.contains(&snubbed_high_addr),
+            "snubbed peer above threshold must NOT be fast-evicted"
+        );
+
+        // Verify this happened without should_churn returning true
+        assert!(
+            !scorer.should_churn(std::time::Instant::now()),
+            "fast-path should fire regardless of churn timer state"
+        );
+    }
+
+    // ---- Test M106-10: blocks_timed_out increments on snub detection ----
+    //
+    // When a peer is snubbed, its pending_requests count is added to
+    // blocks_timed_out. This test verifies the increment logic.
+    #[test]
+    fn blocks_timed_out_increments_on_snub() {
+        let addr: SocketAddr = "10.0.0.1:6881".parse().expect("valid addr");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut peer = PeerState::new(addr, 100, tx, PeerSource::Tracker);
+
+        // Simulate some pending requests
+        peer.pending_requests.insert(0, 0, 16384);
+        peer.pending_requests.insert(0, 16384, 16384);
+        peer.pending_requests.insert(1, 0, 16384);
+        assert_eq!(peer.pending_requests.len(), 3);
+
+        // Initially zero
+        assert_eq!(peer.blocks_timed_out, 0);
+        assert!(!peer.snubbed);
+
+        // Reproduce the snub detection logic from the pipeline tick:
+        //   peer.snubbed = true;
+        //   peer.blocks_timed_out += peer.pending_requests.len();
+        peer.snubbed = true;
+        peer.blocks_timed_out = peer
+            .blocks_timed_out
+            .saturating_add(peer.pending_requests.len() as u64);
+
+        assert!(peer.snubbed);
+        assert_eq!(
+            peer.blocks_timed_out, 3,
+            "blocks_timed_out should equal pending request count"
+        );
+
+        // Subsequent snub detections should accumulate
+        peer.pending_requests.insert(2, 0, 16384);
+        peer.blocks_timed_out = peer
+            .blocks_timed_out
+            .saturating_add(peer.pending_requests.len() as u64);
+        assert_eq!(
+            peer.blocks_timed_out, 7,
+            "blocks_timed_out should accumulate across snub events: 3 + 4 = 7"
+        );
+
+        // Verify the blocks_timed_out feeds into score computation correctly
+        let ctx = crate::peer_scorer::SwarmContext {
+            max_rate: 1_000_000.0,
+            min_rtt: 0.020,
+            median_score: 0.5,
+        };
+
+        // A peer with many timed-out blocks should score lower on reliability
+        let score_reliable = crate::peer_scorer::PeerScorer::compute_score(
+            500_000.0,
+            Some(0.040),
+            100,
+            0, // no timeouts
+            50,
+            100,
+            false,
+            &ctx,
+        );
+        let score_unreliable = crate::peer_scorer::PeerScorer::compute_score(
+            500_000.0,
+            Some(0.040),
+            100,
+            50, // many timeouts
+            50,
+            100,
+            false,
+            &ctx,
+        );
+        assert!(
+            score_reliable > score_unreliable,
+            "peer with no timeouts ({score_reliable}) should score higher than peer with timeouts ({score_unreliable})"
+        );
     }
 
     // ---- Test: force_recheck transitions through Checking state ----

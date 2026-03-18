@@ -157,20 +157,32 @@ fn default_choking_algorithm() -> ChokingAlgorithm {
 fn default_mixed_mode() -> MixedModeAlgorithm {
     MixedModeAlgorithm::PeerProportional
 }
-fn default_peer_turnover() -> f64 {
-    0.08
+fn default_probation_duration_secs() -> u64 {
+    20
 }
-fn default_peer_turnover_cutoff() -> f64 {
-    0.9
+fn default_discovery_phase_secs() -> u64 {
+    60
+}
+fn default_discovery_churn_interval_secs() -> u64 {
+    30
+}
+fn default_discovery_churn_percent() -> f64 {
+    0.10
+}
+fn default_steady_churn_interval_secs() -> u64 {
+    120
+}
+fn default_steady_churn_percent() -> f64 {
+    0.05
+}
+fn default_min_score_threshold() -> f64 {
+    0.15
 }
 fn default_steal_threshold_ratio() -> f64 {
     10.0
 }
 fn default_use_block_stealing() -> bool {
     true
-}
-fn default_peer_turnover_interval() -> u64 {
-    120
 }
 fn default_peer_connect_timeout() -> u64 {
     5
@@ -644,16 +656,28 @@ pub struct Settings {
     #[serde(default = "default_max_peers_per_torrent")]
     pub max_peers_per_torrent: usize,
 
-    // ── Peer turnover ──
-    /// Fraction of peers to disconnect per turnover interval (0.0–1.0, default: 0.04).
-    #[serde(default = "default_peer_turnover")]
-    pub peer_turnover: f64,
-    /// Only trigger turnover if download rate < this fraction of peak rate (0.0–1.0, default: 0.9).
-    #[serde(default = "default_peer_turnover_cutoff")]
-    pub peer_turnover_cutoff: f64,
-    /// Seconds between turnover checks (default: 300, 0 = disabled).
-    #[serde(default = "default_peer_turnover_interval")]
-    pub peer_turnover_interval: u64,
+    // ── Peer scoring ──
+    /// Duration in seconds that newly connected peers are exempt from scoring (default: 20).
+    #[serde(default = "default_probation_duration_secs")]
+    pub probation_duration_secs: u64,
+    /// Duration in seconds of the Discovery phase with aggressive churn (default: 60).
+    #[serde(default = "default_discovery_phase_secs")]
+    pub discovery_phase_secs: u64,
+    /// Seconds between churn cycles during Discovery phase (default: 30).
+    #[serde(default = "default_discovery_churn_interval_secs")]
+    pub discovery_churn_interval_secs: u64,
+    /// Fraction of low-scoring peers to evict per churn cycle during Discovery (default: 0.10).
+    #[serde(default = "default_discovery_churn_percent")]
+    pub discovery_churn_percent: f64,
+    /// Seconds between churn cycles during Steady phase (default: 120).
+    #[serde(default = "default_steady_churn_interval_secs")]
+    pub steady_churn_interval_secs: u64,
+    /// Fraction of low-scoring peers to evict per churn cycle during Steady (default: 0.05).
+    #[serde(default = "default_steady_churn_percent")]
+    pub steady_churn_percent: f64,
+    /// Minimum score threshold — peers below this are eligible for eviction (default: 0.15).
+    #[serde(default = "default_min_score_threshold")]
+    pub min_score_threshold: f64,
 
     // ── Security ──
     /// Enable SSRF mitigation: restrict localhost tracker paths, block
@@ -850,10 +874,14 @@ impl Default for Settings {
             choking_algorithm: ChokingAlgorithm::FixedSlots,
             // Peer connections
             max_peers_per_torrent: 128,
-            // Peer turnover
-            peer_turnover: 0.08,
-            peer_turnover_cutoff: 0.9,
-            peer_turnover_interval: 120,
+            // Peer scoring
+            probation_duration_secs: 20,
+            discovery_phase_secs: 60,
+            discovery_churn_interval_secs: 30,
+            discovery_churn_percent: 0.10,
+            steady_churn_interval_secs: 120,
+            steady_churn_percent: 0.05,
+            min_score_threshold: 0.15,
             // Security
             ssrf_mitigation: true,
             allow_idna: false,
@@ -990,14 +1018,19 @@ impl Settings {
             ));
         }
 
-        if !(0.0..=1.0).contains(&self.peer_turnover) {
+        if !(0.0..=1.0).contains(&self.discovery_churn_percent) {
             return Err(crate::Error::InvalidSettings(
-                "peer_turnover must be between 0.0 and 1.0".into(),
+                "discovery_churn_percent must be between 0.0 and 1.0".into(),
             ));
         }
-        if !(0.0..=1.0).contains(&self.peer_turnover_cutoff) {
+        if !(0.0..=1.0).contains(&self.steady_churn_percent) {
             return Err(crate::Error::InvalidSettings(
-                "peer_turnover_cutoff must be between 0.0 and 1.0".into(),
+                "steady_churn_percent must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.min_score_threshold) {
+            return Err(crate::Error::InvalidSettings(
+                "min_score_threshold must be between 0.0 and 1.0".into(),
             ));
         }
 
@@ -1235,9 +1268,13 @@ impl PartialEq for Settings {
             && self.seed_choking_algorithm == other.seed_choking_algorithm
             && self.choking_algorithm == other.choking_algorithm
             && self.max_peers_per_torrent == other.max_peers_per_torrent
-            && self.peer_turnover.to_bits() == other.peer_turnover.to_bits()
-            && self.peer_turnover_cutoff.to_bits() == other.peer_turnover_cutoff.to_bits()
-            && self.peer_turnover_interval == other.peer_turnover_interval
+            && self.probation_duration_secs == other.probation_duration_secs
+            && self.discovery_phase_secs == other.discovery_phase_secs
+            && self.discovery_churn_interval_secs == other.discovery_churn_interval_secs
+            && self.discovery_churn_percent.to_bits() == other.discovery_churn_percent.to_bits()
+            && self.steady_churn_interval_secs == other.steady_churn_interval_secs
+            && self.steady_churn_percent.to_bits() == other.steady_churn_percent.to_bits()
+            && self.min_score_threshold.to_bits() == other.min_score_threshold.to_bits()
             && self.ssrf_mitigation == other.ssrf_mitigation
             && self.allow_idna == other.allow_idna
             && self.validate_https_trackers == other.validate_https_trackers
@@ -1787,45 +1824,70 @@ mod tests {
     }
 
     #[test]
-    fn peer_turnover_defaults() {
+    fn scoring_settings_defaults() {
         let s = Settings::default();
-        assert!((s.peer_turnover - 0.08).abs() < f64::EPSILON);
-        assert!((s.peer_turnover_cutoff - 0.9).abs() < f64::EPSILON);
-        assert_eq!(s.peer_turnover_interval, 120);
+        assert_eq!(s.probation_duration_secs, 20);
+        assert_eq!(s.discovery_phase_secs, 60);
+        assert_eq!(s.discovery_churn_interval_secs, 30);
+        assert!((s.discovery_churn_percent - 0.10).abs() < f64::EPSILON);
+        assert_eq!(s.steady_churn_interval_secs, 120);
+        assert!((s.steady_churn_percent - 0.05).abs() < f64::EPSILON);
+        assert!((s.min_score_threshold - 0.15).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn peer_turnover_json_round_trip() {
+    fn scoring_settings_json_round_trip() {
         let mut s = Settings::default();
-        s.peer_turnover = 0.1;
-        s.peer_turnover_cutoff = 0.8;
-        s.peer_turnover_interval = 120;
+        s.probation_duration_secs = 30;
+        s.discovery_phase_secs = 90;
+        s.discovery_churn_interval_secs = 45;
+        s.discovery_churn_percent = 0.20;
+        s.steady_churn_interval_secs = 180;
+        s.steady_churn_percent = 0.08;
+        s.min_score_threshold = 0.25;
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
-        assert!((decoded.peer_turnover - 0.1).abs() < f64::EPSILON);
-        assert!((decoded.peer_turnover_cutoff - 0.8).abs() < f64::EPSILON);
-        assert_eq!(decoded.peer_turnover_interval, 120);
+        assert_eq!(decoded.probation_duration_secs, 30);
+        assert_eq!(decoded.discovery_phase_secs, 90);
+        assert_eq!(decoded.discovery_churn_interval_secs, 45);
+        assert!((decoded.discovery_churn_percent - 0.20).abs() < f64::EPSILON);
+        assert_eq!(decoded.steady_churn_interval_secs, 180);
+        assert!((decoded.steady_churn_percent - 0.08).abs() < f64::EPSILON);
+        assert!((decoded.min_score_threshold - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn peer_turnover_validation() {
+    fn scoring_settings_validation() {
         let mut s = Settings::default();
-        s.peer_turnover = 1.5;
+        s.discovery_churn_percent = 1.5;
         let err = s.validate().unwrap_err();
-        assert!(err.to_string().contains("peer_turnover"));
+        assert!(err.to_string().contains("discovery_churn_percent"));
 
         let mut s = Settings::default();
-        s.peer_turnover = -0.1;
+        s.discovery_churn_percent = -0.1;
         let err = s.validate().unwrap_err();
-        assert!(err.to_string().contains("peer_turnover"));
+        assert!(err.to_string().contains("discovery_churn_percent"));
 
         let mut s = Settings::default();
-        s.peer_turnover_cutoff = 1.5;
+        s.steady_churn_percent = 1.5;
         let err = s.validate().unwrap_err();
-        assert!(err.to_string().contains("peer_turnover_cutoff"));
+        assert!(err.to_string().contains("steady_churn_percent"));
 
         let mut s = Settings::default();
-        s.peer_turnover_interval = 0;
+        s.min_score_threshold = 1.5;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("min_score_threshold"));
+
+        let mut s = Settings::default();
+        s.min_score_threshold = -0.1;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("min_score_threshold"));
+
+        // Valid edge cases
+        let mut s = Settings::default();
+        s.discovery_churn_percent = 0.0;
+        s.steady_churn_percent = 1.0;
+        s.min_score_threshold = 0.0;
         s.validate().unwrap();
     }
 

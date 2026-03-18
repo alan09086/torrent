@@ -568,21 +568,62 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the peer turnover fraction (0.0–1.0).
-    pub fn peer_turnover(mut self, fraction: f64) -> Self {
-        self.settings.peer_turnover = fraction;
+    /// Set the probation duration for newly connected peers (seconds).
+    ///
+    /// Peers within this window are exempt from scoring-based eviction.
+    /// Default: 20s.
+    pub fn probation_duration_secs(mut self, secs: u64) -> Self {
+        self.settings.probation_duration_secs = secs;
         self
     }
 
-    /// Set the peer turnover cutoff (0.0–1.0).
-    pub fn peer_turnover_cutoff(mut self, cutoff: f64) -> Self {
-        self.settings.peer_turnover_cutoff = cutoff;
+    /// Set the discovery phase duration (seconds).
+    ///
+    /// During discovery, churn is more aggressive to find good peers quickly.
+    /// Default: 60s.
+    pub fn discovery_phase_secs(mut self, secs: u64) -> Self {
+        self.settings.discovery_phase_secs = secs;
         self
     }
 
-    /// Set the peer turnover interval in seconds (0 = disabled).
-    pub fn peer_turnover_interval(mut self, secs: u64) -> Self {
-        self.settings.peer_turnover_interval = secs;
+    /// Set the churn interval during discovery phase (seconds).
+    ///
+    /// Default: 30s.
+    pub fn discovery_churn_interval_secs(mut self, secs: u64) -> Self {
+        self.settings.discovery_churn_interval_secs = secs;
+        self
+    }
+
+    /// Set the fraction of low-scoring peers to evict per churn cycle during discovery (0.0–1.0).
+    ///
+    /// Default: 0.10.
+    pub fn discovery_churn_percent(mut self, pct: f64) -> Self {
+        self.settings.discovery_churn_percent = pct;
+        self
+    }
+
+    /// Set the churn interval during steady-state phase (seconds).
+    ///
+    /// Default: 120s.
+    pub fn steady_churn_interval_secs(mut self, secs: u64) -> Self {
+        self.settings.steady_churn_interval_secs = secs;
+        self
+    }
+
+    /// Set the fraction of low-scoring peers to evict per churn cycle during steady state (0.0–1.0).
+    ///
+    /// Default: 0.05.
+    pub fn steady_churn_percent(mut self, pct: f64) -> Self {
+        self.settings.steady_churn_percent = pct;
+        self
+    }
+
+    /// Set the minimum score threshold for peer eviction (0.0–1.0).
+    ///
+    /// Peers scoring below this are candidates for disconnection.
+    /// Default: 0.15.
+    pub fn min_score_threshold(mut self, threshold: f64) -> Self {
+        self.settings.min_score_threshold = threshold;
         self
     }
 
