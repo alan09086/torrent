@@ -48,16 +48,13 @@ This milestone implements 8 changes to match rqbit's aggressive peer pipeline st
 
 **Problem**: We request metadata from only ONE peer at a time. When a peer's `ExtHandshake` arrives with `metadata_size`, we request all missing pieces from that single peer. If that peer is slow or disconnects, metadata stalls.
 
-**Solution**: Fan out metadata requests across ALL peers that advertise `ut_metadata`:
+**Solution (eng review: full redundancy, rqbit style)**: Request ALL metadata pieces from EVERY peer that advertises `ut_metadata`. First complete set wins (SHA1 verify against info_hash). No per-piece tracking needed.
 
-- When any peer reports `metadata_size` in its extended handshake, send `RequestMetadata` for all missing pieces to that peer
-- Track which pieces are in-flight from which peer (add `metadata_in_flight: HashMap<u32, SocketAddr>` to `MetadataDownloader`)
-- When a new peer connects with `ut_metadata`, request any pieces not yet received (skip pieces already in-flight from another peer, or request them too for redundancy)
-- Handle `MetadataReject`: mark piece as not in-flight, retry from another peer
-- First complete set wins (SHA1 verify against info_hash)
-- On piece timeout (5s), retry from another peer
-
-**Key insight from rqbit**: rqbit requests ALL pieces from EACH peer — pure redundancy. The first peer to deliver all pieces wins. This is simpler than tracking per-piece assignments and just as effective. We can start with per-piece assignment (less network waste) and upgrade to full redundancy if needed.
+- When any peer reports `metadata_size` in its extended handshake, send `RequestMetadata` for ALL pieces to that peer
+- When additional peers connect with `ut_metadata`, also send ALL pieces to them
+- On `MetadataReject` from a peer: give up on that peer (stop requesting from it), other peers continue racing
+- First peer to deliver all pieces wins — SHA1 verified against info_hash
+- Metadata is ~60 KiB, so redundant requests have negligible network cost
 
 ### 2. Raise num_want to 200 (Trivial — accounts for ~3x more peers per tracker response)
 
@@ -85,45 +82,29 @@ For UDP trackers, the `num_want` field should be set to `-1` (i32, meaning "as m
 - Guard: don't re-query if the torrent is complete or paused
 - Guard: don't re-query if we already have >500 known peers (diminishing returns)
 
-### 5. Remove Connection Ramp-Down (Low risk — keeps connecting aggressively)
+### 5. Aggressive Connection Strategy (eng review: merged Changes 5+6)
 
-**Problem**: At T=15s, the connect interval jumps from 100ms to 500ms (5x slower). This reduces our ability to replace dead peers and connect new ones during the critical download phase.
+**Problem 1**: At T=15s, the connect interval jumps from 100ms to 500ms (5x slower). This reduces our ability to replace dead peers during the critical download phase.
 
-**Solution**:
-- Keep the connect interval at 100ms throughout the download
-- Remove the `connect_ramped_down` flag and the 15-second ramp-down logic
-- The per-peer exponential backoff already prevents hammering individual peers
+**Problem 2**: Each connection attempt tries uTP first with a 5-second timeout, then falls back to TCP. For TCP-only peers (the majority), this wastes 5 seconds per peer.
 
-### 6. Parallel uTP+TCP Connection (Medium — eliminates 5s timeout on TCP-only peers)
+**Solution (eng review: skip uTP for outgoing, match rqbit)**:
+- Keep the connect interval at 100ms throughout the download (remove `connect_ramped_down` flag and 15-second ramp-down)
+- Use TCP only for outgoing connections (skip uTP attempt entirely). Continue accepting inbound uTP connections.
+- rqbit uses TCP-only for outgoing — uTP adoption is low and the 5s timeout penalty is too high
+- Per-peer exponential backoff already prevents hammering individual peers
 
-**Problem**: Each connection attempt tries uTP first with a 5-second timeout, then falls back to TCP. For TCP-only peers (the majority), this wastes 5 seconds per peer.
-
-**Solution**: Try uTP and TCP simultaneously using `tokio::select!`:
-```rust
-tokio::select! {
-    result = try_utp_connect(addr) => { /* use uTP if it wins */ }
-    result = async {
-        tokio::time::sleep(Duration::from_millis(500)).await;  // give uTP a 500ms head start
-        try_tcp_connect(addr).await
-    } => { /* use TCP if uTP is slow */ }
-}
-```
-Give uTP a 500ms head start (not 5s). If uTP hasn't connected in 500ms, start TCP in parallel. First to succeed wins.
-
-### 7. Send Unchoke on Connect (Trivial — improves reciprocity)
+### 6. Send Unchoke on Connect (Trivial — improves reciprocity)
 
 **Problem**: We don't proactively unchoke peers on connect. rqbit sends Unchoke immediately upon connecting, which makes peers more willing to unchoke us (tit-for-tat).
 
 **Solution**: In `run_peer()`, immediately after sending the handshake and bitfield, send an Unchoke message to the peer. This costs nothing (we're downloading, not seeding rate-limited content) and improves unchoke reciprocity.
 
-### 8. Handle MetadataReject + Timeout (Low risk — prevents metadata stalls)
+### 7. Handle MetadataReject (eng review: simplified — give up on rejecting peer)
 
-**Problem**: `MetadataReject` events are completely ignored (`// Could retry from a different peer; for now, ignore.`). If a peer rejects a metadata piece, that piece is never retried. Also, no timeout on individual metadata piece requests.
+**Problem**: `MetadataReject` events are completely ignored. If a peer rejects metadata, we keep requesting from it wastefully.
 
-**Solution**:
-- On `MetadataReject`: mark piece as not in-flight, request from another peer that has `ut_metadata`
-- Add a 5-second timeout per metadata piece request. If a peer doesn't respond in 5s, retry from another peer.
-- If all peers have been tried and some pieces are still missing, cycle through peers again.
+**Solution (eng review: match rqbit)**: On `MetadataReject`, give up on that peer (stop requesting metadata from it). Other peers continue racing under the full-redundancy model. No retry logic needed — it's handled by the parallel fetch.
 
 ## Files Changed
 
