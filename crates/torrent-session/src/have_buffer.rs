@@ -29,7 +29,7 @@ pub(crate) struct HaveBuffer {
 impl HaveBuffer {
     pub fn new(num_pieces: u32, delay_ms: u64) -> Self {
         Self {
-            pending: HashSet::new(),
+            pending: HashSet::with_capacity(num_pieces as usize / 4),
             enabled: delay_ms > 0,
             num_pieces,
         }

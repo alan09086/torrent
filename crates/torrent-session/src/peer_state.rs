@@ -24,7 +24,7 @@ pub(crate) struct PendingRequests {
 impl PendingRequests {
     pub fn new() -> Self {
         Self {
-            inner: FxHashMap::default(),
+            inner: FxHashMap::with_capacity_and_hasher(32, Default::default()),
         }
     }
 
@@ -164,7 +164,7 @@ impl PeerState {
             download_bytes_window: 0,
             upload_bytes_window: 0,
             pending_requests: PendingRequests::new(),
-            incoming_requests: Vec::new(),
+            incoming_requests: Vec::with_capacity(32),
             ext_handshake: None,
             supports_fast: false,
             allowed_fast: HashSet::new(),
