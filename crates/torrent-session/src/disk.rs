@@ -798,7 +798,6 @@ impl DiskHandle {
     ///
     /// Returns `Ok(())` on success, or an error if the backend is not set
     /// or the underlying write fails.
-    #[allow(dead_code)] // Called from peer task in M110 Task 4
     pub(crate) fn write_block_direct(
         &self,
         piece: u32,

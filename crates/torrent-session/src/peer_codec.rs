@@ -482,8 +482,8 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
                     return Ok(FillStatus::Ready);
                 }
 
-                // oversized message (> ring buffer capacity)
-                if length > BUF_LEN {
+                // oversized message (> ring buffer capacity including 4-byte length prefix)
+                if 4 + length > BUF_LEN {
                     return Ok(FillStatus::Oversized(length));
                 }
 
