@@ -165,10 +165,48 @@ impl ReadBuf {
     }
 
     /// Extract `n` bytes as an owned `Bytes`, consuming them from the ring.
+    ///
+    /// Skips zeroing the intermediate buffer since `consume_into` immediately
+    /// writes all `n` bytes.
+    #[allow(clippy::uninit_vec)]
     pub(crate) fn consume_as_bytes(&mut self, n: usize) -> Bytes {
-        let mut vec = vec![0u8; n];
+        let mut vec = Vec::with_capacity(n);
+        // SAFETY: consume_into writes exactly `n` bytes via copy_from_slice,
+        // fully initializing every element before the Vec is read.
+        unsafe { vec.set_len(n) };
         self.consume_into(&mut vec);
         Bytes::from(vec)
+    }
+
+    /// Peek at a single byte at `offset` from the read cursor without consuming.
+    #[inline]
+    pub(crate) fn peek_byte_at(&self, offset: usize) -> u8 {
+        debug_assert!(offset < self.len, "peek_byte_at: offset={offset} len={}", self.len);
+        self.buf[(self.start + offset) % BUF_LEN]
+    }
+
+    /// Peek at a big-endian `u32` at `offset` from the read cursor without consuming.
+    #[inline]
+    pub(crate) fn peek_u32_be_at(&self, offset: usize) -> u32 {
+        debug_assert!(offset + 4 <= self.len, "peek_u32_be_at: offset={offset} len={}", self.len);
+        let s = self.start + offset;
+        u32::from_be_bytes([
+            self.buf[s % BUF_LEN],
+            self.buf[(s + 1) % BUF_LEN],
+            self.buf[(s + 2) % BUF_LEN],
+            self.buf[(s + 3) % BUF_LEN],
+        ])
+    }
+
+    /// Peek at a big-endian `u16` at `offset` from the read cursor without consuming.
+    #[inline]
+    pub(crate) fn peek_u16_be_at(&self, offset: usize) -> u16 {
+        debug_assert!(offset + 2 <= self.len, "peek_u16_be_at: offset={offset} len={}", self.len);
+        let s = self.start + offset;
+        u16::from_be_bytes([
+            self.buf[s % BUF_LEN],
+            self.buf[(s + 1) % BUF_LEN],
+        ])
     }
 
     /// Peek at the first 4 bytes as a big-endian `u32` without consuming.
@@ -363,12 +401,10 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
                     return self.decode_oversized(length).await.map(Some);
                 }
 
-                // Step 5: we have the full message in the ring.
+                // Step 5: we have the full message in the ring — decode inline.
                 let total = 4 + length;
                 if self.buf.len() >= total {
-                    self.buf.consume(4);
-                    let payload = self.buf.consume_as_bytes(length);
-                    return Message::from_payload(payload).map(Some);
+                    return self.decode_from_ring(length, total);
                 }
             }
 
@@ -393,11 +429,15 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
     /// This allocates a temporary `Vec<u8>` of `length` bytes, drains any
     /// buffered data first, then reads the remainder directly from the
     /// socket.
+    #[allow(clippy::uninit_vec)]
     async fn decode_oversized(&mut self, length: usize) -> Result<Message, torrent_wire::Error> {
         // Consume the 4-byte length prefix from the ring.
         self.buf.consume(4);
 
-        let mut vec = vec![0u8; length];
+        let mut vec = Vec::with_capacity(length);
+        // SAFETY: consume_into and read_exact together write all `length` bytes
+        // via copy_from_slice/read_exact, fully initializing the buffer.
+        unsafe { vec.set_len(length) };
         let mut filled = 0;
 
         // Drain whatever is currently buffered.
@@ -411,6 +451,123 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
         self.read_exact(&mut vec[filled..]).await?;
 
         Message::from_payload(Bytes::from(vec))
+    }
+
+    /// Decode a message whose data is fully present in the ring buffer.
+    ///
+    /// Simple messages (fixed fields only) are parsed inline — zero allocation.
+    /// Data-carrying messages allocate via uninit `Vec` to skip zeroing.
+    fn decode_from_ring(
+        &mut self,
+        length: usize,
+        total: usize,
+    ) -> Result<Option<Message>, torrent_wire::Error> {
+        let id = self.buf.peek_byte_at(4);
+
+        match id {
+            // ── Fixed-field messages: zero allocation ──────────────
+            MSG_CHOKE => {
+                self.buf.consume(total);
+                Ok(Some(Message::Choke))
+            }
+            MSG_UNCHOKE => {
+                self.buf.consume(total);
+                Ok(Some(Message::Unchoke))
+            }
+            MSG_INTERESTED => {
+                self.buf.consume(total);
+                Ok(Some(Message::Interested))
+            }
+            MSG_NOT_INTERESTED => {
+                self.buf.consume(total);
+                Ok(Some(Message::NotInterested))
+            }
+            MSG_HAVE => {
+                ensure_msg_len(length, 5)?;
+                let index = self.buf.peek_u32_be_at(5);
+                self.buf.consume(total);
+                Ok(Some(Message::Have { index }))
+            }
+            MSG_REQUEST => {
+                ensure_msg_len(length, 13)?;
+                let index = self.buf.peek_u32_be_at(5);
+                let begin = self.buf.peek_u32_be_at(9);
+                let len = self.buf.peek_u32_be_at(13);
+                self.buf.consume(total);
+                Ok(Some(Message::Request { index, begin, length: len }))
+            }
+            MSG_CANCEL => {
+                ensure_msg_len(length, 13)?;
+                let index = self.buf.peek_u32_be_at(5);
+                let begin = self.buf.peek_u32_be_at(9);
+                let len = self.buf.peek_u32_be_at(13);
+                self.buf.consume(total);
+                Ok(Some(Message::Cancel { index, begin, length: len }))
+            }
+            MSG_PORT => {
+                ensure_msg_len(length, 3)?;
+                let port = self.buf.peek_u16_be_at(5);
+                self.buf.consume(total);
+                Ok(Some(Message::Port(port)))
+            }
+            MSG_SUGGEST_PIECE => {
+                ensure_msg_len(length, 5)?;
+                let index = self.buf.peek_u32_be_at(5);
+                self.buf.consume(total);
+                Ok(Some(Message::SuggestPiece(index)))
+            }
+            MSG_HAVE_ALL => {
+                self.buf.consume(total);
+                Ok(Some(Message::HaveAll))
+            }
+            MSG_HAVE_NONE => {
+                self.buf.consume(total);
+                Ok(Some(Message::HaveNone))
+            }
+            MSG_REJECT_REQUEST => {
+                ensure_msg_len(length, 13)?;
+                let index = self.buf.peek_u32_be_at(5);
+                let begin = self.buf.peek_u32_be_at(9);
+                let len = self.buf.peek_u32_be_at(13);
+                self.buf.consume(total);
+                Ok(Some(Message::RejectRequest { index, begin, length: len }))
+            }
+            MSG_ALLOWED_FAST => {
+                ensure_msg_len(length, 5)?;
+                let index = self.buf.peek_u32_be_at(5);
+                self.buf.consume(total);
+                Ok(Some(Message::AllowedFast(index)))
+            }
+
+            // ── Data-carrying messages: parse header inline, alloc data only ──
+            MSG_PIECE => {
+                ensure_msg_len(length, 9)?;
+                let index = self.buf.peek_u32_be_at(5);
+                let begin = self.buf.peek_u32_be_at(9);
+                self.buf.consume(13); // 4 prefix + 1 id + 4 index + 4 begin
+                let data = self.buf.consume_as_bytes(length - 9);
+                Ok(Some(Message::Piece { index, begin, data }))
+            }
+            MSG_BITFIELD => {
+                self.buf.consume(5); // 4 prefix + 1 id
+                let data = self.buf.consume_as_bytes(length - 1);
+                Ok(Some(Message::Bitfield(data)))
+            }
+            MSG_EXTENDED => {
+                ensure_msg_len(length, 2)?;
+                let ext_id = self.buf.peek_byte_at(5);
+                self.buf.consume(6); // 4 prefix + 1 id + 1 ext_id
+                let payload = self.buf.consume_as_bytes(length - 2);
+                Ok(Some(Message::Extended { ext_id, payload }))
+            }
+
+            // ── Unknown/rare messages: fallback to from_payload ──
+            _ => {
+                self.buf.consume(4);
+                let payload = self.buf.consume_as_bytes(length);
+                Message::from_payload(payload).map(Some)
+            }
+        }
     }
 
     /// Read exactly `buf.len()` bytes, draining from the ring first and then
@@ -436,6 +593,37 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
 // ---------------------------------------------------------------------------
 // PeerWriter — fixed write buffer
 // ---------------------------------------------------------------------------
+
+// Wire protocol message IDs for inline decoding (BEP 3 + BEP 6).
+const MSG_CHOKE: u8 = 0;
+const MSG_UNCHOKE: u8 = 1;
+const MSG_INTERESTED: u8 = 2;
+const MSG_NOT_INTERESTED: u8 = 3;
+const MSG_HAVE: u8 = 4;
+const MSG_BITFIELD: u8 = 5;
+const MSG_REQUEST: u8 = 6;
+const MSG_PIECE: u8 = 7;
+const MSG_CANCEL: u8 = 8;
+const MSG_PORT: u8 = 9;
+const MSG_SUGGEST_PIECE: u8 = 0x0D;
+const MSG_HAVE_ALL: u8 = 0x0E;
+const MSG_HAVE_NONE: u8 = 0x0F;
+const MSG_REJECT_REQUEST: u8 = 0x10;
+const MSG_ALLOWED_FAST: u8 = 0x11;
+const MSG_EXTENDED: u8 = 20;
+
+/// Validate that a message payload has at least `expected` bytes.
+#[inline]
+fn ensure_msg_len(length: usize, expected: usize) -> Result<(), torrent_wire::Error> {
+    if length < expected {
+        Err(torrent_wire::Error::MessageTooShort {
+            expected,
+            got: length,
+        })
+    } else {
+        Ok(())
+    }
+}
 
 /// Maximum encoded message size: 4 (length) + 1 (id) + 8 (index+begin) +
 /// 16384 (block data) = 16397 bytes.
