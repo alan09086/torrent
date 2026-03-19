@@ -441,6 +441,114 @@ impl<B: AsRef<[u8]>> Message<B> {
     }
 }
 
+impl Message<&[u8]> {
+    /// Convert a borrowed message to an owned `Message<Bytes>`.
+    ///
+    /// Fixed-field variants are zero-cost (no data to copy).
+    /// Data-carrying variants (`Piece`, `Bitfield`, `Extended`) copy their
+    /// slices into fresh `Bytes` allocations.
+    #[must_use]
+    pub fn to_owned_bytes(&self) -> Message<Bytes> {
+        match *self {
+            Message::KeepAlive => Message::KeepAlive,
+            Message::Choke => Message::Choke,
+            Message::Unchoke => Message::Unchoke,
+            Message::Interested => Message::Interested,
+            Message::NotInterested => Message::NotInterested,
+            Message::Have { index } => Message::Have { index },
+            Message::Bitfield(data) => Message::Bitfield(Bytes::copy_from_slice(data)),
+            Message::Request {
+                index,
+                begin,
+                length,
+            } => Message::Request {
+                index,
+                begin,
+                length,
+            },
+            Message::Piece {
+                index,
+                begin,
+                data_0,
+                data_1,
+            } => Message::Piece {
+                index,
+                begin,
+                data_0: Bytes::copy_from_slice(data_0),
+                data_1: Bytes::copy_from_slice(data_1),
+            },
+            Message::Cancel {
+                index,
+                begin,
+                length,
+            } => Message::Cancel {
+                index,
+                begin,
+                length,
+            },
+            Message::Port(port) => Message::Port(port),
+            Message::Extended { ext_id, payload } => Message::Extended {
+                ext_id,
+                payload: Bytes::copy_from_slice(payload),
+            },
+            Message::SuggestPiece(index) => Message::SuggestPiece(index),
+            Message::HaveAll => Message::HaveAll,
+            Message::HaveNone => Message::HaveNone,
+            Message::RejectRequest {
+                index,
+                begin,
+                length,
+            } => Message::RejectRequest {
+                index,
+                begin,
+                length,
+            },
+            Message::AllowedFast(index) => Message::AllowedFast(index),
+            Message::HashRequest {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            } => Message::HashRequest {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            },
+            Message::Hashes {
+                ref pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+                ref hashes,
+            } => Message::Hashes {
+                pieces_root: *pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+                hashes: hashes.clone(),
+            },
+            Message::HashReject {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            } => Message::HashReject {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            },
+        }
+    }
+}
+
 impl Message<Bytes> {
     /// Parse a message from its payload (after the 4-byte length prefix has
     /// been consumed). `payload` is everything after the length prefix.
