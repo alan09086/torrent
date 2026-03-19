@@ -133,6 +133,9 @@ impl TransportListener for TokioListener {
     fn accept(&mut self) -> AcceptFuture<'_> {
         Box::pin(async move {
             let (stream, addr) = self.0.accept().await?;
+            // RST on close instead of FIN → skip TIME_WAIT (see connect_tcp).
+            #[allow(deprecated)]
+            let _ = stream.set_linger(Some(std::time::Duration::ZERO));
             Ok((BoxedStream::new(stream), addr))
         })
     }
@@ -182,6 +185,12 @@ impl NetworkFactory {
             connect_tcp: Box::new(|addr| {
                 Box::pin(async move {
                     let stream = TcpStream::connect(addr).await?;
+                    // RST on close instead of FIN → skip TIME_WAIT.
+                    // Peer connections are ephemeral; TIME_WAIT accumulation
+                    // degrades performance across rapid reconnection cycles.
+                    // Safe: linger(0) sends RST immediately, never blocks.
+                    #[allow(deprecated)]
+                    let _ = stream.set_linger(Some(std::time::Duration::ZERO));
                     Ok(BoxedStream::new(stream))
                 })
             }),
