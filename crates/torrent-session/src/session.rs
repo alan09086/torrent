@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use tracing::{debug, info, warn};
@@ -705,6 +706,18 @@ impl SessionHandle {
             64,
         ));
 
+        // M114: Spawn isolated listener task for TCP/uTP accepts.
+        let info_hash_registry = Arc::new(DashMap::new());
+        let (validated_tx, validated_conn_rx) = mpsc::channel(64);
+        let listener_task = crate::listener::ListenerTask::new(
+            tcp_listener,
+            utp_listener,
+            utp_listener_v6,
+            Arc::clone(&info_hash_registry),
+            validated_tx,
+        );
+        let _listener_task = tokio::spawn(listener_task.run());
+
         let external_ip = settings.external_ip;
         let actor = SessionActor {
             settings,
@@ -719,9 +732,7 @@ impl SessionHandle {
             global_upload_bucket,
             global_download_bucket,
             utp_socket,
-            utp_listener,
             utp_socket_v6,
-            utp_listener_v6,
             nat,
             nat_events_rx,
             ban_manager,
@@ -734,8 +745,10 @@ impl SessionHandle {
             plugins,
             sam_session,
             ssl_manager,
-            tcp_listener,
             ssl_listener,
+            validated_conn_rx,
+            info_hash_registry,
+            _listener_task,
             counters: Arc::clone(&counters),
             factory: Arc::clone(&factory),
             hash_pool,
@@ -1866,9 +1879,7 @@ struct SessionActor {
     global_upload_bucket: SharedBucket,
     global_download_bucket: SharedBucket,
     utp_socket: Option<torrent_utp::UtpSocket>,
-    utp_listener: Option<torrent_utp::UtpListener>,
     utp_socket_v6: Option<torrent_utp::UtpSocket>,
-    utp_listener_v6: Option<torrent_utp::UtpListener>,
     nat: Option<torrent_nat::NatHandle>,
     nat_events_rx: Option<mpsc::Receiver<torrent_nat::NatEvent>>,
     ban_manager: SharedBanManager,
@@ -1888,10 +1899,18 @@ struct SessionActor {
     sam_session: Option<Arc<crate::i2p::SamSession>>,
     /// SSL manager for SSL torrent certificate handling (M42).
     ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
-    /// TCP listener on the main listen port for incoming peer connections.
-    tcp_listener: Option<Box<dyn crate::transport::TransportListener>>,
     /// SSL/TLS TCP listener (separate port from the main listener) (M42).
     ssl_listener: Option<Box<dyn crate::transport::TransportListener>>,
+    /// Channel receiving pre-validated inbound connections from the ListenerTask (M114).
+    validated_conn_rx: mpsc::Receiver<crate::listener::IdentifiedConnection>,
+    /// Registry of active info hashes shared with the ListenerTask (M114).
+    /// INVARIANT: Must be updated whenever torrents are added/removed.
+    /// If a new torrent-add path is added without updating this registry,
+    /// inbound connections for that torrent will be silently rejected.
+    info_hash_registry: Arc<DashMap<Id20, ()>>,
+    /// Handle to keep the listener task alive; dropped on session shutdown (M114).
+    #[allow(dead_code)]
+    _listener_task: tokio::task::JoinHandle<()>,
     /// Shared atomic session counters (M50).
     counters: Arc<crate::stats::SessionCounters>,
     /// Network transport factory for TCP operations (M51).
@@ -2432,29 +2451,9 @@ impl SessionActor {
                         let _ = entry.handle.add_peers(vec![peer_addr], crate::peer_state::PeerSource::Lsd).await;
                     }
                 }
-                // TCP inbound connections (main listen port)
-                result = async {
-                    if let Some(ref mut listener) = self.tcp_listener {
-                        listener.accept().await
-                    } else {
-                        std::future::pending().await
-                    }
-                } => {
-                    if let Ok((stream, addr)) = result {
-                        self.handle_tcp_inbound(stream, addr);
-                    }
-                }
-                // uTP inbound connections (IPv4)
-                result = accept_utp(&mut self.utp_listener) => {
-                    if let Ok((stream, addr)) = result {
-                        self.handle_utp_inbound(stream, addr);
-                    }
-                }
-                // uTP inbound connections (IPv6)
-                result = accept_utp(&mut self.utp_listener_v6) => {
-                    if let Ok((stream, addr)) = result {
-                        self.handle_utp_inbound(stream, addr);
-                    }
+                // Pre-validated inbound connections from ListenerTask (M114)
+                Some(conn) = self.validated_conn_rx.recv() => {
+                    self.handle_identified_inbound(conn);
                 }
                 // SSL inbound connections (M42)
                 result = async {
@@ -2681,6 +2680,7 @@ impl SessionActor {
                 prev_uploaded: 0,
             },
         );
+        self.info_hash_registry.insert(info_hash, ());
 
         // Assign queue position for auto-managed torrents
         let pos = self.next_queue_position();
@@ -2752,6 +2752,7 @@ impl SessionActor {
                 prev_uploaded: 0,
             },
         );
+        self.info_hash_registry.insert(info_hash, ());
 
         // Assign queue position for auto-managed torrents
         let pos = self.next_queue_position();
@@ -2784,6 +2785,7 @@ impl SessionActor {
             .torrents
             .remove(&info_hash)
             .ok_or(crate::Error::TorrentNotFound(info_hash))?;
+        self.info_hash_registry.remove(&info_hash);
         let was_auto_managed = entry.auto_managed;
         let removed_position = entry.queue_position;
         entry.handle.shutdown().await?;
@@ -3259,56 +3261,18 @@ impl SessionActor {
         }
     }
 
-    /// Route an inbound uTP connection to the correct torrent.
-    fn handle_utp_inbound(&self, stream: torrent_utp::UtpStream, addr: std::net::SocketAddr) {
-        self.route_inbound_stream(stream, addr, "uTP");
-    }
-
-    /// Handle an incoming TCP connection from the main listen port.
-    fn handle_tcp_inbound(
-        &self,
-        stream: crate::transport::BoxedStream,
-        addr: std::net::SocketAddr,
-    ) {
-        self.route_inbound_stream(stream, addr, "TCP");
-    }
-
-    /// Route an inbound stream (TCP or uTP) to the appropriate torrent by reading the
-    /// BitTorrent handshake preamble.
-    fn route_inbound_stream<S>(
-        &self,
-        stream: S,
-        addr: std::net::SocketAddr,
-        transport: &'static str,
-    ) where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    {
-        // Clone torrent handles so the routing task can look up by info_hash.
-        let torrent_handles: HashMap<Id20, TorrentHandle> = self
-            .torrents
-            .iter()
-            .map(|(hash, entry)| (*hash, entry.handle.clone()))
-            .collect();
-
-        tokio::spawn(async move {
-            match crate::utp_routing::identify_plaintext_connection(stream).await {
-                Ok(Some((info_hash, prefixed_stream))) => {
-                    if let Some(handle) = torrent_handles.get(&info_hash) {
-                        debug!(%addr, %info_hash, "routing inbound {transport} peer to torrent");
-                        let boxed = crate::transport::BoxedStream::new(prefixed_stream);
-                        let _ = handle.send_incoming_peer(boxed, addr).await;
-                    } else {
-                        debug!(%addr, %info_hash, "inbound {transport} peer for unknown torrent, dropping");
-                    }
-                }
-                Ok(None) => {
-                    debug!(%addr, "inbound {transport} peer is encrypted (MSE), dropping (deferred)");
-                }
-                Err(e) => {
-                    debug!(%addr, error = %e, "failed to identify inbound {transport} peer");
-                }
-            }
-        });
+    /// Handle a pre-validated inbound connection from the ListenerTask (M114).
+    fn handle_identified_inbound(&self, conn: crate::listener::IdentifiedConnection) {
+        if let Some(entry) = self.torrents.get(&conn.info_hash) {
+            debug!(%conn.addr, %conn.info_hash, "routing validated inbound peer");
+            let handle = entry.handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.send_incoming_peer(conn.stream, conn.addr).await;
+            });
+        } else {
+            // Race: torrent removed between validation and receipt.
+            debug!(%conn.addr, %conn.info_hash, "validated peer for removed torrent, dropping");
+        }
     }
 
     /// Handle an incoming SSL/TLS connection (M42).
@@ -3559,17 +3523,6 @@ impl SessionActor {
             debug!(error = %e, "uTP v6 socket shutdown error");
         }
         self.disk_manager.shutdown().await;
-    }
-}
-
-/// Helper to accept a connection from an optional uTP listener.
-/// Returns `pending` if no listener is available, so the `select!` branch is skipped.
-async fn accept_utp(
-    listener: &mut Option<torrent_utp::UtpListener>,
-) -> std::io::Result<(torrent_utp::UtpStream, std::net::SocketAddr)> {
-    match listener {
-        Some(l) => l.accept().await.map_err(std::io::Error::other),
-        None => std::future::pending().await,
     }
 }
 

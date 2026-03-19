@@ -25,6 +25,8 @@ pub mod hash_pool;
 pub(crate) mod have_buffer;
 pub mod i2p;
 pub(crate) mod ip_filter;
+#[allow(dead_code)] // Wired in during Task 2 (session.rs integration).
+pub(crate) mod listener;
 pub(crate) mod lsd;
 pub(crate) mod lt_trackers;
 pub(crate) mod peer;
