@@ -440,6 +440,39 @@ impl<B: AsRef<[u8]>> Message<B> {
         }
     }
 
+    /// Return the exact encoded wire length in bytes, including the 4-byte
+    /// length prefix.
+    ///
+    /// This is a pure computation — no allocation, no encoding.  Use it to
+    /// check whether a message fits in a fixed-size buffer before calling
+    /// [`encode_to_slice`](Self::encode_to_slice).
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        match self {
+            Message::KeepAlive => 4,
+            Message::Choke
+            | Message::Unchoke
+            | Message::Interested
+            | Message::NotInterested
+            | Message::HaveAll
+            | Message::HaveNone => 5,
+            Message::Have { .. }
+            | Message::SuggestPiece(_)
+            | Message::AllowedFast(_) => 9,
+            Message::Port(_) => 7,
+            Message::Request { .. }
+            | Message::Cancel { .. }
+            | Message::RejectRequest { .. } => 17,
+            Message::Bitfield(bits) => 5 + bits.as_ref().len(),
+            Message::Piece {
+                data_0, data_1, ..
+            } => 13 + data_0.as_ref().len() + data_1.as_ref().len(),
+            Message::Extended { payload, .. } => 6 + payload.as_ref().len(),
+            Message::HashRequest { .. } | Message::HashReject { .. } => 53,
+            Message::Hashes { hashes, .. } => 53 + hashes.len() * 32,
+        }
+    }
+
     /// Encode this message (with length prefix) into a raw byte slice.
     ///
     /// Returns the number of bytes written. The caller must ensure `dst` is
@@ -1542,5 +1575,26 @@ mod tests {
                 "encode_to_slice vs encode_into mismatch for {msg:?}"
             );
         }
+    }
+
+    #[test]
+    fn wire_len_matches_encoded_size() {
+        for msg in all_message_variants() {
+            let expected = msg.to_bytes().len();
+            assert_eq!(
+                msg.wire_len(),
+                expected,
+                "wire_len mismatch for {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_len_large_bitfield() {
+        // Bitfield for a torrent with >131K pieces (16,384 bytes of bitfield data).
+        let bits = vec![0xFFu8; 20_000];
+        let msg = Message::Bitfield(Bytes::from(bits.clone()));
+        assert_eq!(msg.wire_len(), 5 + bits.len());
+        assert_eq!(msg.wire_len(), msg.to_bytes().len());
     }
 }

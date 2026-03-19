@@ -5,9 +5,7 @@
 
 use std::io::IoSliceMut;
 
-use bytes::Bytes;
-#[cfg(test)]
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use torrent_wire::Message;
 
@@ -987,12 +985,26 @@ impl<W: AsyncWrite + Unpin> PeerWriter<W> {
 
     /// Encode and send a message.
     ///
+    /// Most messages fit in the pre-allocated fixed buffer (up to
+    /// `MAX_MSG_LEN` = 16 397 bytes).  Oversized messages — e.g. Bitfield
+    /// for torrents with >131 K pieces — fall back to a one-shot `BytesMut`
+    /// allocation.
+    ///
     /// # Errors
     ///
     /// Returns an I/O error if the write or flush fails.
     pub(crate) async fn send(&mut self, msg: &Message) -> std::io::Result<()> {
-        let len = msg.encode_to_slice(&mut *self.buf);
-        self.writer.write_all(&self.buf[..len]).await?;
+        if msg.wire_len() <= MAX_MSG_LEN {
+            // Fast path: encode into the pre-allocated fixed buffer.
+            let len = msg.encode_to_slice(&mut *self.buf);
+            self.writer.write_all(&self.buf[..len]).await?;
+        } else {
+            // Slow path: oversized messages (large Bitfield / Extended).
+            let wire = msg.wire_len();
+            let mut tmp = BytesMut::with_capacity(wire);
+            msg.encode_into(&mut tmp);
+            self.writer.write_all(&tmp).await?;
+        }
         self.writer.flush().await?;
         Ok(())
     }
@@ -1877,5 +1889,43 @@ mod tests {
         assert_eq!(b.len(), 4);
         // b should be the first 4 of the new 0xB0 series.
         assert_eq!(b, &[0xB0, 0xB1, 0xB2, 0xB3]);
+    }
+
+    // -----------------------------------------------------------------------
+    // PeerWriter oversized message test (1)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn write_buffer_oversized_bitfield() {
+        // Bitfield larger than MAX_MSG_LEN (16,397 bytes). This exercises the
+        // slow path in PeerWriter::send() — a dynamic BytesMut allocation
+        // instead of the fixed buffer. Without the slow path this would panic.
+        let bitfield_len = 20_000; // > MAX_MSG_LEN - 5
+        let bitfield_data = vec![0xCC; bitfield_len];
+        let msg = Message::Bitfield(Bytes::from(bitfield_data.clone()));
+        let expected = encode_message(&msg);
+
+        let (client, mut server) = duplex(256 * 1024);
+        let mut writer = PeerWriter::new(client);
+        writer.send(&msg).await.expect("send oversized bitfield");
+        drop(writer);
+
+        let mut received = Vec::new();
+        server
+            .read_to_end(&mut received)
+            .await
+            .expect("read failed");
+        assert_eq!(received, expected);
+        assert_eq!(received.len(), 5 + bitfield_len);
+
+        // Verify round-trip decode.
+        let decoded =
+            Message::from_payload(Bytes::from(received[4..].to_vec())).expect("decode failed");
+        if let Message::Bitfield(data) = decoded {
+            assert_eq!(data.len(), bitfield_len);
+            assert!(data.iter().all(|&b| b == 0xCC));
+        } else {
+            panic!("expected Bitfield, got {decoded:?}");
+        }
     }
 }
