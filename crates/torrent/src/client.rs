@@ -914,7 +914,7 @@ mod tests {
         let config = ClientBuilder::new().into_settings();
         assert!(!config.default_super_seeding);
         assert!(config.upload_only_announce);
-        assert_eq!(config.have_send_delay_ms, 0);
+        assert_eq!(config.have_send_delay_ms, 100);
 
         // Explicitly enabled
         let config = ClientBuilder::new()
