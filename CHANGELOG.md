@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.108.0 | M108 | Full PEX + page fault reduction — bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection success rate logging |
 | 0.107.0 | M107 | Aggressive peer pipeline — semaphore-paced `peer_adder_task` replaces timer-based admission (~570 lines deleted), TCP+uTP parallel race, parallel metadata fetch with full redundancy, adaptive DHT re-query, max_peers 200, unconditional Unchoke |
 | 0.106.0 | M106 | Peer scoring system — composite score from bandwidth/RTT/reliability/availability, phase-aware turnover (Discovery 30s / Steady 120s), score-based admission, hybrid snub eviction, disconnect_peer DRY helper |
 | 0.105.0 | M105 | DHT reliability & simplification — routing table node cap (512), two-phase ping (5s→60s), background DNS backoff, unified IterativeLookup\<C\> (~90 lines removed), JSON routing table persistence |
@@ -61,6 +62,17 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.108.0] — 2026-03-18
+
+### Added
+- **Full bidirectional PEX (BEP 11 send-side)** — per-peer `pex_send_task` spawned on ExtHandshake when ut_pex is supported. 10s initial delay, 60s interval, max 50 added peers per message. Privacy filtering (no private/local IP leakage to public peers), I2P mixed-mode filtering, dropped peer tracking via incremental peer view. `PeerCommand::SendPex` wired through peer task to Extended message encoding. `live_outgoing_peers` shared snapshot (`Arc<RwLock<HashSet>>`) updated at all 5 peer mutation sites.
+- Connection success rate logging — `connect_attempts`/`connect_failures` counters on TorrentActor with 30s periodic `info!` summary for variance diagnosis.
+- 9 new tests (8 PEX unit + 1 facade fix)
+
+### Changed
+- `have_send_delay_ms` default changed from 0 (immediate) to 100ms — enables existing HaveBuffer batching mechanism, reducing ~580K individual Have sends to ~29 flushes per download. **Highest single impact on page faults.**
+- Pre-allocated hot-path data structures: `PendingRequests` (capacity 32), `incoming_requests` (capacity 32), `HaveBuffer.pending` (capacity num_pieces/4) — reduces Vec/HashMap realloc page faults.
 
 ## [0.107.0] — 2026-03-18
 
