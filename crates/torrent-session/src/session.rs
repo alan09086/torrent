@@ -52,6 +52,13 @@ struct TorrentEntry {
     prev_uploaded: u64,
 }
 
+impl TorrentEntry {
+    /// Returns `true` if this torrent has the private flag set (BEP 27).
+    fn is_private(&self) -> bool {
+        self.meta.as_ref().is_some_and(|m| m.info.private == Some(1))
+    }
+}
+
 /// Commands sent from SessionHandle to SessionActor.
 enum SessionCommand {
     AddTorrent {
@@ -2287,13 +2294,20 @@ impl SessionActor {
                         }
                         Some(SessionCommand::ForceLsdAnnounce { info_hash, reply }) => {
                             // LSD is session-level: verify the torrent exists, then announce directly.
-                            let result = if self.torrents.contains_key(&info_hash) {
-                                if let Some(ref lsd) = self.lsd {
-                                    lsd.announce(vec![info_hash]).await;
+                            let result = match self.torrents.get(&info_hash) {
+                                Some(entry) if entry.is_private() => {
+                                    // BEP 27: private torrents must not use LSD
+                                    Err(crate::Error::InvalidSettings(
+                                        "LSD disabled for private torrent".into(),
+                                    ))
                                 }
-                                Ok(())
-                            } else {
-                                Err(crate::Error::TorrentNotFound(info_hash))
+                                Some(_) => {
+                                    if let Some(ref lsd) = self.lsd {
+                                        lsd.announce(vec![info_hash]).await;
+                                    }
+                                    Ok(())
+                                }
+                                None => Err(crate::Error::TorrentNotFound(info_hash)),
                             };
                             let _ = reply.send(result);
                         }
@@ -2400,6 +2414,7 @@ impl SessionActor {
                 } => {
                     if let Some((info_hash, peer_addr)) = result
                         && let Some(entry) = self.torrents.get(&info_hash)
+                        && !entry.is_private()  // BEP 27: reject LSD peers for private torrents
                     {
                         let _ = entry.handle.add_peers(vec![peer_addr], crate::peer_state::PeerSource::Lsd).await;
                     }
@@ -2659,7 +2674,11 @@ impl SessionActor {
             &self.alert_mask,
             AlertKind::TorrentAdded { info_hash, name },
         );
-        if let Some(ref lsd) = self.lsd {
+        // BEP 27: private torrents must not use LSD
+        let is_private = self.torrents.get(&info_hash).is_some_and(|e| e.is_private());
+        if let Some(ref lsd) = self.lsd
+            && !is_private
+        {
             lsd.announce(vec![info_hash]).await;
         }
         Ok(info_hash)
@@ -2729,6 +2748,9 @@ impl SessionActor {
                 name: display_name,
             },
         );
+        // BEP 27: magnet metadata not available yet — we allow this one-time LAN
+        // announce. Once metadata resolves, all subsequent LSD ops are gated by
+        // is_private() checks in ForceLsdAnnounce and lsd_peers_rx handlers.
         if let Some(ref lsd) = self.lsd {
             lsd.announce(vec![info_hash]).await;
         }
@@ -5386,6 +5408,100 @@ mod tests {
             }
             other => panic!("expected DhtPutComplete, got {other:?}"),
         }
+
+        session.shutdown().await.unwrap();
+    }
+
+    // ---- BEP 27: Private torrent LSD tests ----
+
+    /// Creates a private torrent (.torrent bytes with private=1 in the info dict).
+    fn make_private_torrent(data: &[u8], piece_length: u64) -> TorrentMetaV1 {
+        use serde::Serialize;
+
+        let mut pieces = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + piece_length as usize).min(data.len());
+            let hash = torrent_core::sha1(&data[offset..end]);
+            pieces.extend_from_slice(hash.as_bytes());
+            offset = end;
+        }
+
+        #[derive(Serialize)]
+        struct Info<'a> {
+            length: u64,
+            name: &'a str,
+            #[serde(rename = "piece length")]
+            piece_length: u64,
+            #[serde(with = "serde_bytes")]
+            pieces: &'a [u8],
+            private: i64,
+        }
+
+        #[derive(Serialize)]
+        struct Torrent<'a> {
+            info: Info<'a>,
+        }
+
+        let t = Torrent {
+            info: Info {
+                length: data.len() as u64,
+                name: "private-test",
+                piece_length,
+                pieces: &pieces,
+                private: 1,
+            },
+        };
+
+        let bytes = torrent_bencode::to_bytes(&t).unwrap();
+        torrent_from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn is_private_true_via_parsed_meta() {
+        // Verify that a torrent parsed from private .torrent bytes has private == Some(1)
+        let data = vec![0xAB; 16384];
+        let meta = make_private_torrent(&data, 16384);
+        assert_eq!(meta.info.private, Some(1), "private field should be Some(1)");
+    }
+
+    #[test]
+    fn is_private_false_for_public_torrent() {
+        // Verify that a regular torrent has private == None
+        let data = vec![0xAB; 16384];
+        let meta = make_test_torrent(&data, 16384);
+        assert_eq!(meta.info.private, None, "public torrent should have no private flag");
+    }
+
+    #[test]
+    fn private_torrent_config_disables_lsd() {
+        // Verify that TorrentConfig::default() has LSD enabled (so disable is meaningful)
+        let config = TorrentConfig::default();
+        assert!(config.enable_lsd, "default TorrentConfig should have LSD enabled");
+    }
+
+    #[tokio::test]
+    async fn force_lsd_announce_private_torrent_returns_error() {
+        let session = SessionHandle::start(test_settings()).await.unwrap();
+        let data = vec![0xAB; 16384];
+        let meta = make_private_torrent(&data, 16384);
+        let storage = make_storage(&data, 16384);
+        let info_hash = session
+            .add_torrent(meta.into(), Some(storage))
+            .await
+            .unwrap();
+
+        // BEP 27: force_lsd_announce on a private torrent must return an error
+        let result = session.force_lsd_announce(info_hash).await;
+        assert!(
+            result.is_err(),
+            "force_lsd_announce on private torrent should return error, got: {result:?}"
+        );
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("InvalidSettings") || err_str.contains("LSD disabled"),
+            "expected InvalidSettings error, got: {err_str}"
+        );
 
         session.shutdown().await.unwrap();
     }
