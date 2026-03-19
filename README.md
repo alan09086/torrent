@@ -2,9 +2,9 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1647-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1648-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.110.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.112.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.112.0 | BEP 55 holepunch initiation + cold-start optimization -- holepunch wired on NAT connect failures (sync buffer pattern, 120s cooldown), DHT re-query delay 60s→5s for magnets, adaptive cap during metadata fetch | +8 tests (1648 total) |
 | 0.111.0 | BEP compliance sweep -- BEP 27 private torrents now disable LSD (4 session guard sites), BEP 40 dead code removed, BEP 51 client-side `sample_infohashes` wired with session timer | -7 tests net (1640 total), ~200 lines net deleted |
 | 0.110.0 | Zero-copy piece pipeline -- `Message<B>` generic over buffer type, three-phase borrowed decode (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks | +16 tests (1647 total), target: page faults <15K, heap allocs <5K, ≥65 MB/s |
 | 0.109.0 | Ring buffer codec -- fixed 32 KiB ReadBuf replaces FramedRead, pre-allocated PeerWriter replaces FramedWrite, zero-copy DoubleBufHelper for wrap-boundary parsing | +21 tests, eliminates page faults from BytesMut growth/shrink |

@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.112.0 | M112 | BEP 55 holepunch initiation + cold-start optimization — holepunch wired on NAT connect failures (sync buffer, 120s cooldown, 256-entry cap), DHT re-query 60s→5s for magnets, adaptive cap during metadata fetch, counter reset on state transition |
 | 0.111.0 | M111 | BEP compliance sweep — BEP 27 private torrents now disable LSD (4 session-level guards + config), BEP 40 dead code removed (superseded by peer scoring M106), BEP 51 client-side `sample_infohashes` wired with session timer |
 | 0.110.0 | M110 | Zero-copy piece pipeline — `Message<B>` generic over buffer type, borrowed decode from ring buffer (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks, bypasses BufferPool entirely |
 | 0.109.0 | M109 | Ring buffer codec — fixed 32 KiB `ReadBuf` replaces `FramedRead`, pre-allocated `PeerWriter` replaces `FramedWrite`, zero-copy `DoubleBufHelper` for wrap-boundary parsing, eliminates page faults from `BytesMut` growth/shrink cycles |
