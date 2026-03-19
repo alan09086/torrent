@@ -439,6 +439,188 @@ impl<B: AsRef<[u8]>> Message<B> {
             }
         }
     }
+
+    /// Encode this message (with length prefix) into a raw byte slice.
+    ///
+    /// Returns the number of bytes written. The caller must ensure `dst` is
+    /// large enough to hold the encoded message (see [`wire_len`] for sizing).
+    ///
+    /// Uses `std::io::Cursor<&mut [u8]>` + `std::io::Write` instead of
+    /// `BufMut`, producing identical bytes to [`encode_into`](Self::encode_into).
+    pub fn encode_to_slice(&self, dst: &mut [u8]) -> usize {
+        use std::io::{Cursor, Write};
+
+        let mut cursor = Cursor::new(dst);
+
+        match self {
+            Message::KeepAlive => {
+                cursor.write_all(&0u32.to_be_bytes()).unwrap();
+            }
+            Message::Choke => {
+                cursor.write_all(&1u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_CHOKE]).unwrap();
+            }
+            Message::Unchoke => {
+                cursor.write_all(&1u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_UNCHOKE]).unwrap();
+            }
+            Message::Interested => {
+                cursor.write_all(&1u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_INTERESTED]).unwrap();
+            }
+            Message::NotInterested => {
+                cursor.write_all(&1u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_NOT_INTERESTED]).unwrap();
+            }
+            Message::Have { index } => {
+                cursor.write_all(&5u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_HAVE]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+            }
+            Message::Bitfield(bits) => {
+                let bits = bits.as_ref();
+                cursor
+                    .write_all(&(1 + bits.len() as u32).to_be_bytes())
+                    .unwrap();
+                cursor.write_all(&[ID_BITFIELD]).unwrap();
+                cursor.write_all(bits).unwrap();
+            }
+            Message::Request {
+                index,
+                begin,
+                length,
+            } => {
+                cursor.write_all(&13u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_REQUEST]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+                cursor.write_all(&begin.to_be_bytes()).unwrap();
+                cursor.write_all(&length.to_be_bytes()).unwrap();
+            }
+            Message::Piece {
+                index,
+                begin,
+                data_0,
+                data_1,
+            } => {
+                let d0 = data_0.as_ref();
+                let d1 = data_1.as_ref();
+                let data_len = d0.len() + d1.len();
+                cursor
+                    .write_all(&(9 + data_len as u32).to_be_bytes())
+                    .unwrap();
+                cursor.write_all(&[ID_PIECE]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+                cursor.write_all(&begin.to_be_bytes()).unwrap();
+                cursor.write_all(d0).unwrap();
+                cursor.write_all(d1).unwrap();
+            }
+            Message::Cancel {
+                index,
+                begin,
+                length,
+            } => {
+                cursor.write_all(&13u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_CANCEL]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+                cursor.write_all(&begin.to_be_bytes()).unwrap();
+                cursor.write_all(&length.to_be_bytes()).unwrap();
+            }
+            Message::Port(port) => {
+                cursor.write_all(&3u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_PORT]).unwrap();
+                cursor.write_all(&port.to_be_bytes()).unwrap();
+            }
+            Message::Extended { ext_id, payload } => {
+                let payload = payload.as_ref();
+                cursor
+                    .write_all(&(2 + payload.len() as u32).to_be_bytes())
+                    .unwrap();
+                cursor.write_all(&[ID_EXTENDED]).unwrap();
+                cursor.write_all(&[*ext_id]).unwrap();
+                cursor.write_all(payload).unwrap();
+            }
+            Message::SuggestPiece(index) => {
+                cursor.write_all(&5u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_SUGGEST_PIECE]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+            }
+            Message::HaveAll => {
+                cursor.write_all(&1u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_HAVE_ALL]).unwrap();
+            }
+            Message::HaveNone => {
+                cursor.write_all(&1u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_HAVE_NONE]).unwrap();
+            }
+            Message::RejectRequest {
+                index,
+                begin,
+                length,
+            } => {
+                cursor.write_all(&13u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_REJECT_REQUEST]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+                cursor.write_all(&begin.to_be_bytes()).unwrap();
+                cursor.write_all(&length.to_be_bytes()).unwrap();
+            }
+            Message::AllowedFast(index) => {
+                cursor.write_all(&5u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[ID_ALLOWED_FAST]).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+            }
+            Message::HashRequest {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            }
+            | Message::HashReject {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+            } => {
+                let id = match self {
+                    Message::HashRequest { .. } => ID_HASH_REQUEST,
+                    _ => ID_HASH_REJECT,
+                };
+                cursor.write_all(&49u32.to_be_bytes()).unwrap();
+                cursor.write_all(&[id]).unwrap();
+                cursor.write_all(&pieces_root.0).unwrap();
+                cursor.write_all(&base.to_be_bytes()).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+                cursor.write_all(&count.to_be_bytes()).unwrap();
+                cursor.write_all(&proof_layers.to_be_bytes()).unwrap();
+            }
+            Message::Hashes {
+                pieces_root,
+                base,
+                index,
+                count,
+                proof_layers,
+                hashes,
+            } => {
+                let hash_bytes = hashes.len() * 32;
+                let payload_len = 1 + 32 + 16 + hash_bytes;
+                cursor
+                    .write_all(&(payload_len as u32).to_be_bytes())
+                    .unwrap();
+                cursor.write_all(&[ID_HASHES]).unwrap();
+                cursor.write_all(&pieces_root.0).unwrap();
+                cursor.write_all(&base.to_be_bytes()).unwrap();
+                cursor.write_all(&index.to_be_bytes()).unwrap();
+                cursor.write_all(&count.to_be_bytes()).unwrap();
+                cursor.write_all(&proof_layers.to_be_bytes()).unwrap();
+                for h in hashes {
+                    cursor.write_all(&h.0).unwrap();
+                }
+            }
+        }
+
+        cursor.position() as usize
+    }
 }
 
 impl Message<&[u8]> {
@@ -1232,5 +1414,131 @@ mod tests {
             payload: Bytes::from_static(b"payload"),
         };
         assert_eq!(ext_borrowed.to_bytes(), ext_owned.to_bytes());
+    }
+
+    // ── M115: encode_to_slice tests ──
+
+    /// Build the complete set of message variants used for encode_to_slice tests.
+    fn all_message_variants() -> Vec<Message> {
+        vec![
+            Message::KeepAlive,
+            Message::Choke,
+            Message::Unchoke,
+            Message::Interested,
+            Message::NotInterested,
+            Message::Have { index: 42 },
+            Message::Bitfield(Bytes::from_static(b"\xff\x00")),
+            Message::Request {
+                index: 1,
+                begin: 0,
+                length: 16384,
+            },
+            Message::Piece {
+                index: 0,
+                begin: 0,
+                data_0: Bytes::from_static(b"block data here"),
+                data_1: Bytes::new(),
+            },
+            Message::Piece {
+                index: 3,
+                begin: 0,
+                data_0: Bytes::from_static(b"first half"),
+                data_1: Bytes::from_static(b" second half"),
+            },
+            Message::Cancel {
+                index: 1,
+                begin: 0,
+                length: 16384,
+            },
+            Message::Port(6881),
+            Message::Extended {
+                ext_id: 0,
+                payload: Bytes::from_static(b"ext payload"),
+            },
+            Message::SuggestPiece(7),
+            Message::HaveAll,
+            Message::HaveNone,
+            Message::RejectRequest {
+                index: 1,
+                begin: 0,
+                length: 16384,
+            },
+            Message::AllowedFast(5),
+            Message::HashRequest {
+                pieces_root: torrent_core::Id32::ZERO,
+                base: 7,
+                index: 0,
+                count: 512,
+                proof_layers: 3,
+            },
+            Message::HashReject {
+                pieces_root: torrent_core::Id32::ZERO,
+                base: 7,
+                index: 0,
+                count: 512,
+                proof_layers: 3,
+            },
+            Message::Hashes {
+                pieces_root: torrent_core::Id32::ZERO,
+                base: 0,
+                index: 0,
+                count: 2,
+                proof_layers: 1,
+                hashes: vec![
+                    torrent_core::sha256(b"block1"),
+                    torrent_core::sha256(b"block2"),
+                    torrent_core::sha256(b"uncle"),
+                ],
+            },
+        ]
+    }
+
+    #[test]
+    fn encode_to_slice_roundtrip() {
+        for msg in all_message_variants() {
+            let mut buf = [0u8; 4096];
+            let n = msg.encode_to_slice(&mut buf);
+            // Skip the 4-byte length prefix for parsing
+            let parsed = Message::from_payload(Bytes::copy_from_slice(&buf[4..n])).unwrap();
+            // For Piece with split data, wire format concatenates into data_0
+            match &msg {
+                Message::Piece {
+                    index,
+                    begin,
+                    data_0,
+                    data_1,
+                } if !data_1.is_empty() => {
+                    let mut combined = Vec::from(data_0.as_ref());
+                    combined.extend_from_slice(data_1.as_ref());
+                    let expected = Message::Piece {
+                        index: *index,
+                        begin: *begin,
+                        data_0: Bytes::from(combined),
+                        data_1: Bytes::new(),
+                    };
+                    assert_eq!(parsed, expected, "roundtrip mismatch for split Piece");
+                }
+                _ => {
+                    assert_eq!(msg, parsed, "roundtrip mismatch for {msg:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encode_to_slice_matches_encode_into() {
+        for msg in all_message_variants() {
+            let mut slice_buf = [0u8; 4096];
+            let n = msg.encode_to_slice(&mut slice_buf);
+
+            let mut bytes_buf = BytesMut::new();
+            msg.encode_into(&mut bytes_buf);
+
+            assert_eq!(
+                &slice_buf[..n],
+                &bytes_buf[..],
+                "encode_to_slice vs encode_into mismatch for {msg:?}"
+            );
+        }
     }
 }
