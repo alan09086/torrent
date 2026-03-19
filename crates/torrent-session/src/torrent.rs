@@ -482,6 +482,8 @@ impl TorrentHandle {
             scorer,
             dht_requery_responding_nodes: 0,
             adder_clear_seen_tx: None,
+            connect_attempts: 0,
+            connect_failures: 0,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -795,6 +797,8 @@ impl TorrentHandle {
             scorer,
             dht_requery_responding_nodes: 0,
             adder_clear_seen_tx: None,
+            connect_attempts: 0,
+            connect_failures: 0,
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1627,6 +1631,10 @@ struct TorrentActor {
     dht_requery_responding_nodes: usize,
     /// M107: Channel to signal the adder task to clear its seen set.
     adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
+    /// M108: Total outbound connection attempts dispatched to peer adder.
+    connect_attempts: u64,
+    /// M108: Total connection failures (peers that disconnected).
+    connect_failures: u64,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -1819,6 +1827,8 @@ impl TorrentActor {
         let mut end_game_tick_interval = tokio::time::interval(Duration::from_millis(200));
         end_game_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut diag_interval = tokio::time::interval(Duration::from_secs(5));
+        // M108: 30s connection success rate summary for variance diagnosis.
+        let mut conn_stats_interval = tokio::time::interval(Duration::from_secs(30));
         // M107: 5s metadata piece timeout — only meaningful in FetchingMetadata state
         let mut metadata_timeout_interval = tokio::time::interval(Duration::from_secs(5));
         // M103: 50ms debounce for reactive snapshot (was 500ms fixed interval)
@@ -1836,6 +1846,7 @@ impl TorrentActor {
         pipeline_tick_interval.tick().await;
         end_game_tick_interval.tick().await;
         diag_interval.tick().await;
+        conn_stats_interval.tick().await;
         metadata_timeout_interval.tick().await;
         snapshot_rebuild_interval.tick().await;
 
@@ -2500,6 +2511,20 @@ impl TorrentActor {
                                    bf_ones = p.bitfield.count_ones(),
                                    "peer state");
                         }
+                    }
+                }
+                // M108: 30s connection success rate summary for variance diagnosis
+                _ = conn_stats_interval.tick() => {
+                    if self.connect_attempts > 0 {
+                        let succeeded = self.connect_attempts.saturating_sub(self.connect_failures);
+                        let success_pct = (succeeded as f64 / self.connect_attempts as f64 * 100.0) as u32;
+                        info!(
+                            connected = self.peers.len(),
+                            attempted = self.connect_attempts,
+                            failed = self.connect_failures,
+                            success_rate = %format!("{success_pct}%"),
+                            "connection stats"
+                        );
                     }
                 }
                 // M103: Reactive snapshot rebuild with 50ms debounce (was 500ms fixed)
@@ -3767,6 +3792,8 @@ impl TorrentActor {
             }
             PeerEvent::Disconnected { peer_addr, reason } => {
                 debug!(%peer_addr, ?reason, "peer disconnected");
+                // M108: Count every disconnection for connection success rate diagnostics.
+                self.connect_failures = self.connect_failures.saturating_add(1);
                 let reason_str = reason.as_deref().unwrap_or("peer disconnected");
                 // M106: Use extracted disconnect helper (handles super_seed,
                 // slab, availability, shutdown, alert, suggested_to_peers).
@@ -6505,6 +6532,9 @@ impl TorrentActor {
     /// M107: Handle a connect request from the peer adder task.
     /// The adder has already validated and acquired a semaphore permit.
     fn handle_adder_connect(&mut self, connect_peer: ConnectPeer) {
+        // M108: Count every connect request that reaches the actor (before dedup).
+        self.connect_attempts = self.connect_attempts.saturating_add(1);
+
         let ConnectPeer {
             addr,
             source,
