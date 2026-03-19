@@ -30,7 +30,6 @@ pub(crate) mod lt_trackers;
 pub(crate) mod peer;
 pub(crate) mod peer_adder;
 pub(crate) mod peer_codec;
-pub(crate) mod peer_priority;
 pub(crate) mod peer_scorer;
 mod persistence;
 pub(crate) mod pex;
