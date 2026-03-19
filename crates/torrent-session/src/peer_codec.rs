@@ -545,8 +545,8 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
                 let index = self.buf.peek_u32_be_at(5);
                 let begin = self.buf.peek_u32_be_at(9);
                 self.buf.consume(13); // 4 prefix + 1 id + 4 index + 4 begin
-                let data = self.buf.consume_as_bytes(length - 9);
-                Ok(Some(Message::Piece { index, begin, data }))
+                let data_0 = self.buf.consume_as_bytes(length - 9);
+                Ok(Some(Message::Piece { index, begin, data_0, data_1: Bytes::new() }))
             }
             MSG_BITFIELD => {
                 self.buf.consume(5); // 4 prefix + 1 id
@@ -1009,7 +1009,8 @@ mod tests {
         let msg = Message::Piece {
             index: 7,
             begin: 0,
-            data: Bytes::from(piece_data.clone()),
+            data_0: Bytes::from(piece_data.clone()),
+            data_1: Bytes::new(),
         };
         let wire = encode_message(&msg);
 
@@ -1026,11 +1027,11 @@ mod tests {
             .expect("decode error")
             .expect("expected Piece");
 
-        if let Message::Piece { index, begin, data } = decoded {
+        if let Message::Piece { index, begin, data_0, data_1 } = decoded {
             assert_eq!(index, 7);
             assert_eq!(begin, 0);
-            assert_eq!(data.len(), 16_384);
-            assert_eq!(&data[..], &piece_data[..]);
+            assert_eq!(data_0.len() + data_1.len(), 16_384);
+            assert_eq!(&data_0[..], &piece_data[..]);
         } else {
             panic!("expected Piece message, got {decoded:?}");
         }
@@ -1108,7 +1109,7 @@ mod tests {
         // max_message_size. A Bitfield message is the easiest: length = 1 + N.
         let bitfield_len = BUF_LEN + 1000; // > 32 KiB
         let bitfield_data = vec![0xAA; bitfield_len];
-        let msg = Message::Bitfield(Bytes::from(bitfield_data.clone()));
+        let msg: Message = Message::Bitfield(Bytes::from(bitfield_data.clone()));
         let wire = encode_message(&msg);
 
         let max = BUF_LEN * 4; // plenty of room
@@ -1164,7 +1165,8 @@ mod tests {
         let msg = Message::Piece {
             index: 3,
             begin: 16_384,
-            data: Bytes::from(piece_data.clone()),
+            data_0: Bytes::from(piece_data.clone()),
+            data_1: Bytes::new(),
         };
         let expected = encode_message(&msg);
 
@@ -1183,10 +1185,11 @@ mod tests {
         // Verify the piece data is intact.
         let decoded =
             Message::from_payload(Bytes::from(received[4..].to_vec())).expect("decode failed");
-        if let Message::Piece { index, begin, data } = decoded {
+        if let Message::Piece { index, begin, data_0, data_1 } = decoded {
             assert_eq!(index, 3);
             assert_eq!(begin, 16_384);
-            assert_eq!(&data[..], &piece_data[..]);
+            let _ = &data_1; // data_1 is empty after wire round-trip
+            assert_eq!(&data_0[..], &piece_data[..]);
         } else {
             panic!("expected Piece, got {decoded:?}");
         }

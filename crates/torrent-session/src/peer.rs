@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -339,7 +339,7 @@ pub(crate) async fn run_peer(
                         // M75: Intercept messages for permit management BEFORE handle_message.
                         // M76: Also update local_bitfield for dispatch.
                         match &msg {
-                            Message::Piece { index, begin, data } => {
+                            Message::Piece { index, begin, data_0, data_1 } => {
                                 if reservation_state.is_some() {
                                     in_flight = in_flight.saturating_sub(1);
                                     // M82: Permit absorption — only return permit if below target depth
@@ -354,7 +354,11 @@ pub(crate) async fn run_peer(
                                 }
                                 // M100: Direct per-block deferred write
                                 if let Some((_, _, Some(ref disk), _)) = reservation_state {
-                                    disk.write_block_deferred(*index, *begin, data.clone());
+                                    disk.write_block_deferred(*index, *begin, data_0.clone());
+                                    if !data_1.is_empty() {
+                                        let offset_1 = begin.saturating_add(data_0.len() as u32);
+                                        disk.write_block_deferred(*index, offset_1, data_1.clone());
+                                    }
                                 }
                             }
                             Message::Unchoke => {
@@ -420,11 +424,11 @@ pub(crate) async fn run_peer(
                         // M92: Accumulate block in PendingBatch.
                         // Flush immediately on piece completion (when all blocks arrive within
                         // one batch window); otherwise the 25ms timer flushes partial batches.
-                        if let Message::Piece { index, begin, ref data } = msg
+                        if let Message::Piece { index, begin, ref data_0, ref data_1 } = msg
                             && let Some((_, _, Some(_), _)) = &reservation_state
                         {
                             if let Some(ref mut batch) = pending_batch {
-                                let piece_complete = batch.push(index, begin, data.len() as u32);
+                                let piece_complete = batch.push(index, begin, (data_0.len() + data_1.len()) as u32);
                                 if piece_complete {
                                     let blocks = batch.take();
                                     event_tx.send(PeerEvent::PieceBlocksBatch {
@@ -438,7 +442,7 @@ pub(crate) async fn run_peer(
                                     peer_addr: addr,
                                     blocks: vec![BlockEntry {
                                         index, begin,
-                                        length: data.len() as u32,
+                                        length: (data_0.len() + data_1.len()) as u32,
                                     }],
                                 }).await.map_err(|_| crate::Error::Shutdown)?;
                             }
@@ -742,7 +746,18 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        Message::Piece { index, begin, data } => {
+        Message::Piece { index, begin, data_0, data_1 } => {
+            // Concatenate the two ring-buffer slices into a single Bytes for
+            // the event channel.  In the common case data_1 is empty, so we
+            // avoid the allocation.
+            let data = if data_1.is_empty() {
+                data_0
+            } else {
+                let mut combined = BytesMut::with_capacity(data_0.len() + data_1.len());
+                combined.extend_from_slice(&data_0);
+                combined.extend_from_slice(&data_1);
+                combined.freeze()
+            };
             event_tx
                 .send(PeerEvent::PieceData {
                     peer_addr: addr,
@@ -1173,7 +1188,7 @@ async fn handle_command(
             length,
         },
         PeerCommand::AllowedFast(index) => Message::AllowedFast(index),
-        PeerCommand::SendPiece { index, begin, data } => Message::Piece { index, begin, data },
+        PeerCommand::SendPiece { index, begin, data } => Message::Piece { index, begin, data_0: data, data_1: Bytes::new() },
         PeerCommand::SendExtHandshake(hs) => {
             let payload = hs.to_bytes().map_err(crate::Error::Wire)?;
             Message::Extended { ext_id: 0, payload }
@@ -1772,7 +1787,8 @@ mod tests {
             &Message::Piece {
                 index: 0,
                 begin: 0,
-                data: piece_data.clone(),
+                data_0: piece_data.clone(),
+                data_1: Bytes::new(),
             },
         )
         .await;
@@ -2338,10 +2354,11 @@ mod tests {
 
         let msg = read_framed_message(&mut server_stream).await;
         match msg {
-            Message::Piece { index, begin, data } => {
+            Message::Piece { index, begin, data_0, data_1 } => {
                 assert_eq!(index, 0);
                 assert_eq!(begin, 0);
-                assert_eq!(data, piece_data);
+                assert!(data_1.is_empty());
+                assert_eq!(data_0, piece_data);
             }
             other => panic!("expected Piece, got: {other:?}"),
         }

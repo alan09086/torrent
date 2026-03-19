@@ -1,4 +1,4 @@
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::error::Error;
@@ -37,10 +37,10 @@ impl Default for MessageCodec {
 }
 
 impl Decoder for MessageCodec {
-    type Item = Message;
+    type Item = Message<Bytes>;
     type Error = Error;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message<Bytes>>, Error> {
         // Need at least 4 bytes for the length prefix
         if src.len() < 4 {
             return Ok(None);
@@ -73,10 +73,10 @@ impl Decoder for MessageCodec {
     }
 }
 
-impl Encoder<Message> for MessageCodec {
+impl Encoder<Message<Bytes>> for MessageCodec {
     type Error = Error;
 
-    fn encode(&mut self, msg: Message, dst: &mut BytesMut) -> Result<(), Error> {
+    fn encode(&mut self, msg: Message<Bytes>, dst: &mut BytesMut) -> Result<(), Error> {
         msg.encode_into(dst);
         Ok(())
     }
@@ -161,7 +161,8 @@ mod tests {
         let msg = Message::Piece {
             index: 0,
             begin: 0,
-            data: Bytes::from_static(b"data"),
+            data_0: Bytes::from_static(b"data"),
+            data_1: Bytes::new(),
         };
 
         let mut buf = BytesMut::new();

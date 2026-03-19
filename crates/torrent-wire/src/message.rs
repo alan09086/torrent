@@ -3,8 +3,17 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crate::error::{Error, Result};
 
 /// Standard BitTorrent peer wire messages (BEP 3).
+///
+/// Generic over buffer type `B` to support both owned (`Bytes`) and borrowed
+/// (`&[u8]`) payloads.  Data-carrying variants (`Piece`, `Bitfield`,
+/// `Extended`) use `B`; fixed-field variants are buffer-agnostic.
+///
+/// The `Piece` variant carries two buffer fields (`data_0`, `data_1`) to
+/// support ring-buffer wrap-around: when a block spans the ring boundary the
+/// two non-contiguous slices are stored separately. In the common (no-wrap)
+/// case `data_1` is empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message {
+pub enum Message<B = Bytes> {
     /// Keep connection alive (no payload, length=0).
     KeepAlive,
     /// Peer is choking us.
@@ -21,7 +30,7 @@ pub enum Message {
         index: u32,
     },
     /// Peer's complete bitfield.
-    Bitfield(Bytes),
+    Bitfield(B),
     /// Request a block: piece index, byte offset within piece, length.
     Request {
         /// Piece index.
@@ -32,13 +41,18 @@ pub enum Message {
         length: u32,
     },
     /// A data block: piece index, byte offset, data.
+    ///
+    /// Two buffer fields support ring-buffer wrap-around.  When the block does
+    /// not straddle the ring boundary, `data_1` is empty.
     Piece {
         /// Piece index.
         index: u32,
         /// Byte offset within the piece.
         begin: u32,
-        /// Block payload.
-        data: Bytes,
+        /// First (or only) contiguous slice of block payload.
+        data_0: B,
+        /// Second contiguous slice when the ring buffer wraps; empty otherwise.
+        data_1: B,
     },
     /// Cancel a previously sent request.
     Cancel {
@@ -56,7 +70,7 @@ pub enum Message {
         /// Extension message ID (0 = handshake).
         ext_id: u8,
         /// Bencoded extension payload.
-        payload: Bytes,
+        payload: B,
     },
     /// BEP 6: Suggest a piece for the peer to download.
     SuggestPiece(u32),
@@ -143,7 +157,7 @@ const ID_HASH_REQUEST: u8 = 21;
 const ID_HASHES: u8 = 22;
 const ID_HASH_REJECT: u8 = 23;
 
-impl Message {
+impl<B: AsRef<[u8]>> Message<B> {
     /// Serialize a message to bytes (length-prefix + id + payload).
     ///
     /// The returned bytes include the 4-byte length prefix.
@@ -166,6 +180,7 @@ impl Message {
                 buf.freeze()
             }
             Message::Bitfield(bits) => {
+                let bits = bits.as_ref();
                 let mut buf = BytesMut::with_capacity(5 + bits.len());
                 buf.put_u32(1 + bits.len() as u32);
                 buf.put_u8(ID_BITFIELD);
@@ -177,13 +192,22 @@ impl Message {
                 begin,
                 length,
             } => triple_msg(ID_REQUEST, *index, *begin, *length),
-            Message::Piece { index, begin, data } => {
-                let mut buf = BytesMut::with_capacity(13 + data.len());
-                buf.put_u32(9 + data.len() as u32);
+            Message::Piece {
+                index,
+                begin,
+                data_0,
+                data_1,
+            } => {
+                let d0 = data_0.as_ref();
+                let d1 = data_1.as_ref();
+                let data_len = d0.len() + d1.len();
+                let mut buf = BytesMut::with_capacity(13 + data_len);
+                buf.put_u32(9 + data_len as u32);
                 buf.put_u8(ID_PIECE);
                 buf.put_u32(*index);
                 buf.put_u32(*begin);
-                buf.put_slice(data);
+                buf.put_slice(d0);
+                buf.put_slice(d1);
                 buf.freeze()
             }
             Message::Cancel {
@@ -199,6 +223,7 @@ impl Message {
                 buf.freeze()
             }
             Message::Extended { ext_id, payload } => {
+                let payload = payload.as_ref();
                 let mut buf = BytesMut::with_capacity(6 + payload.len());
                 buf.put_u32(2 + payload.len() as u32);
                 buf.put_u8(ID_EXTENDED);
@@ -301,6 +326,7 @@ impl Message {
                 dst.put_u32(*index);
             }
             Message::Bitfield(bits) => {
+                let bits = bits.as_ref();
                 dst.reserve(5 + bits.len());
                 dst.put_u32(1 + bits.len() as u32);
                 dst.put_u8(ID_BITFIELD);
@@ -311,13 +337,22 @@ impl Message {
                 begin,
                 length,
             } => encode_triple_into(dst, ID_REQUEST, *index, *begin, *length),
-            Message::Piece { index, begin, data } => {
-                dst.reserve(13 + data.len());
-                dst.put_u32(9 + data.len() as u32);
+            Message::Piece {
+                index,
+                begin,
+                data_0,
+                data_1,
+            } => {
+                let d0 = data_0.as_ref();
+                let d1 = data_1.as_ref();
+                let data_len = d0.len() + d1.len();
+                dst.reserve(13 + data_len);
+                dst.put_u32(9 + data_len as u32);
                 dst.put_u8(ID_PIECE);
                 dst.put_u32(*index);
                 dst.put_u32(*begin);
-                dst.put_slice(data);
+                dst.put_slice(d0);
+                dst.put_slice(d1);
             }
             Message::Cancel {
                 index,
@@ -330,6 +365,7 @@ impl Message {
                 dst.put_u16(*port);
             }
             Message::Extended { ext_id, payload } => {
+                let payload = payload.as_ref();
                 dst.reserve(6 + payload.len());
                 dst.put_u32(2 + payload.len() as u32);
                 dst.put_u8(ID_EXTENDED);
@@ -403,7 +439,9 @@ impl Message {
             }
         }
     }
+}
 
+impl Message<Bytes> {
     /// Parse a message from its payload (after the 4-byte length prefix has
     /// been consumed). `payload` is everything after the length prefix.
     pub fn from_payload(payload: Bytes) -> Result<Self> {
@@ -441,7 +479,8 @@ impl Message {
                 Ok(Message::Piece {
                     index,
                     begin,
-                    data: payload.slice(9..),
+                    data_0: payload.slice(9..),
+                    data_1: Bytes::new(),
                 })
             }
             ID_CANCEL => {
@@ -726,7 +765,8 @@ mod tests {
         round_trip(Message::Piece {
             index: 1,
             begin: 0,
-            data: Bytes::from_static(b"hello world"),
+            data_0: Bytes::from_static(b"hello world"),
+            data_1: Bytes::new(),
         });
     }
 
@@ -879,7 +919,7 @@ mod tests {
 
     #[test]
     fn hash_request_exact_wire_size() {
-        let msg = Message::HashRequest {
+        let msg: Message = Message::HashRequest {
             pieces_root: torrent_core::Id32::ZERO,
             base: 0,
             index: 0,
@@ -894,7 +934,7 @@ mod tests {
     #[test]
     fn hashes_variable_length() {
         let h = torrent_core::sha256(b"test");
-        let msg = Message::Hashes {
+        let msg: Message = Message::Hashes {
             pieces_root: torrent_core::Id32::ZERO,
             base: 0,
             index: 0,
@@ -933,7 +973,8 @@ mod tests {
             Message::Piece {
                 index: 0,
                 begin: 0,
-                data: Bytes::from_static(b"block data here"),
+                data_0: Bytes::from_static(b"block data here"),
+                data_1: Bytes::new(),
             },
             Message::Cancel {
                 index: 1,
@@ -998,5 +1039,90 @@ mod tests {
         let set_v4 = allowed_fast_set(&ih, ipv4, 1000, 10);
         let set_ip = allowed_fast_set_for_ip(&ih, std::net::IpAddr::V4(ipv4), 1000, 10);
         assert_eq!(set_v4, set_ip);
+    }
+
+    // ── M110: Generic Message<B> tests ──
+
+    #[test]
+    fn message_piece_two_fields_round_trip() {
+        // Encode a Piece with data_0 only (data_1 empty) — common case.
+        let msg = Message::Piece {
+            index: 5,
+            begin: 16384,
+            data_0: Bytes::from_static(b"block payload here"),
+            data_1: Bytes::new(),
+        };
+        let bytes = msg.to_bytes();
+        let parsed = Message::from_payload(Bytes::copy_from_slice(&bytes[4..])).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn message_piece_split_data_round_trip() {
+        // Encode a Piece with both data_0 and data_1 populated (ring-wrap case).
+        // The wire format concatenates them, so decoding puts everything into data_0.
+        let msg = Message::Piece {
+            index: 3,
+            begin: 0,
+            data_0: Bytes::from_static(b"first half"),
+            data_1: Bytes::from_static(b" second half"),
+        };
+        let bytes = msg.to_bytes();
+        let parsed = Message::from_payload(Bytes::copy_from_slice(&bytes[4..])).unwrap();
+        // After round-trip through the wire, the data is concatenated into data_0
+        // with data_1 empty (the receiver doesn't know about ring-wrap).
+        assert_eq!(
+            parsed,
+            Message::Piece {
+                index: 3,
+                begin: 0,
+                data_0: Bytes::from_static(b"first half second half"),
+                data_1: Bytes::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn message_generic_encode_borrowed() {
+        // Verify that Message<&[u8]> can encode_into just like Message<Bytes>.
+        let borrowed: Message<&[u8]> = Message::Piece {
+            index: 1,
+            begin: 0,
+            data_0: b"borrowed data",
+            data_1: b"",
+        };
+        let owned: Message<Bytes> = Message::Piece {
+            index: 1,
+            begin: 0,
+            data_0: Bytes::from_static(b"borrowed data"),
+            data_1: Bytes::new(),
+        };
+        let mut buf_borrowed = BytesMut::new();
+        borrowed.encode_into(&mut buf_borrowed);
+        let mut buf_owned = BytesMut::new();
+        owned.encode_into(&mut buf_owned);
+        assert_eq!(
+            buf_borrowed, buf_owned,
+            "borrowed and owned encode identically"
+        );
+
+        // Also test to_bytes
+        assert_eq!(borrowed.to_bytes(), owned.to_bytes());
+
+        // Test borrowed Bitfield
+        let bf_borrowed: Message<&[u8]> = Message::Bitfield(b"\xff\x80");
+        let bf_owned: Message<Bytes> = Message::Bitfield(Bytes::from_static(b"\xff\x80"));
+        assert_eq!(bf_borrowed.to_bytes(), bf_owned.to_bytes());
+
+        // Test borrowed Extended
+        let ext_borrowed: Message<&[u8]> = Message::Extended {
+            ext_id: 1,
+            payload: b"payload",
+        };
+        let ext_owned: Message<Bytes> = Message::Extended {
+            ext_id: 1,
+            payload: Bytes::from_static(b"payload"),
+        };
+        assert_eq!(ext_borrowed.to_bytes(), ext_owned.to_bytes());
     }
 }
