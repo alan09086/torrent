@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -18,7 +18,7 @@ use torrent_wire::{
     ExtHandshake, Handshake, Message, MetadataMessage, MetadataMessageType,
 };
 
-use crate::peer_codec::{PeerReader, PeerWriter};
+use crate::peer_codec::{FillStatus, PeerReader, PeerWriter};
 
 use crate::disk::{DiskHandle, DiskWriteError};
 use crate::pex::PexMessage;
@@ -311,62 +311,156 @@ pub(crate) async fn run_peer(
         tokio::select! {
             biased;
 
-            result = reader.next_message() => {
-                match result {
-                    Ok(Some(msg)) => {
+            // M110: Three-phase zero-copy read: fill → decode → advance.
+            // Piece messages are written directly to disk from ring buffer
+            // slices (pwritev) before advancing — no clone, no channel.
+            status = reader.fill_message() => {
+                match status {
+                    Ok(FillStatus::Ready) => {
+                        let (msg, consumed) = match reader.try_decode() {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                debug!(%addr, "decode error: {e}");
+                                break Some(e.to_string());
+                            }
+                        };
+
+                        // --- Piece fast-path: zero-copy pwrite from ring buffer ---
+                        if let Message::Piece { index, begin, data_0, data_1 } = &msg {
+                            let data_len = (data_0.len() + data_1.len()) as u32;
+
+                            // M75: Permit management for pipeline depth.
+                            if reservation_state.is_some() {
+                                in_flight = in_flight.saturating_sub(1);
+                                // M82: Permit absorption — only return permit if below target depth
+                                if in_flight < current_effective_depth {
+                                    semaphore.add_permits(1);
+                                }
+                            }
+
+                            // M103: Track received blocks in shared BlockMaps for steal visibility.
+                            if let Some(ref bm) = peer_block_maps {
+                                let block_idx = *begin / block_length;
+                                bm.mark_received(*index, block_idx);
+                            }
+
+                            // M110: Direct pwrite from ring buffer slices — no clone, no channel.
+                            if let Some((_, _, Some(ref disk), ref write_err_tx)) = reservation_state
+                                && let Err(e) = disk.write_block_direct(*index, *begin, data_0, data_1)
+                            {
+                                // Report write error to TorrentActor (same pattern as deferred path).
+                                let _ = write_err_tx.try_send(DiskWriteError {
+                                    piece: *index,
+                                    begin: *begin,
+                                    error: match e {
+                                        crate::Error::Storage(se) => se,
+                                        other => torrent_storage::Error::Io(
+                                            std::io::Error::other(other.to_string()),
+                                        ),
+                                    },
+                                });
+                            }
+
+                            // M92: Accumulate block metadata in PendingBatch.
+                            // Flush immediately on piece completion.
+                            if reservation_state.as_ref().is_some_and(|(_, _, d, _)| d.is_some()) {
+                                if let Some(ref mut batch) = pending_batch {
+                                    let piece_complete = batch.push(*index, *begin, data_len);
+                                    // CRITICAL: advance BEFORE any await — borrowed slices released.
+                                    reader.advance(consumed);
+                                    if piece_complete {
+                                        let blocks = batch.take();
+                                        event_tx.send(PeerEvent::PieceBlocksBatch {
+                                            peer_addr: addr,
+                                            blocks,
+                                        }).await.map_err(|_| crate::Error::Shutdown)?;
+                                    }
+                                } else {
+                                    // No batch yet (StartRequesting not received) — send single block.
+                                    reader.advance(consumed);
+                                    event_tx.send(PeerEvent::PieceBlocksBatch {
+                                        peer_addr: addr,
+                                        blocks: vec![BlockEntry {
+                                            index: *index, begin: *begin,
+                                            length: data_len,
+                                        }],
+                                    }).await.map_err(|_| crate::Error::Shutdown)?;
+                                }
+                                continue; // skip handle_message
+                            }
+
+                            // Piece without reservation — fall through to handle_message.
+                            // Convert to owned before advancing.
+                            let owned = msg.to_owned_bytes();
+                            reader.advance(consumed);
+                            match handle_message(
+                                owned,
+                                addr,
+                                num_pieces,
+                                &event_tx,
+                                &mut peer_ut_metadata,
+                                &mut peer_ut_pex,
+                                &mut peer_lt_trackers,
+                                &mut peer_ut_holepunch,
+                                &mut peer_ext_ids,
+                                our_ut_metadata,
+                                our_ut_pex,
+                                our_lt_trackers,
+                                our_ut_holepunch,
+                                both_support_fast,
+                                info_bytes.as_ref(),
+                                &info_hash,
+                                &plugins,
+                            ).await {
+                                Ok(Some(response)) => {
+                                    if let Err(e) = writer.send(&response).await {
+                                        warn!(%addr, "error sending response: {e}");
+                                        break Some(e.to_string());
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(%addr, "error handling message: {e}");
+                                }
+                            }
+                            continue;
+                        }
+
+                        // --- Non-Piece path: convert to owned, advance, then process ---
                         // Defer Bitfield/HaveAll/HaveNone when num_pieces is
                         // unknown (magnet phase).  Replay after UpdateNumPieces.
                         if num_pieces == 0 {
                             match &msg {
                                 Message::Bitfield(data) => {
                                     debug!(%addr, data_len = data.len(), "deferring bitfield (num_pieces=0)");
-                                    deferred_bitfield = Some(DeferredBitfield::Raw(data.to_vec()));
+                                    let raw = data.to_vec();
+                                    reader.advance(consumed);
+                                    deferred_bitfield = Some(DeferredBitfield::Raw(raw));
                                     continue;
                                 }
                                 Message::HaveAll => {
                                     debug!(%addr, "deferring HaveAll (num_pieces=0)");
+                                    reader.advance(consumed);
                                     deferred_bitfield = Some(DeferredBitfield::HaveAll);
                                     continue;
                                 }
                                 Message::HaveNone => {
                                     debug!(%addr, "deferring HaveNone (num_pieces=0)");
+                                    reader.advance(consumed);
                                     deferred_bitfield = Some(DeferredBitfield::HaveNone);
                                     continue;
                                 }
                                 _ => {}
                             }
                         }
-                        // M75: Intercept messages for permit management BEFORE handle_message.
-                        // M76: Also update local_bitfield for dispatch.
+
+                        // M75/M76: Intercept for permit management and local_bitfield update.
+                        // These operate on borrowed data before we convert to owned.
                         match &msg {
-                            Message::Piece { index, begin, data } => {
-                                if reservation_state.is_some() {
-                                    in_flight = in_flight.saturating_sub(1);
-                                    // M82: Permit absorption — only return permit if below target depth
-                                    if in_flight < current_effective_depth {
-                                        semaphore.add_permits(1);
-                                    }
-                                }
-                                // M103: Track received blocks in shared BlockMaps for steal visibility.
-                                if let Some(ref bm) = peer_block_maps {
-                                    let block_idx = *begin / block_length;
-                                    bm.mark_received(*index, block_idx);
-                                }
-                                // M100: Direct per-block deferred write
-                                if let Some((_, _, Some(ref disk), _)) = reservation_state {
-                                    disk.write_block_deferred(*index, *begin, data.clone());
-                                }
-                            }
                             Message::Unchoke => {
                                 peer_choking = false;
                                 in_flight = 0;
                                 // M82: Drain stale permits from previous cycle before refilling.
-                                // Late Piece arrivals after a Choke/Unchoke cycle would otherwise
-                                // add phantom permits (in_flight was reset to 0, so the absorption
-                                // guard passes for every late arrival).
-                                // IMPORTANT: forget() prevents the RAII SemaphorePermit from
-                                // releasing the permit back on drop, which would cause an
-                                // infinite loop.
                                 while let Ok(permit) = semaphore.try_acquire() {
                                     permit.forget();
                                 }
@@ -380,11 +474,47 @@ pub(crate) async fn run_peer(
                                         if let Some((ref atomic_states, ..)) = reservation_state {
                                             atomic_states.release(piece);
                                         }
-                                        // Notify actor to clear piece_owner
+                                        // Notify actor to clear piece_owner — need to advance
+                                        // first since we await below and the borrowed msg is
+                                        // a fixed-field variant (no data slices to preserve).
+                                        reader.advance(consumed);
                                         let _ = event_tx.send(PeerEvent::PieceReleased {
                                             peer_addr: addr,
                                             piece,
                                         }).await;
+                                        // Already advanced — use owned msg for handle_message.
+                                        ds.clear_current_piece();
+                                        match handle_message(
+                                            Message::Choke,
+                                            addr,
+                                            num_pieces,
+                                            &event_tx,
+                                            &mut peer_ut_metadata,
+                                            &mut peer_ut_pex,
+                                            &mut peer_lt_trackers,
+                                            &mut peer_ut_holepunch,
+                                            &mut peer_ext_ids,
+                                            our_ut_metadata,
+                                            our_ut_pex,
+                                            our_lt_trackers,
+                                            our_ut_holepunch,
+                                            both_support_fast,
+                                            info_bytes.as_ref(),
+                                            &info_hash,
+                                            &plugins,
+                                        ).await {
+                                            Ok(Some(response)) => {
+                                                if let Err(e) = writer.send(&response).await {
+                                                    warn!(%addr, "error sending response: {e}");
+                                                    break Some(e.to_string());
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                warn!(%addr, "error handling message: {e}");
+                                            }
+                                        }
+                                        continue;
                                     }
                                     ds.clear_current_piece();
                                 }
@@ -417,33 +547,58 @@ pub(crate) async fn run_peer(
                             }
                             _ => {}
                         }
-                        // M92: Accumulate block in PendingBatch.
-                        // Flush immediately on piece completion (when all blocks arrive within
-                        // one batch window); otherwise the 25ms timer flushes partial batches.
-                        if let Message::Piece { index, begin, ref data } = msg
-                            && let Some((_, _, Some(_), _)) = &reservation_state
-                        {
-                            if let Some(ref mut batch) = pending_batch {
-                                let piece_complete = batch.push(index, begin, data.len() as u32);
-                                if piece_complete {
-                                    let blocks = batch.take();
-                                    event_tx.send(PeerEvent::PieceBlocksBatch {
-                                        peer_addr: addr,
-                                        blocks,
-                                    }).await.map_err(|_| crate::Error::Shutdown)?;
+
+                        // Convert borrowed message to owned, then release ring space.
+                        let owned = msg.to_owned_bytes();
+                        reader.advance(consumed);
+
+                        match handle_message(
+                            owned,
+                            addr,
+                            num_pieces,
+                            &event_tx,
+                            &mut peer_ut_metadata,
+                            &mut peer_ut_pex,
+                            &mut peer_lt_trackers,
+                            &mut peer_ut_holepunch,
+                            &mut peer_ext_ids,
+                            our_ut_metadata,
+                            our_ut_pex,
+                            our_lt_trackers,
+                            our_ut_holepunch,
+                            both_support_fast,
+                            info_bytes.as_ref(),
+                            &info_hash,
+                            &plugins,
+                        ).await {
+                            Ok(Some(response)) => {
+                                if let Err(e) = writer.send(&response).await {
+                                    warn!(%addr, "error sending response: {e}");
+                                    break Some(e.to_string());
                                 }
-                            } else {
-                                // No batch yet (StartRequesting not received) — send single block
-                                event_tx.send(PeerEvent::PieceBlocksBatch {
-                                    peer_addr: addr,
-                                    blocks: vec![BlockEntry {
-                                        index, begin,
-                                        length: data.len() as u32,
-                                    }],
-                                }).await.map_err(|_| crate::Error::Shutdown)?;
                             }
-                            continue; // skip handle_message
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(%addr, "error handling message: {e}");
+                            }
                         }
+                    }
+                    Ok(FillStatus::Eof) => {
+                        // Clean end-of-stream
+                        break Some("connection closed".into());
+                    }
+                    Ok(FillStatus::Oversized(length)) => {
+                        // Message exceeds ring buffer capacity (> 32 KiB).
+                        // Read into heap buffer and process as owned Message<Bytes>.
+                        let msg = match reader.decode_oversized_into(length).await {
+                            Ok(m) => m,
+                            Err(e) => {
+                                debug!(%addr, "oversized decode error: {e}");
+                                break Some(e.to_string());
+                            }
+                        };
+                        // Oversized messages are never Piece (max 16 KiB block + 9 byte header).
+                        // Process through handle_message directly.
                         match handle_message(
                             msg,
                             addr,
@@ -474,10 +629,6 @@ pub(crate) async fn run_peer(
                                 warn!(%addr, "error handling message: {e}");
                             }
                         }
-                    }
-                    Ok(None) => {
-                        // Stream closed
-                        break Some("connection closed".into());
                     }
                     Err(e) => {
                         debug!(%addr, "wire error: {e}");
@@ -742,7 +893,18 @@ async fn handle_message(
                 .await
                 .map_err(|_| crate::Error::Shutdown)?;
         }
-        Message::Piece { index, begin, data } => {
+        Message::Piece { index, begin, data_0, data_1 } => {
+            // Concatenate the two ring-buffer slices into a single Bytes for
+            // the event channel.  In the common case data_1 is empty, so we
+            // avoid the allocation.
+            let data = if data_1.is_empty() {
+                data_0
+            } else {
+                let mut combined = BytesMut::with_capacity(data_0.len() + data_1.len());
+                combined.extend_from_slice(&data_0);
+                combined.extend_from_slice(&data_1);
+                combined.freeze()
+            };
             event_tx
                 .send(PeerEvent::PieceData {
                     peer_addr: addr,
@@ -1173,7 +1335,7 @@ async fn handle_command(
             length,
         },
         PeerCommand::AllowedFast(index) => Message::AllowedFast(index),
-        PeerCommand::SendPiece { index, begin, data } => Message::Piece { index, begin, data },
+        PeerCommand::SendPiece { index, begin, data } => Message::Piece { index, begin, data_0: data, data_1: Bytes::new() },
         PeerCommand::SendExtHandshake(hs) => {
             let payload = hs.to_bytes().map_err(crate::Error::Wire)?;
             Message::Extended { ext_id: 0, payload }
@@ -1772,7 +1934,8 @@ mod tests {
             &Message::Piece {
                 index: 0,
                 begin: 0,
-                data: piece_data.clone(),
+                data_0: piece_data.clone(),
+                data_1: Bytes::new(),
             },
         )
         .await;
@@ -2338,10 +2501,11 @@ mod tests {
 
         let msg = read_framed_message(&mut server_stream).await;
         match msg {
-            Message::Piece { index, begin, data } => {
+            Message::Piece { index, begin, data_0, data_1 } => {
                 assert_eq!(index, 0);
                 assert_eq!(begin, 0);
-                assert_eq!(data, piece_data);
+                assert!(data_1.is_empty());
+                assert_eq!(data_0, piece_data);
             }
             other => panic!("expected Piece, got: {other:?}"),
         }

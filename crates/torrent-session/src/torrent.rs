@@ -9128,7 +9128,8 @@ mod tests {
                             .send(Message::Piece {
                                 index,
                                 begin,
-                                data: Bytes::copy_from_slice(piece_data),
+                                data_0: Bytes::copy_from_slice(piece_data),
+                                data_1: Bytes::new(),
                             })
                             .await
                             .unwrap();
@@ -9279,7 +9280,8 @@ mod tests {
                             .send(Message::Piece {
                                 index,
                                 begin,
-                                data: Bytes::from(piece_data),
+                                data_0: Bytes::from(piece_data),
+                                data_1: Bytes::new(),
                             })
                             .await
                             .unwrap();
@@ -9418,7 +9420,8 @@ mod tests {
                             .send(Message::Piece {
                                 index,
                                 begin,
-                                data: Bytes::copy_from_slice(piece_data),
+                                data_0: Bytes::copy_from_slice(piece_data),
+                                data_1: Bytes::new(),
                             })
                             .await
                             .unwrap();
@@ -9551,7 +9554,8 @@ mod tests {
                             .send(Message::Piece {
                                 index: 0,
                                 begin,
-                                data: Bytes::copy_from_slice(&mock_data[start..end]),
+                                data_0: Bytes::copy_from_slice(&mock_data[start..end]),
+                                data_1: Bytes::new(),
                             })
                             .await
                             .unwrap();
@@ -9655,7 +9659,8 @@ mod tests {
                             .send(Message::Piece {
                                 index,
                                 begin,
-                                data: Bytes::from(piece_data),
+                                data_0: Bytes::from(piece_data),
+                                data_1: Bytes::new(),
                             })
                             .await
                             .unwrap();
@@ -10205,7 +10210,8 @@ mod tests {
                                 .send(Message::Piece {
                                     index,
                                     begin,
-                                    data: Bytes::copy_from_slice(&seed_data[start..end]),
+                                    data_0: Bytes::copy_from_slice(&seed_data[start..end]),
+                                    data_1: Bytes::new(),
                                 })
                                 .await
                                 .unwrap();
@@ -10295,10 +10301,11 @@ mod tests {
                     tokio::select! {
                         msg = framed_read.next() => {
                             match msg {
-                                Some(Ok(Message::Piece { index, begin, data })) => {
+                                Some(Ok(Message::Piece { index, begin, data_0, data_1 })) => {
                                     assert_eq!(index, 0);
                                     assert_eq!(begin, 0);
-                                    assert_eq!(data.as_ref(), expected_data.as_slice());
+                                    let _ = &data_1; // empty after wire round-trip
+                                    assert_eq!(data_0.as_ref(), expected_data.as_slice());
                                     return; // success
                                 }
                                 Some(Ok(_)) => {}
@@ -10437,7 +10444,8 @@ mod tests {
                                 .send(Message::Piece {
                                     index,
                                     begin,
-                                    data: Bytes::copy_from_slice(&seed_data[start..end]),
+                                    data_0: Bytes::copy_from_slice(&seed_data[start..end]),
+                                    data_1: Bytes::new(),
                                 })
                                 .await
                                 .unwrap();
