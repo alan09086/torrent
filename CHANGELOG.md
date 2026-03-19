@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.109.0 | M109 | Ring buffer codec — fixed 32 KiB `ReadBuf` replaces `FramedRead`, pre-allocated `PeerWriter` replaces `FramedWrite`, zero-copy `DoubleBufHelper` for wrap-boundary parsing, eliminates page faults from `BytesMut` growth/shrink cycles |
 | 0.108.0 | M108 | Full PEX + page fault reduction — bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection success rate logging |
 | 0.107.0 | M107 | Aggressive peer pipeline — semaphore-paced `peer_adder_task` replaces timer-based admission (~570 lines deleted), TCP+uTP parallel race, parallel metadata fetch with full redundancy, adaptive DHT re-query, max_peers 200, unconditional Unchoke |
 | 0.106.0 | M106 | Peer scoring system — composite score from bandwidth/RTT/reliability/availability, phase-aware turnover (Discovery 30s / Steady 120s), score-based admission, hybrid snub eviction, disconnect_peer DRY helper |
@@ -62,6 +63,21 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.109.0] — 2026-03-19
+
+### Added
+- **Ring buffer codec (`peer_codec.rs`)** — new ~1000-line module replacing tokio-util `FramedRead`/`FramedWrite` with fixed-size ring buffers that never reallocate. Eliminates page faults caused by dynamic `BytesMut` growth/shrink cycles.
+- **`ReadBuf`** — 32 KiB fixed ring buffer for async reading. Wraps around without reallocation, providing a steady-state zero-page-fault read path.
+- **`DoubleBufHelper`** — zero-copy cursor for parsing data that spans the ring buffer's wrap boundary. Avoids linearization copies in the common case.
+- **`PeerReader`** — async message reader built on `ReadBuf`. Includes oversized-message fallback for messages exceeding 32 KiB (rare in practice).
+- **`PeerWriter`** — pre-allocated `BytesMut(16397)` cleared and reused per message write, replacing `FramedWrite`'s dynamically-sized buffer.
+- 21 new tests (1631 total)
+
+### Changed
+- `Message::from_payload(BytesMut)` → `Message::from_payload(Bytes)` — removes `.freeze()` calls at the parse boundary, cleaning up ownership semantics.
+- Removed M94 codec buffer shrinking logic — fixed ring buffers have no dynamic capacity to shrink, making the shrinking code dead.
+- Peer task wiring updated: `peer.rs` simplified (+15/−35 net lines) to use new `PeerReader`/`PeerWriter` instead of `FramedRead`/`FramedWrite`.
 
 ## [0.108.0] — 2026-03-18
 

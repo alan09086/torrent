@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1610-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1631-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.108.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.109.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,601 tests. Zero clippy warnings.
+12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,631 tests. Zero clippy warnings.
 
 ---
 
@@ -51,7 +51,7 @@ torrent download ./ubuntu.torrent --list
 
 ```toml
 [dependencies]
-torrent = "0.108.0"
+torrent = "0.109.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -174,12 +174,13 @@ Page f:  44K avg
 
 CPU parity with rqbit. Context switches reduced 63% (from 3x gap to 1.1x). Speed variance is DHT bootstrap latency, not a regression -- the 53.6 MB/s peak exceeds v0.100.0's average.
 
-### Optimization Stack (M85--M104)
+### Optimization Stack (M85--M109)
 
-The performance work spans 19 milestones of profiler-driven optimization:
+The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.109.0 | Ring buffer codec -- fixed 32 KiB ReadBuf replaces FramedRead, pre-allocated PeerWriter replaces FramedWrite, zero-copy DoubleBufHelper for wrap-boundary parsing | +21 tests, eliminates page faults from BytesMut growth/shrink |
 | 0.108.0 | Full PEX + page fault reduction -- bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection stats logging | +9 tests, target: peers >500, page faults <15K |
 | 0.107.0 | Aggressive peer pipeline -- semaphore-paced admission (`peer_adder_task`), TCP+uTP parallel race, parallel metadata fetch, adaptive DHT re-query, max_peers 200, unconditional Unchoke | +20 tests, ~570 lines deleted |
 | 0.106.0 | Peer scoring system -- composite score (bandwidth/RTT/reliability/availability), phase-aware turnover, score-based admission, hybrid snub eviction | 36.9 MB/s mean (10 trials), +20 tests |
@@ -279,7 +280,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M105) focuses on performance optimization and DHT reliability. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M109) focuses on performance optimization, DHT reliability, and wire-level efficiency. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -300,6 +301,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Speed Optimization | M55-M104 | Dispatch architecture, pipeline tuning, CPU efficiency, unified buffer pool, block stealing | Done |
 | DHT Reliability | M105 | Routing table cap, two-phase ping, background DNS backoff, unified lookup, JSON persistence | Done |
 | Peer Pipeline | M106-M107 | Peer scoring system, semaphore-paced admission, TCP+uTP race, parallel metadata fetch | Done |
+| Wire Optimization | M108-M109 | Full PEX send-side, Have batching, hot-path pre-allocation, ring buffer codec | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -308,7 +310,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,601 tests
+cargo test --workspace                      # 1,631 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 
