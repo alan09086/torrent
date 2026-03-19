@@ -610,6 +610,7 @@ pub(crate) async fn run_peer(
                             cmd,
                             &mut framed_write,
                             peer_ut_metadata,
+                            peer_ut_pex,
                             peer_ut_holepunch,
                         ).await {
                             debug!(%addr, "error sending message: {e}");
@@ -1164,6 +1165,7 @@ async fn handle_command(
     cmd: PeerCommand,
     framed_write: &mut FramedWrite<tokio::io::WriteHalf<impl AsyncWrite>, MessageCodec>,
     peer_ut_metadata: Option<u8>,
+    peer_ut_pex: Option<u8>,
     peer_ut_holepunch: Option<u8>,
 ) -> crate::Result<()> {
     let msg = match cmd {
@@ -1248,6 +1250,18 @@ async fn handle_command(
             count: req.count,
             proof_layers: req.proof_layers,
         },
+        PeerCommand::SendPex { message } => {
+            if let Some(ext_id) = peer_ut_pex {
+                let payload = message
+                    .to_bytes()
+                    .map_err(|e| crate::Error::Connection(e.to_string()))?;
+                framed_write
+                    .send(Message::Extended { ext_id, payload })
+                    .await
+                    .map_err(crate::Error::Wire)?;
+            }
+            return Ok(());
+        }
         PeerCommand::SendHolepunch(hp_msg) => {
             if let Some(ext_id) = peer_ut_holepunch {
                 let payload = hp_msg.to_bytes();

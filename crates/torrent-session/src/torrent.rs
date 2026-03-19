@@ -388,6 +388,9 @@ impl TorrentHandle {
             peer_tx: None,
             peer_semaphore: Arc::new(tokio::sync::Semaphore::new(0)),
             peers_connected: Arc::new(DashMap::new()),
+            live_outgoing_peers: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             connect_rx: None,
             metadata_downloader: None,
             downloaded: 0,
@@ -703,6 +706,9 @@ impl TorrentHandle {
             peer_tx: None,
             peer_semaphore: Arc::new(tokio::sync::Semaphore::new(0)),
             peers_connected: Arc::new(DashMap::new()),
+            live_outgoing_peers: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             connect_rx: None,
             metadata_downloader: Some(MetadataDownloader::new(magnet.info_hash())),
             downloaded: 0,
@@ -1631,6 +1637,8 @@ struct TorrentActor {
     dht_requery_responding_nodes: usize,
     /// M107: Channel to signal the adder task to clear its seen set.
     adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
+    /// M108: Shared snapshot of connected peer addresses for PEX send tasks.
+    live_outgoing_peers: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<SocketAddr>>>,
     /// M108: Total outbound connection attempts dispatched to peer adder.
     connect_attempts: u64,
     /// M108: Total connection failures (peers that disconnected).
@@ -3705,6 +3713,21 @@ impl TorrentActor {
                     peer.appears_nated = peer.source != PeerSource::Incoming;
                     peer.ext_handshake = Some(handshake);
                 }
+                // M108: Spawn PEX send task if peer supports ut_pex and PEX is enabled
+                if self.config.enable_pex
+                    && let Some(peer) = self.peers.get(&peer_addr)
+                    && let Some(ref hs) = peer.ext_handshake
+                    && hs.ext_id("ut_pex").is_some()
+                {
+                    let recipient_is_i2p = is_i2p_synthetic_addr(&peer_addr);
+                    tokio::spawn(crate::pex::pex_send_task(
+                        peer_addr,
+                        peer.cmd_tx.clone(),
+                        std::sync::Arc::clone(&self.live_outgoing_peers),
+                        self.config.allow_i2p_mixed,
+                        recipient_is_i2p,
+                    ));
+                }
             }
             PeerEvent::MetadataPiece {
                 peer_addr: _,
@@ -5279,6 +5302,11 @@ impl TorrentActor {
             if let Some(peer) = self.peers.remove(&addr) {
                 let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
                 self.peers_connected.remove(&addr);
+                // M108: Update live peers for PEX send tasks
+                self.live_outgoing_peers
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&addr);
                 post_alert(
                     &self.alert_tx,
                     &self.alert_mask,
@@ -6184,6 +6212,11 @@ impl TorrentActor {
             let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
             // M107: Remove from shared connected set (wakes adder task via semaphore)
             self.peers_connected.remove(&addr);
+            // M108: Update live peers for PEX send tasks
+            self.live_outgoing_peers
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&addr);
             post_alert(
                 &self.alert_tx,
                 &self.alert_mask,
@@ -6561,6 +6594,11 @@ impl TorrentActor {
         self.peers
             .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, source));
         self.peers_connected.insert(addr, ());
+        // M108: Update live peers for PEX send tasks
+        self.live_outgoing_peers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(addr);
         post_alert(
             &self.alert_tx,
             &self.alert_mask,
@@ -6691,6 +6729,11 @@ impl TorrentActor {
             // No SAM session — can't connect to I2P peer, clean up
             self.peers.remove(&addr);
             self.peers_connected.remove(&addr);
+            // M108: Update live peers for PEX send tasks
+            self.live_outgoing_peers
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&addr);
             return;
         }
 
@@ -7718,6 +7761,11 @@ impl TorrentActor {
             PeerState::new(addr, self.num_pieces, cmd_tx, PeerSource::Incoming),
         );
         self.peers_connected.insert(addr, ());
+        // M108: Update live peers for PEX send tasks
+        self.live_outgoing_peers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(addr);
         // Identify transport for incoming peers (M45)
         let transport = if mode_override.is_some() {
             crate::rate_limiter::PeerTransport::Utp

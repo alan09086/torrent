@@ -806,6 +806,8 @@ pub(crate) enum PeerCommand {
     },
     /// BEP 52: Reject a peer's hash request.
     SendHashReject(torrent_core::HashRequest),
+    /// BEP 11: Send a PEX message to this peer.
+    SendPex { message: crate::pex::PexMessage },
     /// BEP 55: Send a holepunch message to this peer.
     SendHolepunch(torrent_wire::HolepunchMessage),
     /// Update the piece count after BEP 9 metadata assembly.
