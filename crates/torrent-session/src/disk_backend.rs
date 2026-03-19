@@ -107,6 +107,22 @@ pub trait DiskIoBackend: Send + Sync {
 
     /// Return current I/O statistics.
     fn stats(&self) -> DiskIoStats;
+
+    /// Write a block directly to storage from two slices (vectored write).
+    ///
+    /// Bypasses the buffer pool entirely — data goes straight to the
+    /// underlying `TorrentStorage`. The two slices represent contiguous
+    /// block data split across a ring-buffer wrap boundary.
+    ///
+    /// This is the zero-copy direct-pwrite path used by peer tasks.
+    fn write_block_direct(
+        &self,
+        info_hash: Id20,
+        piece: u32,
+        begin: u32,
+        s0: &[u8],
+        s1: &[u8],
+    ) -> crate::Result<()>;
 }
 
 /// No-op disk I/O backend for network throughput benchmarking.
@@ -189,6 +205,17 @@ impl DiskIoBackend for DisabledDiskIo {
 
     fn stats(&self) -> DiskIoStats {
         DiskIoStats::default()
+    }
+
+    fn write_block_direct(
+        &self,
+        _info_hash: Id20,
+        _piece: u32,
+        _begin: u32,
+        _s0: &[u8],
+        _s1: &[u8],
+    ) -> crate::Result<()> {
+        Ok(())
     }
 }
 
@@ -461,6 +488,21 @@ impl DiskIoBackend for PosixDiskIo {
         s.skeleton_count = ps.skeleton_count;
         s
     }
+
+    fn write_block_direct(
+        &self,
+        info_hash: Id20,
+        piece: u32,
+        begin: u32,
+        s0: &[u8],
+        s1: &[u8],
+    ) -> crate::Result<()> {
+        let storage = self.get_storage(info_hash)?;
+        storage.write_chunk_vectored(piece, begin, s0, s1)?;
+        let total = (s0.len() + s1.len()) as u64;
+        self.stats.lock().unwrap().write_bytes += total;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +639,21 @@ impl DiskIoBackend for MmapDiskIo {
 
     fn stats(&self) -> DiskIoStats {
         self.stats.lock().unwrap().clone()
+    }
+
+    fn write_block_direct(
+        &self,
+        info_hash: Id20,
+        piece: u32,
+        begin: u32,
+        s0: &[u8],
+        s1: &[u8],
+    ) -> crate::Result<()> {
+        let storage = self.get_storage(info_hash)?;
+        storage.write_chunk_vectored(piece, begin, s0, s1)?;
+        let total = (s0.len() + s1.len()) as u64;
+        self.stats.lock().unwrap().write_bytes += total;
+        Ok(())
     }
 }
 
@@ -1383,5 +1440,52 @@ mod tests {
             hit_rate > 0.8,
             "cache hit rate {hit_rate:.1} should be >80% (hits={hits}, total={total})"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // write_block_direct tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_block_direct_contiguous() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(60);
+        let storage = make_storage(100);
+        backend.register(ih, Arc::clone(&storage));
+
+        // Common case: all data in s0, empty s1.
+        let data = vec![0xCDu8; 50];
+        backend
+            .write_block_direct(ih, 0, 0, &data, &[])
+            .unwrap();
+
+        let read = storage.read_chunk(0, 0, 50).unwrap();
+        assert_eq!(read, data);
+
+        // Stats should reflect the write.
+        let stats = backend.stats();
+        assert_eq!(stats.write_bytes, 50);
+    }
+
+    #[test]
+    fn write_block_direct_split() {
+        let backend = PosixDiskIo::new(&test_config());
+        let ih = make_hash_n(61);
+        let storage = make_storage(100);
+        backend.register(ih, Arc::clone(&storage));
+
+        // Ring-buffer wrap: 30 bytes in s0, 20 bytes in s1.
+        let s0: Vec<u8> = (0..30).collect();
+        let s1: Vec<u8> = (30..50).collect();
+        backend
+            .write_block_direct(ih, 0, 10, &s0, &s1)
+            .unwrap();
+
+        let read = storage.read_chunk(0, 10, 50).unwrap();
+        let expected: Vec<u8> = (0..50).collect();
+        assert_eq!(read, expected);
+
+        let stats = backend.stats();
+        assert_eq!(stats.write_bytes, 50);
     }
 }

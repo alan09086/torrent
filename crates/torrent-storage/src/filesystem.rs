@@ -132,6 +132,44 @@ impl TorrentStorage for FilesystemStorage {
         Ok(())
     }
 
+    fn write_chunk_vectored(&self, piece: u32, begin: u32, s0: &[u8], s1: &[u8]) -> Result<()> {
+        let total_len = s0.len() + s1.len();
+        let segments = self
+            .file_map
+            .chunk_segments(piece, begin, total_len as u32);
+        let mut pos = 0usize;
+
+        for seg in &segments {
+            let seg_len = seg.len as usize;
+            let mut guard = self.open_file(seg.file_index)?;
+            let f = guard.as_mut().unwrap();
+            f.seek(SeekFrom::Start(seg.file_offset))?;
+
+            // Determine which portions of s0/s1 this segment spans.
+            let seg_end = pos + seg_len;
+
+            if seg_end <= s0.len() {
+                // Entire segment falls within s0.
+                f.write_all(&s0[pos..seg_end])?;
+            } else if pos >= s0.len() {
+                // Entire segment falls within s1.
+                let s1_start = pos - s0.len();
+                let s1_end = seg_end - s0.len();
+                f.write_all(&s1[s1_start..s1_end])?;
+            } else {
+                // Segment straddles the s0/s1 boundary.
+                let from_s0 = &s0[pos..];
+                let s1_need = seg_len - from_s0.len();
+                f.write_all(from_s0)?;
+                f.write_all(&s1[..s1_need])?;
+            }
+
+            pos = seg_end;
+        }
+
+        Ok(())
+    }
+
     fn read_chunk(&self, piece: u32, begin: u32, length: u32) -> Result<Vec<u8>> {
         let segments = self.file_map.chunk_segments(piece, begin, length);
         let mut buf = vec![0u8; length as usize];
@@ -516,6 +554,90 @@ mod tests {
         let data = vec![42u8; 16384];
         s.write_chunk(0, 0, &data).unwrap();
         let read = s.read_chunk(0, 0, 16384).unwrap();
+        assert_eq!(read, data);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── write_chunk_vectored tests ────────────────────────────────────
+
+    #[test]
+    fn write_chunk_vectored_single_file() {
+        let dir = temp_dir("vec_single");
+        let lengths = Lengths::new(200, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![200],
+            lengths,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Simulate ring-buffer wrap: first 30 bytes in s0, last 20 in s1.
+        let s0: Vec<u8> = (0..30).collect();
+        let s1: Vec<u8> = (30..50).collect();
+        s.write_chunk_vectored(0, 10, &s0, &s1).unwrap();
+
+        let read = s.read_chunk(0, 10, 50).unwrap();
+        let expected: Vec<u8> = (0..50).collect();
+        assert_eq!(read, expected);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_chunk_vectored_file_boundary() {
+        let dir = temp_dir("vec_boundary");
+        // 200 bytes total, 150-byte pieces, two files of 100 bytes each.
+        // Piece 0 starts at abs offset 0, spans files a (0..100) and b (0..50).
+        let lengths = Lengths::new(200, 150, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")],
+            vec![100, 100],
+            lengths,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Write 100 bytes at piece 0, begin 50 → abs offset 50.
+        // File a: 50..100 (50 bytes), file b: 0..50 (50 bytes).
+        // Split: s0 = 60 bytes, s1 = 40 bytes.
+        // s0 covers file-a's 50 bytes + 10 bytes into file-b.
+        // s1 covers the remaining 40 bytes in file-b.
+        let s0: Vec<u8> = (0..60).collect();
+        let s1: Vec<u8> = (60..100).collect();
+        s.write_chunk_vectored(0, 50, &s0, &s1).unwrap();
+
+        let read = s.read_chunk(0, 50, 100).unwrap();
+        let expected: Vec<u8> = (0..100).collect();
+        assert_eq!(read, expected);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_chunk_vectored_empty_s1() {
+        let dir = temp_dir("vec_empty_s1");
+        let lengths = Lengths::new(100, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![100],
+            lengths,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Common case: contiguous buffer, s1 is empty.
+        let data = vec![0xABu8; 50];
+        s.write_chunk_vectored(0, 0, &data, &[]).unwrap();
+
+        let read = s.read_chunk(0, 0, 50).unwrap();
         assert_eq!(read, data);
 
         fs::remove_dir_all(&dir).unwrap();

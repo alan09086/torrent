@@ -789,6 +789,30 @@ impl DiskHandle {
         }
     }
 
+    /// Write a block directly to storage from two slices (vectored write).
+    ///
+    /// Bypasses the buffer pool and deferred write queue — data goes straight
+    /// to the underlying storage via `DiskIoBackend::write_block_direct`.
+    /// This is the zero-copy direct-pwrite path used by peer tasks when
+    /// the ring buffer wraps and produces two slices.
+    ///
+    /// Returns `Ok(())` on success, or an error if the backend is not set
+    /// or the underlying write fails.
+    #[allow(dead_code)] // Called from peer task in M110 Task 4
+    pub(crate) fn write_block_direct(
+        &self,
+        piece: u32,
+        begin: u32,
+        s0: &[u8],
+        s1: &[u8],
+    ) -> crate::Result<()> {
+        let backend = match &self.backend {
+            Some(b) => b,
+            None => return Ok(()), // pre-M100 path
+        };
+        backend.write_block_direct(self.info_hash, piece, begin, s0, s1)
+    }
+
     /// Wait until all deferred writes for `piece` have been flushed to storage.
     ///
     /// Returns immediately if write_state is `None` (pre-M100 path) or if

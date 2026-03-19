@@ -42,6 +42,27 @@ pub trait TorrentStorage: Send + Sync {
         let data = self.read_chunk(piece, begin, length)?;
         Ok(torrent_core::sha256(&data))
     }
+
+    /// Write a block from two slices without concatenation (vectored write).
+    ///
+    /// The two slices `s0` and `s1` represent contiguous data that may be split
+    /// across a ring-buffer wrap boundary. The total write length is
+    /// `s0.len() + s1.len()`.
+    ///
+    /// Default implementation concatenates and delegates to [`write_chunk`].
+    /// Backends with file-level I/O should override this to avoid the copy.
+    ///
+    /// [`write_chunk`]: TorrentStorage::write_chunk
+    fn write_chunk_vectored(&self, piece: u32, begin: u32, s0: &[u8], s1: &[u8]) -> Result<()> {
+        if s1.is_empty() {
+            self.write_chunk(piece, begin, s0)
+        } else {
+            let mut combined = Vec::with_capacity(s0.len() + s1.len());
+            combined.extend_from_slice(s0);
+            combined.extend_from_slice(s1);
+            self.write_chunk(piece, begin, &combined)
+        }
+    }
 }
 
 #[cfg(test)]
