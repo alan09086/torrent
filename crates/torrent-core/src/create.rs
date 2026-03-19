@@ -1918,18 +1918,201 @@ mod tests {
         );
     }
 
+    // ── V2-only torrent creation tests ─────────────────────────────────
+
     #[test]
-    fn v2_only_creation_returns_error() {
+    fn create_v2_only_single_file() {
+        let f = make_test_file();
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::V2Only)
+            .generate()
+            .expect("v2-only single file creation should succeed");
+
+        assert!(result.meta.is_v2(), "should be V2 variant");
+        let v2 = result.meta.as_v2().expect("as_v2 should succeed");
+        assert_eq!(v2.info.meta_version, 2);
+        assert_eq!(v2.info.piece_length, 32768);
+        let files = v2.info.files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].attr.length, 65536);
+    }
+
+    #[test]
+    fn create_v2_only_multi_file() {
+        let dir = make_test_dir();
+        let result = CreateTorrent::new()
+            .add_directory(dir.path())
+            .set_name("v2-multi")
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::V2Only)
+            .generate()
+            .expect("v2-only multi file creation should succeed");
+
+        assert!(result.meta.is_v2(), "should be V2 variant");
+        let v2 = result.meta.as_v2().expect("as_v2 should succeed");
+        let files = v2.info.files();
+        assert_eq!(files.len(), 2);
+        // Files should be sorted: aaa.txt before subdir/bbb.bin
+        assert_eq!(files[0].path, vec!["aaa.txt"]);
+        assert_eq!(files[1].path, vec!["subdir", "bbb.bin"]);
+        assert_eq!(files[0].attr.length, 12);
+        assert_eq!(files[1].attr.length, 1000);
+    }
+
+    #[test]
+    fn create_v2_only_has_piece_layers() {
+        // Create a file larger than piece_size so piece_layers should be populated.
+        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+        f.write_all(&vec![0xCD; 65536]).expect("write temp file");
+        f.flush().expect("flush temp file");
+
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(16384) // 4 pieces
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::V2Only)
+            .generate()
+            .expect("v2-only creation should succeed");
+
+        let v2 = result.meta.as_v2().expect("as_v2 should succeed");
+        assert!(
+            !v2.piece_layers.is_empty(),
+            "piece_layers should not be empty for a file spanning multiple pieces"
+        );
+        // The single file's Merkle root should be the key in piece_layers.
+        let files = v2.info.files();
+        assert_eq!(files.len(), 1);
+        let root = files[0]
+            .attr
+            .pieces_root
+            .expect("file should have a pieces_root");
+        assert!(
+            v2.piece_layers.contains_key(&root),
+            "piece_layers should contain an entry for the file's Merkle root"
+        );
+    }
+
+    #[test]
+    fn create_v2_only_no_v1_keys() {
         let f = make_test_file();
         let result = CreateTorrent::new()
             .add_file(f.path())
             .set_piece_size(65536)
+            .set_creation_date(1000000)
             .set_version(TorrentVersion::V2Only)
-            .generate();
+            .generate()
+            .expect("v2-only creation should succeed");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("v2-only"), "error: {err}");
+        // Re-parse the raw bytes as a generic BencodeValue to inspect keys.
+        let value: torrent_bencode::BencodeValue =
+            torrent_bencode::from_bytes(&result.bytes).expect("bencode parse");
+        let root = value.as_dict().expect("root should be a dict");
+        let info = root
+            .get(b"info".as_ref())
+            .expect("should have info key")
+            .as_dict()
+            .expect("info should be a dict");
+
+        // v1-only keys must NOT be present.
+        assert!(
+            !info.contains_key(b"pieces".as_ref()),
+            "v2-only should not have 'pieces'"
+        );
+        assert!(
+            !info.contains_key(b"length".as_ref()),
+            "v2-only should not have 'length'"
+        );
+        assert!(
+            !info.contains_key(b"files".as_ref()),
+            "v2-only should not have 'files'"
+        );
+
+        // v2 keys MUST be present.
+        assert!(
+            info.contains_key(b"file tree".as_ref()),
+            "v2-only must have 'file tree'"
+        );
+        assert!(
+            info.contains_key(b"meta version".as_ref()),
+            "v2-only must have 'meta version'"
+        );
+        assert!(
+            info.contains_key(b"name".as_ref()),
+            "v2-only must have 'name'"
+        );
+        assert!(
+            info.contains_key(b"piece length".as_ref()),
+            "v2-only must have 'piece length'"
+        );
+    }
+
+    #[test]
+    fn create_v2_only_round_trip() {
+        let f = make_test_file();
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(32768)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::V2Only)
+            .generate()
+            .expect("v2-only creation should succeed");
+
+        // Round-trip through the auto-detect parser.
+        let detected = crate::detect::torrent_from_bytes_any(&result.bytes)
+            .expect("round-trip parse should succeed");
+
+        assert!(detected.is_v2(), "detected should be V2 (not hybrid, not v1)");
+        assert!(!detected.is_hybrid(), "detected should NOT be hybrid");
+
+        let orig = result.meta.as_v2().expect("original as_v2");
+        let rt = detected.as_v2().expect("round-trip as_v2");
+
+        assert_eq!(rt.info.name, orig.info.name);
+        assert_eq!(rt.info.piece_length, orig.info.piece_length);
+        assert_eq!(rt.info.meta_version, orig.info.meta_version);
+        assert_eq!(rt.info.files().len(), orig.info.files().len());
+        assert_eq!(
+            rt.info.files()[0].attr.length,
+            orig.info.files()[0].attr.length
+        );
+    }
+
+    #[test]
+    fn create_v2_only_info_hash() {
+        let f = make_test_file();
+        let result = CreateTorrent::new()
+            .add_file(f.path())
+            .set_piece_size(65536)
+            .set_creation_date(1000000)
+            .set_version(TorrentVersion::V2Only)
+            .generate()
+            .expect("v2-only creation should succeed");
+
+        let v2 = result.meta.as_v2().expect("as_v2 should succeed");
+        let hashes = &v2.info_hashes;
+
+        // Pure v2 should have no v1 hash and a v2 hash.
+        assert!(hashes.v1.is_none(), "v2-only should have no v1 hash");
+        assert!(hashes.v2.is_some(), "v2-only should have a v2 hash");
+
+        // best_v1() should still return something (truncated from SHA-256).
+        let _best = hashes.best_v1();
+
+        // Manually compute SHA-256 of the info dict bytes and compare.
+        let info_bytes = v2
+            .info_bytes
+            .as_ref()
+            .expect("info_bytes should be present");
+        let manual_hash = crate::sha256(info_bytes);
+        assert_eq!(
+            manual_hash,
+            hashes.v2.expect("v2 hash present"),
+            "manually computed SHA-256 of info dict should match info_hashes.v2"
+        );
     }
 
     #[test]
