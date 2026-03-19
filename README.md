@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1654-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1663-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.113.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.114.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,654 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,663 tests. Zero clippy warnings.
 
 ---
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.114.0 | Listener task extraction -- TCP/uTP accept loops moved from SessionActor select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone | +9 tests (1663 total) |
 | 0.113.0 | BEP 52 V2-only torrent creation -- `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test | +6 tests (1654 total) |
 | 0.112.0 | BEP 55 holepunch initiation + cold-start optimization -- holepunch wired on NAT connect failures (sync buffer pattern, 120s cooldown), DHT re-query delay 60s→5s for magnets, adaptive cap during metadata fetch | +8 tests (1648 total) |
 | 0.111.0 | BEP compliance sweep -- BEP 27 private torrents now disable LSD (4 session guard sites), BEP 40 dead code removed, BEP 51 client-side `sample_infohashes` wired with session timer | -7 tests net (1640 total), ~200 lines net deleted |
@@ -284,7 +285,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M109) focuses on performance optimization, DHT reliability, and wire-level efficiency. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M114) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -305,7 +306,9 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Speed Optimization | M55-M104 | Dispatch architecture, pipeline tuning, CPU efficiency, unified buffer pool, block stealing | Done |
 | DHT Reliability | M105 | Routing table cap, two-phase ping, background DNS backoff, unified lookup, JSON persistence | Done |
 | Peer Pipeline | M106-M107 | Peer scoring system, semaphore-paced admission, TCP+uTP race, parallel metadata fetch | Done |
-| Wire Optimization | M108-M109 | Full PEX send-side, Have batching, hot-path pre-allocation, ring buffer codec | Done |
+| Wire Optimization | M108-M110 | Full PEX send-side, Have batching, hot-path pre-allocation, ring buffer codec, zero-copy piece pipeline | Done |
+| Protocol Compliance | M111-M113 | BEP compliance sweep, holepunch initiation, V2-only torrent creation | Done |
+| Session Architecture | M114 | Listener task extraction -- TCP/uTP accept loops in dedicated spawned task | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 

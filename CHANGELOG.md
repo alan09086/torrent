@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.114.0 | M114 | Listener task extraction — TCP/uTP accept loops moved from SessionActor's select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone |
 | 0.113.0 | M113 | BEP 52 V2-only torrent creation — `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test |
 | 0.112.0 | M112 | BEP 55 holepunch initiation + cold-start optimization — holepunch wired on NAT connect failures (sync buffer, 120s cooldown, 256-entry cap), DHT re-query 60s→5s for magnets, adaptive cap during metadata fetch, counter reset on state transition |
 | 0.111.0 | M111 | BEP compliance sweep — BEP 27 private torrents now disable LSD (4 session-level guards + config), BEP 40 dead code removed (superseded by peer scoring M106), BEP 51 client-side `sample_infohashes` wired with session timer |
@@ -67,6 +68,22 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.114.0] — 2026-03-19
+
+### Added
+- **ListenerTask** — dedicated spawned task for TCP and uTP listener accept loops, extracted from SessionActor's 13-arm `select!` loop. Uses `FuturesUnordered` for concurrent connection identification (48-byte BEP 3 preamble read).
+- **DashMap info_hash_registry** — shared lock-free registry of active info hashes, synced on torrent add/remove. Replaces per-connection `HashMap` clone (was O(n) per accepted connection).
+- **5s preamble timeout** — connections that fail to send the 48-byte handshake preamble within 5 seconds are dropped.
+- **10s accept error backoff** — listener sleeps on accept errors to avoid busy-loop on transient failures.
+- 9 new tests (1663 total).
+
+### Changed
+- SessionActor `select!` loop reduced from 13 to 11 arms — TCP and uTP listener arms replaced by a single mpsc channel receive from ListenerTask.
+- Target: `TokioListener::accept` allocations reduced from 31K to <1K per download.
+
+### Removed
+- Per-connection `HashMap` clone of active info hashes in the accept path — replaced by shared DashMap lookup.
 
 ## [0.113.0] — 2026-03-19
 
