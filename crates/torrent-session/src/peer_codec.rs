@@ -604,6 +604,7 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
     ///   `max_message_size`.
     /// - `torrent_wire::Error::Io` on socket errors or unexpected EOF with
     ///   a partial message buffered.
+    #[allow(dead_code)] // Retained as legacy convenience API; peer.rs now uses the three-phase zero-copy path.
     pub(crate) async fn next_message(&mut self) -> Result<Option<Message>, torrent_wire::Error> {
         match self.fill_message().await? {
             FillStatus::Eof => Ok(None),
