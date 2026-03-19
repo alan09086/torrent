@@ -1923,6 +1923,19 @@ impl SessionActor {
             t.tick().await; // skip first immediate tick
         }
 
+        // Periodic sample_infohashes timer (BEP 51, M111)
+        let sample_interval_secs = self.settings.dht_sample_infohashes_interval;
+        let mut sample_timer = if sample_interval_secs > 0 {
+            Some(tokio::time::interval(std::time::Duration::from_secs(
+                sample_interval_secs,
+            )))
+        } else {
+            None
+        };
+        if let Some(ref mut t) = sample_timer {
+            t.tick().await; // skip first immediate tick
+        }
+
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => {
@@ -2526,6 +2539,15 @@ impl SessionActor {
                 } => {
                     self.fire_stats_alert();
                 }
+                // Periodic sample_infohashes (BEP 51, M111)
+                _ = async {
+                    match &mut sample_timer {
+                        Some(t) => t.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.fire_sample_infohashes().await;
+                }
             }
         }
     }
@@ -2886,6 +2908,32 @@ impl SessionActor {
             &self.alert_mask,
             crate::alert::AlertKind::SessionStatsAlert { values },
         );
+    }
+
+    /// Fire a periodic BEP 51 sample_infohashes query to the DHT (M111).
+    async fn fire_sample_infohashes(&self) {
+        let dht = match (&self.dht_v4, &self.dht_v6) {
+            (Some(d), _) | (_, Some(d)) => d,
+            _ => return,
+        };
+        let mut buf = [0u8; 20];
+        torrent_core::random_bytes(&mut buf);
+        let target = Id20::from(buf);
+        match dht.sample_infohashes(target).await {
+            Ok(result) => {
+                post_alert(
+                    &self.alert_tx,
+                    &self.alert_mask,
+                    AlertKind::DhtSampleInfohashes {
+                        num_samples: result.samples.len(),
+                        total_estimate: result.num,
+                    },
+                );
+            }
+            Err(e) => {
+                debug!("sample_infohashes failed: {e}");
+            }
+        }
     }
 
     async fn make_session_stats(&self) -> SessionStats {
@@ -4674,6 +4722,24 @@ mod tests {
         assert!(
             result.is_err(),
             "no SessionStatsAlert should fire when stats_report_interval is 0"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sample_infohashes_timer_disabled_when_zero() {
+        use crate::alert::{AlertCategory, AlertKind};
+
+        let mut config = test_settings();
+        config.dht_sample_infohashes_interval = 0;
+        let session = SessionHandle::start(config).await.unwrap();
+        let mut dht_sub = session.subscribe_filtered(AlertCategory::DHT);
+
+        // Wait 200ms — no DhtSampleInfohashes alert should arrive
+        let result = tokio::time::timeout(Duration::from_millis(200), dht_sub.recv()).await;
+        assert!(
+            result.is_err(),
+            "no DhtSampleInfohashes alert should fire when interval is 0"
         );
         session.shutdown().await.unwrap();
     }
