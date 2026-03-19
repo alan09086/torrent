@@ -69,7 +69,7 @@ impl Decoder for MessageCodec {
         // Take the payload
         let payload = src.split_to(length);
 
-        Message::from_payload(payload).map(Some)
+        Message::from_payload(payload.freeze()).map(Some)
     }
 }
 

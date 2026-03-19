@@ -1,11 +1,11 @@
 #![no_main]
 
-use bytes::BytesMut;
+use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Parse as a BitTorrent wire protocol message payload.
-    let _ = torrent_wire::Message::from_payload(BytesMut::from(data));
+    let _ = torrent_wire::Message::from_payload(Bytes::copy_from_slice(data));
 
     // Parse as a BEP 10 extension handshake.
     let _ = torrent_wire::ExtHandshake::from_bytes(data);

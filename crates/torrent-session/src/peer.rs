@@ -7,18 +7,18 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
 
 use rustc_hash::FxHashMap;
 use torrent_core::{Id20, Lengths};
 use torrent_storage::Bitfield;
 use torrent_wire::{
-    ExtHandshake, Handshake, Message, MessageCodec, MetadataMessage, MetadataMessageType,
+    ExtHandshake, Handshake, Message, MetadataMessage, MetadataMessageType,
 };
+
+use crate::peer_codec::{PeerReader, PeerWriter};
 
 use crate::disk::{DiskHandle, DiskWriteError};
 use crate::pex::PexMessage;
@@ -94,31 +94,6 @@ type ReservationState = Option<(
 /// Total handshake size: 1 + 19 + 8 + 20 + 20 = 68 bytes.
 const HANDSHAKE_SIZE: usize = 68;
 
-/// M94: Codec read buffer shrinks when it exceeds this capacity.
-/// During active download the buffer grows to ~16 KiB+ for Piece messages.
-const CODEC_BUFFER_SHRINK_THRESHOLD: usize = 32 * 1024;
-
-/// M94: Target capacity after shrinking — small enough to reclaim memory,
-/// large enough to avoid an immediate reallocation on the next message.
-const CODEC_BUFFER_TARGET_CAPACITY: usize = 4096;
-
-/// M94: Shrink codec read buffer when peer goes idle to reclaim memory.
-/// During active download, the buffer grows to ~16 KiB+ for Piece messages.
-/// Shrinking on idle (choke/cursor exhausted/disconnect) reclaims memory
-/// from peers that stopped sending without causing hot-path churn.
-fn maybe_shrink_codec_buffer<T: tokio::io::AsyncRead + Unpin>(
-    framed_read: &mut FramedRead<T, MessageCodec>,
-) {
-    let buf = framed_read.read_buffer_mut();
-    if buf.capacity() > CODEC_BUFFER_SHRINK_THRESHOLD {
-        let mut new_buf =
-            bytes::BytesMut::with_capacity(CODEC_BUFFER_TARGET_CAPACITY.max(buf.len()));
-        if !buf.is_empty() {
-            new_buf.extend_from_slice(buf);
-        }
-        *buf = new_buf;
-    }
-}
 
 /// Run a single peer connection, handling handshake, extension negotiation,
 /// and the message loop.
@@ -207,11 +182,10 @@ pub(crate) async fn run_peer(
         return Err(crate::Error::Connection("info_hash mismatch".into()));
     }
 
-    // --- Phase 2: Wrap stream in framed codec ---
+    // --- Phase 2: Wrap stream in ring-buffer codec (M109) ---
     let (reader, writer) = tokio::io::split(stream);
-    let mut framed_read =
-        FramedRead::new(reader, MessageCodec::new().with_max_size(max_message_size));
-    let mut framed_write = FramedWrite::new(writer, MessageCodec::new());
+    let mut reader = PeerReader::new(reader, max_message_size);
+    let mut writer = PeerWriter::new(writer);
 
     // --- Phase 3: BEP 10 Extension Handshake ---
     let plugin_names: Vec<&str> = plugins.iter().map(|p| p.name()).collect();
@@ -228,59 +202,44 @@ pub(crate) async fn run_peer(
             ext_hs.upload_only = None;
         }
         let payload = ext_hs.to_bytes().map_err(crate::Error::Wire)?;
-        framed_write
-            .send(Message::Extended { ext_id: 0, payload })
-            .await
-            .map_err(crate::Error::Wire)?;
+        writer
+            .send(&Message::Extended { ext_id: 0, payload })
+            .await?;
     }
 
     // --- Phase 4: Send our bitfield (fast-aware) ---
     let both_support_fast = enable_fast && their_hs.supports_fast();
     if both_support_fast {
         if num_pieces > 0 && our_bitfield.count_ones() == num_pieces {
-            framed_write
-                .send(Message::HaveAll)
-                .await
-                .map_err(crate::Error::Wire)?;
+            writer.send(&Message::HaveAll).await?;
         } else if our_bitfield.count_ones() == 0 {
-            framed_write
-                .send(Message::HaveNone)
-                .await
-                .map_err(crate::Error::Wire)?;
+            writer.send(&Message::HaveNone).await?;
         } else {
-            framed_write
-                .send(Message::Bitfield(Bytes::copy_from_slice(
+            writer
+                .send(&Message::Bitfield(Bytes::copy_from_slice(
                     our_bitfield.as_bytes(),
                 )))
-                .await
-                .map_err(crate::Error::Wire)?;
+                .await?;
         }
     } else if our_bitfield.count_ones() > 0 {
-        framed_write
-            .send(Message::Bitfield(Bytes::copy_from_slice(
+        writer
+            .send(&Message::Bitfield(Bytes::copy_from_slice(
                 our_bitfield.as_bytes(),
             )))
-            .await
-            .map_err(crate::Error::Wire)?;
+            .await?;
     }
 
     // --- Phase 4b: Send AllowedFast set (BEP 6) ---
     if both_support_fast && num_pieces > 0 {
         let fast_set = torrent_wire::allowed_fast_set_for_ip(&info_hash, addr.ip(), num_pieces, 10);
         for index in fast_set {
-            framed_write
-                .send(Message::AllowedFast(index))
-                .await
-                .map_err(crate::Error::Wire)?;
+            writer.send(&Message::AllowedFast(index)).await?;
         }
     }
 
     // M107: Send unchoke unconditionally on connect (matches rqbit).
     // Costs nothing for a downloader; improves tit-for-tat reciprocity.
-    framed_write
-        .send(Message::Unchoke)
-        .await
-        .map_err(crate::Error::Wire)?;
+    writer.send(&Message::Unchoke).await?;
 
     // Track extension ID mappings:
     // - peer_ut_*: IDs from the remote's ext handshake (used when SENDING to them)
@@ -352,9 +311,9 @@ pub(crate) async fn run_peer(
         tokio::select! {
             biased;
 
-            frame = framed_read.next() => {
-                match frame {
-                    Some(Ok(msg)) => {
+            result = reader.next_message() => {
+                match result {
+                    Ok(Some(msg)) => {
                         // Defer Bitfield/HaveAll/HaveNone when num_pieces is
                         // unknown (magnet phase).  Replay after UpdateNumPieces.
                         if num_pieces == 0 {
@@ -429,8 +388,6 @@ pub(crate) async fn run_peer(
                                     }
                                     ds.clear_current_piece();
                                 }
-                                // M94: Shrink codec buffer — peer stopped sending data
-                                maybe_shrink_codec_buffer(&mut framed_read);
                             }
                             Message::RejectRequest { .. } => {
                                 if reservation_state.is_some() {
@@ -507,7 +464,7 @@ pub(crate) async fn run_peer(
                             &plugins,
                         ).await {
                             Ok(Some(response)) => {
-                                if let Err(e) = framed_write.send(response).await {
+                                if let Err(e) = writer.send(&response).await {
                                     warn!(%addr, "error sending response: {e}");
                                     break Some(e.to_string());
                                 }
@@ -518,13 +475,13 @@ pub(crate) async fn run_peer(
                             }
                         }
                     }
-                    Some(Err(e)) => {
-                        debug!(%addr, "wire error: {e}");
-                        break Some(e.to_string());
-                    }
-                    None => {
+                    Ok(None) => {
                         // Stream closed
                         break Some("connection closed".into());
+                    }
+                    Err(e) => {
+                        debug!(%addr, "wire error: {e}");
+                        break Some(e.to_string());
                     }
                 }
             }
@@ -608,7 +565,7 @@ pub(crate) async fn run_peer(
                     Some(cmd) => {
                         if let Err(e) = handle_command(
                             cmd,
-                            &mut framed_write,
+                            &mut writer,
                             peer_ut_metadata,
                             peer_ut_pex,
                             peer_ut_holepunch,
@@ -639,17 +596,15 @@ pub(crate) async fn run_peer(
                     Some(block) => {
                         permit.forget();
                         in_flight += 1;
-                        framed_write.send(Message::Request {
+                        writer.send(&Message::Request {
                             index: block.piece,
                             begin: block.begin,
                             length: block.length,
-                        }).await.map_err(crate::Error::Wire)?;
+                        }).await?;
                     }
                     None => {
                         // Cursor exhausted -- wait for new pieces
                         drop(permit);
-                        // M94: Shrink codec buffer while waiting for new pieces
-                        maybe_shrink_codec_buffer(&mut framed_read);
                         piece_notify.notified().await;
                     }
                 }
@@ -675,9 +630,6 @@ pub(crate) async fn run_peer(
     {
         atomic_states.release(piece);
     }
-
-    // M94: Shrink codec buffer before disconnect cleanup
-    maybe_shrink_codec_buffer(&mut framed_read);
 
     // Notify plugins that a peer disconnected
     for plugin in plugins.iter() {
@@ -1163,7 +1115,7 @@ async fn handle_holepunch_message(
 /// Handle a command from the TorrentActor.
 async fn handle_command(
     cmd: PeerCommand,
-    framed_write: &mut FramedWrite<tokio::io::WriteHalf<impl AsyncWrite>, MessageCodec>,
+    writer: &mut PeerWriter<tokio::io::WriteHalf<impl AsyncWrite>>,
     peer_ut_metadata: Option<u8>,
     peer_ut_pex: Option<u8>,
     peer_ut_holepunch: Option<u8>,
@@ -1255,20 +1207,14 @@ async fn handle_command(
                 let payload = message
                     .to_bytes()
                     .map_err(|e| crate::Error::Connection(e.to_string()))?;
-                framed_write
-                    .send(Message::Extended { ext_id, payload })
-                    .await
-                    .map_err(crate::Error::Wire)?;
+                writer.send(&Message::Extended { ext_id, payload }).await?;
             }
             return Ok(());
         }
         PeerCommand::SendHolepunch(hp_msg) => {
             if let Some(ext_id) = peer_ut_holepunch {
                 let payload = hp_msg.to_bytes();
-                framed_write
-                    .send(Message::Extended { ext_id, payload })
-                    .await
-                    .map_err(crate::Error::Wire)?;
+                writer.send(&Message::Extended { ext_id, payload }).await?;
             }
             return Ok(());
         }
@@ -1281,14 +1227,14 @@ async fn handle_command(
             return Ok(());
         }
     };
-    framed_write.send(msg).await.map_err(crate::Error::Wire)?;
+    writer.send(&msg).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
+    use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
@@ -1335,7 +1281,7 @@ mod tests {
         if len > 0 {
             stream.read_exact(&mut payload).await.unwrap();
         }
-        Message::from_payload(BytesMut::from(&payload[..])).unwrap()
+        Message::from_payload(Bytes::from(payload)).unwrap()
     }
 
     /// Write one framed message to a raw stream (length-prefix + payload).

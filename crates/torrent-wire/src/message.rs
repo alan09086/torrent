@@ -406,7 +406,7 @@ impl Message {
 
     /// Parse a message from its payload (after the 4-byte length prefix has
     /// been consumed). `payload` is everything after the length prefix.
-    pub fn from_payload(payload: BytesMut) -> Result<Self> {
+    pub fn from_payload(payload: Bytes) -> Result<Self> {
         if payload.is_empty() {
             return Ok(Message::KeepAlive);
         }
@@ -425,7 +425,7 @@ impl Message {
                     index: read_u32(body),
                 })
             }
-            ID_BITFIELD => Ok(Message::Bitfield(payload.freeze().slice(1..))),
+            ID_BITFIELD => Ok(Message::Bitfield(payload.slice(1..))),
             ID_REQUEST => {
                 ensure_len(body, 12, "Request")?;
                 Ok(Message::Request {
@@ -441,7 +441,7 @@ impl Message {
                 Ok(Message::Piece {
                     index,
                     begin,
-                    data: payload.freeze().slice(9..),
+                    data: payload.slice(9..),
                 })
             }
             ID_CANCEL => {
@@ -461,7 +461,7 @@ impl Message {
                 let ext_id = body[0];
                 Ok(Message::Extended {
                     ext_id,
-                    payload: payload.freeze().slice(2..),
+                    payload: payload.slice(2..),
                 })
             }
             ID_SUGGEST_PIECE => {
@@ -681,7 +681,7 @@ mod tests {
     fn round_trip(msg: Message) {
         let bytes = msg.to_bytes();
         // Skip the 4-byte length prefix for parsing
-        let parsed = Message::from_payload(BytesMut::from(&bytes[4..])).unwrap();
+        let parsed = Message::from_payload(Bytes::copy_from_slice(&bytes[4..])).unwrap();
         assert_eq!(msg, parsed);
     }
 
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn invalid_message_id() {
-        assert!(Message::from_payload(BytesMut::from(&[99u8][..])).is_err());
+        assert!(Message::from_payload(Bytes::from_static(&[99u8])).is_err());
     }
 
     #[test]
@@ -912,7 +912,7 @@ mod tests {
         // msg id 21, but only 10 bytes of body (need 48)
         let mut payload = vec![21u8];
         payload.extend_from_slice(&[0u8; 10]);
-        assert!(Message::from_payload(BytesMut::from(&payload[..])).is_err());
+        assert!(Message::from_payload(Bytes::from(payload)).is_err());
     }
 
     #[test]
