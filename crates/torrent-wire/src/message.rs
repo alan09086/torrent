@@ -443,10 +443,12 @@ impl<B: AsRef<[u8]>> Message<B> {
     /// Encode this message (with length prefix) into a raw byte slice.
     ///
     /// Returns the number of bytes written. The caller must ensure `dst` is
-    /// large enough to hold the encoded message (see [`wire_len`] for sizing).
+    /// large enough to hold the encoded message. For peer wire messages,
+    /// `MAX_MSG_LEN` (16397) is always sufficient.
     ///
     /// Uses `std::io::Cursor<&mut [u8]>` + `std::io::Write` instead of
     /// `BufMut`, producing identical bytes to [`encode_into`](Self::encode_into).
+    #[must_use]
     pub fn encode_to_slice(&self, dst: &mut [u8]) -> usize {
         use std::io::{Cursor, Write};
 
