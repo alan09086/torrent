@@ -2,9 +2,9 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1631-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1647-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.109.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.110.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -51,7 +51,7 @@ torrent download ./ubuntu.torrent --list
 
 ```toml
 [dependencies]
-torrent = "0.109.0"
+torrent = "0.110.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.110.0 | Zero-copy piece pipeline -- `Message<B>` generic over buffer type, three-phase borrowed decode (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks | +16 tests (1647 total), target: page faults <15K, heap allocs <5K, ≥65 MB/s |
 | 0.109.0 | Ring buffer codec -- fixed 32 KiB ReadBuf replaces FramedRead, pre-allocated PeerWriter replaces FramedWrite, zero-copy DoubleBufHelper for wrap-boundary parsing | +21 tests, eliminates page faults from BytesMut growth/shrink |
 | 0.108.0 | Full PEX + page fault reduction -- bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection stats logging | +9 tests, target: peers >500, page faults <15K |
 | 0.107.0 | Aggressive peer pipeline -- semaphore-paced admission (`peer_adder_task`), TCP+uTP parallel race, parallel metadata fetch, adaptive DHT re-query, max_peers 200, unconditional Unchoke | +20 tests, ~570 lines deleted |

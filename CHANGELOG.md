@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.110.0 | M110 | Zero-copy piece pipeline — `Message<B>` generic over buffer type, borrowed decode from ring buffer (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks, bypasses BufferPool entirely |
 | 0.109.0 | M109 | Ring buffer codec — fixed 32 KiB `ReadBuf` replaces `FramedRead`, pre-allocated `PeerWriter` replaces `FramedWrite`, zero-copy `DoubleBufHelper` for wrap-boundary parsing, eliminates page faults from `BytesMut` growth/shrink cycles |
 | 0.108.0 | M108 | Full PEX + page fault reduction — bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection success rate logging |
 | 0.107.0 | M107 | Aggressive peer pipeline — semaphore-paced `peer_adder_task` replaces timer-based admission (~570 lines deleted), TCP+uTP parallel race, parallel metadata fetch with full redundancy, adaptive DHT re-query, max_peers 200, unconditional Unchoke |
@@ -63,6 +64,26 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.110.0] — 2026-03-19
+
+### Added
+- **`Message<B = Bytes>` generic buffer type** — Message enum is now generic over the buffer type `B`, enabling `Message<&[u8]>` for zero-copy borrowed references from the ring buffer. Piece variant carries two fields (`data_0`, `data_1`) to handle ring-buffer wrap-around without linearisation.
+- **Three-phase zero-copy PeerReader API** — `fill_message()` (async socket read), `try_decode()` (sync borrowed decode from ring), `advance()` (release ring space). Returns `Message<&[u8]>` with slices pointing directly into the ring buffer — zero allocation, zero copy on the hot path.
+- **`ReadBuf::readable_slices_at(offset, len)`** — borrowed peek into ring buffer without consuming, supporting the zero-copy decode path.
+- **`TorrentStorage::write_chunk_vectored(piece, begin, s0, s1)`** — vectored write for ring-wrapped blocks. `FilesystemStorage` override handles file-segment boundaries with split slices (no concatenation).
+- **`DiskIoBackend::write_block_direct(info_hash, piece, begin, s0, s1)`** — synchronous pwrite bypassing the BufferPool entirely. Implemented for `PosixDiskIo`, `MmapDiskIo`, and `DisabledDiskIo`.
+- **`DiskHandle::write_block_direct`** — peer task entry point for synchronous disk writes from ring buffer slices.
+- **`Message<&[u8]>::to_owned_bytes()`** — conversion from borrowed to owned `Message<Bytes>` for non-Piece message processing.
+- 16 new tests (1647 total)
+
+### Changed
+- Peer task message loop uses three-phase API for Piece messages: borrowed decode → synchronous pwrite from ring → advance. Non-Piece messages convert to owned via `to_owned_bytes()` before processing.
+- `write_block_deferred` bypassed for normal Piece handling — replaced by synchronous `write_block_direct` from ring buffer slices.
+- Codec explicitly types `Decoder::Item = Message<Bytes>` and `Encoder<Message<Bytes>>`.
+
+### Fixed
+- Off-by-4 oversized message check — messages with payload length in `[BUF_LEN-3, BUF_LEN]` would pass the oversized check but exceed ring capacity, potentially causing `fill_message` to loop forever (pre-existing from M109).
 
 ## [0.109.0] — 2026-03-19
 
