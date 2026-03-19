@@ -3,8 +3,12 @@
 //! Replaces `tokio_util::codec::FramedRead`/`FramedWrite` with fixed-size
 //! buffers that never reallocate on the hot path.
 
-use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::io::IoSliceMut;
+
+use bytes::Bytes;
+#[cfg(test)]
+use bytes::BytesMut;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use torrent_wire::Message;
 
 // ---------------------------------------------------------------------------
@@ -97,6 +101,7 @@ impl ReadBuf {
     /// First contiguous writable region. This is the region from the write
     /// cursor to either the end of the backing array or the start of the
     /// readable region, whichever comes first.
+    #[allow(dead_code)] // Used in tests; fill() now uses unfilled_ioslices().
     pub(crate) fn unfilled_contiguous(&mut self) -> &mut [u8] {
         if self.len == BUF_LEN {
             return &mut [];
@@ -113,26 +118,26 @@ impl ReadBuf {
     /// the first slice runs to the end of the array and the second slice
     /// covers `[0..start)`. Uses `split_at_mut` to safely produce two
     /// mutable borrows.
-    #[allow(dead_code)] // Used in tests; retained for vectored I/O future use.
-    pub(crate) fn unfilled_ioslices(&mut self) -> (&mut [u8], &mut [u8]) {
+    pub(crate) fn unfilled_ioslices(&mut self) -> [IoSliceMut<'_>; 2] {
         let available = BUF_LEN - self.len;
         if available == 0 {
-            return (&mut [], &mut []);
+            return [IoSliceMut::new(&mut []), IoSliceMut::new(&mut [])];
         }
         let write_pos = (self.start + self.len) % BUF_LEN;
         if write_pos >= self.start {
             // Case 1: write_pos is at or after start.
             // Writable: [write_pos..BUF_LEN) and [0..start).
-            // But if start == 0 (and write_pos == len), only [write_pos..BUF_LEN).
             let (left, right) = self.buf.split_at_mut(write_pos);
-            // right = [write_pos..BUF_LEN], left = [0..write_pos]
-            // Writable in right: all of it. Writable in left: [0..start).
-            let first = right; // [write_pos..BUF_LEN]
-            let second = &mut left[..self.start];
-            (first, second)
+            [
+                IoSliceMut::new(right),
+                IoSliceMut::new(&mut left[..self.start]),
+            ]
         } else {
             // Case 2: write_pos < start — single contiguous region.
-            (&mut self.buf[write_pos..self.start], &mut [])
+            [
+                IoSliceMut::new(&mut self.buf[write_pos..self.start]),
+                IoSliceMut::new(&mut []),
+            ]
         }
     }
 
@@ -420,7 +425,7 @@ pub(crate) struct PeerReader<R> {
     oversized_buf: Vec<u8>,
 }
 
-impl<R: AsyncRead + Unpin> PeerReader<R> {
+impl<R: crate::vectored_io::AsyncReadVectored> PeerReader<R> {
     /// Create a new reader wrapping `reader` with the given maximum message
     /// size.
     pub(crate) fn new(reader: R, max_message_size: usize) -> Self {
@@ -435,11 +440,11 @@ impl<R: AsyncRead + Unpin> PeerReader<R> {
     /// Read data from the socket into the ring buffer. Returns the number of
     /// bytes read, or 0 on EOF.
     async fn fill(&mut self) -> std::io::Result<usize> {
-        let slice = self.buf.unfilled_contiguous();
-        if slice.is_empty() {
+        let mut iov = self.buf.unfilled_ioslices();
+        if iov[0].is_empty() {
             return Ok(0);
         }
-        let n = self.reader.read(slice).await?;
+        let n = crate::vectored_io::read_vectored(&mut self.reader, &mut iov).await?;
         self.buf.mark_filled(n);
         Ok(n)
     }
@@ -968,7 +973,7 @@ const MAX_MSG_LEN: usize = 4 + 1 + 8 + 16_384;
 /// pre-allocated buffer.
 pub(crate) struct PeerWriter<W> {
     writer: W,
-    buf: BytesMut,
+    buf: Box<[u8; MAX_MSG_LEN]>,
 }
 
 impl<W: AsyncWrite + Unpin> PeerWriter<W> {
@@ -976,7 +981,7 @@ impl<W: AsyncWrite + Unpin> PeerWriter<W> {
     pub(crate) fn new(writer: W) -> Self {
         Self {
             writer,
-            buf: BytesMut::with_capacity(MAX_MSG_LEN),
+            buf: Box::new([0u8; MAX_MSG_LEN]),
         }
     }
 
@@ -986,9 +991,8 @@ impl<W: AsyncWrite + Unpin> PeerWriter<W> {
     ///
     /// Returns an I/O error if the write or flush fails.
     pub(crate) async fn send(&mut self, msg: &Message) -> std::io::Result<()> {
-        self.buf.clear();
-        msg.encode_into(&mut self.buf);
-        self.writer.write_all(&self.buf).await?;
+        let len = msg.encode_to_slice(&mut *self.buf);
+        self.writer.write_all(&self.buf[..len]).await?;
         self.writer.flush().await?;
         Ok(())
     }
@@ -1011,6 +1015,7 @@ impl<W: AsyncWrite + Unpin> PeerWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vectored_io::VectoredCompat;
     use tokio::io::duplex;
 
     // -----------------------------------------------------------------------
@@ -1097,7 +1102,7 @@ mod tests {
         rb.mark_filled(100);
 
         // Unfilled should be one contiguous region: [100..BUF_LEN).
-        let (a, b) = rb.unfilled_ioslices();
+        let [a, b] = rb.unfilled_ioslices();
         assert_eq!(a.len(), BUF_LEN - 100);
         assert!(b.is_empty());
     }
@@ -1134,7 +1139,7 @@ mod tests {
         rb2.start = 5;
         rb2.len = 3;
         // write_pos = (5+3) % BUF_LEN = 8
-        let (a, b) = rb2.unfilled_ioslices();
+        let [a, b] = rb2.unfilled_ioslices();
         // First region: [8..BUF_LEN)
         assert_eq!(a.len(), BUF_LEN - 8);
         // Second region: [0..5)
@@ -1244,7 +1249,7 @@ mod tests {
             server.shutdown().await.unwrap();
         });
 
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
         let decoded = reader
             .next_message()
             .await
@@ -1267,7 +1272,7 @@ mod tests {
         // Create a dummy duplex (won't actually read from it since data is
         // pre-loaded).
         let (client, _server) = duplex(1024);
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
 
         // Place message at the wrap boundary.
         let start = BUF_LEN - 5; // 5 bytes before end, so 4 bytes wrap
@@ -1292,7 +1297,7 @@ mod tests {
         let wire = encode_message(&msg);
 
         let (client, _server) = duplex(1024);
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
 
         // Place start so the 4-byte length prefix straddles the boundary:
         // 2 bytes before end, 2 bytes at start.
@@ -1321,7 +1326,7 @@ mod tests {
             server.shutdown().await.unwrap();
         });
 
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
         let decoded = reader
             .next_message()
             .await
@@ -1355,7 +1360,7 @@ mod tests {
             server.shutdown().await.unwrap();
         });
 
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
         let decoded = reader
             .next_message()
             .await
@@ -1392,7 +1397,7 @@ mod tests {
         });
 
         let max = 100_000;
-        let mut reader = PeerReader::new(client, max);
+        let mut reader = PeerReader::new(VectoredCompat(client), max);
         let err = reader
             .next_message()
             .await
@@ -1429,7 +1434,7 @@ mod tests {
             server.shutdown().await.unwrap();
         });
 
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
         for expected in &messages {
             let decoded = reader
                 .next_message()
@@ -1460,7 +1465,7 @@ mod tests {
             server.shutdown().await.unwrap();
         });
 
-        let mut reader = PeerReader::new(client, max);
+        let mut reader = PeerReader::new(VectoredCompat(client), max);
         let decoded = reader
             .next_message()
             .await
@@ -1542,15 +1547,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn write_buffer_no_reallocation() {
+        let (client, _server) = duplex(256 * 1024);
+        let mut writer = PeerWriter::new(client);
+        let ptr_before = writer.buf.as_ptr();
+
+        for i in 0..100u32 {
+            let msg = Message::Have { index: i };
+            writer.send(&msg).await.expect("send failed");
+        }
+
+        let ptr_after = writer.buf.as_ptr();
+        assert_eq!(ptr_before, ptr_after, "Box buffer should never reallocate");
+    }
+
+    #[tokio::test]
+    async fn write_buffer_max_size_message() {
+        let piece_data = vec![0xABu8; 16_384];
+        let msg = Message::Piece {
+            index: 0,
+            begin: 0,
+            data_0: Bytes::from(piece_data),
+            data_1: Bytes::new(),
+        };
+
+        let (client, mut server) = duplex(256 * 1024);
+        let mut writer = PeerWriter::new(client);
+        writer.send(&msg).await.expect("send max-size message");
+        drop(writer);
+
+        let mut received = Vec::new();
+        server
+            .read_to_end(&mut received)
+            .await
+            .expect("read failed");
+        assert_eq!(received.len(), MAX_MSG_LEN);
+    }
+
     // -----------------------------------------------------------------------
     // Zero-copy (M110): fill_message + try_decode + advance tests (6)
     // -----------------------------------------------------------------------
 
     /// Helper: pre-load wire bytes into a PeerReader's ring buffer, optionally
     /// at a specific `start` position to exercise wrap-around.
-    fn preload_reader(wire: &[u8], start: usize) -> PeerReader<tokio::io::DuplexStream> {
+    fn preload_reader(wire: &[u8], start: usize) -> PeerReader<VectoredCompat<tokio::io::DuplexStream>> {
         let (client, _server) = duplex(1024);
-        let mut reader = PeerReader::new(client, 1 << 20);
+        let mut reader = PeerReader::new(VectoredCompat(client), 1 << 20);
         reader.buf.start = start;
         reader.buf.len = wire.len();
         for (i, &byte) in wire.iter().enumerate() {

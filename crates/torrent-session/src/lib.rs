@@ -55,6 +55,7 @@ pub(crate) mod tracker_manager;
 pub mod transport;
 pub(crate) mod url_guard;
 pub(crate) mod utp_routing;
+pub(crate) mod vectored_io;
 pub(crate) mod web_seed;
 
 pub use crate::piece_selector::build_wanted_pieces;

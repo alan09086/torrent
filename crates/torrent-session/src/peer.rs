@@ -184,7 +184,10 @@ pub(crate) async fn run_peer(
 
     // --- Phase 2: Wrap stream in ring-buffer codec (M109) ---
     let (reader, writer) = tokio::io::split(stream);
-    let mut reader = PeerReader::new(reader, max_message_size);
+    let mut reader = PeerReader::new(
+        crate::vectored_io::VectoredCompat(reader),
+        max_message_size,
+    );
     let mut writer = PeerWriter::new(writer);
 
     // --- Phase 3: BEP 10 Extension Handshake ---
