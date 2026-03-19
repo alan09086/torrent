@@ -8,14 +8,14 @@ A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** fe
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 27 BEPs. ~78K lines of Rust. 1,631 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,640 tests. Zero clippy warnings.
 
 ---
 
 ## Highlights
 
 - **Full BitTorrent v1 + v2** -- BEP 52 metadata, Merkle verification, hybrid v1+v2 torrents, BEP 53 file selection
-- **27 BEPs implemented** -- from base protocol (BEP 3) through holepunch (BEP 55)
+- **26 BEPs implemented** -- from base protocol (BEP 3) through holepunch (BEP 55)
 - **Async actor architecture** -- tokio-based `SessionActor`/`TorrentActor`/`DhtActor` with `select!` loops and command channels
 - **Pluggable everything** -- crypto backends (AWS-LC/ring/OpenSSL), disk I/O backends (POSIX/mmap/disabled), transport (TCP/uTP/SimTransport)
 - **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live hot-reload
@@ -95,7 +95,7 @@ torrent-cli           CLI binary: download, create, info subcommands
 | `torrent-tracker` | HTTP (reqwest) + UDP (BEP 15), BEP 48 scrape, IPv6 compact peers, SSRF guard | 42 |
 | `torrent-dht` | Kademlia with KRPC, routing table, BEP 24 IPv6, BEP 42 security, BEP 44 storage, BEP 51 indexing | 160 |
 | `torrent-storage` | Bitfield, FileMap (O(log n)), ChunkTracker (v1+v2), SmallVec segments, MmapStorage, ARC cache | 69 |
-| `torrent-session` | Session management, disk I/O, hash pool, peer orchestration -- see below | 755 |
+| `torrent-session` | Session management, disk I/O, hash pool, peer orchestration -- see below | 856 |
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD auto port mapping | 20 |
 | `torrent` | `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module | 59 |
@@ -106,7 +106,7 @@ torrent-cli           CLI binary: download, create, info subcommands
 
 | Category | Features |
 |----------|----------|
-| **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange, BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 40 canonical peer priority, BEP 52 v2 Merkle verification + hash exchange, BEP 53 `so=` file selection |
+| **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange, BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 52 v2 Merkle verification + hash exchange, BEP 53 `so=` file selection |
 | **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, fixed-depth pipeline (Semaphore(128) per peer), lock-free piece dispatch (atomic CAS), file streaming (`AsyncRead` + `AsyncSeek`), sequential download with auto-hysteresis, SuggestPiece, predictive announce |
 | **Disk I/O** | Pluggable `DiskIoBackend` (POSIX/mmap/disabled), async DiskActor, deferred write queue with batch `spawn_blocking` (64 jobs/call), ARC read cache, streaming piece verification (64 KiB buffer, `Sha1Hasher`), parallel hashing (`HashPool` with `Data`/`Streaming` variants) |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode algorithm, automatic upload slot optimization |
@@ -139,7 +139,7 @@ torrent-cli           CLI binary: download, create, info subcommands
 | 27 | Private Torrents | Done |
 | 29 | uTP (Micro Transport Protocol) | Done |
 | 35 | Torrent Signing / SSL Torrents | Done |
-| 40 | Canonical Peer Priority | Done |
+| ~~40~~ | ~~Canonical Peer Priority~~ | Removed (superseded by peer scoring M106) |
 | 42 | DHT Security Extension | Done |
 | 44 | Storing Arbitrary Data in the DHT | Done |
 | 47 | Pad Files and File Attributes | Done |
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.111.0 | BEP compliance sweep -- BEP 27 private torrents now disable LSD (4 session guard sites), BEP 40 dead code removed, BEP 51 client-side `sample_infohashes` wired with session timer | -7 tests net (1640 total), ~200 lines net deleted |
 | 0.110.0 | Zero-copy piece pipeline -- `Message<B>` generic over buffer type, three-phase borrowed decode (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks | +16 tests (1647 total), target: page faults <15K, heap allocs <5K, ≥65 MB/s |
 | 0.109.0 | Ring buffer codec -- fixed 32 KiB ReadBuf replaces FramedRead, pre-allocated PeerWriter replaces FramedWrite, zero-copy DoubleBufHelper for wrap-boundary parsing | +21 tests, eliminates page faults from BytesMut growth/shrink |
 | 0.108.0 | Full PEX + page fault reduction -- bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection stats logging | +9 tests, target: peers >500, page faults <15K |

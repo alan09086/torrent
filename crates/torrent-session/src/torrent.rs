@@ -152,10 +152,11 @@ impl TorrentHandle {
         hash_pool: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     ) -> crate::Result<Self> {
         let mut config = config;
-        // BEP 27: private torrents disable DHT and PEX
+        // BEP 27: private torrents disable DHT, PEX, and LSD
         if meta.info.private == Some(1) {
             config.enable_dht = false;
             config.enable_pex = false;
+            config.enable_lsd = false;
         }
 
         let info_hashes = match (&version, &meta_v2) {
