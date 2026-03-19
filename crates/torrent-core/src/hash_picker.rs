@@ -286,10 +286,8 @@ impl HashPicker {
             .any(|r| r.file_index == file_index && r.piece == piece);
 
         if !existing {
-            self.block_requests.push(BlockHashRequest {
-                file_index,
-                piece,
-            });
+            self.block_requests
+                .push(BlockHashRequest { file_index, piece });
         }
     }
 
@@ -325,6 +323,51 @@ impl HashPicker {
         self.trees
             .get(file_index)
             .map(|t| t.num_blocks().next_power_of_two().trailing_zeros())
+    }
+
+    /// Pre-load piece-layer hashes from the `.torrent` file's `piece_layers` map.
+    ///
+    /// This is used when full metadata is available at torrent creation (not from
+    /// a magnet link). Each entry maps a file's Merkle root to the concatenated
+    /// piece-layer hashes (32 bytes each). After loading, any blocks that were
+    /// already hashed are retroactively verified.
+    ///
+    /// Returns the list of piece indices that were fully verified during loading.
+    pub fn load_piece_layers(
+        &mut self,
+        piece_layers: &std::collections::BTreeMap<Id32, Vec<u8>>,
+    ) -> Vec<u32> {
+        let mut verified = Vec::new();
+        for (file_idx, root) in self.file_roots.iter().enumerate() {
+            let Some(layer_bytes) = piece_layers.get(root) else {
+                continue;
+            };
+            // Each hash is 32 bytes (SHA-256)
+            if layer_bytes.len() % 32 != 0 {
+                continue;
+            }
+            let hashes: Vec<Id32> = layer_bytes
+                .chunks_exact(32)
+                .map(|chunk| {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(chunk);
+                    Id32(arr)
+                })
+                .collect();
+
+            // Mark the corresponding piece-request chunks as received
+            let num_chunks = self.piece_requests.get(file_idx).map_or(0, Vec::len);
+            for chunk_idx in 0..num_chunks {
+                self.piece_requests[file_idx][chunk_idx].have = true;
+            }
+
+            // Load into tree state and retroactively verify stored blocks
+            if let Some(tree) = self.trees.get_mut(file_idx) {
+                let v = tree.set_piece_hashes_and_verify(hashes, self.blocks_per_piece);
+                verified.extend(v);
+            }
+        }
+        verified
     }
 }
 

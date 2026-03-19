@@ -392,6 +392,97 @@ async fn test_link_config_transfer() {
     swarm.shutdown().await;
 }
 
+/// Build a 2-node swarm (seeder + leecher), create a V2Only torrent,
+/// transfer 64 KiB of data (4 pieces at 16384), and verify the leecher
+/// downloads everything and the seeder records upload.
+///
+/// This exercises the full V2Only end-to-end flow: torrent creation via
+/// `CreateTorrent` with `TorrentVersion::V2Only`, seeding, downloading,
+/// and SHA-256 piece verification.
+#[tokio::test]
+async fn v2_only_sim_basic_transfer() {
+    use std::io::Write;
+
+    use torrent_core::CreateTorrent;
+    use torrent_core::TorrentVersion;
+
+    let swarm = SimSwarmBuilder::new(2).build().await;
+
+    // 64 KiB of test data = 4 pieces at 16384 bytes each
+    let data = vec![0xDE; 65536];
+
+    // Write data to a temp file for CreateTorrent (it reads from disk)
+    let mut tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
+    tmp.write_all(&data).expect("failed to write temp file");
+    tmp.flush().expect("failed to flush temp file");
+
+    // Create a V2Only torrent
+    let result = CreateTorrent::new()
+        .add_file(tmp.path())
+        .set_piece_size(16384)
+        .set_version(TorrentVersion::V2Only)
+        .set_creation_date(1_000_000)
+        .generate()
+        .expect("v2-only torrent creation should succeed");
+
+    let meta = result.meta;
+    let seeded_storage = make_seeded_storage(&data, 16384);
+
+    // Node 0 is the seeder (with pre-populated storage)
+    let info_hash = swarm
+        .add_torrent(0, meta.clone(), Some(seeded_storage))
+        .await;
+
+    // Node 1 is the leecher (empty storage)
+    let _ih2 = swarm.add_torrent(1, meta, None).await;
+
+    // Verify seed has the torrent registered with pieces
+    let seed_stats = swarm.torrent_stats(0, info_hash).await;
+    assert!(
+        seed_stats.pieces_total > 0,
+        "v2-only seed should have pieces_total > 0, got {}",
+        seed_stats.pieces_total,
+    );
+
+    // Introduce peers so nodes know about each other
+    swarm.introduce_peers(info_hash).await;
+
+    // Poll leecher stats until download completes, with 30s timeout
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+        if leecher_stats.total_done == data.len() as u64 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for v2-only leecher to complete download; \
+             total_done={}, expected={}",
+            leecher_stats.total_done,
+            data.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Verify leecher has all the data
+    let leecher_stats = swarm.torrent_stats(1, info_hash).await;
+    assert_eq!(
+        leecher_stats.total_done,
+        data.len() as u64,
+        "leecher should have downloaded all v2-only data"
+    );
+
+    // Verify seeder recorded upload
+    let seed_stats = swarm.torrent_stats(0, info_hash).await;
+    assert!(
+        seed_stats.total_upload > 0,
+        "seeder should have total_upload > 0, got {}",
+        seed_stats.total_upload,
+    );
+
+    swarm.shutdown().await;
+}
+
 /// Verify make_seeded_storage produces storage with correct data.
 #[test]
 fn test_make_seeded_storage_roundtrip() {

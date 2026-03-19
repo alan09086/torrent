@@ -21,3 +21,4 @@ serde_bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+tempfile = "3"

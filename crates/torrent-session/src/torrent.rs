@@ -236,7 +236,49 @@ impl TorrentHandle {
             meta.info.piece_length,
             DEFAULT_CHUNK_SIZE,
         );
-        let chunk_tracker = ChunkTracker::new(lengths.clone());
+        let mut chunk_tracker = ChunkTracker::new(lengths.clone());
+
+        // Initialize HashPicker for v2/hybrid torrents and enable v2 block tracking
+        let hash_picker = if version.has_v2() {
+            if let Some(ref v2_meta) = meta_v2 {
+                chunk_tracker.enable_v2_tracking();
+
+                let block_size = 16384u64;
+                let blocks_per_piece = (meta.info.piece_length / block_size) as u32;
+
+                // Build FileHashInfo from v2 file tree
+                let v2_files = v2_meta.info.files();
+                let file_infos: Vec<torrent_core::FileHashInfo> = v2_files
+                    .iter()
+                    .filter_map(|f| {
+                        let root = f.attr.pieces_root?;
+                        let num_blocks = f.attr.length.div_ceil(block_size) as u32;
+                        let num_pieces = f.attr.length.div_ceil(meta.info.piece_length) as u32;
+                        Some(torrent_core::FileHashInfo {
+                            root,
+                            num_blocks,
+                            num_pieces,
+                        })
+                    })
+                    .collect();
+
+                if !file_infos.is_empty() {
+                    let mut picker = torrent_core::HashPicker::new(&file_infos, blocks_per_piece);
+
+                    // Pre-load piece-layer hashes from the .torrent file
+                    let _verified = picker.load_piece_layers(&v2_meta.piece_layers);
+
+                    Some(picker)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
         let file_priorities = vec![FilePriority::Normal; file_lengths.len()];
         let wanted_pieces =
@@ -519,7 +561,7 @@ impl TorrentHandle {
             share_lru: std::collections::VecDeque::new(),
             share_max_pieces: if is_share_mode { 64 } else { 0 },
             plugins,
-            hash_picker: None,
+            hash_picker,
             version,
             meta_v2,
             info_hashes,
@@ -4362,43 +4404,21 @@ impl TorrentActor {
         self.transition_state(TorrentState::Checking);
         self.checking_progress = 0.0;
 
-        let max_concurrent = self.config.hashing_threads.max(1);
         let mut verified_count = 0u32;
-        let mut checked_count = 0u32;
         let total = self.num_pieces;
 
-        let mut in_flight = tokio::task::JoinSet::new();
-        let mut next_piece = 0u32;
-
-        // Seed the pipeline
-        while next_piece < total && in_flight.len() < max_concurrent {
-            if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
-                let d = disk.clone();
-                let piece = next_piece;
-                in_flight.spawn(async move {
-                    let valid = d
-                        .verify_piece(piece, expected, DiskJobFlags::empty())
-                        .await
-                        .unwrap_or(false);
-                    (piece, valid)
-                });
-            }
-            next_piece += 1;
-        }
-
-        // Process completions, refill pipeline
-        while let Some(result) = in_flight.join_next().await {
-            if let Ok((piece, valid)) = result {
-                checked_count += 1;
-                if valid {
+        if self.version == torrent_core::TorrentVersion::V2Only {
+            // V2Only: use SHA-256 Merkle block verification (sequential, needs &mut self)
+            for piece in 0..total {
+                let result = self.run_v2_block_verification(piece).await;
+                if matches!(result, HashResult::Passed) {
                     if let Some(ref mut ct) = self.chunk_tracker {
                         ct.mark_verified(piece);
                     }
                     verified_count += 1;
                 }
 
-                // Update progress
-                self.checking_progress = checked_count as f32 / total as f32;
+                self.checking_progress = (piece + 1) as f32 / total as f32;
                 post_alert(
                     &self.alert_tx,
                     &self.alert_mask,
@@ -4408,8 +4428,14 @@ impl TorrentActor {
                     },
                 );
             }
+        } else {
+            // V1Only / Hybrid: use concurrent SHA-1 piece verification
+            let max_concurrent = self.config.hashing_threads.max(1);
+            let mut checked_count = 0u32;
+            let mut in_flight = tokio::task::JoinSet::new();
+            let mut next_piece = 0u32;
 
-            // Refill pipeline
+            // Seed the pipeline
             while next_piece < total && in_flight.len() < max_concurrent {
                 if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
                     let d = disk.clone();
@@ -4423,6 +4449,46 @@ impl TorrentActor {
                     });
                 }
                 next_piece += 1;
+            }
+
+            // Process completions, refill pipeline
+            while let Some(result) = in_flight.join_next().await {
+                if let Ok((piece, valid)) = result {
+                    checked_count += 1;
+                    if valid {
+                        if let Some(ref mut ct) = self.chunk_tracker {
+                            ct.mark_verified(piece);
+                        }
+                        verified_count += 1;
+                    }
+
+                    // Update progress
+                    self.checking_progress = checked_count as f32 / total as f32;
+                    post_alert(
+                        &self.alert_tx,
+                        &self.alert_mask,
+                        AlertKind::CheckingProgress {
+                            info_hash: self.info_hash,
+                            progress: self.checking_progress,
+                        },
+                    );
+                }
+
+                // Refill pipeline
+                while next_piece < total && in_flight.len() < max_concurrent {
+                    if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
+                        let d = disk.clone();
+                        let piece = next_piece;
+                        in_flight.spawn(async move {
+                            let valid = d
+                                .verify_piece(piece, expected, DiskJobFlags::empty())
+                                .await
+                                .unwrap_or(false);
+                            (piece, valid)
+                        });
+                    }
+                    next_piece += 1;
+                }
             }
         }
 
@@ -14436,8 +14502,9 @@ mod tests {
         let mut cooldowns: HashMap<SocketAddr, Instant> = HashMap::new();
         let now = Instant::now();
         for i in 0..256u16 {
-            let addr: SocketAddr =
-                format!("10.0.{}.{}:6881", i / 256, i % 256).parse().expect("valid test addr");
+            let addr: SocketAddr = format!("10.0.{}.{}:6881", i / 256, i % 256)
+                .parse()
+                .expect("valid test addr");
             cooldowns.insert(addr, now);
         }
         assert_eq!(cooldowns.len(), HOLEPUNCH_MAX_TRACKED);
