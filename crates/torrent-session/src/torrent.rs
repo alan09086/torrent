@@ -158,9 +158,14 @@ const HOLEPUNCH_MAX_TRACKED: usize = 256;
 /// Returns true if the disconnect reason suggests the peer is behind NAT
 /// and a holepunch attempt might succeed.
 fn should_attempt_holepunch(reason: &str) -> bool {
+    // Don't re-attempt holepunch for failures from a previous holepunch attempt
+    if reason.contains("holepunch") {
+        return false;
+    }
     reason.contains("refused")
         || reason.contains("timed out")
         || reason.contains("Connection reset")
+        || reason.contains("connection reset")
 }
 
 /// Cloneable handle for interacting with a running torrent.
@@ -14399,6 +14404,11 @@ mod tests {
         assert!(should_attempt_holepunch("Connection refused"));
         assert!(should_attempt_holepunch("timed out"));
         assert!(should_attempt_holepunch("Connection reset by peer"));
+        assert!(should_attempt_holepunch("connection reset by peer"));
+        // Re-entrancy guard: holepunch-originated failures → false
+        assert!(!should_attempt_holepunch(
+            "holepunch TCP connect failed: Connection refused"
+        ));
         // Non-NAT reasons → false
         assert!(!should_attempt_holepunch("peer banned"));
         assert!(!should_attempt_holepunch("protocol error"));
