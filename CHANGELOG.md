@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.115.0 | M115 | Pre-allocated PeerWriter + vectored read infrastructure — PeerWriter Box<[u8; MAX_MSG_LEN]> replaces BytesMut, encode_to_slice/wire_len on Message, AsyncReadVectored trait + VectoredCompat fallback |
 | 0.114.0 | M114 | Listener task extraction — TCP/uTP accept loops moved from SessionActor's select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone |
 | 0.113.0 | M113 | BEP 52 V2-only torrent creation — `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test |
 | 0.112.0 | M112 | BEP 55 holepunch initiation + cold-start optimization — holepunch wired on NAT connect failures (sync buffer, 120s cooldown, 256-entry cap), DHT re-query 60s→5s for magnets, adaptive cap during metadata fetch, counter reset on state transition |
@@ -68,6 +69,23 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.115.0] — 2026-03-19
+
+### Added
+- **`Message::encode_to_slice()`** — encodes a peer wire message into a raw `&mut [u8]` slice via `std::io::Cursor`, producing identical bytes to `encode_into(BytesMut)`. Enables writing into fixed-size pre-allocated buffers without the `bytes` crate on the write path.
+- **`Message::wire_len()`** — zero-allocation method returning the exact encoded wire length (including 4-byte length prefix) for any message variant. Used to gate the fast/slow path in PeerWriter.
+- **`AsyncReadVectored` trait** — async vectored read trait extending `AsyncRead + Unpin` with `poll_read_vectored` for filling multiple `IoSliceMut` buffers in one call.
+- **`VectoredCompat<T>` wrapper** — fallback adapter that bridges any `AsyncRead` into `AsyncReadVectored` by filling only the first non-empty slice. Provides M117 infrastructure without kernel-level readv benefit yet.
+- **`read_vectored()` async helper** — convenience function driving `AsyncReadVectored::poll_read_vectored` via `poll_fn`.
+- 9 new tests (1672 total): `encode_to_slice_roundtrip`, `encode_to_slice_matches_encode_into`, `wire_len_matches_encoded_size`, `wire_len_large_bitfield`, `vectored_compat_fills_first_slice`, `vectored_compat_empty_slices`, `write_buffer_no_reallocation`, `write_buffer_max_size_message`, `write_buffer_oversized_bitfield`.
+
+### Changed
+- **PeerWriter** buffer changed from `BytesMut` to `Box<[u8; MAX_MSG_LEN]>` — single heap allocation per peer, never reallocates. Messages exceeding `MAX_MSG_LEN` (large Bitfield/Extended) fall back to a one-shot `BytesMut` allocation.
+- **PeerWriter::send()** uses `encode_to_slice()` for the fast path (≤16,397 bytes) and `encode_into(BytesMut)` for the slow path (oversized messages).
+- **PeerReader** generic bound changed from `AsyncRead + Unpin` to `AsyncReadVectored`. The `fill()` method now uses `unfilled_ioslices()` + `read_vectored()` instead of `unfilled_contiguous()` + `read()`.
+- **`ReadBuf::unfilled_ioslices()`** return type changed from `(&mut [u8], &mut [u8])` to `[IoSliceMut<'_>; 2]` — directly usable by vectored I/O calls.
+- Read half in `run_peer` wrapped with `VectoredCompat` for compatibility with the new `AsyncReadVectored` bound.
 
 ## [0.114.0] — 2026-03-19
 
