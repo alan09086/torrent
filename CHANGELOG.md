@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.113.0 | M113 | BEP 52 V2-only torrent creation — `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test |
 | 0.112.0 | M112 | BEP 55 holepunch initiation + cold-start optimization — holepunch wired on NAT connect failures (sync buffer, 120s cooldown, 256-entry cap), DHT re-query 60s→5s for magnets, adaptive cap during metadata fetch, counter reset on state transition |
 | 0.111.0 | M111 | BEP compliance sweep — BEP 27 private torrents now disable LSD (4 session-level guards + config), BEP 40 dead code removed (superseded by peer scoring M106), BEP 51 client-side `sample_infohashes` wired with session timer |
 | 0.110.0 | M110 | Zero-copy piece pipeline — `Message<B>` generic over buffer type, borrowed decode from ring buffer (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks, bypasses BufferPool entirely |
@@ -66,6 +67,20 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.113.0] — 2026-03-19
+
+### Added
+- **BEP 52 V2-only torrent creation** — `CreateTorrent::set_version(V2Only)` now produces pure v2 `.torrent` files with SHA-256 Merkle trees, file tree, and piece layers. V2Only skips SHA-1 computation entirely (early branch in `generate()`).
+- **`build_v2_output()` helper** — shared v2 creation logic (Merkle trees, file tree, piece layers, info dict serialization) extracted from the Hybrid path. Both V2Only and Hybrid call this helper, eliminating ~150 lines of duplicated v2 logic.
+- **`hash_sha1_pieces()`, `build_v1_info_dict()`, `build_outer_dict()` helpers** — factored from the monolithic `generate()` method for cleaner code organization.
+- **`HashPicker::load_piece_layers()`** — pre-loads piece-layer hashes from `.torrent` file metadata, enabling block-level Merkle verification without waiting for hash responses from peers.
+- **V2Only session-layer verification** — `TorrentActor::from_torrent()` now initializes `HashPicker` for V2Only torrents and routes initial piece verification through SHA-256 Merkle path.
+- 6 new tests (1654 total): `create_v2_only_single_file`, `create_v2_only_multi_file`, `create_v2_only_has_piece_layers`, `create_v2_only_no_v1_keys`, `create_v2_only_round_trip`, `create_v2_only_info_hash`, plus 1 sim transfer test.
+
+### Changed
+- `generate()` restructured with early version branch — `V2Only` → `V1Only` → `Hybrid` match ordering, simplest case first.
+- Hybrid creation path refactored to use `build_v2_output()` instead of inline v2 logic.
 
 ## [0.111.0] — 2026-03-19
 

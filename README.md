@@ -2,19 +2,19 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1648-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1654-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.112.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.113.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,640 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,654 tests. Zero clippy warnings.
 
 ---
 
 ## Highlights
 
-- **Full BitTorrent v1 + v2** -- BEP 52 metadata, Merkle verification, hybrid v1+v2 torrents, BEP 53 file selection
+- **Full BitTorrent v1 + v2** -- BEP 52 metadata, Merkle verification, v2-only + hybrid torrent creation, BEP 53 file selection
 - **26 BEPs implemented** -- from base protocol (BEP 3) through holepunch (BEP 55)
 - **Async actor architecture** -- tokio-based `SessionActor`/`TorrentActor`/`DhtActor` with `select!` loops and command channels
 - **Pluggable everything** -- crypto backends (AWS-LC/ring/OpenSSL), disk I/O backends (POSIX/mmap/disabled), transport (TCP/uTP/SimTransport)
@@ -106,7 +106,7 @@ torrent-cli           CLI binary: download, create, info subcommands
 
 | Category | Features |
 |----------|----------|
-| **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange, BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 52 v2 Merkle verification + hash exchange, BEP 53 `so=` file selection |
+| **Protocol** | BEP 6 Fast Extension, BEP 9 metadata exchange, BEP 10 extension protocol, BEP 11 PEX, BEP 14 LSD, BEP 16 super seeding, BEP 21 upload-only, BEP 52 v2 Merkle verification + hash exchange + v2-only creation, BEP 53 `so=` file selection |
 | **Transfer** | Rarest-first piece picker with extent affinity, end-game mode, fixed-depth pipeline (Semaphore(128) per peer), lock-free piece dispatch (atomic CAS), file streaming (`AsyncRead` + `AsyncSeek`), sequential download with auto-hysteresis, SuggestPiece, predictive announce |
 | **Disk I/O** | Pluggable `DiskIoBackend` (POSIX/mmap/disabled), async DiskActor, deferred write queue with batch `spawn_blocking` (64 jobs/call), ARC read cache, streaming piece verification (64 KiB buffer, `Sha1Hasher`), parallel hashing (`HashPool` with `Data`/`Streaming` variants) |
 | **Bandwidth** | Global + per-torrent token bucket rate limiting, per-class limits (TCP/uTP), mixed-mode algorithm, automatic upload slot optimization |
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.113.0 | BEP 52 V2-only torrent creation -- `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test | +6 tests (1654 total) |
 | 0.112.0 | BEP 55 holepunch initiation + cold-start optimization -- holepunch wired on NAT connect failures (sync buffer pattern, 120s cooldown), DHT re-query delay 60s→5s for magnets, adaptive cap during metadata fetch | +8 tests (1648 total) |
 | 0.111.0 | BEP compliance sweep -- BEP 27 private torrents now disable LSD (4 session guard sites), BEP 40 dead code removed, BEP 51 client-side `sample_infohashes` wired with session timer | -7 tests net (1640 total), ~200 lines net deleted |
 | 0.110.0 | Zero-copy piece pipeline -- `Message<B>` generic over buffer type, three-phase borrowed decode (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks | +16 tests (1647 total), target: page faults <15K, heap allocs <5K, ≥65 MB/s |
