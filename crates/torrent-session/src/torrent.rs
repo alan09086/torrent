@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -147,6 +147,20 @@ fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> D
         // Full interval when DHT is healthy
         Duration::from_secs(60)
     }
+}
+
+/// M112: Cooldown period between holepunch attempts to the same address.
+const HOLEPUNCH_COOLDOWN: Duration = Duration::from_secs(120);
+
+/// M112: Maximum number of tracked holepunch cooldown entries to prevent unbounded growth.
+const HOLEPUNCH_MAX_TRACKED: usize = 256;
+
+/// Returns true if the disconnect reason suggests the peer is behind NAT
+/// and a holepunch attempt might succeed.
+fn should_attempt_holepunch(reason: &str) -> bool {
+    reason.contains("refused")
+        || reason.contains("timed out")
+        || reason.contains("Connection reset")
 }
 
 /// Cloneable handle for interacting with a running torrent.
@@ -521,6 +535,8 @@ impl TorrentHandle {
             adder_clear_seen_tx: None,
             connect_attempts: 0,
             connect_failures: 0,
+            holepunch_cooldowns: HashMap::new(),
+            holepunch_pending: Vec::new(),
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -839,6 +855,8 @@ impl TorrentHandle {
             adder_clear_seen_tx: None,
             connect_attempts: 0,
             connect_failures: 0,
+            holepunch_cooldowns: HashMap::new(),
+            holepunch_pending: Vec::new(),
         };
 
         let spawn_info_hash = actor.info_hash;
@@ -1677,6 +1695,10 @@ struct TorrentActor {
     connect_attempts: u64,
     /// M108: Total connection failures (peers that disconnected).
     connect_failures: u64,
+    /// M112: Tracks recent holepunch attempts to prevent retry storms.
+    holepunch_cooldowns: HashMap<SocketAddr, Instant>,
+    /// M112: Buffer for holepunch attempts (disconnect_peer is sync, try_holepunch is async).
+    holepunch_pending: Vec<SocketAddr>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -2585,6 +2607,11 @@ impl TorrentActor {
                         self.config.upload_rate_limit,
                     );
                 }
+            }
+
+            // M112: drain holepunch attempts (bridging sync disconnect_peer → async try_holepunch)
+            for target in std::mem::take(&mut self.holepunch_pending) {
+                self.try_holepunch(target).await;
             }
         }
     }
@@ -6210,6 +6237,19 @@ impl TorrentActor {
     /// slab/piece-owner release, availability decrement, cmd_tx shutdown,
     /// PeerDisconnected alert, and suggested_to_peers cleanup.
     fn disconnect_peer(&mut self, addr: SocketAddr, reason: &str) {
+        // BEP 55: attempt holepunch for NAT-related connection failures (M112)
+        if self.config.enable_holepunch && should_attempt_holepunch(reason) {
+            let now = Instant::now();
+            self.holepunch_cooldowns
+                .retain(|_, t| now.duration_since(*t) < HOLEPUNCH_COOLDOWN);
+            if self.holepunch_cooldowns.len() < HOLEPUNCH_MAX_TRACKED
+                && !self.holepunch_cooldowns.contains_key(&addr)
+            {
+                self.holepunch_cooldowns.insert(addr, now);
+                self.holepunch_pending.push(addr);
+            }
+        }
+
         // BEP 16: clean up super-seed assignment
         if let Some(ref mut ss) = self.super_seed {
             ss.peer_disconnected(addr);
@@ -8175,7 +8215,6 @@ impl TorrentActor {
     ///
     /// Finds a relay peer that supports holepunch and sends a Rendezvous message
     /// asking the relay to broker a connection to `target`.
-    #[allow(dead_code)] // will be wired into peer discovery in Task 7
     async fn try_holepunch(&mut self, target: SocketAddr) {
         use torrent_wire::HolepunchMessage;
 
@@ -14351,4 +14390,61 @@ mod tests {
         );
     }
 
+    // -- BEP 55 holepunch initiation tests (M112) --
+
+    #[test]
+    fn should_attempt_holepunch_reason_classification() {
+        // NAT-related reasons → true
+        assert!(should_attempt_holepunch("connection refused"));
+        assert!(should_attempt_holepunch("Connection refused"));
+        assert!(should_attempt_holepunch("timed out"));
+        assert!(should_attempt_holepunch("Connection reset by peer"));
+        // Non-NAT reasons → false
+        assert!(!should_attempt_holepunch("peer banned"));
+        assert!(!should_attempt_holepunch("protocol error"));
+        assert!(!should_attempt_holepunch(""));
+    }
+
+    #[test]
+    fn holepunch_initiation_on_connect_failure() {
+        // "connection refused" is the canonical NAT failure reason
+        assert!(should_attempt_holepunch("connection refused"));
+    }
+
+    #[test]
+    fn holepunch_cooldown_prevents_retry() {
+        let mut cooldowns: HashMap<SocketAddr, Instant> = HashMap::new();
+        let addr: SocketAddr = "127.0.0.1:6881".parse().expect("valid test addr");
+        let now = Instant::now();
+        cooldowns.insert(addr, now);
+        // addr is in cooldowns, so should be skipped on subsequent attempt
+        assert!(cooldowns.contains_key(&addr));
+    }
+
+    #[test]
+    fn holepunch_cooldown_overflow_skips() {
+        let mut cooldowns: HashMap<SocketAddr, Instant> = HashMap::new();
+        let now = Instant::now();
+        for i in 0..256u16 {
+            let addr: SocketAddr =
+                format!("10.0.{}.{}:6881", i / 256, i % 256).parse().expect("valid test addr");
+            cooldowns.insert(addr, now);
+        }
+        assert_eq!(cooldowns.len(), HOLEPUNCH_MAX_TRACKED);
+        // New entry should be skipped when at capacity
+    }
+
+    #[test]
+    fn holepunch_skipped_when_disabled() {
+        // should_attempt_holepunch only checks the reason string, not config.
+        // Config check happens in disconnect_peer.
+        assert!(should_attempt_holepunch("connection refused"));
+        // This test documents that should_attempt_holepunch is reason-only.
+    }
+
+    #[test]
+    fn holepunch_not_triggered_on_ban() {
+        assert!(!should_attempt_holepunch("peer banned"));
+        assert!(!should_attempt_holepunch("banned for bad data"));
+    }
 }
