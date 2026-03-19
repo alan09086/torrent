@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.111.0 | M111 | BEP compliance sweep — BEP 27 private torrents now disable LSD (4 session-level guards + config), BEP 40 dead code removed (superseded by peer scoring M106), BEP 51 client-side `sample_infohashes` wired with session timer |
 | 0.110.0 | M110 | Zero-copy piece pipeline — `Message<B>` generic over buffer type, borrowed decode from ring buffer (`fill_message`/`try_decode`/`advance`), direct synchronous pwrite from ring slices, vectored write for ring-wrap blocks, bypasses BufferPool entirely |
 | 0.109.0 | M109 | Ring buffer codec — fixed 32 KiB `ReadBuf` replaces `FramedRead`, pre-allocated `PeerWriter` replaces `FramedWrite`, zero-copy `DoubleBufHelper` for wrap-boundary parsing, eliminates page faults from `BytesMut` growth/shrink cycles |
 | 0.108.0 | M108 | Full PEX + page fault reduction — bidirectional PEX send-side (BEP 11), Have batching default 100ms, hot-path pre-allocation, connection success rate logging |
@@ -64,6 +65,16 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.111.0] — 2026-03-19
+
+### Added
+- **BEP 27: LSD disabled for private torrents** — 4 session-level guards (`handle_add_torrent`, `ForceLsdAnnounce`, `lsd_peers_rx`, config) ensure private torrents never use Local Service Discovery. `TorrentEntry::is_private()` helper method. Magnet adds intentionally allowed (metadata unavailable until resolved).
+- **BEP 51: Client-side `sample_infohashes` timer** — `SessionActor` periodically sends `sample_infohashes` queries to the DHT when `dht_sample_infohashes_interval > 0`. Fires `DhtSampleInfohashes` alert on success. Follows `stats_timer` pattern (disabled by default).
+- 5 new tests (1640 total)
+
+### Removed
+- **BEP 40: `peer_priority.rs` deleted** — 298 lines of dead `canonical_peer_priority()` CRC32C code, superseded by peer scoring system (M106) and removed from peer pipeline (M107).
 
 ## [0.110.0] — 2026-03-19
 
