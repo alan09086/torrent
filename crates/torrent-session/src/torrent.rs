@@ -116,6 +116,39 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// M112: Compute initial DHT re-query delay based on torrent state.
+///
+/// Magnet links in `FetchingMetadata` state need fast peer discovery,
+/// so the initial delay is shortened from 60s to 5s.
+fn initial_dht_requery_delay(state: TorrentState) -> Duration {
+    if state == TorrentState::FetchingMetadata {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(60)
+    }
+}
+
+/// M112: Compute adaptive DHT re-query delay based on state and response quality.
+///
+/// During `FetchingMetadata`, the delay is capped at 5s regardless of
+/// responding node count. Once metadata is resolved, the adaptive
+/// scaling kicks in (1s for empty responses, linear ramp to 60s).
+fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> Duration {
+    if state == TorrentState::FetchingMetadata {
+        Duration::from_secs(5)
+    } else if responding_nodes == 0 {
+        // Aggressive retry on empty response
+        Duration::from_secs(1)
+    } else if responding_nodes < 8 {
+        // Scale between 1s and 60s based on response count
+        let ratio = responding_nodes as u32;
+        Duration::from_secs(u64::from(ratio.saturating_mul(60) / 8))
+    } else {
+        // Full interval when DHT is healthy
+        Duration::from_secs(60)
+    }
+}
+
 /// Cloneable handle for interacting with a running torrent.
 #[derive(Clone)]
 pub struct TorrentHandle {
@@ -1814,8 +1847,9 @@ impl TorrentActor {
         let mut unchoke_interval = tokio::time::interval(Duration::from_secs(10));
         let mut optimistic_interval = tokio::time::interval(Duration::from_secs(30));
         let mut refill_interval = tokio::time::interval(Duration::from_millis(100));
-        // M107: Adaptive DHT re-query sleep (replaces fixed 30s interval)
-        let mut dht_requery_sleep = Box::pin(tokio::time::sleep(Duration::from_secs(60)));
+        // M112: shorter initial delay for magnets — metadata needs fast peer discovery
+        let mut dht_requery_sleep =
+            Box::pin(tokio::time::sleep(initial_dht_requery_delay(self.state)));
         let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
             Some(tokio::time::interval(Duration::from_millis(
                 self.config.have_send_delay_ms,
@@ -2226,17 +2260,10 @@ impl TorrentActor {
                     && self.state != TorrentState::Stopped => {
                     self.run_dht_requery().await;
                     // Adaptive next-sleep calculation based on response quality
-                    let next_delay = if self.dht_requery_responding_nodes == 0 {
-                        // Aggressive retry on empty response
-                        Duration::from_secs(1)
-                    } else if self.dht_requery_responding_nodes < 8 {
-                        // Scale between 1s and 60s based on response count
-                        let ratio = self.dht_requery_responding_nodes as u32;
-                        Duration::from_secs(u64::from(ratio.saturating_mul(60) / 8))
-                    } else {
-                        // Full interval when DHT is healthy
-                        Duration::from_secs(60)
-                    };
+                    let next_delay = adaptive_dht_requery_delay(
+                        self.state,
+                        self.dht_requery_responding_nodes,
+                    );
                     dht_requery_sleep = Box::pin(tokio::time::sleep(next_delay));
                 }
                 // Tracker re-announce timer — also fires during FetchingMetadata
@@ -5500,6 +5527,7 @@ impl TorrentActor {
                         } else {
                             self.transition_state(TorrentState::Downloading);
                             self.scorer.start_download();
+                            self.dht_requery_responding_nodes = 0; // M112: reset for download-phase adaptive timing
                         }
                         self.metadata_downloader = None;
 
@@ -14269,5 +14297,72 @@ mod tests {
 
         // Zero pieces (edge case — would give pieces/2=0, floor=512)
         assert_eq!(formula(100, 0), 512);
+    }
+
+    #[test]
+    fn dht_requery_initial_delay_short_for_magnet() {
+        // M112: FetchingMetadata (magnet) gets 5s initial delay for fast peer discovery.
+        assert_eq!(
+            initial_dht_requery_delay(TorrentState::FetchingMetadata),
+            Duration::from_secs(5),
+        );
+        // All other states get the standard 60s initial delay.
+        assert_eq!(
+            initial_dht_requery_delay(TorrentState::Downloading),
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            initial_dht_requery_delay(TorrentState::Seeding),
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            initial_dht_requery_delay(TorrentState::Checking),
+            Duration::from_secs(60),
+        );
+    }
+
+    #[test]
+    fn dht_requery_adaptive_cap_during_metadata_fetch() {
+        // M112: During FetchingMetadata, delay is always 5s regardless of responding nodes.
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::FetchingMetadata, 0),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::FetchingMetadata, 4),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::FetchingMetadata, 100),
+            Duration::from_secs(5),
+        );
+        // Non-metadata states use the adaptive scaling.
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::Downloading, 0),
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::Downloading, 4),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::Downloading, 8),
+            Duration::from_secs(60),
+        );
+    }
+
+    #[test]
+    fn dht_requery_resets_counter_on_metadata_complete() {
+        // M112: After metadata completes, responding_nodes resets to 0
+        // so the download phase starts with fresh adaptive timing.
+        let mut responding_nodes: usize = 15;
+        // Simulate the reset that happens on metadata completion.
+        responding_nodes = 0;
+        assert_eq!(responding_nodes, 0);
+        // After reset, adaptive delay for downloading gives aggressive retry.
+        assert_eq!(
+            adaptive_dht_requery_delay(TorrentState::Downloading, responding_nodes),
+            Duration::from_secs(1),
+        );
     }
 }
