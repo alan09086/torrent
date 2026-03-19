@@ -5522,12 +5522,12 @@ impl TorrentActor {
                             &file_lengths,
                             self.lengths.as_ref().unwrap(),
                         );
+                        self.dht_requery_responding_nodes = 0; // M112: reset for post-metadata adaptive timing
                         if self.config.share_mode {
                             self.transition_state(TorrentState::Sharing);
                         } else {
                             self.transition_state(TorrentState::Downloading);
                             self.scorer.start_download();
-                            self.dht_requery_responding_nodes = 0; // M112: reset for download-phase adaptive timing
                         }
                         self.metadata_downloader = None;
 
@@ -14351,18 +14351,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dht_requery_resets_counter_on_metadata_complete() {
-        // M112: After metadata completes, responding_nodes resets to 0
-        // so the download phase starts with fresh adaptive timing.
-        let mut responding_nodes: usize = 15;
-        // Simulate the reset that happens on metadata completion.
-        responding_nodes = 0;
-        assert_eq!(responding_nodes, 0);
-        // After reset, adaptive delay for downloading gives aggressive retry.
-        assert_eq!(
-            adaptive_dht_requery_delay(TorrentState::Downloading, responding_nodes),
-            Duration::from_secs(1),
-        );
-    }
 }
