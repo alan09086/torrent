@@ -747,7 +747,6 @@ impl TorrentPeerHandler {
                 let payload = hs.to_bytes().map_err(crate::Error::Wire)?;
                 Message::Extended { ext_id: 0, payload }
             }
-            PeerCommand::SendBitfield(data) => Message::Bitfield(data),
             PeerCommand::SuggestPiece(index) => Message::SuggestPiece(index),
             PeerCommand::SendHashRequest(req) => Message::HashRequest {
                 pieces_root: req.file_root,
@@ -1002,8 +1001,9 @@ impl PeerConnectionHandler for TorrentPeerHandler {
         }
     }
 
-    fn should_transmit_have(&self, _piece: u32) -> bool {
-        true // M118 will add super-seed filtering
+    fn should_transmit_have(&self, piece: u32) -> bool {
+        // M118: skip Have if the remote peer already has this piece.
+        !self.local_bitfield.get(piece)
     }
 
     async fn on_disconnect(&mut self, reason: Option<String>) {
@@ -1556,14 +1556,55 @@ mod tests {
             }
         }
 
-        // -- Test 10 --
+        // -- Test 10: M118 broadcast filtering --
         #[test]
-        fn handler_should_transmit_have_always_true() {
+        fn broadcast_not_filtered_for_peer_without_piece() {
             let (handler, _rx) = make_handler(10);
+            // Fresh handler has empty local_bitfield — peer has no pieces
             for i in 0..10 {
                 assert!(
                     handler.should_transmit_have(i),
-                    "should_transmit_have({i}) must be true"
+                    "should_transmit_have({i}) must be true when peer has no pieces"
+                );
+            }
+        }
+
+        // -- Test 10b --
+        #[test]
+        fn broadcast_filtered_for_peer_with_piece() {
+            let (mut handler, _rx) = make_handler(10);
+            // Simulate peer announcing Have for piece 42 (index 5)
+            handler.on_bitfield_update(&torrent_wire::Message::<&[u8]>::Have { index: 5 });
+            assert!(
+                !handler.should_transmit_have(5),
+                "should NOT transmit Have for piece 5 — peer already has it"
+            );
+            assert!(
+                handler.should_transmit_have(4),
+                "should transmit Have for piece 4 — peer does not have it"
+            );
+        }
+
+        // -- Test 10c --
+        #[test]
+        fn should_transmit_have_empty_bitfield() {
+            let (handler, _rx) = make_handler(10);
+            // All pieces should be transmitted when bitfield is empty
+            for i in 0..10 {
+                assert!(handler.should_transmit_have(i));
+            }
+        }
+
+        // -- Test 10d --
+        #[test]
+        fn should_transmit_have_full_bitfield() {
+            let (mut handler, _rx) = make_handler(10);
+            // Simulate HaveAll — peer has all pieces
+            handler.on_bitfield_update(&torrent_wire::Message::<&[u8]>::HaveAll);
+            for i in 0..10 {
+                assert!(
+                    !handler.should_transmit_have(i),
+                    "should NOT transmit Have({i}) — peer has all pieces"
                 );
             }
         }
@@ -1617,6 +1658,38 @@ mod tests {
                 handler.can_request(),
                 "unchoked + dispatch + reservation → can request"
             );
+        }
+
+        // -- Test 14: M118 broadcast lagged recovery --
+        #[tokio::test]
+        async fn broadcast_lagged_receiver_recovers() {
+            // Create a very small broadcast channel to force lagging
+            let (tx, mut rx) = tokio::sync::broadcast::channel::<u32>(4);
+            // Send more messages than capacity → oldest will be dropped
+            for i in 0..10 {
+                let _ = tx.send(i);
+            }
+            // First recv should report Lagged
+            match rx.recv().await {
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    assert!(n > 0, "should report skipped messages");
+                }
+                other => panic!("expected Lagged, got {other:?}"),
+            }
+            // Subsequent recv should succeed with the most recent messages
+            let val = rx.recv().await.unwrap();
+            assert!(val >= 6, "should receive recent value, got {val}");
+        }
+
+        // -- Test 15: M118 broadcast closed --
+        #[tokio::test]
+        async fn broadcast_channel_closed() {
+            let (tx, mut rx) = tokio::sync::broadcast::channel::<u32>(16);
+            drop(tx);
+            match rx.recv().await {
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                other => panic!("expected Closed, got {other:?}"),
+            }
         }
     }
 }

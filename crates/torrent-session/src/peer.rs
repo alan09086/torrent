@@ -45,6 +45,7 @@ pub(crate) async fn run_peer(
     plugins: std::sync::Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
     enable_holepunch: bool,
     max_message_size: usize,
+    have_broadcast_rx: tokio::sync::broadcast::Receiver<u32>,
 ) -> crate::Result<()> {
     use torrent_wire::mse::{self, EncryptionMode, MseStream};
 
@@ -204,7 +205,8 @@ pub(crate) async fn run_peer(
         our_ut_holepunch,
     );
 
-    let connection = PeerConnection::new(handler, reader, writer, cmd_rx, event_tx);
+    let connection =
+        PeerConnection::new(handler, reader, writer, cmd_rx, event_tx, have_broadcast_rx);
     connection.run().await
 }
 
@@ -215,6 +217,13 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
     use torrent_wire::{ExtHandshake, MetadataMessage, MetadataMessageType};
+
+    /// Create a dummy broadcast receiver for tests that don't need Have broadcasting.
+    fn dummy_broadcast_rx() -> tokio::sync::broadcast::Receiver<u32> {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        drop(tx);
+        rx
+    }
 
     fn test_addr() -> SocketAddr {
         "127.0.0.1:6881".parse().unwrap()
@@ -324,6 +333,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -376,6 +386,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -428,6 +439,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -489,6 +501,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -541,6 +554,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -602,6 +616,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -632,13 +647,14 @@ mod tests {
         let _ = handle.await;
     }
 
-    // ---- Test 7: Have Forwarding ----
+    // ---- Test 7: Have Forwarding via Broadcast (M118) ----
 
     #[tokio::test]
-    async fn have_forwarding() {
+    async fn have_forwarding_via_broadcast() {
         let (client_stream, mut server_stream) = tokio::io::duplex(8192);
         let (event_tx, _event_rx) = mpsc::channel(32);
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (have_tx, have_rx) = tokio::sync::broadcast::channel(16);
 
         let info_hash = test_info_hash();
         let bitfield = Bitfield::new(10);
@@ -662,6 +678,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                have_rx,
             )
             .await
         });
@@ -673,7 +690,8 @@ mod tests {
         // M107: drain the unconditional Unchoke sent on connect
         let _unchoke = read_framed_message(&mut server_stream).await;
 
-        cmd_tx.send(PeerCommand::Have(5)).await.unwrap();
+        // M118: Send Have via broadcast channel (not PeerCommand)
+        have_tx.send(5).unwrap();
 
         let msg = read_framed_message(&mut server_stream).await;
         assert_eq!(msg, Message::Have { index: 5 });
@@ -712,6 +730,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -802,6 +821,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -856,6 +876,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -910,6 +931,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -979,6 +1001,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1077,6 +1100,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1130,6 +1154,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1180,6 +1205,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1247,6 +1273,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1293,6 +1320,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1366,6 +1394,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()), // plugins
                 true,                            // enable_holepunch
                 16 * 1024 * 1024,                // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1477,6 +1506,7 @@ mod tests {
                 plugins,
                 true,             // enable_holepunch
                 16 * 1024 * 1024, // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1532,6 +1562,7 @@ mod tests {
                 plugins,
                 true,             // enable_holepunch
                 16 * 1024 * 1024, // max_message_size
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1618,6 +1649,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 true,
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1707,6 +1739,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 true,
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1790,6 +1823,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 true,
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1875,6 +1909,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 false, // enable_holepunch = DISABLED
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1927,6 +1962,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 true, // enable_holepunch = ENABLED
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -1980,6 +2016,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 true,
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -2060,6 +2097,7 @@ mod tests {
                 std::sync::Arc::new(Vec::new()),
                 true,
                 16 * 1024 * 1024,
+                dummy_broadcast_rx(),
             )
             .await
         });
@@ -2144,5 +2182,4 @@ mod tests {
         assert!(decoded.upload_only.is_none());
         assert!(!decoded.m.is_empty());
     }
-
 }

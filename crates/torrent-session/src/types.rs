@@ -51,8 +51,6 @@ pub struct TorrentConfig {
     pub super_seeding: bool,
     /// BEP 21: advertise upload-only status via extension handshake when seeding.
     pub upload_only_announce: bool,
-    /// Batched Have: buffer Have messages for this many ms before sending (0 = disabled).
-    pub have_send_delay_ms: u64,
     /// Number of concurrent piece verifications during torrent checking.
     pub hashing_threads: usize,
     /// Enable sequential (in-order) piece downloading.
@@ -176,7 +174,6 @@ impl Default for TorrentConfig {
             max_web_seeds: 4,
             super_seeding: false,
             upload_only_announce: true,
-            have_send_delay_ms: 0,
             hashing_threads: {
                 let cores = std::thread::available_parallelism()
                     .map(|n| n.get())
@@ -255,7 +252,6 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_web_seeds: s.max_web_seeds,
             super_seeding: s.default_super_seeding,
             upload_only_announce: s.upload_only_announce,
-            have_send_delay_ms: s.have_send_delay_ms,
             hashing_threads: s.hashing_threads,
             sequential_download: false,
             initial_picker_threshold: s.initial_picker_threshold,
@@ -793,8 +789,6 @@ pub(crate) enum PeerCommand {
     },
     /// Send an updated extension handshake (e.g. BEP 21 upload-only).
     SendExtHandshake(torrent_wire::ExtHandshake),
-    /// Send a full bitfield mid-connection (batched Have fallback).
-    SendBitfield(Bytes),
     /// BEP 6: Suggest a piece to the peer.
     SuggestPiece(u32),
     /// BEP 52: Send a hash request to the peer.
@@ -1240,12 +1234,6 @@ mod tests {
         let cfg = TorrentConfig::default();
         assert!(!cfg.super_seeding);
         assert!(cfg.upload_only_announce);
-    }
-
-    #[test]
-    fn torrent_config_have_delay_default() {
-        let cfg = TorrentConfig::default();
-        assert_eq!(cfg.have_send_delay_ms, 0);
     }
 
     #[test]

@@ -403,8 +403,9 @@ impl TorrentHandle {
         } else {
             None
         };
-        let have_buffer =
-            crate::have_buffer::HaveBuffer::new(num_pieces, config.have_send_delay_ms);
+        // M118: broadcast channel for Have distribution — capacity scales with torrent size
+        let (have_broadcast_tx, _) =
+            tokio::sync::broadcast::channel(std::cmp::max(128, num_pieces as usize / 4));
         let is_share_mode = config.share_mode;
 
         let (piece_ready_tx, _) = broadcast::channel(64);
@@ -553,7 +554,7 @@ impl TorrentHandle {
             banned_web_seeds: HashSet::new(),
             web_seed_in_flight: HashMap::new(),
             super_seed,
-            have_buffer,
+            have_broadcast_tx,
             suggested_to_peers: HashMap::new(),
             predictive_have_sent: HashSet::new(),
 
@@ -736,7 +737,8 @@ impl TorrentHandle {
         } else {
             None
         };
-        let have_buffer = crate::have_buffer::HaveBuffer::new(0, config.have_send_delay_ms);
+        // M118: broadcast channel — start with min capacity for magnet (resized on metadata)
+        let (have_broadcast_tx, _) = tokio::sync::broadcast::channel(128);
         let is_share_mode = config.share_mode;
         let magnet_selected_files = magnet.selected_files.clone();
         let info_hashes = magnet.info_hashes.clone();
@@ -874,7 +876,7 @@ impl TorrentHandle {
             banned_web_seeds: HashSet::new(),
             web_seed_in_flight: HashMap::new(),
             super_seed,
-            have_buffer,
+            have_broadcast_tx,
             suggested_to_peers: HashMap::new(),
             predictive_have_sent: HashSet::new(),
 
@@ -1711,8 +1713,8 @@ struct TorrentActor {
 
     // BEP 16 super seeding (M23)
     super_seed: Option<crate::super_seed::SuperSeedState>,
-    // Batched Have (M23)
-    have_buffer: crate::have_buffer::HaveBuffer,
+    // M118: Broadcast channel for Have distribution (replaces HaveBuffer)
+    have_broadcast_tx: tokio::sync::broadcast::Sender<u32>,
 
     /// M44: pieces we've suggested to each peer (avoid re-suggesting)
     suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
@@ -1970,13 +1972,6 @@ impl TorrentActor {
         // M112: shorter initial delay for magnets — metadata needs fast peer discovery
         let mut dht_requery_sleep =
             Box::pin(tokio::time::sleep(initial_dht_requery_delay(self.state)));
-        let mut have_flush_interval = if self.config.have_send_delay_ms > 0 {
-            Some(tokio::time::interval(Duration::from_millis(
-                self.config.have_send_delay_ms,
-            )))
-        } else {
-            None
-        };
         let mut suggest_interval = if self.config.suggest_mode {
             Some(tokio::time::interval(Duration::from_secs(30)))
         } else {
@@ -2496,15 +2491,6 @@ impl TorrentActor {
                             self.dht_v6_v2_peers_rx = None;
                         }
                     }
-                }
-                // Batched Have flush timer
-                _ = async {
-                    match &mut have_flush_interval {
-                        Some(interval) => interval.tick().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    self.flush_have_buffer().await;
                 }
                 // M44: Suggest cached pieces timer
                 _ = async {
@@ -4171,16 +4157,12 @@ impl TorrentActor {
         };
 
         if piece_complete && !self.pending_verify.contains(&index) {
-            // M44: Predictive piece announce — send Have before verification
+            // M44/M118: Predictive piece announce — broadcast Have before verification
             if self.config.predictive_piece_announce_ms > 0
                 && !self.predictive_have_sent.contains(&index)
             {
                 self.predictive_have_sent.insert(index);
-                for peer in self.peers.values() {
-                    if !peer.bitfield.get(index) {
-                        let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
-                    }
-                }
+                let _ = self.have_broadcast_tx.send(index);
             }
 
             // M100: Flush deferred writes before verification — ensures all
@@ -4353,16 +4335,12 @@ impl TorrentActor {
         };
 
         if piece_complete && !self.pending_verify.contains(&index) {
-            // M44: Predictive piece announce — send Have before verification
+            // M44/M118: Predictive piece announce — broadcast Have before verification
             if self.config.predictive_piece_announce_ms > 0
                 && !self.predictive_have_sent.contains(&index)
             {
                 self.predictive_have_sent.insert(index);
-                for peer in self.peers.values() {
-                    if !peer.bitfield.get(index) {
-                        let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
-                    }
-                }
+                let _ = self.have_broadcast_tx.send(index);
             }
 
             // M100: Flush deferred writes before verification — ensures all
@@ -5080,21 +5058,13 @@ impl TorrentActor {
             self.apply_parole_success(index, parole).await;
         }
 
-        // Broadcast Have to all peers (skip in super-seed mode)
+        // M118: Broadcast Have to all peers via broadcast channel (skip in super-seed mode).
+        // Per-peer filtering (skip if peer already has piece) is done receiver-side
+        // in PeerConnection via should_transmit_have().
         if self.super_seed.is_none() {
             let already_announced = self.predictive_have_sent.remove(&index);
             if !already_announced {
-                if self.have_buffer.is_enabled() {
-                    self.have_buffer.push(index);
-                } else {
-                    // Immediate mode — with redundancy elimination
-                    // Use try_send to avoid blocking the actor if any peer's channel is full
-                    for peer in self.peers.values() {
-                        if !peer.bitfield.get(index) {
-                            let _ = peer.cmd_tx.try_send(PeerCommand::Have(index));
-                        }
-                    }
-                }
+                let _ = self.have_broadcast_tx.send(index);
             }
         }
 
@@ -5463,36 +5433,6 @@ impl TorrentActor {
             }
         }
         // M107: No need to clean available_peers — adder task checks ban list on its own.
-    }
-
-    /// Flush the batched Have buffer, sending accumulated Haves or a full bitfield.
-    async fn flush_have_buffer(&mut self) {
-        let ct = match &self.chunk_tracker {
-            Some(ct) => ct,
-            None => return,
-        };
-
-        let result = self.have_buffer.flush(ct.bitfield());
-        match result {
-            Some(crate::have_buffer::FlushResult::SendHaves(pieces)) => {
-                for peer in self.peers.values() {
-                    for &idx in &pieces {
-                        if !peer.bitfield.get(idx) {
-                            let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));
-                        }
-                    }
-                }
-            }
-            Some(crate::have_buffer::FlushResult::SendBitfield(bf)) => {
-                let data = Bytes::copy_from_slice(bf.as_bytes());
-                for peer in self.peers.values() {
-                    let _ = peer
-                        .cmd_tx
-                        .try_send(PeerCommand::SendBitfield(data.clone()));
-                }
-            }
-            None => {}
-        }
     }
 
     /// M44: Suggest cached pieces to connected peers (BEP 6).
@@ -6806,6 +6746,7 @@ impl TorrentActor {
                 let peer_connect_timeout = self.config.peer_connect_timeout;
                 let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
                 let plugins = Arc::clone(&self.plugins);
+                let have_broadcast_tx = self.have_broadcast_tx.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit; // M107: hold for peer lifetime
@@ -6861,6 +6802,7 @@ impl TorrentActor {
                                 plugins,
                                 false, // enable_holepunch — N/A for I2P
                                 max_message_size,
+                                have_broadcast_tx.subscribe(),
                             )
                             .await
                             {
@@ -6925,6 +6867,7 @@ impl TorrentActor {
             self.utp_socket.clone()
         };
         let plugins = Arc::clone(&self.plugins);
+        let have_broadcast_tx = self.have_broadcast_tx.clone();
 
         // SSL torrent: pre-build client TLS config for outbound connections (M42).
         // If ssl_cert is present in the torrent metadata and we have an ssl_manager,
@@ -7055,6 +6998,7 @@ impl TorrentActor {
                                                 plugins,
                                                 enable_holepunch,
                                                 max_message_size,
+                                                have_broadcast_tx.subscribe(),
                                             )
                                             .await;
                                         }
@@ -7087,6 +7031,7 @@ impl TorrentActor {
                                         Arc::clone(&plugins),
                                         enable_holepunch,
                                         max_message_size,
+                                        have_broadcast_tx.subscribe(),
                                     )
                                     .await
                                     {
@@ -7130,6 +7075,7 @@ impl TorrentActor {
                                                         plugins,
                                                         enable_holepunch,
                                                         max_message_size,
+                                                        have_broadcast_tx.subscribe(),
                                                     )
                                                     .await
                                                     {
@@ -7199,6 +7145,7 @@ impl TorrentActor {
                                             Arc::clone(&plugins),
                                             enable_holepunch,
                                             max_message_size,
+                                            have_broadcast_tx.subscribe(),
                                         )
                                         .await
                                         {
@@ -7247,6 +7194,7 @@ impl TorrentActor {
                                                             Arc::clone(&plugins),
                                                             enable_holepunch,
                                                             max_message_size,
+                                                            have_broadcast_tx.subscribe(),
                                                         )
                                                         .await
                                                         {
@@ -7333,6 +7281,7 @@ impl TorrentActor {
                                     Arc::clone(&plugins),
                                     enable_holepunch,
                                     max_message_size,
+                                    have_broadcast_tx.subscribe(),
                                 )
                                 .await
                                 {
@@ -7381,6 +7330,7 @@ impl TorrentActor {
                                                     Arc::clone(&plugins),
                                                     enable_holepunch,
                                                     max_message_size,
+                                                    have_broadcast_tx.subscribe(),
                                                 )
                                                 .await
                                                 {
@@ -7459,6 +7409,7 @@ impl TorrentActor {
                                                         plugins,
                                                         enable_holepunch,
                                                         max_message_size,
+                                                        have_broadcast_tx.subscribe(),
                                                     )
                                                     .await;
                                                 }
@@ -7491,6 +7442,7 @@ impl TorrentActor {
                                                 Arc::clone(&plugins),
                                                 enable_holepunch,
                                                 max_message_size,
+                                                have_broadcast_tx.subscribe(),
                                             )
                                             .await
                                             {
@@ -7534,6 +7486,7 @@ impl TorrentActor {
                                                                 plugins,
                                                                 enable_holepunch,
                                                                 max_message_size,
+                                                                have_broadcast_tx.subscribe(),
                                                             )
                                                             .await
                                                             {
@@ -7659,6 +7612,7 @@ impl TorrentActor {
                                     plugins,
                                     enable_holepunch,
                                     max_message_size,
+                                    have_broadcast_tx.subscribe(),
                                 )
                                 .await;
                             }
@@ -7691,6 +7645,7 @@ impl TorrentActor {
                             Arc::clone(&plugins),
                             enable_holepunch,
                             max_message_size,
+                            have_broadcast_tx.subscribe(),
                         )
                         .await
                         {
@@ -7734,6 +7689,7 @@ impl TorrentActor {
                                             plugins,
                                             enable_holepunch,
                                             max_message_size,
+                                            have_broadcast_tx.subscribe(),
                                         )
                                         .await
                                         {
@@ -7979,6 +7935,7 @@ impl TorrentActor {
         let max_message_size = self.config.max_message_size;
         let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
         let plugins = Arc::clone(&self.plugins);
+        let have_broadcast_tx = self.have_broadcast_tx.clone();
 
         tokio::spawn(async move {
             let _permit = permit; // M107: hold for peer lifetime
@@ -8000,6 +7957,7 @@ impl TorrentActor {
                 plugins,
                 enable_holepunch,
                 max_message_size,
+                have_broadcast_tx.subscribe(),
             )
             .await;
         });
@@ -8182,6 +8140,7 @@ impl TorrentActor {
         };
         let plugins = Arc::clone(&self.plugins);
         let factory = Arc::clone(&self.factory);
+        let have_broadcast_tx = self.have_broadcast_tx.clone();
 
         tokio::spawn(async move {
             // Try uTP first (5s timeout) — preferred for holepunch as NAT traversal
@@ -8216,6 +8175,7 @@ impl TorrentActor {
                             plugins,
                             enable_holepunch,
                             max_message_size,
+                            have_broadcast_tx.subscribe(),
                         )
                         .await;
                         return; // uTP succeeded — don't fall through to TCP
@@ -8259,6 +8219,7 @@ impl TorrentActor {
                         plugins,
                         enable_holepunch,
                         max_message_size,
+                        have_broadcast_tx.subscribe(),
                     )
                     .await;
                 }
@@ -8527,7 +8488,6 @@ mod tests {
             max_web_seeds: 4,
             super_seeding: false,
             upload_only_announce: true,
-            have_send_delay_ms: 0,
             hashing_threads: 2,
             sequential_download: false,
             initial_picker_threshold: 4,

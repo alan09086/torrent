@@ -201,9 +201,6 @@ fn default_max_peers_per_torrent() -> usize {
 fn default_stats_report_interval() -> u64 {
     1000
 }
-fn default_have_send_delay_ms() -> u64 {
-    100
-}
 fn default_strict_end_game() -> bool {
     true
 }
@@ -351,12 +348,6 @@ pub struct Settings {
     /// transitions to seeding (BEP 21). Default: true.
     #[serde(default = "default_true")]
     pub upload_only_announce: bool,
-    /// Have message batching delay in milliseconds. When > 0, Have messages are
-    /// buffered and sent in batches; if the batch exceeds 50% of total pieces,
-    /// a full Bitfield is sent instead. Default: 100.
-    #[serde(default = "default_have_send_delay_ms")]
-    pub have_send_delay_ms: u64,
-
     // ── Rate limiting ──
     /// Global upload rate limit in bytes/sec (0 = unlimited).
     #[serde(default)]
@@ -795,7 +786,6 @@ impl Default for Settings {
             default_super_seeding: false,
             default_share_mode: false,
             upload_only_announce: true,
-            have_send_delay_ms: default_have_send_delay_ms(),
             // Rate limiting
             upload_rate_limit: 0,
             download_rate_limit: 0,
@@ -1213,7 +1203,6 @@ impl PartialEq for Settings {
             && self.default_super_seeding == other.default_super_seeding
             && self.default_share_mode == other.default_share_mode
             && self.upload_only_announce == other.upload_only_announce
-            && self.have_send_delay_ms == other.have_send_delay_ms
             && self.upload_rate_limit == other.upload_rate_limit
             && self.download_rate_limit == other.download_rate_limit
             && self.tcp_upload_rate_limit == other.tcp_upload_rate_limit
@@ -1392,12 +1381,6 @@ mod tests {
         assert_eq!(s.max_peers_per_torrent, 200);
         assert_eq!(s.runtime_worker_threads, default_runtime_worker_threads());
         assert!(s.pin_cores);
-    }
-
-    #[test]
-    fn have_batch_default_100ms() {
-        let s = Settings::default();
-        assert_eq!(s.have_send_delay_ms, 100);
     }
 
     #[test]
