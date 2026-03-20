@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1677-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1690-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.116.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.117.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,677 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,690 tests. Zero clippy warnings.
 
 ---
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.117.0 | PeerConnectionHandler trait -- `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, sync/async method split preserving zero-copy pwrite fast-path | +13 tests (1690 total) |
 | 0.116.0 | Session-level BlockingSpawner + hot-path allocation cleanup -- `spawn_blocking`→`block_in_place` in DiskActor/DiskHandle (all 7 dispatch arms + writer task), cached file metadata for zero-alloc `check_file_completion`, cooperative `yield_now()` in peer message loop, `max_blocking_threads` setting | +5 tests (1677 total) |
 | 0.115.0 | Pre-allocated PeerWriter + vectored read infrastructure -- PeerWriter `Box<[u8; MAX_MSG_LEN]>` replaces BytesMut (zero realloc on write path), `encode_to_slice`/`wire_len` methods on Message, `AsyncReadVectored` trait + `VectoredCompat` fallback wrapper, PeerReader fill() uses vectored I/O path (single-buffer via VectoredCompat, real readv deferred to M117) | +9 tests (1672 total) |
 | 0.114.0 | Listener task extraction -- TCP/uTP accept loops moved from SessionActor select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone | +9 tests (1663 total) |
@@ -287,7 +288,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M114) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M117) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -311,6 +312,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Wire Optimization | M108-M110 | Full PEX send-side, Have batching, hot-path pre-allocation, ring buffer codec, zero-copy piece pipeline | Done |
 | Protocol Compliance | M111-M113 | BEP compliance sweep, holepunch initiation, V2-only torrent creation | Done |
 | Session Architecture | M114 | Listener task extraction -- TCP/uTP accept loops in dedicated spawned task | Done |
+| Peer Architecture | M115-M117 | Pre-allocated PeerWriter, vectored read infrastructure, PeerConnectionHandler trait | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -319,7 +321,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,677 tests
+cargo test --workspace                      # 1,690 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 
