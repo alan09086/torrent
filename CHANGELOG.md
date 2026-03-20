@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.118.0 | M118 | Broadcast Have distribution — `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have` filtering, O(1) broadcast send, Have latency <1ms (was 100ms batch delay) |
 | 0.117.0 | M117 | PeerConnectionHandler trait — `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, trait-based 3-file architecture |
 | 0.116.0 | M116 | Session-level BlockingSpawner + hot-path allocation cleanup — spawn_blocking→block_in_place in DiskActor/DiskHandle, cached file metadata for zero-alloc check_file_completion, cooperative yielding in peer message loop |
 | 0.115.0 | M115 | Pre-allocated PeerWriter + vectored read infrastructure — PeerWriter Box<[u8; MAX_MSG_LEN]> replaces BytesMut, encode_to_slice/wire_len on Message, AsyncReadVectored trait + VectoredCompat fallback |
@@ -71,6 +72,26 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.118.0] — 2026-03-19
+
+### Added
+- `tokio::sync::broadcast` channel for Have distribution (rqbit pattern)
+- Per-peer Have filtering via `should_transmit_have(!local_bitfield.get(piece))`
+- Have broadcast receive arm in PeerConnection select! loop
+- Lagged receiver recovery (skip missed Haves, log at debug level)
+- 6 new broadcast/filtering tests
+
+### Removed
+- `HaveBuffer` struct and `have_buffer.rs` (131 lines)
+- `have_send_delay_ms` setting (no longer needed)
+- `PeerCommand::SendBitfield` variant
+- Have flush timer arm from TorrentActor select! loop
+
+### Changed
+- Have distribution: O(peers) actor iteration → O(1) broadcast send
+- Have latency: <1ms (was 100ms batch delay)
+- `should_transmit_have()` now filters based on peer's bitfield (was always true)
 
 ## [0.117.0] — 2026-03-19
 
