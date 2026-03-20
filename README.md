@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1690-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1696-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.118.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.119.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,690 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,696 tests. Zero clippy warnings.
 
 ---
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.119.0 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold -- `pwritev(2)` replaces seek+write_all in `write_chunk_vectored` (single atomic syscall, no seek), `PreallocateMode` enum (None/Sparse/Full) with `FALLOC_FL_KEEP_SIZE` for SSD-friendly extent reservation, `TorrentStorageAsync` trait behind `io-uring` feature flag (M122 scaffold) | +6 tests (1696 total) |
 | 0.118.0 | Broadcast Have distribution -- `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have(!local_bitfield.get(piece))` filtering, lagged receiver recovery, O(1) broadcast send (was O(peers) actor iteration), Have latency <1ms (was 100ms batch delay) | +6 tests (1690 total) |
 | 0.117.0 | PeerConnectionHandler trait -- `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, sync/async method split preserving zero-copy pwrite fast-path | +13 tests (1690 total) |
 | 0.116.0 | Session-level BlockingSpawner + hot-path allocation cleanup -- `spawn_blocking`→`block_in_place` in DiskActor/DiskHandle (all 7 dispatch arms + writer task), cached file metadata for zero-alloc `check_file_completion`, cooperative `yield_now()` in peer message loop, `max_blocking_threads` setting | +5 tests (1677 total) |
@@ -323,7 +324,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,690 tests
+cargo test --workspace                      # 1,696 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 

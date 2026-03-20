@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.119.0 | M119 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold — `pwritev(2)` replaces seek+write_all, `PreallocateMode` enum with `FALLOC_FL_KEEP_SIZE`, `TorrentStorageAsync` trait behind feature flag |
 | 0.118.0 | M118 | Broadcast Have distribution — `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have` filtering, O(1) broadcast send, Have latency <1ms (was 100ms batch delay) |
 | 0.117.0 | M117 | PeerConnectionHandler trait — `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, trait-based 3-file architecture |
 | 0.116.0 | M116 | Session-level BlockingSpawner + hot-path allocation cleanup — spawn_blocking→block_in_place in DiskActor/DiskHandle, cached file metadata for zero-alloc check_file_completion, cooperative yielding in peer message loop |
@@ -72,6 +73,26 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.119.0] — 2026-03-20
+
+### Added
+- `pwritev(2)` vectored writes in `write_chunk_vectored` on Linux — single atomic
+  syscall for ring-buffer straddle writes, eliminates seek entirely
+- `PreallocateMode` enum (None/Sparse/Full) with `From<bool>` backward compatibility
+- `PreallocateMode::Sparse` using `FALLOC_FL_KEEP_SIZE` for SSD-friendly extent
+  reservation without write amplification, with graceful fallback
+- `TorrentStorageAsync` trait behind `cfg(feature = "io-uring")` — M122 scaffold
+  with object-safe async methods via `async-trait`
+- `preallocate_mode` setting in Settings for explicit pre-allocation control
+- `PreallocateMode` re-exported through facade crate
+- 7 new tests (6 default + 1 feature-gated): pwritev contiguous/split/multi-file,
+  sparse fallocate reserves/degradation, From<bool> compat, async trait compilation
+
+### Changed
+- `FilesystemStorage::new()` takes `PreallocateMode` instead of `bool`
+- `preallocate_file()` dispatches on mode enum instead of single code path
+- Non-Linux platforms retain seek+write_all fallback in `write_chunk_vectored`
 
 ## [0.118.0] — 2026-03-19
 
