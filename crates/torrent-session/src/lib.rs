@@ -9,6 +9,7 @@ mod settings;
 mod types;
 // These will be added as they're implemented:
 pub(crate) mod ban;
+pub(crate) mod blocking_spawner;
 pub(crate) mod buffer_pool;
 pub(crate) mod choker;
 #[allow(dead_code)] // M73: retained for endgame pathway and future use

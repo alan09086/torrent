@@ -76,6 +76,11 @@ fn default_disk_io_threads() -> usize {
         .unwrap_or(4);
     (cores / 2).clamp(4, 16)
 }
+fn default_max_blocking_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
 fn default_storage_mode() -> StorageMode {
     StorageMode::Auto
 }
@@ -442,6 +447,10 @@ pub struct Settings {
     /// Number of concurrent disk I/O threads (default: 4).
     #[serde(default = "default_disk_io_threads")]
     pub disk_io_threads: usize,
+    /// Maximum number of concurrent blocking I/O operations dispatched via
+    /// `block_in_place`. Defaults to the number of available CPU cores.
+    #[serde(default = "default_max_blocking_threads")]
+    pub max_blocking_threads: usize,
     /// Storage allocation mode: Auto, FullPreallocate, or SparseFile (default: Auto).
     #[serde(default = "default_storage_mode")]
     pub storage_mode: StorageMode,
@@ -817,6 +826,7 @@ impl Default for Settings {
             smart_ban_parole: true,
             // Disk I/O
             disk_io_threads: default_disk_io_threads(),
+            max_blocking_threads: default_max_blocking_threads(),
             storage_mode: StorageMode::Auto,
             disk_cache_size: 16 * 1024 * 1024,
             disk_write_cache_ratio: 0.5,
@@ -1010,6 +1020,12 @@ impl Settings {
         if self.disk_io_threads == 0 {
             return Err(crate::Error::InvalidSettings(
                 "disk_io_threads must be at least 1".into(),
+            ));
+        }
+
+        if self.max_blocking_threads == 0 {
+            return Err(crate::Error::InvalidSettings(
+                "max_blocking_threads must be at least 1".into(),
             ));
         }
 
@@ -1223,6 +1239,7 @@ impl PartialEq for Settings {
             && self.smart_ban_max_failures == other.smart_ban_max_failures
             && self.smart_ban_parole == other.smart_ban_parole
             && self.disk_io_threads == other.disk_io_threads
+            && self.max_blocking_threads == other.max_blocking_threads
             && self.storage_mode == other.storage_mode
             && self.disk_cache_size == other.disk_cache_size
             && self.disk_write_cache_ratio.to_bits() == other.disk_write_cache_ratio.to_bits()
@@ -1343,6 +1360,7 @@ mod tests {
         assert_eq!(s.smart_ban_max_failures, 3);
         assert!(s.smart_ban_parole);
         assert_eq!(s.disk_io_threads, default_disk_io_threads());
+        assert_eq!(s.max_blocking_threads, default_max_blocking_threads());
         assert_eq!(s.storage_mode, StorageMode::Auto);
         assert_eq!(s.disk_cache_size, 16 * 1024 * 1024);
         assert!((s.disk_write_cache_ratio - 0.5).abs() < f32::EPSILON);
@@ -1578,6 +1596,11 @@ mod tests {
         s.disk_io_threads = 0;
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("disk_io_threads"));
+
+        let mut s = Settings::default();
+        s.max_blocking_threads = 0;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("max_blocking_threads"));
     }
 
     #[test]

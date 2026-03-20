@@ -236,6 +236,8 @@ pub struct DiskManagerHandle {
     tx: mpsc::Sender<DiskJob>,
     /// Backend reference for per-torrent deferred writes (M100).
     backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
+    /// Bounded blocking-task spawner (M116).
+    spawner: crate::blocking_spawner::BlockingSpawner,
 }
 
 impl DiskManagerHandle {
@@ -243,20 +245,22 @@ impl DiskManagerHandle {
     /// Returns the handle and a `JoinHandle` for the background actor task.
     pub fn new(config: DiskConfig) -> (Self, tokio::task::JoinHandle<()>) {
         let backend = crate::disk_backend::create_backend_from_config(&config);
-        Self::new_with_backend(config, backend)
+        let spawner = crate::blocking_spawner::BlockingSpawner::new(config.io_threads);
+        Self::new_with_backend(config, backend, spawner)
     }
 
     /// Create a new disk manager with a custom disk I/O backend.
     /// Returns the handle and a `JoinHandle` for the background actor task.
-    pub fn new_with_backend(
+    pub(crate) fn new_with_backend(
         config: DiskConfig,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
+        spawner: crate::blocking_spawner::BlockingSpawner,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         let backend_for_actor = Arc::clone(&backend);
-        let actor = DiskActor::new(rx, config, backend_for_actor);
+        let actor = DiskActor::new(rx, config, backend_for_actor, spawner.clone());
         let join = tokio::spawn(actor.run());
-        (DiskManagerHandle { tx, backend }, join)
+        (DiskManagerHandle { tx, backend, spawner }, join)
     }
 
     /// Register a torrent's storage with the disk subsystem and return a
@@ -291,10 +295,11 @@ impl DiskManagerHandle {
         // Spawn the per-torrent writer task.
         let writer_storage = Arc::clone(&storage_for_handle);
         let writer_state = Arc::clone(&write_state);
+        let writer_spawner = self.spawner.clone();
         tokio::spawn(async move {
             while let Some(first) = write_rx.recv().await {
                 // Drain up to 64 jobs into a batch, then execute all in a
-                // single spawn_blocking call to reduce thread pool overhead.
+                // single block_in_place call to reduce thread pool overhead.
                 let mut batch = vec![first];
                 while batch.len() < 64 {
                     match write_rx.try_recv() {
@@ -306,18 +311,15 @@ impl DiskManagerHandle {
                 // Collect piece indices before moving batch into the closure.
                 let pieces: Vec<u32> = batch.iter().map(|j| j.piece).collect();
 
-                // Use spawn_blocking (not block_in_place) because this task may
-                // run on a current_thread runtime in tests. The hot-path fallback
-                // in write_block_deferred uses block_in_place on worker threads.
                 let ws = Arc::clone(&writer_storage);
-                let _ = tokio::task::spawn_blocking(move || {
+                let spawner = writer_spawner.clone();
+                spawner.block_in_place(move || {
                     for WriteJob { piece, begin, data } in &batch {
                         if let Err(e) = ws.write_chunk(*piece, *begin, data) {
                             tracing::warn!(piece, begin, %e, "deferred write failed");
                         }
                     }
-                })
-                .await;
+                }).await;
 
                 // Decrement pending counts for all jobs in batch, notify once.
                 {
@@ -343,6 +345,7 @@ impl DiskManagerHandle {
             storage: Some(storage_for_handle),
             backend: Some(Arc::clone(&self.backend)),
             write_state: Some(write_state),
+            spawner: Some(self.spawner.clone()),
         }
     }
 
@@ -378,6 +381,8 @@ pub struct DiskHandle {
     backend: Option<Arc<dyn crate::disk_backend::DiskIoBackend>>,
     /// Deferred write queue state (M100).
     write_state: Option<Arc<DiskWriteState>>,
+    /// Bounded blocking-task spawner (M116).
+    spawner: Option<crate::blocking_spawner::BlockingSpawner>,
 }
 
 impl std::fmt::Debug for DiskHandle {
@@ -400,6 +405,7 @@ impl DiskHandle {
             storage: None,
             backend: None,
             write_state: None,
+            spawner: None,
         }
     }
 
@@ -657,15 +663,15 @@ impl DiskHandle {
             let backend = Arc::clone(backend);
             let info_hash = self.info_hash;
             let result_tx = result_tx.clone();
+            let spawner = self.spawner.clone().unwrap();
             tokio::spawn(async move {
-                let passed = tokio::task::spawn_blocking(move || {
+                let passed = spawner.block_in_place(move || {
                     backend.hash_piece(info_hash, piece, &expected).unwrap_or_else(|e| {
                         warn!(piece, %e, "verify: hash_piece failed");
                         false
                     })
                 })
-                .await
-                .expect("hash_piece task panicked");
+                .await;
                 let _ = result_tx.send(VerifyResult { piece, passed }).await;
             });
             return;
@@ -697,8 +703,9 @@ impl DiskHandle {
             let backend = Arc::clone(backend);
             let info_hash = self.info_hash;
             let result_tx = result_tx.clone();
+            let spawner = self.spawner.clone().unwrap();
             tokio::spawn(async move {
-                let passed = tokio::task::spawn_blocking(move || {
+                let passed = spawner.block_in_place(move || {
                     match backend.read_piece(info_hash, piece) {
                         Ok(data) => {
                             let actual = torrent_core::sha256(&data);
@@ -710,8 +717,7 @@ impl DiskHandle {
                         }
                     }
                 })
-                .await
-                .expect("read_piece v2 task panicked");
+                .await;
                 let _ = result_tx.send(VerifyResult { piece, passed }).await;
             });
             return;
@@ -758,11 +764,18 @@ impl DiskHandle {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Channel full: write synchronously to avoid unbounded backlog.
                 let storage = Arc::clone(storage);
-                tokio::task::block_in_place(|| {
+                if let Some(ref spawner) = self.spawner {
+                    spawner.block_in_place_sync(|| {
+                        if let Err(e) = storage.write_chunk(piece, begin, &data) {
+                            tracing::warn!(piece, begin, %e, "deferred write fallback failed");
+                        }
+                    });
+                } else {
+                    // Fallback: direct call (pre-M116 path)
                     if let Err(e) = storage.write_chunk(piece, begin, &data) {
                         tracing::warn!(piece, begin, %e, "deferred write fallback failed");
                     }
-                });
+                }
                 // Decrement pending + notify.
                 let mut pending = write_state.pending.lock().expect("pending lock poisoned");
                 if let Some(count) = pending.get_mut(&piece) {
@@ -847,7 +860,7 @@ impl DiskHandle {
 struct DiskActor {
     rx: mpsc::Receiver<DiskJob>,
     backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
-    semaphore: Arc<tokio::sync::Semaphore>,
+    spawner: crate::blocking_spawner::BlockingSpawner,
     #[allow(dead_code)]
     config: DiskConfig,
 }
@@ -857,11 +870,12 @@ impl DiskActor {
         rx: mpsc::Receiver<DiskJob>,
         config: DiskConfig,
         backend: Arc<dyn crate::disk_backend::DiskIoBackend>,
+        spawner: crate::blocking_spawner::BlockingSpawner,
     ) -> Self {
         DiskActor {
             rx,
             backend,
-            semaphore: Arc::new(tokio::sync::Semaphore::new(config.io_threads)),
+            spawner,
             config,
         }
     }
@@ -884,9 +898,9 @@ impl DiskActor {
                 if let DiskJob::Shutdown { reply } = job {
                     // Flush on blocking thread to avoid stalling tokio runtime.
                     let backend = Arc::clone(&self.backend);
-                    let flush_result =
-                        tokio::task::spawn_blocking(move || backend.flush_all()).await;
-                    if let Ok(Err(e)) = flush_result {
+                    let spawner = self.spawner.clone();
+                    let flush_result = spawner.block_in_place(move || backend.flush_all()).await;
+                    if let Err(e) = flush_result {
                         warn!("flush_all on shutdown failed: {e}");
                     }
                     let _ = reply.send(());
@@ -933,15 +947,11 @@ impl DiskActor {
             } => {
                 let flush = flags.contains(DiskJobFlags::FLUSH_PIECE);
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || {
+                    let result = spawner.block_in_place(move || {
                         backend.write_chunk(info_hash, piece, begin, data, flush)
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
+                    }).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }
@@ -957,15 +967,11 @@ impl DiskActor {
             } => {
                 let volatile = flags.contains(DiskJobFlags::VOLATILE_READ);
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || {
+                    let result = spawner.block_in_place(move || {
                         backend.read_chunk(info_hash, piece, begin, length, volatile)
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
+                    }).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }
@@ -979,15 +985,11 @@ impl DiskActor {
                 ..
             } => {
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || {
+                    let result = spawner.block_in_place(move || {
                         backend.hash_piece(info_hash, piece, &expected)
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
+                    }).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }
@@ -1001,15 +1003,11 @@ impl DiskActor {
                 ..
             } => {
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || {
+                    let result = spawner.block_in_place(move || {
                         backend.hash_piece_v2(info_hash, piece, &expected)
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
+                    }).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }
@@ -1024,15 +1022,11 @@ impl DiskActor {
                 ..
             } => {
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || {
+                    let result = spawner.block_in_place(move || {
                         backend.hash_block(info_hash, piece, begin, length)
-                    })
-                    .await
-                    .unwrap();
-                    drop(permit);
+                    }).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }
@@ -1044,14 +1038,11 @@ impl DiskActor {
                 reply,
             } => {
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result =
-                        tokio::task::spawn_blocking(move || backend.flush_piece(info_hash, piece))
-                            .await
-                            .unwrap();
-                    drop(permit);
+                    let result = spawner.block_in_place(move || {
+                        backend.flush_piece(info_hash, piece)
+                    }).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }
@@ -1059,13 +1050,9 @@ impl DiskActor {
             // --- Flush all ---
             DiskJob::FlushAll { reply } => {
                 let backend = Arc::clone(&self.backend);
-                let semaphore = self.semaphore.clone();
+                let spawner = self.spawner.clone();
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = tokio::task::spawn_blocking(move || backend.flush_all())
-                        .await
-                        .unwrap();
-                    drop(permit);
+                    let result = spawner.block_in_place(move || backend.flush_all()).await;
                     let _ = reply.send(to_storage_result(result));
                 });
             }

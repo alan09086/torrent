@@ -442,6 +442,9 @@ impl TorrentHandle {
             disk.set_hash_result_tx(hash_result_tx.clone());
         }
 
+        // M116: Pre-compute file->piece mapping for zero-alloc completion checks.
+        let cached_files = Some(build_cached_file_info(&meta, &lengths));
+
         let actor = TorrentActor {
             config,
             info_hash: meta.info_hash,
@@ -526,6 +529,7 @@ impl TorrentHandle {
             hash_result_rx,
             hash_result_tx,
             meta: Some(meta),
+            cached_files,
             listener,
             utp_socket,
             utp_socket_v6,
@@ -846,6 +850,7 @@ impl TorrentHandle {
             hash_result_rx,
             hash_result_tx,
             meta: None,
+            cached_files: None,
             listener,
             utp_socket,
             utp_socket_v6,
@@ -1484,6 +1489,49 @@ impl TorrentHandle {
 }
 
 // ---------------------------------------------------------------------------
+// M116: Cached file metadata for zero-allocation piece completion checks
+// ---------------------------------------------------------------------------
+
+/// Pre-computed file metadata for zero-allocation piece completion checks.
+#[derive(Debug, Clone)]
+struct CachedFileEntry {
+    index: usize,
+    #[allow(dead_code)] // Used in tests; retained for future diagnostics
+    length: u64,
+    first_piece: u32,
+    last_piece: u32,
+}
+
+/// Cached file-to-piece mapping, computed once at torrent registration.
+#[derive(Debug, Clone)]
+struct CachedFileInfo {
+    entries: Vec<CachedFileEntry>,
+}
+
+fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFileInfo {
+    let piece_length = lengths.piece_length();
+    let files = meta.info.files();
+    let mut entries = Vec::with_capacity(files.len());
+    let mut offset = 0u64;
+    for (index, file) in files.iter().enumerate() {
+        let first_piece = (offset / piece_length) as u32;
+        let last_piece = if file.length == 0 {
+            first_piece
+        } else {
+            ((offset + file.length - 1) / piece_length) as u32
+        };
+        entries.push(CachedFileEntry {
+            index,
+            length: file.length,
+            first_piece,
+            last_piece,
+        });
+        offset += file.length;
+    }
+    CachedFileInfo { entries }
+}
+
+// ---------------------------------------------------------------------------
 // TorrentActor — internal single-owner event loop
 // ---------------------------------------------------------------------------
 
@@ -1567,6 +1615,9 @@ struct TorrentActor {
 
     // Parsed torrent meta (for piece hash verification)
     meta: Option<TorrentMetaV1>,
+
+    /// M116: Pre-computed file->piece mapping for zero-alloc completion checks.
+    cached_files: Option<CachedFileInfo>,
 
     // Stats
     downloaded: u64,
@@ -2829,14 +2880,11 @@ impl TorrentActor {
 
     /// Check if the just-completed piece finishes any file, and fire FileCompleted alerts.
     ///
-    /// For efficiency, only checks files whose byte range overlaps the completed piece.
+    /// M116: Uses pre-computed `cached_files` mapping instead of allocating
+    /// `meta.info.files()` on every verified piece.
     fn check_file_completion(&self, piece_index: u32) {
-        let meta = match self.meta.as_ref() {
-            Some(m) => m,
-            None => return,
-        };
-        let lengths = match self.lengths.as_ref() {
-            Some(l) => l,
+        let cached = match self.cached_files.as_ref() {
+            Some(c) => c,
             None => return,
         };
         let bitfield = match self.chunk_tracker.as_ref() {
@@ -2844,42 +2892,14 @@ impl TorrentActor {
             None => return,
         };
 
-        let files = meta.info.files();
-        if files.is_empty() {
-            return;
-        }
-
-        let piece_length = lengths.piece_length();
-        let piece_start = lengths.piece_offset(piece_index);
-        let piece_end = piece_start + lengths.piece_size(piece_index) as u64;
-
-        // Walk files to find which ones overlap this piece
-        let mut file_offset = 0u64;
-        for (file_idx, file_entry) in files.iter().enumerate() {
-            let file_end = file_offset + file_entry.length;
-
-            // Skip files that don't overlap this piece
-            if file_end <= piece_start || file_offset >= piece_end {
-                file_offset = file_end;
+        for entry in &cached.entries {
+            // Skip files that don't contain this piece
+            if piece_index < entry.first_piece || piece_index > entry.last_piece {
                 continue;
             }
 
-            // This file overlaps the completed piece. Check if ALL pieces for
-            // this file are now complete.
-            let first_piece = (file_offset / piece_length) as u32;
-            let last_piece = if file_entry.length == 0 {
-                first_piece
-            } else {
-                ((file_end - 1) / piece_length) as u32
-            };
-
-            let mut all_complete = true;
-            for p in first_piece..=last_piece {
-                if !bitfield.get(p) {
-                    all_complete = false;
-                    break;
-                }
-            }
+            // Check if ALL pieces for this file are complete
+            let all_complete = (entry.first_piece..=entry.last_piece).all(|p| bitfield.get(p));
 
             if all_complete {
                 post_alert(
@@ -2887,12 +2907,10 @@ impl TorrentActor {
                     &self.alert_mask,
                     AlertKind::FileCompleted {
                         info_hash: self.info_hash,
-                        file_index: file_idx,
+                        file_index: entry.index,
                     },
                 );
             }
-
-            file_offset = file_end;
         }
     }
 
@@ -5604,6 +5622,12 @@ impl TorrentActor {
                         let mut meta = meta;
                         meta.info_bytes = Some(Bytes::from(info_bytes));
                         self.meta = Some(meta);
+
+                        // M116: Populate cached file info for zero-alloc completion checks.
+                        if let (Some(meta), Some(lengths)) = (&self.meta, &self.lengths) {
+                            self.cached_files = Some(build_cached_file_info(meta, lengths));
+                        }
+
                         self.file_priorities = vec![FilePriority::Normal; file_lengths.len()];
 
                         // BEP 53: apply magnet so= file selection
@@ -14523,5 +14547,113 @@ mod tests {
     fn holepunch_not_triggered_on_ban() {
         assert!(!should_attempt_holepunch("peer banned"));
         assert!(!should_attempt_holepunch("banned for bad data"));
+    }
+
+    // -- M116: CachedFileInfo tests --
+
+    /// Helper to build a minimal TorrentMetaV1 with multi-file entries.
+    fn make_multi_file_meta(files: Vec<(u64, &str)>, piece_length: u64) -> TorrentMetaV1 {
+        let total_length: u64 = files.iter().map(|(len, _)| *len).sum();
+        let num_pieces = total_length.div_ceil(piece_length) as usize;
+        let file_entries: Vec<torrent_core::FileEntry> = files
+            .iter()
+            .map(|(length, name)| torrent_core::FileEntry {
+                length: *length,
+                path: vec![name.to_string()],
+                attr: None,
+                mtime: None,
+                symlink_path: None,
+            })
+            .collect();
+        TorrentMetaV1 {
+            info_hash: Id20([0u8; 20]),
+            announce: None,
+            announce_list: None,
+            comment: None,
+            created_by: None,
+            creation_date: None,
+            info: torrent_core::InfoDict {
+                name: "test".to_string(),
+                piece_length,
+                pieces: vec![0u8; num_pieces * 20],
+                length: None,
+                files: Some(file_entries),
+                private: None,
+                source: None,
+                ssl_cert: None,
+            },
+            url_list: Vec::new(),
+            httpseeds: Vec::new(),
+            info_bytes: None,
+            ssl_cert: None,
+        }
+    }
+
+    #[test]
+    fn cached_files_populated_on_registration() {
+        // 3 files: 100, 200, 50 bytes; piece_length = 100
+        // Total = 350 bytes, 4 pieces (0..3)
+        // File 0: offset 0..100  -> pieces [0, 0]
+        // File 1: offset 100..300 -> pieces [1, 2]
+        // File 2: offset 300..350 -> pieces [3, 3]
+        let meta = make_multi_file_meta(
+            vec![(100, "a.txt"), (200, "b.txt"), (50, "c.txt")],
+            100,
+        );
+        let lengths = Lengths::new(350, 100, 16384);
+        let cached = build_cached_file_info(&meta, &lengths);
+
+        assert_eq!(cached.entries.len(), 3);
+
+        assert_eq!(cached.entries[0].index, 0);
+        assert_eq!(cached.entries[0].length, 100);
+        assert_eq!(cached.entries[0].first_piece, 0);
+        assert_eq!(cached.entries[0].last_piece, 0);
+
+        assert_eq!(cached.entries[1].index, 1);
+        assert_eq!(cached.entries[1].length, 200);
+        assert_eq!(cached.entries[1].first_piece, 1);
+        assert_eq!(cached.entries[1].last_piece, 2);
+
+        assert_eq!(cached.entries[2].index, 2);
+        assert_eq!(cached.entries[2].length, 50);
+        assert_eq!(cached.entries[2].first_piece, 3);
+        assert_eq!(cached.entries[2].last_piece, 3);
+    }
+
+    #[test]
+    fn cached_files_single_file_torrent() {
+        // Single-file torrent: 500 bytes, piece_length = 100
+        // 5 pieces (0..4)
+        let meta = TorrentMetaV1 {
+            info_hash: Id20([0u8; 20]),
+            announce: None,
+            announce_list: None,
+            comment: None,
+            created_by: None,
+            creation_date: None,
+            info: torrent_core::InfoDict {
+                name: "single.bin".to_string(),
+                piece_length: 100,
+                pieces: vec![0u8; 5 * 20],
+                length: Some(500),
+                files: None,
+                private: None,
+                source: None,
+                ssl_cert: None,
+            },
+            url_list: Vec::new(),
+            httpseeds: Vec::new(),
+            info_bytes: None,
+            ssl_cert: None,
+        };
+        let lengths = Lengths::new(500, 100, 16384);
+        let cached = build_cached_file_info(&meta, &lengths);
+
+        assert_eq!(cached.entries.len(), 1);
+        assert_eq!(cached.entries[0].index, 0);
+        assert_eq!(cached.entries[0].length, 500);
+        assert_eq!(cached.entries[0].first_piece, 0);
+        assert_eq!(cached.entries[0].last_piece, 4);
     }
 }

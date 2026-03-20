@@ -389,6 +389,8 @@ pub(crate) async fn run_peer(
                                         }],
                                     }).await.map_err(|_| crate::Error::Shutdown)?;
                                 }
+                                // M116: Yield to prevent busy peers from monopolizing a worker thread.
+                                tokio::task::yield_now().await;
                                 continue; // skip handle_message
                             }
 
@@ -585,6 +587,8 @@ pub(crate) async fn run_peer(
                                 warn!(%addr, "error handling message: {e}");
                             }
                         }
+                        // M116: Yield after processing non-piece messages to prevent monopolization.
+                        tokio::task::yield_now().await;
                     }
                     Ok(FillStatus::Eof) => {
                         // Clean end-of-stream

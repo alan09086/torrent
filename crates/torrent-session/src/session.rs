@@ -695,8 +695,9 @@ impl SessionHandle {
             Arc::new(std::sync::RwLock::new(crate::ip_filter::IpFilter::new()));
 
         let disk_config = crate::disk::DiskConfig::from(&settings);
+        let spawner = crate::blocking_spawner::BlockingSpawner::new(settings.max_blocking_threads);
         let (disk_manager, disk_actor_handle) =
-            crate::disk::DiskManagerHandle::new_with_backend(disk_config, backend);
+            crate::disk::DiskManagerHandle::new_with_backend(disk_config, backend, spawner);
 
         let counters = Arc::new(crate::stats::SessionCounters::new());
 
