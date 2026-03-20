@@ -2762,14 +2762,18 @@ impl TorrentActor {
                 return Err(crate::Error::Config("lengths not available".into()));
             }
         };
-        let preallocate = self.config.storage_mode == torrent_core::StorageMode::Full;
+        let prealloc_mode = self.config.preallocate_mode.unwrap_or_else(|| {
+            torrent_storage::PreallocateMode::from(
+                self.config.storage_mode == torrent_core::StorageMode::Full,
+            )
+        });
         let storage: Arc<dyn TorrentStorage> = match torrent_storage::FilesystemStorage::new(
             &new_path,
             file_paths,
             file_lengths,
             lengths,
             Some(&self.file_priorities),
-            preallocate,
+            prealloc_mode,
         ) {
             Ok(s) => Arc::new(s),
             Err(e) => {
@@ -5511,8 +5515,12 @@ impl TorrentActor {
                             .map(|f| f.path.iter().collect::<std::path::PathBuf>())
                             .collect();
                         let file_lengths_vec: Vec<u64> = files.iter().map(|f| f.length).collect();
-                        let preallocate =
-                            self.config.storage_mode == torrent_core::StorageMode::Full;
+                        let prealloc_mode =
+                            self.config.preallocate_mode.unwrap_or_else(|| {
+                                torrent_storage::PreallocateMode::from(
+                                    self.config.storage_mode == torrent_core::StorageMode::Full,
+                                )
+                            });
                         let storage: Arc<dyn TorrentStorage> =
                             match torrent_storage::FilesystemStorage::new(
                                 &self.config.download_dir,
@@ -5520,7 +5528,7 @@ impl TorrentActor {
                                 file_lengths_vec,
                                 lengths.clone(),
                                 None,
-                                preallocate,
+                                prealloc_mode,
                             ) {
                                 Ok(s) => Arc::new(s),
                                 Err(e) => {
@@ -8511,6 +8519,7 @@ mod tests {
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
             storage_mode: torrent_core::StorageMode::Auto,
+            preallocate_mode: None,
             block_request_timeout_secs: 60,
             enable_lsd: false,
             force_proxy: false,

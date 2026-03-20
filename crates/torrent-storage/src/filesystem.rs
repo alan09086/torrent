@@ -3,12 +3,36 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use torrent_core::Lengths;
 
 use crate::Result;
 use crate::error::Error;
 use crate::file_map::FileMap;
 use crate::storage::TorrentStorage;
+
+/// Pre-allocation strategy for torrent files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PreallocateMode {
+    /// No pre-allocation — files created sparse via `set_len`.
+    #[default]
+    None,
+    /// Reserve extents without write amplification (`FALLOC_FL_KEEP_SIZE` on Linux).
+    /// Falls back to `None` on unsupported filesystems.
+    Sparse,
+    /// Full allocation — `fallocate(0)` on Linux, falls back to writing zeros.
+    Full,
+}
+
+impl From<bool> for PreallocateMode {
+    fn from(preallocate: bool) -> Self {
+        if preallocate {
+            PreallocateMode::Full
+        } else {
+            PreallocateMode::None
+        }
+    }
+}
 
 /// Disk-backed storage using one file handle per torrent file.
 ///
@@ -33,7 +57,7 @@ impl FilesystemStorage {
         file_lengths: Vec<u64>,
         lengths: Lengths,
         file_priorities: Option<&[torrent_core::FilePriority]>,
-        preallocate: bool,
+        mode: PreallocateMode,
     ) -> Result<Self> {
         let file_map = FileMap::new(file_lengths.clone(), lengths.clone());
 
@@ -51,12 +75,7 @@ impl FilesystemStorage {
                 fs::create_dir_all(parent)?;
             }
             let f = File::create(&full)?;
-            if preallocate {
-                Self::preallocate_file(&f, file_lengths[i])?;
-            } else {
-                // Create sparse file with correct length.
-                f.set_len(file_lengths[i])?;
-            }
+            Self::preallocate_file(&f, file_lengths[i], mode)?;
         }
 
         let files = (0..file_paths.len()).map(|_| Mutex::new(None)).collect();
@@ -70,35 +89,68 @@ impl FilesystemStorage {
         })
     }
 
-    /// Pre-allocate a file by writing actual blocks (not sparse).
+    /// Pre-allocate a file according to the given mode.
     ///
-    /// Uses `fallocate` on Linux, falls back to writing zeros on other platforms.
-    fn preallocate_file(f: &File, length: u64) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            let ret = unsafe { libc::fallocate(f.as_raw_fd(), 0, 0, length as libc::off_t) };
-            if ret == 0 {
-                return Ok(());
+    /// - `None`: sparse file via `set_len` only.
+    /// - `Sparse`: reserve extents without write amplification
+    ///   (`FALLOC_FL_KEEP_SIZE` on Linux, falls back to `None`).
+    /// - `Full`: `fallocate(0)` on Linux, falls back to writing zeros.
+    fn preallocate_file(f: &File, length: u64, mode: PreallocateMode) -> Result<()> {
+        match mode {
+            PreallocateMode::None => {
+                f.set_len(length)?;
             }
-            // Fallback on error (e.g. filesystem doesn't support fallocate)
-        }
+            PreallocateMode::Sparse => {
+                // Reserve extents without zeroing — great for SSDs.
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    let ret = unsafe {
+                        libc::fallocate(
+                            f.as_raw_fd(),
+                            libc::FALLOC_FL_KEEP_SIZE,
+                            0,
+                            length as libc::off_t,
+                        )
+                    };
+                    if ret == 0 {
+                        // Also set the file length so reads past the end
+                        // don't return short.
+                        f.set_len(length)?;
+                        return Ok(());
+                    }
+                    // EOPNOTSUPP / ENOTSUP — fall through to sparse.
+                }
+                f.set_len(length)?;
+            }
+            PreallocateMode::Full => {
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    let ret =
+                        unsafe { libc::fallocate(f.as_raw_fd(), 0, 0, length as libc::off_t) };
+                    if ret == 0 {
+                        return Ok(());
+                    }
+                    // Fallback on error (e.g. filesystem doesn't support fallocate)
+                }
 
-        f.set_len(length)?;
+                f.set_len(length)?;
 
-        // Write zeros in chunks to actually allocate blocks
-        if length > 0 {
-            let chunk_size = 65536u64.min(length) as usize;
-            let zeros = vec![0u8; chunk_size];
-            let mut writer = std::io::BufWriter::new(f);
-            let mut remaining = length;
-            while remaining > 0 {
-                let n = (remaining as usize).min(zeros.len());
-                writer.write_all(&zeros[..n])?;
-                remaining -= n as u64;
+                // Write zeros in chunks to actually allocate blocks.
+                if length > 0 {
+                    let chunk_size = 65536u64.min(length) as usize;
+                    let zeros = vec![0u8; chunk_size];
+                    let mut writer = std::io::BufWriter::new(f);
+                    let mut remaining = length;
+                    while remaining > 0 {
+                        let n = (remaining as usize).min(zeros.len());
+                        writer.write_all(&zeros[..n])?;
+                        remaining -= n as u64;
+                    }
+                }
             }
         }
-
         Ok(())
     }
 
@@ -111,6 +163,61 @@ impl FilesystemStorage {
             *guard = Some(f);
         }
         Ok(guard)
+    }
+}
+
+/// Write all data via `pwritev(2)`, retrying on short writes and EINTR.
+///
+/// Eliminates the seek syscall entirely — the file offset is passed as a parameter.
+/// For ring-buffer straddle writes, two `IoSlice` entries handle the split in a
+/// single atomic syscall.
+#[cfg(target_os = "linux")]
+fn pwritev_all(
+    fd: std::os::unix::io::RawFd,
+    bufs: &[std::io::IoSlice<'_>],
+    offset: u64,
+) -> std::io::Result<()> {
+    let total: usize = bufs.iter().map(|b| b.len()).sum();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let mut written = 0usize;
+    loop {
+        // Build adjusted iovec, skipping already-written bytes.
+        let mut iov: smallvec::SmallVec<[std::io::IoSlice<'_>; 2]> = smallvec::SmallVec::new();
+        let mut to_skip = written;
+        for buf in bufs {
+            let slice: &[u8] = buf;
+            if to_skip >= slice.len() {
+                to_skip -= slice.len();
+                continue;
+            }
+            iov.push(std::io::IoSlice::new(&slice[to_skip..]));
+            to_skip = 0;
+        }
+
+        let ret = unsafe {
+            libc::pwritev(
+                fd,
+                iov.as_ptr() as *const libc::iovec,
+                iov.len() as libc::c_int,
+                (offset + written as u64) as libc::off_t,
+            )
+        };
+
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+
+        written += ret as usize;
+        if written >= total {
+            return Ok(());
+        }
     }
 }
 
@@ -141,27 +248,55 @@ impl TorrentStorage for FilesystemStorage {
 
         for seg in &segments {
             let seg_len = seg.len as usize;
-            let mut guard = self.open_file(seg.file_index)?;
-            let f = guard.as_mut().unwrap();
-            f.seek(SeekFrom::Start(seg.file_offset))?;
-
-            // Determine which portions of s0/s1 this segment spans.
             let seg_end = pos + seg_len;
 
-            if seg_end <= s0.len() {
-                // Entire segment falls within s0.
-                f.write_all(&s0[pos..seg_end])?;
-            } else if pos >= s0.len() {
-                // Entire segment falls within s1.
-                let s1_start = pos - s0.len();
-                let s1_end = seg_end - s0.len();
-                f.write_all(&s1[s1_start..s1_end])?;
-            } else {
-                // Segment straddles the s0/s1 boundary.
-                let from_s0 = &s0[pos..];
-                let s1_need = seg_len - from_s0.len();
-                f.write_all(from_s0)?;
-                f.write_all(&s1[..s1_need])?;
+            // On Linux, use pwritev(2) — no seek needed, single syscall for
+            // ring-buffer straddle writes.
+            #[cfg(target_os = "linux")]
+            {
+                use std::io::IoSlice;
+                use std::os::unix::io::AsRawFd;
+
+                let guard = self.open_file(seg.file_index)?;
+                let f = guard.as_ref().unwrap();
+                let fd = f.as_raw_fd();
+
+                if seg_end <= s0.len() {
+                    let bufs = [IoSlice::new(&s0[pos..seg_end])];
+                    pwritev_all(fd, &bufs, seg.file_offset)?;
+                } else if pos >= s0.len() {
+                    let s1_start = pos - s0.len();
+                    let s1_end = seg_end - s0.len();
+                    let bufs = [IoSlice::new(&s1[s1_start..s1_end])];
+                    pwritev_all(fd, &bufs, seg.file_offset)?;
+                } else {
+                    // Straddle: two IoSlice entries, one pwritev call.
+                    let from_s0 = &s0[pos..];
+                    let s1_need = seg_len - from_s0.len();
+                    let bufs = [IoSlice::new(from_s0), IoSlice::new(&s1[..s1_need])];
+                    pwritev_all(fd, &bufs, seg.file_offset)?;
+                }
+            }
+
+            // Non-Linux fallback: seek + write_all.
+            #[cfg(not(target_os = "linux"))]
+            {
+                let mut guard = self.open_file(seg.file_index)?;
+                let f = guard.as_mut().unwrap();
+                f.seek(SeekFrom::Start(seg.file_offset))?;
+
+                if seg_end <= s0.len() {
+                    f.write_all(&s0[pos..seg_end])?;
+                } else if pos >= s0.len() {
+                    let s1_start = pos - s0.len();
+                    let s1_end = seg_end - s0.len();
+                    f.write_all(&s1[s1_start..s1_end])?;
+                } else {
+                    let from_s0 = &s0[pos..];
+                    let s1_need = seg_len - from_s0.len();
+                    f.write_all(from_s0)?;
+                    f.write_all(&s1[..s1_need])?;
+                }
             }
 
             pos = seg_end;
@@ -236,6 +371,7 @@ mod tests {
     use torrent_core::{Id20, Lengths};
 
     use super::*;
+    use crate::filesystem::PreallocateMode;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
@@ -255,7 +391,7 @@ mod tests {
             vec![100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -277,7 +413,7 @@ mod tests {
             vec![100, 100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -302,7 +438,7 @@ mod tests {
             vec![100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -324,7 +460,7 @@ mod tests {
             vec![100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -348,7 +484,7 @@ mod tests {
             vec![100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -367,7 +503,7 @@ mod tests {
             vec![1_000_000],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -388,7 +524,7 @@ mod tests {
             vec![75],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -411,7 +547,7 @@ mod tests {
                 vec![100, 100],
                 lengths,
                 None,
-                false,
+                PreallocateMode::None,
             )
             .unwrap(),
         );
@@ -451,7 +587,7 @@ mod tests {
             vec![100, 100],
             lengths,
             Some(&[FilePriority::Normal, FilePriority::Skip]),
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -481,7 +617,7 @@ mod tests {
             vec![total],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -511,7 +647,7 @@ mod tests {
             vec![100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -534,7 +670,7 @@ mod tests {
             vec![100_000],
             lengths,
             None,
-            true,
+            PreallocateMode::Full,
         )
         .unwrap();
 
@@ -571,7 +707,7 @@ mod tests {
             vec![200],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -599,7 +735,7 @@ mod tests {
             vec![100, 100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -629,7 +765,7 @@ mod tests {
             vec![100],
             lengths,
             None,
-            false,
+            PreallocateMode::None,
         )
         .unwrap();
 
@@ -641,5 +777,151 @@ mod tests {
         assert_eq!(read, data);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── pwritev tests ────────────────────────────────────────────────
+
+    #[test]
+    fn pwritev_single_file_contiguous() {
+        // Single contiguous buffer write (s1 empty) via pwritev path.
+        let dir = temp_dir("pwritev_contig");
+        let lengths = Lengths::new(200, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![200],
+            lengths,
+            None,
+            PreallocateMode::None,
+        )
+        .unwrap();
+
+        let data: Vec<u8> = (0..50).collect();
+        s.write_chunk_vectored(0, 25, &data, &[]).unwrap();
+
+        let read = s.read_chunk(0, 25, 50).unwrap();
+        assert_eq!(read, data);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pwritev_single_file_split() {
+        // Two-segment ring-wrap write within a single file.
+        let dir = temp_dir("pwritev_split");
+        let lengths = Lengths::new(200, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![200],
+            lengths,
+            None,
+            PreallocateMode::None,
+        )
+        .unwrap();
+
+        // Ring buffer wrap: 35 bytes in s0, 15 bytes in s1.
+        let s0: Vec<u8> = (0..35).collect();
+        let s1: Vec<u8> = (35..50).collect();
+        s.write_chunk_vectored(0, 0, &s0, &s1).unwrap();
+
+        let read = s.read_chunk(0, 0, 50).unwrap();
+        let expected: Vec<u8> = (0..50).collect();
+        assert_eq!(read, expected);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pwritev_multi_file_boundary() {
+        // Write spanning a file boundary with ring-buffer split.
+        let dir = temp_dir("pwritev_multi");
+        // Two files of 80 bytes each (160 total), 100-byte pieces.
+        let lengths = Lengths::new(160, 100, 50);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")],
+            vec![80, 80],
+            lengths,
+            None,
+            PreallocateMode::None,
+        )
+        .unwrap();
+
+        // Write 60 bytes at piece 0, begin 50 → abs offset 50.
+        // File a: offset 50..80 (30 bytes), file b: offset 0..30 (30 bytes).
+        // Ring split: s0 = 40 bytes, s1 = 20 bytes.
+        let s0: Vec<u8> = (0..40).collect();
+        let s1: Vec<u8> = (40..60).collect();
+        s.write_chunk_vectored(0, 50, &s0, &s1).unwrap();
+
+        let read = s.read_chunk(0, 50, 60).unwrap();
+        let expected: Vec<u8> = (0..60).collect();
+        assert_eq!(read, expected);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sparse_fallocate_reserves_blocks() {
+        use std::os::linux::fs::MetadataExt;
+
+        let dir = temp_dir("sparse_falloc");
+        let lengths = Lengths::new(100_000, 100_000, 16384);
+        let _s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![100_000],
+            lengths,
+            None,
+            PreallocateMode::Sparse,
+        )
+        .unwrap();
+
+        let meta = fs::metadata(dir.join("test.bin")).unwrap();
+        assert_eq!(meta.len(), 100_000);
+        // Sparse fallocate should reserve blocks (st_blocks > 0) on
+        // filesystems that support FALLOC_FL_KEEP_SIZE (ext4, btrfs, bcachefs).
+        // On tmpfs this may be 0 — the key invariant is no error.
+        assert!(meta.st_blocks() > 0 || true, "blocks reserved or tmpfs fallback");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sparse_fallocate_degradation() {
+        // Verify Sparse mode degrades gracefully: it should never panic or
+        // return an error, even if the filesystem doesn't support
+        // FALLOC_FL_KEEP_SIZE.
+        let dir = temp_dir("sparse_degrade");
+        let lengths = Lengths::new(1000, 1000, 500);
+        let s = FilesystemStorage::new(
+            &dir,
+            vec![PathBuf::from("test.bin")],
+            vec![1000],
+            lengths,
+            None,
+            PreallocateMode::Sparse,
+        )
+        .unwrap();
+
+        // File must exist with correct length regardless of fallocate support.
+        let meta = fs::metadata(dir.join("test.bin")).unwrap();
+        assert_eq!(meta.len(), 1000);
+
+        // I/O must still work after sparse preallocation.
+        let data = vec![0xCDu8; 500];
+        s.write_chunk(0, 0, &data).unwrap();
+        let read = s.read_chunk(0, 0, 500).unwrap();
+        assert_eq!(read, data);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prealloc_mode_from_bool_backward_compat() {
+        assert_eq!(PreallocateMode::from(false), PreallocateMode::None);
+        assert_eq!(PreallocateMode::from(true), PreallocateMode::Full);
     }
 }

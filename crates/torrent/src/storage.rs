@@ -15,6 +15,8 @@ pub use torrent_storage::{
     FileMap,
     FileSegment,
     FilesystemStorage,
+    // Pre-allocation mode
+    PreallocateMode,
     // Storage backends
     MemoryStorage,
     MmapStorage,

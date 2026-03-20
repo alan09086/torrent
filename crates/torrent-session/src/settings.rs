@@ -445,6 +445,10 @@ pub struct Settings {
     /// Storage allocation mode: Auto, FullPreallocate, or SparseFile (default: Auto).
     #[serde(default = "default_storage_mode")]
     pub storage_mode: StorageMode,
+    /// Override pre-allocation strategy (None/Sparse/Full). When `None` (default),
+    /// derived from `storage_mode`: Full → PreallocateMode::Full, else → PreallocateMode::None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preallocate_mode: Option<torrent_storage::PreallocateMode>,
     /// Total ARC disk cache size in bytes (default: 16 MiB, minimum: 1 MiB).
     #[serde(default = "default_disk_cache_size")]
     pub disk_cache_size: usize,
@@ -818,6 +822,7 @@ impl Default for Settings {
             disk_io_threads: default_disk_io_threads(),
             max_blocking_threads: default_max_blocking_threads(),
             storage_mode: StorageMode::Auto,
+            preallocate_mode: None,
             disk_cache_size: 16 * 1024 * 1024,
             disk_write_cache_ratio: 0.5,
             disk_channel_capacity: 512,
