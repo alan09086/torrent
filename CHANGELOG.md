@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.117.0 | M117 | PeerConnectionHandler trait — `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, trait-based 3-file architecture |
 | 0.116.0 | M116 | Session-level BlockingSpawner + hot-path allocation cleanup — spawn_blocking→block_in_place in DiskActor/DiskHandle, cached file metadata for zero-alloc check_file_completion, cooperative yielding in peer message loop |
 | 0.115.0 | M115 | Pre-allocated PeerWriter + vectored read infrastructure — PeerWriter Box<[u8; MAX_MSG_LEN]> replaces BytesMut, encode_to_slice/wire_len on Message, AsyncReadVectored trait + VectoredCompat fallback |
 | 0.114.0 | M114 | Listener task extraction — TCP/uTP accept loops moved from SessionActor's select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone |
@@ -70,6 +71,22 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.117.0] — 2026-03-19
+
+### Added
+- `PeerConnectionHandler` trait abstracting peer message handling from transport loop
+- `PeerConnection<H>` generic select! loop with monomorphized generics (zero vtable overhead)
+- `TorrentPeerHandler` struct implementing the trait with all per-peer state
+- `ExtensionState` sub-struct grouping 9 extension ID fields
+- `should_transmit_have()` trait method (M118 prerequisite)
+- 13 new handler unit tests
+
+### Changed
+- Extracted `peer.rs` monolithic `run_peer()` into trait-based 3-file architecture
+- `peer.rs` reduced from 3382 to ~2148 lines (handshake phases + existing tests)
+- Sync/async method split preserves zero-copy ring buffer pwrite fast-path
+- Moved PendingBatch, DeferredBitfield, handle_message, handle_command to handler module
 
 ## [0.116.0] — 2026-03-19
 
