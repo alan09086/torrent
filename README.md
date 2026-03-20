@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1672-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1677-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.115.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.116.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,663 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,677 tests. Zero clippy warnings.
 
 ---
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.116.0 | Session-level BlockingSpawner + hot-path allocation cleanup -- `spawn_blocking`→`block_in_place` in DiskActor/DiskHandle (all 7 dispatch arms + writer task), cached file metadata for zero-alloc `check_file_completion`, cooperative `yield_now()` in peer message loop, `max_blocking_threads` setting | +5 tests (1677 total) |
 | 0.115.0 | Pre-allocated PeerWriter + vectored read infrastructure -- PeerWriter `Box<[u8; MAX_MSG_LEN]>` replaces BytesMut (zero realloc on write path), `encode_to_slice`/`wire_len` methods on Message, `AsyncReadVectored` trait + `VectoredCompat` fallback wrapper, PeerReader fill() uses vectored I/O path (single-buffer via VectoredCompat, real readv deferred to M117) | +9 tests (1672 total) |
 | 0.114.0 | Listener task extraction -- TCP/uTP accept loops moved from SessionActor select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone | +9 tests (1663 total) |
 | 0.113.0 | BEP 52 V2-only torrent creation -- `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test | +6 tests (1654 total) |
@@ -318,7 +319,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,631 tests
+cargo test --workspace                      # 1,677 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 

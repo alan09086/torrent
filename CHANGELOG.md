@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.116.0 | M116 | Session-level BlockingSpawner + hot-path allocation cleanup — spawn_blocking→block_in_place in DiskActor/DiskHandle, cached file metadata for zero-alloc check_file_completion, cooperative yielding in peer message loop |
 | 0.115.0 | M115 | Pre-allocated PeerWriter + vectored read infrastructure — PeerWriter Box<[u8; MAX_MSG_LEN]> replaces BytesMut, encode_to_slice/wire_len on Message, AsyncReadVectored trait + VectoredCompat fallback |
 | 0.114.0 | M114 | Listener task extraction — TCP/uTP accept loops moved from SessionActor's select! to dedicated ListenerTask, FuturesUnordered concurrent identification, 5s preamble timeout, DashMap info_hash_registry, removed per-connection HashMap clone |
 | 0.113.0 | M113 | BEP 52 V2-only torrent creation — `build_v2_output()` helper extraction, V2Only skips SHA-1 entirely, `HashPicker::load_piece_layers()` for session-layer V2 verification, sim transfer test |
@@ -69,6 +70,22 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.116.0] — 2026-03-19
+
+### Added
+- **`BlockingSpawner`** — session-level concurrency-bounded wrapper around `tokio::task::block_in_place`. Detects runtime flavor (multi-thread vs current-thread), acquires semaphore permit before blocking, eliminates per-job `JoinHandle` allocations from `spawn_blocking`. Configurable via `max_blocking_threads` setting (default: `available_parallelism`).
+- **`CachedFileInfo`** — pre-computed file-to-piece mapping stored on `TorrentActor`. Built once at torrent registration and magnet metadata-received. Eliminates ~10K `Vec<FileInfo>` allocations per torrent from `InfoDict::files()` calls in `check_file_completion`.
+- **Cooperative yielding** — `tokio::task::yield_now().await` at piece fast-path exit and after `handle_message` in the peer message loop. Prevents busy peers from monopolizing a tokio worker thread during message bursts.
+- `max_blocking_threads` setting in `Settings` with validation (must be >= 1).
+- 5 new tests (1677 total): `blocking_spawner_limits_concurrency`, `blocking_spawner_semaphore_backpressure`, `blocking_spawner_single_threaded_runtime`, `cached_files_populated_on_registration`, `cached_files_single_file_torrent`.
+
+### Changed
+- **DiskActor** `dispatch_job()` — all 7 I/O arms (Write, Read, Hash, HashV2, BlockHash, FlushWriteBuffer, FlushAll) converted from `semaphore.acquire_owned() + spawn_blocking` to `BlockingSpawner::block_in_place`. Shutdown flush also converted.
+- **DiskHandle** — `enqueue_verify()`, `enqueue_verify_v2()` converted from `spawn_blocking` to `BlockingSpawner::block_in_place`. `write_block_deferred()` fallback uses `block_in_place_sync`.
+- **Writer task** in `DiskManagerHandle::register_torrent()` — batch writes converted from `spawn_blocking` to `BlockingSpawner::block_in_place`.
+- **`check_file_completion()`** — rewritten to use `CachedFileInfo` entries instead of `meta.info.files()`. Zero heap allocations per call.
+- DiskActor `semaphore: Arc<Semaphore>` field replaced by `spawner: BlockingSpawner`.
 
 ## [0.115.0] — 2026-03-19
 
