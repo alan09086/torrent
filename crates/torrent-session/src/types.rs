@@ -99,6 +99,8 @@ pub struct TorrentConfig {
     pub auto_sequential: bool,
     /// Storage allocation mode for disk I/O.
     pub storage_mode: torrent_core::StorageMode,
+    /// Override pre-allocation strategy. `None` = derive from `storage_mode`.
+    pub preallocate_mode: Option<torrent_storage::PreallocateMode>,
     /// Block request timeout in seconds before re-issuing (0 = disabled).
     pub block_request_timeout_secs: u32,
     /// Enable Local Service Discovery (BEP 14) for this torrent.
@@ -202,6 +204,7 @@ impl Default for TorrentConfig {
             mixed_mode_algorithm: crate::rate_limiter::MixedModeAlgorithm::PeerProportional,
             auto_sequential: true,
             storage_mode: torrent_core::StorageMode::Auto,
+            preallocate_mode: None,
             block_request_timeout_secs: 60,
             enable_lsd: true,
             force_proxy: false,
@@ -275,6 +278,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             mixed_mode_algorithm: s.mixed_mode_algorithm,
             auto_sequential: s.auto_sequential,
             storage_mode: s.storage_mode,
+            preallocate_mode: s.preallocate_mode,
             block_request_timeout_secs: s.block_request_timeout_secs,
             enable_lsd: s.enable_lsd,
             force_proxy: s.force_proxy,

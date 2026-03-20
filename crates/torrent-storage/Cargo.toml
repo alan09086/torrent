@@ -8,10 +8,16 @@ description = "Piece storage, verification, and disk I/O for BitTorrent"
 [lints]
 workspace = true
 
+[features]
+default = []
+io-uring = ["dep:async-trait"]
+
 [dependencies]
 torrent-core = { path = "../torrent-core" }
+async-trait = { version = "0.1", optional = true }
 memmap2 = "0.9"
 rustc-hash = "2"
+serde = { workspace = true }
 smallvec = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
