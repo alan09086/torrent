@@ -23,7 +23,7 @@ pub(crate) mod dscp;
 pub(crate) mod end_game;
 pub mod extension;
 pub mod hash_pool;
-pub(crate) mod have_buffer;
+// have_buffer removed in M118 — replaced by broadcast channel
 pub mod i2p;
 pub(crate) mod ip_filter;
 #[allow(dead_code)] // Wired in during Task 2 (session.rs integration).

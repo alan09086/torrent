@@ -29,6 +29,9 @@ pub(crate) struct PeerConnection<H, R, W> {
     event_tx: mpsc::Sender<PeerEvent>,
     flush_interval: tokio::time::Interval,
     addr: SocketAddr,
+    // M118: Broadcast receiver for Have messages from TorrentActor.
+    have_broadcast_rx: tokio::sync::broadcast::Receiver<u32>,
+    broadcast_closed: bool,
 }
 
 impl<H, R, W> PeerConnection<H, R, W>
@@ -44,6 +47,7 @@ where
         writer: PeerWriter<W>,
         cmd_rx: mpsc::Receiver<PeerCommand>,
         event_tx: mpsc::Sender<PeerEvent>,
+        have_broadcast_rx: tokio::sync::broadcast::Receiver<u32>,
     ) -> Self {
         let mut flush_interval = tokio::time::interval(Duration::from_millis(25));
         // The first tick completes immediately; we want to skip it so the
@@ -60,6 +64,8 @@ where
             event_tx,
             flush_interval,
             addr,
+            have_broadcast_rx,
+            broadcast_closed: false,
         }
     }
 
@@ -110,7 +116,27 @@ where
                     }
                 }
 
-                // ----- ARM 2: Commands from TorrentActor -----
+                // ----- ARM 2: Have broadcast from TorrentActor (M118, rqbit pattern) -----
+                result = self.have_broadcast_rx.recv(), if !self.broadcast_closed => {
+                    match result {
+                        Ok(piece_index) => {
+                            if self.handler.should_transmit_have(piece_index)
+                                && let Err(e) = self.writer.send(&Message::Have { index: piece_index }).await
+                            {
+                                debug!(addr = %self.addr, "error sending Have: {e}");
+                                break Some(e.to_string());
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            debug!(addr = %self.addr, skipped = n, "have broadcast lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            self.broadcast_closed = true;
+                        }
+                    }
+                }
+
+                // ----- ARM 3: Commands from TorrentActor -----
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(PeerCommand::Shutdown) => {
@@ -155,7 +181,7 @@ where
                     }
                 }
 
-                // ----- ARM 3: Lock-free block requesting -----
+                // ----- ARM 4: Lock-free block requesting -----
                 // Uses Arc<Semaphore> extracted before select! to avoid
                 // borrowing self.handler across await points.
                 permit = semaphore.acquire(), if can_request => {
@@ -181,7 +207,7 @@ where
                     }
                 }
 
-                // ----- ARM 4: 25ms batch flush timer -----
+                // ----- ARM 5: 25ms batch flush timer -----
                 _ = self.flush_interval.tick(), if has_pending => {
                     if let Some(blocks) = self.handler.take_batch() {
                         let _ = self.event_tx.send(PeerEvent::PieceBlocksBatch {

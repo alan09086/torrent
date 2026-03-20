@@ -252,16 +252,6 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the Have message batching delay in milliseconds.
-    ///
-    /// When > 0, Have messages are buffered and sent in batches at this interval.
-    /// If the batch exceeds 50% of total pieces, a full Bitfield is sent instead.
-    /// Default: 0 (immediate, no batching).
-    pub fn have_send_delay_ms(mut self, ms: u64) -> Self {
-        self.settings.have_send_delay_ms = ms;
-        self
-    }
-
     /// Set the number of hash-failure involvements before a peer is auto-banned.
     ///
     /// Default: 3. Lower values ban faster but risk false positives.
@@ -914,17 +904,14 @@ mod tests {
         let config = ClientBuilder::new().into_settings();
         assert!(!config.default_super_seeding);
         assert!(config.upload_only_announce);
-        assert_eq!(config.have_send_delay_ms, 100);
 
         // Explicitly enabled
         let config = ClientBuilder::new()
             .super_seeding(true)
             .upload_only_announce(false)
-            .have_send_delay_ms(500)
             .into_settings();
         assert!(config.default_super_seeding);
         assert!(!config.upload_only_announce);
-        assert_eq!(config.have_send_delay_ms, 500);
     }
 
     #[test]
