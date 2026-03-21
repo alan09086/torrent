@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1704-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1709-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.120.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.121.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,704 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,709 tests. Zero clippy warnings.
 
 ---
 
@@ -73,6 +73,7 @@ torrent-core          Hashes, metainfo (v1/v2/hybrid), magnets, piece arithmetic
 torrent-storage       Piece verification (SHA-1 + SHA-256), FileMap, chunk tracking, mmap, ARC cache
     |
 torrent-session       Session orchestration, disk I/O actor, hash pool, peer management
+    |                     TorrentActor sub-modules: torrent_state, torrent_peers, torrent_dispatch, torrent_verify
     |
 torrent-utp           uTP (BEP 29), LEDBAT congestion control, SACK
     |
@@ -95,7 +96,7 @@ torrent-cli           CLI binary: download, create, info subcommands
 | `torrent-tracker` | HTTP (reqwest) + UDP (BEP 15), BEP 48 scrape, IPv6 compact peers, SSRF guard | 42 |
 | `torrent-dht` | Kademlia with KRPC, routing table, BEP 24 IPv6, BEP 42 security, BEP 44 storage, BEP 51 indexing | 160 |
 | `torrent-storage` | Bitfield, FileMap (O(log n)), ChunkTracker (v1+v2), SmallVec segments, MmapStorage, ARC cache | 69 |
-| `torrent-session` | Session management, disk I/O, hash pool, peer orchestration -- see below | 856 |
+| `torrent-session` | Session management, disk I/O, hash pool, peer orchestration (TorrentActor decomposed into state/peers/dispatch/verify sub-modules) -- see below | 861 |
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD auto port mapping | 20 |
 | `torrent` | `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module | 59 |
@@ -180,6 +181,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.121.0 | TorrentActor decomposition + SessionHandle API surface -- 14,680-line torrent.rs split into `torrent_state.rs` (19 methods), `torrent_peers.rs` (14 methods), `torrent_dispatch.rs` (9 methods), `torrent_verify.rs` (15 methods); `TorrentSummary` type, `Serialize` on `InfoHashes`/`TorrentStats`, `SessionHandle::list_torrent_summaries()`/`add_magnet_uri()`/`add_torrent_bytes()` | +5 tests (1709 total), 60.5 MB/s mean (no regression) |
 | 0.120.0 | parking_lot migration -- replaced all `std::sync::Mutex`/`RwLock` with parking_lot in torrent-session/storage/sim (~100 sites), eliminated all poison handling; `TimedGuard<G>` diagnostic wrapper logging hot-path locks held longer than threshold (13 locks); `PieceWriteGuards` per-piece `RwLock<()>` array preventing steal/write races; `lock_warn_threshold_ms` setting (default 50ms, 0 = disabled) | +8 tests (1704 total), 57.9 MB/s mean, 60.3 MB/s median, 33 MiB RSS |
 | 0.119.0 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold -- `pwritev(2)` replaces seek+write_all in `write_chunk_vectored` (single atomic syscall, no seek), `PreallocateMode` enum (None/Sparse/Full) with `FALLOC_FL_KEEP_SIZE` for SSD-friendly extent reservation, `TorrentStorageAsync` trait behind `io-uring` feature flag (M122 scaffold) | +6 tests (1696 total) |
 | 0.118.0 | Broadcast Have distribution -- `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have(!local_bitfield.get(piece))` filtering, lagged receiver recovery, O(1) broadcast send (was O(peers) actor iteration), Have latency <1ms (was 100ms batch delay) | +6 tests (1690 total) |
@@ -214,7 +216,8 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Avg Speed | CPU Time | RSS | Ctx Switches | Page Faults | Notes |
 |---------|-----------|----------|-----|:------------:|:-----------:|-------|
-| **0.120.0** | 57.9 MB/s | — | 33 MiB | — | — | parking_lot migration, TimedGuard, PieceWriteGuards |
+| **0.121.0** | 60.5 MB/s | — | — | — | — | TorrentActor decomposition, SessionHandle API surface |
+| 0.120.0 | 57.9 MB/s | — | 33 MiB | — | — | parking_lot migration, TimedGuard, PieceWriteGuards |
 | 0.101.0 | 42.4 MB/s | 8.7s | 51 MiB | 131K | 44K | SmallVec, batch writer, streaming verify |
 | 0.100.0 | 36.4 MB/s | 17.9s | 46-73 MiB | 633K | 118K | Direct pwrite, deferred queue |
 | 0.98.1 | 31.8 MB/s | 9.8s | 256 MiB | 114K | 226K | Write coalescer fix |
@@ -292,7 +295,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M120) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M121) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -320,6 +323,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Have Distribution | M118 | Broadcast Have via `tokio::sync::broadcast`, per-peer filtering, O(1) send | Done |
 | I/O Optimization | M119 | pwritev vectored writes, fallocate sparse files, io_uring async trait scaffold | Done |
 | Lock Hygiene | M120 | parking_lot migration (~100 sites), TimedGuard diagnostics, PieceWriteGuards | Done |
+| Actor Decomposition | M121 | TorrentActor split into 4 sub-modules, TorrentSummary type, SessionHandle API additions | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -328,7 +332,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,704 tests
+cargo test --workspace                      # 1,709 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 

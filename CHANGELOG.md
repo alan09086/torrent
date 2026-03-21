@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.121.0 | M121 | TorrentActor decomposition (14,680-line torrent.rs → 4 sub-modules: state/peers/dispatch/verify) + SessionHandle API surface (`TorrentSummary`, `Serialize` on `InfoHashes`/`TorrentStats`, `list_torrent_summaries()`/`add_magnet_uri()`/`add_torrent_bytes()`) — 60.5 MB/s mean, no regression |
 | 0.120.0 | M120 | parking_lot migration (~100 lock sites in session/storage/sim), `TimedGuard<G>` diagnostic wrapper (13 hot-path locks), `PieceWriteGuards` per-piece RwLock array, `lock_warn_threshold_ms` setting — 57.9 MB/s mean, 33 MiB RSS |
 | 0.119.0 | M119 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold — `pwritev(2)` replaces seek+write_all, `PreallocateMode` enum with `FALLOC_FL_KEEP_SIZE`, `TorrentStorageAsync` trait behind feature flag |
 | 0.118.0 | M118 | Broadcast Have distribution — `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have` filtering, O(1) broadcast send, Have latency <1ms (was 100ms batch delay) |
@@ -74,6 +75,24 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.121.0] — 2026-03-20
+
+### Added
+- `TorrentSummary` type (9 fields) with `From<&TorrentStats>` conversion for lightweight torrent listing
+- `Serialize` derive on `InfoHashes` and `TorrentStats` for JSON/API serialization
+- `SessionHandle::list_torrent_summaries()` — returns `Vec<TorrentSummary>` for all managed torrents
+- `SessionHandle::add_magnet_uri()` — convenience method to add torrents from magnet URI strings
+- `SessionHandle::add_torrent_bytes()` — convenience method to add torrents from raw .torrent bytes
+- 5 new tests (1709 total)
+
+### Changed
+- Decomposed 14,680-line `torrent.rs` into focused sub-modules:
+  - `torrent_state.rs`: 19 methods — state machine, stats, resume data, file management
+  - `torrent_peers.rs`: 14 methods — peer lifecycle, connectivity, holepunch
+  - `torrent_dispatch.rs`: 9 methods — dispatch, availability, endgame, streaming
+  - `torrent_verify.rs`: 15 methods — hash verification, smart banning, parole, BEP 52
+- Benchmark: 60.5 MB/s mean (no regression from M120)
 
 ## [0.120.0] — 2026-03-20
 
