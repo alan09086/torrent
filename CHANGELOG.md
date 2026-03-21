@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.120.0 | M120 | parking_lot migration (~100 lock sites in session/storage/sim), `TimedGuard<G>` diagnostic wrapper (13 hot-path locks), `PieceWriteGuards` per-piece RwLock array, `lock_warn_threshold_ms` setting — 57.9 MB/s mean, 33 MiB RSS |
 | 0.119.0 | M119 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold — `pwritev(2)` replaces seek+write_all, `PreallocateMode` enum with `FALLOC_FL_KEEP_SIZE`, `TorrentStorageAsync` trait behind feature flag |
 | 0.118.0 | M118 | Broadcast Have distribution — `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have` filtering, O(1) broadcast send, Have latency <1ms (was 100ms batch delay) |
 | 0.117.0 | M117 | PeerConnectionHandler trait — `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, trait-based 3-file architecture |
@@ -73,6 +74,21 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.120.0] — 2026-03-20
+
+### Added
+- `parking_lot` migration: replaced all `std::sync::Mutex`/`RwLock` with `parking_lot` equivalents in torrent-session, torrent-storage, and torrent-sim (~100 lock sites)
+- `TimedGuard<G>` diagnostic wrapper (`timed_lock.rs`) — logs warnings when hot-path locks are held longer than configurable threshold (applied to 13 locks)
+- `PieceWriteGuards` per-piece `RwLock<()>` array preventing steal/write races in the piece pipeline
+- `lock_warn_threshold_ms` setting (default: 50ms, 0 = disabled with zero overhead)
+- 8 new tests (1704 total)
+
+### Changed
+- Eliminated all `.unwrap()`/`.expect("poisoned")`/`.unwrap_or_else(|e| e.into_inner())` on lock acquisitions
+- `StealCandidates`, `DiskWriteState.pending`, `SharedBanManager`, `SharedIpFilter` now use `TimedGuard` on hot-path locks
+- Steal path (`next_block` Phase 3) checks `PieceWriteGuards::try_write()` before stealing — skips pieces with in-flight writes
+- Write path (`on_piece_sync`) acquires read guard on piece before `write_block_direct`
 
 ## [0.119.0] — 2026-03-20
 

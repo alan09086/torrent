@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1696-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1704-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.119.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.120.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,696 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,704 tests. Zero clippy warnings.
 
 ---
 
@@ -180,6 +180,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.120.0 | parking_lot migration -- replaced all `std::sync::Mutex`/`RwLock` with parking_lot in torrent-session/storage/sim (~100 sites), eliminated all poison handling; `TimedGuard<G>` diagnostic wrapper logging hot-path locks held longer than threshold (13 locks); `PieceWriteGuards` per-piece `RwLock<()>` array preventing steal/write races; `lock_warn_threshold_ms` setting (default 50ms, 0 = disabled) | +8 tests (1704 total), 57.9 MB/s mean, 60.3 MB/s median, 33 MiB RSS |
 | 0.119.0 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold -- `pwritev(2)` replaces seek+write_all in `write_chunk_vectored` (single atomic syscall, no seek), `PreallocateMode` enum (None/Sparse/Full) with `FALLOC_FL_KEEP_SIZE` for SSD-friendly extent reservation, `TorrentStorageAsync` trait behind `io-uring` feature flag (M122 scaffold) | +6 tests (1696 total) |
 | 0.118.0 | Broadcast Have distribution -- `tokio::sync::broadcast` channel replaces `HaveBuffer` batch iteration, per-peer `should_transmit_have(!local_bitfield.get(piece))` filtering, lagged receiver recovery, O(1) broadcast send (was O(peers) actor iteration), Have latency <1ms (was 100ms batch delay) | +6 tests (1690 total) |
 | 0.117.0 | PeerConnectionHandler trait -- `PeerConnectionHandler` trait abstracting peer message handling from transport loop, `PeerConnection<H>` generic select! loop, `TorrentPeerHandler` with all per-peer state, `ExtensionState` sub-struct, sync/async method split preserving zero-copy pwrite fast-path | +13 tests (1690 total) |
@@ -213,7 +214,8 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Avg Speed | CPU Time | RSS | Ctx Switches | Page Faults | Notes |
 |---------|-----------|----------|-----|:------------:|:-----------:|-------|
-| **0.101.0** | 42.4 MB/s | 8.7s | 51 MiB | 131K | 44K | SmallVec, batch writer, streaming verify |
+| **0.120.0** | 57.9 MB/s | — | 33 MiB | — | — | parking_lot migration, TimedGuard, PieceWriteGuards |
+| 0.101.0 | 42.4 MB/s | 8.7s | 51 MiB | 131K | 44K | SmallVec, batch writer, streaming verify |
 | 0.100.0 | 36.4 MB/s | 17.9s | 46-73 MiB | 633K | 118K | Direct pwrite, deferred queue |
 | 0.98.1 | 31.8 MB/s | 9.8s | 256 MiB | 114K | 226K | Write coalescer fix |
 | 0.95.0 | 66.9 MB/s | — | ~133 MiB | — | — | Core affinity (warm-state) |
@@ -290,7 +292,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M118) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M120) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -316,6 +318,8 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Session Architecture | M114 | Listener task extraction -- TCP/uTP accept loops in dedicated spawned task | Done |
 | Peer Architecture | M115-M117 | Pre-allocated PeerWriter, vectored read infrastructure, PeerConnectionHandler trait | Done |
 | Have Distribution | M118 | Broadcast Have via `tokio::sync::broadcast`, per-peer filtering, O(1) send | Done |
+| I/O Optimization | M119 | pwritev vectored writes, fallocate sparse files, io_uring async trait scaffold | Done |
+| Lock Hygiene | M120 | parking_lot migration (~100 sites), TimedGuard diagnostics, PieceWriteGuards | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -324,7 +328,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,696 tests
+cargo test --workspace                      # 1,704 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 
