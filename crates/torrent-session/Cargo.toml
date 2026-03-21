@@ -8,6 +8,10 @@ description = "BitTorrent session management: peers, torrents, and piece selecti
 [lints]
 workspace = true
 
+[features]
+default = []
+io-uring = ["torrent-storage/io-uring"]
+
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }
 torrent-core = { path = "../torrent-core" }

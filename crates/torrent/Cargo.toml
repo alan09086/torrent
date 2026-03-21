@@ -13,6 +13,7 @@ default = ["crypto-aws-lc"]
 crypto-ring = ["torrent-core/crypto-ring"]
 crypto-openssl = ["torrent-core/crypto-openssl"]
 crypto-aws-lc = ["torrent-core/crypto-aws-lc"]
+io-uring = ["torrent-session/io-uring"]
 
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }

@@ -18,6 +18,7 @@ default = ["crypto-aws-lc"]
 crypto-ring = ["torrent/crypto-ring"]
 crypto-openssl = ["torrent/crypto-openssl"]
 crypto-aws-lc = ["torrent/crypto-aws-lc"]
+io-uring = ["torrent/io-uring"]
 
 [dependencies]
 torrent = { path = "../torrent", default-features = false }

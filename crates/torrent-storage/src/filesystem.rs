@@ -361,6 +361,10 @@ impl TorrentStorage for FilesystemStorage {
         let actual = hasher.finish();
         Ok(actual == *expected)
     }
+
+    fn filesystem_info(&self) -> Option<(&std::path::Path, &[std::path::PathBuf], &crate::file_map::FileMap)> {
+        Some((&self.base_dir, &self.file_paths, &self.file_map))
+    }
 }
 
 #[cfg(test)]

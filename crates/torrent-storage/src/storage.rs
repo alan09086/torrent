@@ -63,6 +63,14 @@ pub trait TorrentStorage: Send + Sync {
             self.write_chunk(piece, begin, &combined)
         }
     }
+
+    /// Return filesystem metadata for io_uring fd management.
+    ///
+    /// Filesystem-backed implementations return the base directory, file paths,
+    /// and file map. Non-filesystem backends (memory, mmap) return `None`.
+    fn filesystem_info(&self) -> Option<(&std::path::Path, &[std::path::PathBuf], &crate::file_map::FileMap)> {
+        None
+    }
 }
 
 #[cfg(test)]

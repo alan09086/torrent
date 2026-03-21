@@ -14,4 +14,7 @@ pub enum StorageMode {
     Full,
     /// Memory-mapped file I/O (64-bit recommended).
     Mmap,
+    /// io_uring kernel-bypass I/O (Linux 5.6+).
+    /// Falls back to standard I/O when io_uring is unavailable.
+    IoUring,
 }
