@@ -74,6 +74,7 @@ pub use torrent_session::{
     TorrentInfo,
     TorrentState,
     TorrentStats,
+    TorrentSummary,
     // Tracker management (M24)
     TrackerInfo,
     TrackerStatus,

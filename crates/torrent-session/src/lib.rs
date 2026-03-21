@@ -93,5 +93,5 @@ pub use torrent::TorrentHandle;
 pub use transport::{BoxedStream, NetworkFactory, TransportListener};
 pub use types::{
     FileInfo, FileMode, FileStatus, PartialPieceInfo, PeerInfo, SessionStats, StorageFactory,
-    TorrentConfig, TorrentFlags, TorrentInfo, TorrentState, TorrentStats,
+    TorrentConfig, TorrentFlags, TorrentInfo, TorrentState, TorrentStats, TorrentSummary,
 };

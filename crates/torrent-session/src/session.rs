@@ -23,6 +23,7 @@ use crate::settings::Settings;
 use crate::torrent::TorrentHandle;
 use crate::types::{
     FileInfo, SessionStats, TorrentConfig, TorrentInfo, TorrentState, TorrentStats,
+    TorrentSummary,
 };
 
 /// Shared global rate limiter bucket.
@@ -1860,6 +1861,48 @@ impl SessionHandle {
             .await
             .map_err(|_| crate::Error::Shutdown)?;
         rx.await.map_err(|_| crate::Error::Shutdown)?
+    }
+
+    // ── M121: Convenience API for future HTTP endpoints ──
+
+    /// List all torrents as lightweight summaries.
+    ///
+    /// Fetches stats for each active torrent and converts to [`TorrentSummary`].
+    /// Torrents that fail the stats query (e.g. shutting down) are silently skipped.
+    pub async fn list_torrent_summaries(&self) -> crate::Result<Vec<TorrentSummary>> {
+        let ids = self.list_torrents().await?;
+        let mut summaries = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Ok(stats) = self.torrent_stats(id).await {
+                summaries.push(TorrentSummary::from(&stats));
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// Add a torrent from a magnet URI string.
+    ///
+    /// Parses the URI, extracts info hashes, and adds the magnet to the session.
+    /// Returns the info hashes (v1 and/or v2) for the added torrent.
+    pub async fn add_magnet_uri(&self, uri: &str) -> crate::Result<torrent_core::InfoHashes> {
+        let magnet = torrent_core::Magnet::parse(uri)?;
+        let info_hashes = magnet.info_hashes.clone();
+        self.add_magnet(magnet).await?;
+        Ok(info_hashes)
+    }
+
+    /// Add a torrent from raw .torrent file bytes.
+    ///
+    /// Auto-detects v1, v2, or hybrid format. Returns the info hashes for the
+    /// added torrent.
+    pub async fn add_torrent_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> crate::Result<torrent_core::InfoHashes> {
+        let meta = torrent_core::torrent_from_bytes_any(bytes)?;
+        let info_hashes = meta.info_hashes();
+        self.add_torrent(meta, None).await?;
+        Ok(info_hashes)
     }
 }
 

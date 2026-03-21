@@ -334,7 +334,7 @@ pub enum TorrentState {
 }
 
 /// Aggregate statistics for a torrent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TorrentStats {
     // ── Original fields (unchanged) ──
     /// Current torrent state.
@@ -613,6 +613,48 @@ impl Default for TorrentStats {
             // Error
             error: String::new(),
             error_file: -1,
+        }
+    }
+}
+
+/// Lightweight summary of a torrent for the HTTP API.
+///
+/// A reduced view of [`TorrentStats`] with only the fields needed for list views.
+/// Constructed via `From<&TorrentStats>`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TorrentSummary {
+    /// Hex-encoded v1 info hash (empty string for v2-only torrents).
+    pub info_hash: String,
+    /// Display name from the torrent metadata.
+    pub name: String,
+    /// Current torrent state.
+    pub state: TorrentState,
+    /// Download progress as a fraction (0.0–1.0).
+    pub progress: f64,
+    /// Current download rate in bytes/sec.
+    pub download_rate: u64,
+    /// Current upload rate in bytes/sec.
+    pub upload_rate: u64,
+    /// Total size of the torrent in bytes.
+    pub total_size: u64,
+    /// Number of connected peers.
+    pub num_peers: usize,
+    /// Time when the torrent was added (POSIX seconds).
+    pub added_time: i64,
+}
+
+impl From<&TorrentStats> for TorrentSummary {
+    fn from(s: &TorrentStats) -> Self {
+        Self {
+            info_hash: s.info_hashes.v1.map(|h| h.to_hex()).unwrap_or_default(),
+            name: s.name.clone(),
+            state: s.state,
+            progress: s.progress as f64,
+            download_rate: s.download_rate,
+            upload_rate: s.upload_rate,
+            total_size: s.total,
+            num_peers: s.num_peers,
+            added_time: s.added_time,
         }
     }
 }
