@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-io-uring = ["torrent-storage/io-uring"]
+io-uring = ["torrent-storage/io-uring", "dep:io-uring"]
 
 [dependencies]
 torrent-bencode = { path = "../torrent-bencode" }
@@ -40,6 +40,9 @@ futures = "0.3"
 slab = { workspace = true }
 smallvec = "1"
 url = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

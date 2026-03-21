@@ -18,6 +18,10 @@ pub(crate) mod chunk_mask;
 pub mod disk;
 /// Pluggable disk I/O backend trait and implementations.
 pub mod disk_backend;
+/// io_uring disk I/O backend (Linux-only, feature-gated).
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[allow(dead_code)] // Wired in during Task 6 (factory integration).
+pub(crate) mod io_uring_backend;
 #[allow(dead_code)] // Wired in during Task 2 (DSCP wiring to session/torrent actors).
 pub(crate) mod dscp;
 pub(crate) mod end_game;
