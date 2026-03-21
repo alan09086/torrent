@@ -1,4 +1,4 @@
-//! TorrentActor peer lifecycle, connectivity, choking, holepunch, and web seeds.
+//! TorrentActor peer lifecycle, connectivity, choking, and holepunch.
 //!
 //! This module contains peer-related methods extracted from `torrent.rs`:
 //! - Connection count helpers (`effective_max_connections`, `transport_peer_counts`)
