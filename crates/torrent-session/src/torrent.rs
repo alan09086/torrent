@@ -44,7 +44,7 @@ use crate::types::{
 };
 
 /// Shared global rate limiter bucket.
-type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
+pub(crate) type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
 
 /// Tribool result for piece hash verification in hybrid torrents.
 ///
@@ -52,7 +52,7 @@ type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
 /// verification. `NotApplicable` covers cases where verification cannot run
 /// (e.g. missing hash picker, disk error before any block is checked).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HashResult {
+pub(crate) enum HashResult {
     /// All hashes matched.
     Passed,
     /// At least one hash did not match.
@@ -66,7 +66,7 @@ enum HashResult {
 /// For each file, tries `rename` first (fast, same-filesystem), then falls
 /// back to copy + delete (cross-filesystem). Creates parent directories as
 /// needed. Returns error on the first failure.
-fn relocate_files(
+pub(crate) fn relocate_files(
     src_base: &std::path::Path,
     dst_base: &std::path::Path,
     file_paths: &[std::path::PathBuf],
@@ -109,7 +109,7 @@ fn relocate_files(
 }
 
 /// Current time as POSIX seconds (0 on clock error).
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -120,7 +120,7 @@ fn now_unix() -> i64 {
 ///
 /// Magnet links in `FetchingMetadata` state need fast peer discovery,
 /// so the initial delay is shortened from 60s to 5s.
-fn initial_dht_requery_delay(state: TorrentState) -> Duration {
+pub(crate) fn initial_dht_requery_delay(state: TorrentState) -> Duration {
     if state == TorrentState::FetchingMetadata {
         Duration::from_secs(5)
     } else {
@@ -133,7 +133,7 @@ fn initial_dht_requery_delay(state: TorrentState) -> Duration {
 /// During `FetchingMetadata`, the delay is capped at 5s regardless of
 /// responding node count. Once metadata is resolved, the adaptive
 /// scaling kicks in (1s for empty responses, linear ramp to 60s).
-fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> Duration {
+pub(crate) fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> Duration {
     if state == TorrentState::FetchingMetadata {
         Duration::from_secs(5)
     } else if responding_nodes == 0 {
@@ -150,14 +150,14 @@ fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> D
 }
 
 /// M112: Cooldown period between holepunch attempts to the same address.
-const HOLEPUNCH_COOLDOWN: Duration = Duration::from_secs(120);
+pub(crate) const HOLEPUNCH_COOLDOWN: Duration = Duration::from_secs(120);
 
 /// M112: Maximum number of tracked holepunch cooldown entries to prevent unbounded growth.
-const HOLEPUNCH_MAX_TRACKED: usize = 256;
+pub(crate) const HOLEPUNCH_MAX_TRACKED: usize = 256;
 
 /// Returns true if the disconnect reason suggests the peer is behind NAT
 /// and a holepunch attempt might succeed.
-fn should_attempt_holepunch(reason: &str) -> bool {
+pub(crate) fn should_attempt_holepunch(reason: &str) -> bool {
     // Don't re-attempt holepunch for failures from a previous holepunch attempt
     if reason.contains("holepunch") {
         return false;
@@ -1504,21 +1504,21 @@ impl TorrentHandle {
 
 /// Pre-computed file metadata for zero-allocation piece completion checks.
 #[derive(Debug, Clone)]
-struct CachedFileEntry {
-    index: usize,
+pub(crate) struct CachedFileEntry {
+    pub(crate) index: usize,
     #[allow(dead_code)] // Used in tests; retained for future diagnostics
-    length: u64,
-    first_piece: u32,
-    last_piece: u32,
+    pub(crate) length: u64,
+    pub(crate) first_piece: u32,
+    pub(crate) last_piece: u32,
 }
 
 /// Cached file-to-piece mapping, computed once at torrent registration.
 #[derive(Debug, Clone)]
-struct CachedFileInfo {
-    entries: Vec<CachedFileEntry>,
+pub(crate) struct CachedFileInfo {
+    pub(crate) entries: Vec<CachedFileEntry>,
 }
 
-fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFileInfo {
+pub(crate) fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFileInfo {
     let piece_length = lengths.piece_length();
     let files = meta.info.files();
     let mut entries = Vec::with_capacity(files.len());
@@ -1545,272 +1545,272 @@ fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFile
 // TorrentActor — internal single-owner event loop
 // ---------------------------------------------------------------------------
 
-struct TorrentActor {
-    config: TorrentConfig,
+pub(crate) struct TorrentActor {
+    pub(crate) config: TorrentConfig,
     /// M120: Lock timing settings for hot-path diagnostics.
-    lock_timing: crate::timed_lock::LockTimingSettings,
-    info_hash: Id20,
-    our_peer_id: Id20,
-    state: TorrentState,
+    pub(crate) lock_timing: crate::timed_lock::LockTimingSettings,
+    pub(crate) info_hash: Id20,
+    pub(crate) our_peer_id: Id20,
+    pub(crate) state: TorrentState,
 
     // Disk I/O (None in magnet mode until metadata arrives)
-    disk: Option<DiskHandle>,
-    disk_manager: DiskManagerHandle,
-    chunk_tracker: Option<ChunkTracker>,
-    lengths: Option<Lengths>,
-    num_pieces: u32,
+    pub(crate) disk: Option<DiskHandle>,
+    pub(crate) disk_manager: DiskManagerHandle,
+    pub(crate) chunk_tracker: Option<ChunkTracker>,
+    pub(crate) lengths: Option<Lengths>,
+    pub(crate) num_pieces: u32,
 
     // Piece management
-    file_priorities: Vec<FilePriority>,
-    wanted_pieces: Bitfield,
-    end_game: EndGame,
+    pub(crate) file_priorities: Vec<FilePriority>,
+    pub(crate) wanted_pieces: Bitfield,
+    pub(crate) end_game: EndGame,
 
     // Streaming (M28)
-    streaming_pieces: BTreeSet<u32>,
-    time_critical_pieces: BTreeSet<u32>,
-    streaming_cursors: Vec<crate::streaming::StreamingCursor>,
-    piece_ready_tx: broadcast::Sender<u32>,
-    have_watch_tx: tokio::sync::watch::Sender<Bitfield>,
-    have_watch_rx: tokio::sync::watch::Receiver<Bitfield>,
-    stream_read_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) streaming_pieces: BTreeSet<u32>,
+    pub(crate) time_critical_pieces: BTreeSet<u32>,
+    pub(crate) streaming_cursors: Vec<crate::streaming::StreamingCursor>,
+    pub(crate) piece_ready_tx: broadcast::Sender<u32>,
+    pub(crate) have_watch_tx: tokio::sync::watch::Sender<Bitfield>,
+    pub(crate) have_watch_rx: tokio::sync::watch::Receiver<Bitfield>,
+    pub(crate) stream_read_semaphore: Arc<tokio::sync::Semaphore>,
 
     // Peer management
-    peers: HashMap<SocketAddr, PeerState>,
+    pub(crate) peers: HashMap<SocketAddr, PeerState>,
     /// Cached peer download rates for piece stealing decisions.
     /// Refreshed on each periodic tick (~1s) instead of rebuilding per block.
-    cached_peer_rates: FxHashMap<SocketAddr, f64>,
+    pub(crate) cached_peer_rates: FxHashMap<SocketAddr, f64>,
     /// Notify handle for reactive queue refill (legacy, unused in M73).
     #[allow(dead_code)]
-    refill_notify: Arc<tokio::sync::Notify>,
+    pub(crate) refill_notify: Arc<tokio::sync::Notify>,
     /// M93: Lock-free piece states (shared with peers via Arc).
-    atomic_states: Option<Arc<crate::piece_reservation::AtomicPieceStates>>,
+    pub(crate) atomic_states: Option<Arc<crate::piece_reservation::AtomicPieceStates>>,
     /// M103: Shared block-level request/received bitmaps.
-    block_maps: Option<Arc<BlockMaps>>,
+    pub(crate) block_maps: Option<Arc<BlockMaps>>,
     /// M103: Shared queue of stealable pieces.
-    steal_candidates: Option<Arc<StealCandidates>>,
+    pub(crate) steal_candidates: Option<Arc<StealCandidates>>,
     /// M120: Per-piece write guards to prevent steal/write races.
-    piece_write_guards: Option<Arc<crate::piece_reservation::PieceWriteGuards>>,
+    pub(crate) piece_write_guards: Option<Arc<crate::piece_reservation::PieceWriteGuards>>,
     /// M103: Dirty flag for reactive snapshot rebuild.
-    snapshot_dirty: bool,
+    pub(crate) snapshot_dirty: bool,
     /// M93: Current availability snapshot (shared with peers via Arc).
-    availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
+    pub(crate) availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
     /// M93: Snapshot generation counter.
-    snapshot_generation: u64,
+    pub(crate) snapshot_generation: u64,
     /// M93: Maps piece index -> peer slab slot that owns it.
-    piece_owner: Vec<Option<u16>>,
+    pub(crate) piece_owner: Vec<Option<u16>>,
     /// M93: Arena-allocated peer tracking: slot <-> SocketAddr.
-    peer_slab: crate::piece_reservation::PeerSlab,
+    pub(crate) peer_slab: crate::piece_reservation::PeerSlab,
     /// M93: Per-piece availability count.
-    availability: Vec<u32>,
+    pub(crate) availability: Vec<u32>,
     /// M93: Priority pieces (streaming, time-critical).
-    priority_pieces: BTreeSet<u32>,
+    pub(crate) priority_pieces: BTreeSet<u32>,
     /// M93: Maximum in-flight pieces.
-    max_in_flight: usize,
+    pub(crate) max_in_flight: usize,
     /// Piece notify handle (for driver spawning).
-    reservation_notify: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) reservation_notify: Option<Arc<tokio::sync::Notify>>,
     /// M104: Per-peer exponential backoff for failed connections.
     /// Maps peer address → (earliest_retry_time, attempt_count).
     /// Shared with the peer adder task (M107).
-    connect_backoff: Arc<DashMap<SocketAddr, (std::time::Instant, u32)>>,
-    choker: Choker,
+    pub(crate) connect_backoff: Arc<DashMap<SocketAddr, (std::time::Instant, u32)>>,
+    pub(crate) choker: Choker,
     /// Per-torrent connection limit override (0 = use config.max_peers).
-    max_connections: usize,
+    pub(crate) max_connections: usize,
     /// M107: Channel sender to feed discovered peers to the adder task.
-    peer_tx: Option<mpsc::UnboundedSender<(SocketAddr, PeerSource)>>,
+    pub(crate) peer_tx: Option<mpsc::UnboundedSender<(SocketAddr, PeerSource)>>,
     /// M107: Semaphore that gates outbound+inbound peer connections.
-    peer_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) peer_semaphore: Arc<tokio::sync::Semaphore>,
     /// M107: Shared set of connected peer addresses (actor writes, adder reads).
-    peers_connected: Arc<DashMap<SocketAddr, ()>>,
+    pub(crate) peers_connected: Arc<DashMap<SocketAddr, ()>>,
     /// M107: Receiver for connect requests from the adder task.
-    connect_rx: Option<mpsc::Receiver<ConnectPeer>>,
+    pub(crate) connect_rx: Option<mpsc::Receiver<ConnectPeer>>,
 
     // Metadata (for magnet links)
-    metadata_downloader: Option<MetadataDownloader>,
+    pub(crate) metadata_downloader: Option<MetadataDownloader>,
 
     // Parsed torrent meta (for piece hash verification)
-    meta: Option<TorrentMetaV1>,
+    pub(crate) meta: Option<TorrentMetaV1>,
 
     /// M116: Pre-computed file->piece mapping for zero-alloc completion checks.
-    cached_files: Option<CachedFileInfo>,
+    pub(crate) cached_files: Option<CachedFileInfo>,
 
     // Stats
-    downloaded: u64,
-    uploaded: u64,
-    checking_progress: f32,
-    total_download: u64,
-    total_upload: u64,
-    total_failed_bytes: u64,
-    total_redundant_bytes: u64,
-    added_time: i64,
-    completed_time: i64,
-    last_download: i64,
-    last_upload: i64,
-    last_seen_complete: i64,
-    active_duration: i64,
-    finished_duration: i64,
-    seeding_duration: i64,
-    active_since: Option<std::time::Instant>,
-    state_duration_since: Option<std::time::Instant>,
+    pub(crate) downloaded: u64,
+    pub(crate) uploaded: u64,
+    pub(crate) checking_progress: f32,
+    pub(crate) total_download: u64,
+    pub(crate) total_upload: u64,
+    pub(crate) total_failed_bytes: u64,
+    pub(crate) total_redundant_bytes: u64,
+    pub(crate) added_time: i64,
+    pub(crate) completed_time: i64,
+    pub(crate) last_download: i64,
+    pub(crate) last_upload: i64,
+    pub(crate) last_seen_complete: i64,
+    pub(crate) active_duration: i64,
+    pub(crate) finished_duration: i64,
+    pub(crate) seeding_duration: i64,
+    pub(crate) active_since: Option<std::time::Instant>,
+    pub(crate) state_duration_since: Option<std::time::Instant>,
     #[allow(dead_code)] // M104: ConnectPhase removed; kept for future diagnostics
-    started_at: std::time::Instant,
-    moving_storage: bool,
-    has_incoming: bool,
-    need_save_resume: bool,
-    error: String,
-    error_file: i32,
+    pub(crate) started_at: std::time::Instant,
+    pub(crate) moving_storage: bool,
+    pub(crate) has_incoming: bool,
+    pub(crate) need_save_resume: bool,
+    pub(crate) error: String,
+    pub(crate) error_file: i32,
 
     // Channels
-    cmd_rx: mpsc::Receiver<TorrentCommand>,
-    event_tx: mpsc::Sender<PeerEvent>,
-    event_rx: mpsc::Receiver<PeerEvent>,
+    pub(crate) cmd_rx: mpsc::Receiver<TorrentCommand>,
+    pub(crate) event_tx: mpsc::Sender<PeerEvent>,
+    pub(crate) event_rx: mpsc::Receiver<PeerEvent>,
 
     // Async disk pipeline channels
-    write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
-    write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
-    verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
-    verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
+    pub(crate) write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
+    pub(crate) write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
+    pub(crate) verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
+    pub(crate) verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
     /// Pieces currently awaiting async verification — prevents duplicate
     /// verify tasks when end game or slow peers deliver duplicate blocks.
-    pending_verify: HashSet<u32>,
+    pub(crate) pending_verify: HashSet<u32>,
     /// Generation counter per piece — increments on release/re-reserve.
     /// Used to detect stale hash results from the HashPool (M96).
-    piece_generations: Vec<u64>,
+    pub(crate) piece_generations: Vec<u64>,
     /// Receiver for hash pool results (M96).
-    hash_result_rx: tokio::sync::mpsc::Receiver<crate::hash_pool::HashResult>,
+    pub(crate) hash_result_rx: tokio::sync::mpsc::Receiver<crate::hash_pool::HashResult>,
     /// Sender for hash pool results — cloned into DiskHandle (M96).
-    hash_result_tx: tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>,
+    pub(crate) hash_result_tx: tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>,
 
     // TCP listener for incoming peer connections
-    listener: Option<Box<dyn crate::transport::TransportListener>>,
+    pub(crate) listener: Option<Box<dyn crate::transport::TransportListener>>,
 
     // uTP socket for outbound connections (shared with session, cloned)
-    utp_socket: Option<torrent_utp::UtpSocket>,
+    pub(crate) utp_socket: Option<torrent_utp::UtpSocket>,
     // IPv6 uTP socket for outbound connections to IPv6 peers
-    utp_socket_v6: Option<torrent_utp::UtpSocket>,
+    pub(crate) utp_socket_v6: Option<torrent_utp::UtpSocket>,
 
     // Tracker management
-    tracker_manager: TrackerManager,
+    pub(crate) tracker_manager: TrackerManager,
 
     // DHT handles (shared, optional)
-    dht: Option<DhtHandle>,
-    dht_v6: Option<DhtHandle>,
-    dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
-    dht_v6_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht: Option<DhtHandle>,
+    pub(crate) dht_v6: Option<DhtHandle>,
+    pub(crate) dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht_v6_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
     /// Consecutive times the V6 DHT returned an empty table.
     /// After 30 failures (~3s at 100ms), stop retrying to avoid log spam.
-    dht_v6_empty_count: u32,
+    pub(crate) dht_v6_empty_count: u32,
     /// Timestamp of last V6 DHT retry attempt (M97).
-    dht_v6_last_retry: Option<std::time::Instant>,
+    pub(crate) dht_v6_last_retry: Option<std::time::Instant>,
 
     // Alert system (M15)
-    alert_tx: broadcast::Sender<Alert>,
-    alert_mask: Arc<AtomicU32>,
+    pub(crate) alert_tx: broadcast::Sender<Alert>,
+    pub(crate) alert_mask: Arc<AtomicU32>,
 
     // Rate limiting (M14)
-    upload_bucket: crate::rate_limiter::TokenBucket,
-    download_bucket: crate::rate_limiter::TokenBucket,
-    global_upload_bucket: Option<SharedBucket>,
+    pub(crate) upload_bucket: crate::rate_limiter::TokenBucket,
+    pub(crate) download_bucket: crate::rate_limiter::TokenBucket,
+    pub(crate) global_upload_bucket: Option<SharedBucket>,
     #[allow(dead_code)] // M73: rate limiting deferred to M74
-    global_download_bucket: Option<SharedBucket>,
-    slot_tuner: crate::slot_tuner::SlotTuner,
-    upload_bytes_interval: u64,
+    pub(crate) global_download_bucket: Option<SharedBucket>,
+    pub(crate) slot_tuner: crate::slot_tuner::SlotTuner,
+    pub(crate) upload_bytes_interval: u64,
 
     /// Peak aggregate download rate observed (bytes/sec), for peer turnover cutoff.
-    peak_download_rate: u64,
+    pub(crate) peak_download_rate: u64,
 
     // Web seeding (M22)
-    web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
-    banned_web_seeds: HashSet<String>,
-    web_seed_in_flight: HashMap<u32, String>,
+    pub(crate) web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
+    pub(crate) banned_web_seeds: HashSet<String>,
+    pub(crate) web_seed_in_flight: HashMap<u32, String>,
 
     // BEP 16 super seeding (M23)
-    super_seed: Option<crate::super_seed::SuperSeedState>,
+    pub(crate) super_seed: Option<crate::super_seed::SuperSeedState>,
     // M118: Broadcast channel for Have distribution (replaces HaveBuffer)
-    have_broadcast_tx: tokio::sync::broadcast::Sender<u32>,
+    pub(crate) have_broadcast_tx: tokio::sync::broadcast::Sender<u32>,
 
     /// M44: pieces we've suggested to each peer (avoid re-suggesting)
-    suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
+    pub(crate) suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
 
     /// M44: pieces for which we've already sent predictive Have
-    predictive_have_sent: HashSet<u32>,
+    pub(crate) predictive_have_sent: HashSet<u32>,
 
     // Smart banning (M25)
-    ban_manager: crate::session::SharedBanManager,
-    piece_contributors: HashMap<u32, HashSet<std::net::IpAddr>>,
-    parole_pieces: HashMap<u32, crate::ban::ParoleState>,
+    pub(crate) ban_manager: crate::session::SharedBanManager,
+    pub(crate) piece_contributors: HashMap<u32, HashSet<std::net::IpAddr>>,
+    pub(crate) parole_pieces: HashMap<u32, crate::ban::ParoleState>,
 
     // IP filtering (M29)
-    ip_filter: crate::session::SharedIpFilter,
+    pub(crate) ip_filter: crate::session::SharedIpFilter,
 
     // BEP 40 peer priority (M32b)
-    external_ip: Option<std::net::IpAddr>,
+    pub(crate) external_ip: Option<std::net::IpAddr>,
 
     // Share mode (M32c): LRU tracker for in-memory piece relay.
     // Tracks which pieces are currently "live" (servable) in share mode.
     // Oldest pieces are evicted when capacity is reached.
-    share_lru: std::collections::VecDeque<u32>,
+    pub(crate) share_lru: std::collections::VecDeque<u32>,
     /// Max pieces to keep live in share mode (0 = share mode disabled).
-    share_max_pieces: usize,
+    pub(crate) share_max_pieces: usize,
 
     // Extension plugins (M32d)
-    plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    pub(crate) plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 
     // BEP 52 v2/hybrid support (M34-M35)
-    hash_picker: Option<torrent_core::HashPicker>,
-    version: torrent_core::TorrentVersion,
+    pub(crate) hash_picker: Option<torrent_core::HashPicker>,
+    pub(crate) version: torrent_core::TorrentVersion,
     #[allow(dead_code)] // stored for hybrid torrent re-serialization (M35 Task 5)
-    meta_v2: Option<torrent_core::TorrentMetaV2>,
+    pub(crate) meta_v2: Option<torrent_core::TorrentMetaV2>,
 
     /// Full info hashes for dual-swarm support (v1 + v2 for hybrid).
-    info_hashes: torrent_core::InfoHashes,
+    pub(crate) info_hashes: torrent_core::InfoHashes,
 
     /// Dual-swarm DHT peer receivers (v2 hash in hybrid torrents).
-    dht_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
-    dht_v6_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht_v6_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
 
     /// BEP 53: deferred file selection from magnet `so=` parameter.
     /// Applied after metadata is received to set file priorities.
-    magnet_selected_files: Option<Vec<torrent_core::FileSelection>>,
+    pub(crate) magnet_selected_files: Option<Vec<torrent_core::FileSelection>>,
 
     /// I2P SAM session for anonymous peer connections (M41).
-    sam_session: Option<Arc<crate::i2p::SamSession>>,
+    pub(crate) sam_session: Option<Arc<crate::i2p::SamSession>>,
 
     /// Receiver for incoming I2P peer connections (M41).
-    i2p_accept_rx: Option<mpsc::Receiver<crate::i2p::SamStream>>,
+    pub(crate) i2p_accept_rx: Option<mpsc::Receiver<crate::i2p::SamStream>>,
 
     /// Counter for generating synthetic SocketAddr values for I2P peers (M41).
-    i2p_peer_counter: u32,
+    pub(crate) i2p_peer_counter: u32,
 
     /// Maps synthetic SocketAddr → I2pDestination for outbound I2P connects.
-    i2p_destinations: HashMap<SocketAddr, crate::i2p::I2pDestination>,
+    pub(crate) i2p_destinations: HashMap<SocketAddr, crate::i2p::I2pDestination>,
 
     /// SSL manager for SSL torrent certificate handling (M42).
-    ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+    pub(crate) ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
 
     /// Per-class rate limiting with mixed-mode (M45).
-    rate_limiter_set: crate::rate_limiter::RateLimiterSet,
+    pub(crate) rate_limiter_set: crate::rate_limiter::RateLimiterSet,
     /// Whether auto-sequential mode is currently active (hysteresis state).
-    auto_sequential_active: bool,
+    pub(crate) auto_sequential_active: bool,
     /// Network transport factory for TCP operations (M51).
-    factory: Arc<crate::transport::NetworkFactory>,
+    pub(crate) factory: Arc<crate::transport::NetworkFactory>,
     /// Shared hash pool for parallel piece verification (M96).
-    hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
+    pub(crate) hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     /// M106: Peer quality scorer for churn decisions.
-    scorer: PeerScorer,
+    pub(crate) scorer: PeerScorer,
     /// M107: Last DHT re-query response count (for adaptive sleep).
-    dht_requery_responding_nodes: usize,
+    pub(crate) dht_requery_responding_nodes: usize,
     /// M107: Channel to signal the adder task to clear its seen set.
-    adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
+    pub(crate) adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
     /// M108: Shared snapshot of connected peer addresses for PEX send tasks.
-    live_outgoing_peers: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<SocketAddr>>>,
+    pub(crate) live_outgoing_peers: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<SocketAddr>>>,
     /// M108: Total outbound connection attempts dispatched to peer adder.
-    connect_attempts: u64,
+    pub(crate) connect_attempts: u64,
     /// M108: Total connection failures (peers that disconnected).
-    connect_failures: u64,
+    pub(crate) connect_failures: u64,
     /// M112: Tracks recent holepunch attempts to prevent retry storms.
-    holepunch_cooldowns: HashMap<SocketAddr, Instant>,
+    pub(crate) holepunch_cooldowns: HashMap<SocketAddr, Instant>,
     /// M112: Buffer for holepunch attempts (disconnect_peer is sync, try_holepunch is async).
-    holepunch_pending: Vec<SocketAddr>,
+    pub(crate) holepunch_pending: Vec<SocketAddr>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -1819,7 +1819,7 @@ struct TorrentActor {
 /// End-game pipeline depth: match normal mode (128 slots per peer).
 /// Safe because the reactive per-block cascade was replaced with a 200ms
 /// batch refill tick — raising depth no longer amplifies picker invocations.
-const END_GAME_DEPTH: usize = 128;
+pub(crate) const END_GAME_DEPTH: usize = 128;
 
 /// Minimum free pipeline slots before invoking the full piece picker in
 /// `handle_piece_data()`.  Avoids running the 5-layer picker on every single
@@ -8403,7 +8403,7 @@ async fn accept_i2p(
 /// Only serves piece-layer hashes (the layer stored in `piece_layers`).
 /// Block-layer or other layer requests are rejected since we don't store
 /// the full Merkle tree.
-fn serve_hashes(
+pub(crate) fn serve_hashes(
     meta_v2: Option<&torrent_core::TorrentMetaV2>,
     version: torrent_core::TorrentVersion,
     lengths: Option<&Lengths>,
