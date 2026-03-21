@@ -22,7 +22,7 @@ use crate::disk::DiskConfig;
 use crate::disk_backend::{DiskIoBackend, DiskIoStats, PosixDiskIo};
 
 /// Per-torrent io_uring write state: pre-opened fds + file map.
-struct IoUringWriteState {
+pub(crate) struct IoUringWriteState {
     fds: IoUringStorageState,
     file_map: FileMap,
 }
@@ -39,7 +39,7 @@ struct IoUringWriteState {
 pub(crate) struct IoUringDiskIo {
     inner: PosixDiskIo,
     ring: Mutex<IoUring>,
-    uring_states: RwLock<HashMap<Id20, IoUringWriteState>>,
+    pub(crate) uring_states: RwLock<HashMap<Id20, IoUringWriteState>>,
     config: IoUringConfig,
     /// Cumulative bytes written via the io_uring path (lock-free stat tracking).
     uring_write_bytes: AtomicU64,
@@ -348,5 +348,430 @@ impl DiskIoBackend for IoUringDiskIo {
 
         self.inner
             .write_block_direct(info_hash, piece, begin, s0, s1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use torrent_core::Lengths;
+    use torrent_storage::{FilesystemStorage, IoUringConfig, MemoryStorage, PreallocateMode};
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn make_hash() -> Id20 {
+        Id20([0xAB; 20])
+    }
+
+    fn make_hash_n(n: u8) -> Id20 {
+        let mut b = [0u8; 20];
+        b[0] = n;
+        Id20(b)
+    }
+
+    fn test_config() -> crate::disk::DiskConfig {
+        crate::disk::DiskConfig {
+            io_threads: 2,
+            cache_size: 1024 * 1024,
+            ..crate::disk::DiskConfig::default()
+        }
+    }
+
+    fn test_uring_config() -> IoUringConfig {
+        IoUringConfig::default()
+    }
+
+    /// Create a [`FilesystemStorage`] in a temp directory with a single file.
+    fn make_fs_storage(dir: &std::path::Path, total: u64) -> Arc<dyn TorrentStorage> {
+        let chunk = total.min(16384) as u32;
+        let lengths = Lengths::new(total, total, chunk);
+        Arc::new(
+            FilesystemStorage::new(
+                dir,
+                vec![PathBuf::from("test.bin")],
+                vec![total],
+                lengths,
+                None,
+                PreallocateMode::None,
+            )
+            .expect("FilesystemStorage::new should succeed"),
+        )
+    }
+
+    /// Create a multi-file [`FilesystemStorage`].
+    fn make_fs_storage_multi(
+        dir: &std::path::Path,
+        file_sizes: &[u64],
+        piece_len: u64,
+    ) -> Arc<dyn TorrentStorage> {
+        let total: u64 = file_sizes.iter().sum();
+        let chunk = piece_len.min(16384) as u32;
+        let lengths = Lengths::new(total, piece_len, chunk);
+        let paths: Vec<PathBuf> = file_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, _)| PathBuf::from(format!("file{i}.bin")))
+            .collect();
+        Arc::new(
+            FilesystemStorage::new(
+                dir,
+                paths,
+                file_sizes.to_vec(),
+                lengths,
+                None,
+                PreallocateMode::None,
+            )
+            .expect("multi-file FilesystemStorage::new should succeed"),
+        )
+    }
+
+    // -------------------------------------------------------------------
+    // 1. Config defaults
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_config_default() {
+        let cfg = IoUringConfig::default();
+        assert_eq!(cfg.sq_depth, 256);
+        assert!(!cfg.enable_direct_io);
+        assert_eq!(cfg.batch_threshold, 4);
+    }
+
+    // -------------------------------------------------------------------
+    // 2. Ring creation (success)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_ring_creation() {
+        let result = IoUringDiskIo::new(&test_config(), test_uring_config());
+        assert!(result.is_ok(), "IoUringDiskIo::new() should succeed with default config");
+    }
+
+    // -------------------------------------------------------------------
+    // 3. Ring creation (invalid depth)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_ring_creation_invalid_depth() {
+        let cfg = IoUringConfig {
+            sq_depth: 0,
+            ..IoUringConfig::default()
+        };
+        let result = IoUringDiskIo::new(&test_config(), cfg);
+        assert!(result.is_err(), "sq_depth=0 should fail io_uring setup");
+    }
+
+    // -------------------------------------------------------------------
+    // 4. Register filesystem storage (uring_states populated)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_register_filesystem_storage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash();
+        let storage = make_fs_storage(dir.path(), 16384);
+
+        backend.register(ih, storage);
+
+        let states = backend.uring_states.read();
+        assert!(
+            states.contains_key(&ih),
+            "uring_states should contain the registered info_hash"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // 5. Register memory storage (uring_states NOT populated)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_register_memory_storage() {
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash();
+        let lengths = Lengths::new(16384, 16384, 16384);
+        let storage: Arc<dyn TorrentStorage> = Arc::new(MemoryStorage::new(lengths));
+
+        backend.register(ih, storage);
+
+        let states = backend.uring_states.read();
+        assert!(
+            !states.contains_key(&ih),
+            "uring_states should NOT contain memory storage (no filesystem_info)"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // 6. Write single block via io_uring, read back
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_write_single_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(6);
+        let storage = make_fs_storage(dir.path(), 16384);
+
+        backend.register(ih, Arc::clone(&storage));
+
+        let data = vec![0xBEu8; 16384];
+        backend
+            .write_block_direct(ih, 0, 0, &data, &[])
+            .expect("write_block_direct should succeed");
+
+        let readback = storage
+            .read_chunk(0, 0, 16384)
+            .expect("read_chunk should succeed");
+        assert_eq!(readback, data);
+    }
+
+    // -------------------------------------------------------------------
+    // 7. Write vectored split (s0 + s1), read back
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_write_vectored_split() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(7);
+        let total = 16384_u64;
+        let storage = make_fs_storage(dir.path(), total);
+
+        backend.register(ih, Arc::clone(&storage));
+
+        // Simulate ring buffer straddle: 10000 bytes in s0, 6384 bytes in s1.
+        let s0: Vec<u8> = (0..10000_u32)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let s1: Vec<u8> = (0..6384_u32)
+            .map(|i| ((i + 10000) % 251) as u8)
+            .collect();
+
+        backend
+            .write_block_direct(ih, 0, 0, &s0, &s1)
+            .expect("vectored write should succeed");
+
+        let readback = storage
+            .read_chunk(0, 0, 16384)
+            .expect("read_chunk should succeed");
+
+        let mut expected = s0.clone();
+        expected.extend_from_slice(&s1);
+        assert_eq!(readback, expected);
+    }
+
+    // -------------------------------------------------------------------
+    // 8. Write spanning two files (multi-file boundary)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_write_multi_file_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(8);
+
+        // Two files of 8192 bytes each, one piece of 16384 spanning both.
+        let storage = make_fs_storage_multi(dir.path(), &[8192, 8192], 16384);
+        backend.register(ih, Arc::clone(&storage));
+
+        let data = vec![0xCDu8; 16384];
+        backend
+            .write_block_direct(ih, 0, 0, &data, &[])
+            .expect("multi-file write should succeed");
+
+        let readback = storage
+            .read_chunk(0, 0, 16384)
+            .expect("read_chunk should succeed");
+        assert_eq!(readback, data);
+    }
+
+    // -------------------------------------------------------------------
+    // 9. Read delegates to inner PosixDiskIo
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_read_delegates_to_inner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(9);
+        let storage = make_fs_storage(dir.path(), 16384);
+
+        backend.register(ih, Arc::clone(&storage));
+
+        // Write data via the uring path.
+        let data = vec![0xAAu8; 16384];
+        backend
+            .write_block_direct(ih, 0, 0, &data, &[])
+            .expect("write should succeed");
+
+        // Read via the backend's read_chunk (delegates to inner PosixDiskIo).
+        let readback = backend
+            .read_chunk(ih, 0, 0, 16384, true)
+            .expect("read_chunk via backend should succeed");
+        assert_eq!(&readback[..], &data[..]);
+    }
+
+    // -------------------------------------------------------------------
+    // 10. Hash piece delegates to inner
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_hash_piece_delegates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(10);
+        let storage = make_fs_storage(dir.path(), 16384);
+
+        backend.register(ih, Arc::clone(&storage));
+
+        let data = vec![0x42u8; 16384];
+        backend
+            .write_block_direct(ih, 0, 0, &data, &[])
+            .expect("write should succeed");
+
+        // Flush so the inner backend can read from disk.
+        backend
+            .flush_piece(ih, 0)
+            .expect("flush should succeed");
+
+        let expected_hash = torrent_core::sha1(&data);
+        let matches = backend
+            .hash_piece(ih, 0, &expected_hash)
+            .expect("hash_piece should succeed");
+        assert!(matches, "hash should match the written data");
+    }
+
+    // -------------------------------------------------------------------
+    // 11. Unregister removes uring state
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_unregister_closes_fds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(11);
+        let storage = make_fs_storage(dir.path(), 16384);
+
+        backend.register(ih, Arc::clone(&storage));
+        assert!(backend.uring_states.read().contains_key(&ih));
+
+        backend.unregister(ih);
+        assert!(
+            !backend.uring_states.read().contains_key(&ih),
+            "uring_states should be empty after unregister"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // 12. Backend name
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_backend_name() {
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        assert_eq!(backend.name(), "io_uring");
+    }
+
+    // -------------------------------------------------------------------
+    // 13. Stats track uring writes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_stats_track_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+        let ih = make_hash_n(13);
+        let storage = make_fs_storage(dir.path(), 16384);
+
+        backend.register(ih, storage);
+
+        let data = vec![0xFFu8; 16384];
+        backend
+            .write_block_direct(ih, 0, 0, &data, &[])
+            .expect("write should succeed");
+
+        let stats = backend.stats();
+        assert!(
+            stats.write_bytes >= 16384,
+            "stats.write_bytes ({}) should include the 16384-byte uring write",
+            stats.write_bytes
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // 14. Concurrent torrents — isolation
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_concurrent_torrents() {
+        let dir1 = tempfile::tempdir().expect("tempdir 1");
+        let dir2 = tempfile::tempdir().expect("tempdir 2");
+        let backend =
+            IoUringDiskIo::new(&test_config(), test_uring_config()).expect("backend creation");
+
+        let ih1 = make_hash_n(141);
+        let ih2 = make_hash_n(142);
+
+        let storage1 = make_fs_storage(dir1.path(), 16384);
+        let storage2 = make_fs_storage(dir2.path(), 16384);
+
+        backend.register(ih1, Arc::clone(&storage1));
+        backend.register(ih2, Arc::clone(&storage2));
+
+        // Write different data to each torrent.
+        let data1 = vec![0x11u8; 16384];
+        let data2 = vec![0x22u8; 16384];
+
+        backend
+            .write_block_direct(ih1, 0, 0, &data1, &[])
+            .expect("write to torrent 1");
+        backend
+            .write_block_direct(ih2, 0, 0, &data2, &[])
+            .expect("write to torrent 2");
+
+        // Read back and verify isolation.
+        let read1 = storage1
+            .read_chunk(0, 0, 16384)
+            .expect("read torrent 1");
+        let read2 = storage2
+            .read_chunk(0, 0, 16384)
+            .expect("read torrent 2");
+
+        assert_eq!(read1, data1, "torrent 1 data should be 0x11");
+        assert_eq!(read2, data2, "torrent 2 data should be 0x22");
+    }
+
+    // -------------------------------------------------------------------
+    // 15. Factory fallback on io_uring init failure
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn uring_factory_fallback() {
+        use crate::disk_backend::create_backend_from_config;
+
+        let config = crate::disk::DiskConfig {
+            storage_mode: torrent_core::StorageMode::IoUring,
+            // sq_depth=0 forces IoUring::new() to fail.
+            io_uring_sq_depth: 0,
+            ..crate::disk::DiskConfig::default()
+        };
+
+        let backend = create_backend_from_config(&config);
+        assert_eq!(
+            backend.name(),
+            "posix",
+            "should fall back to posix when io_uring init fails"
+        );
     }
 }
