@@ -59,6 +59,15 @@ enum Command {
         /// Disable tracker announces
         #[arg(long)]
         disable_trackers: bool,
+        /// Use io_uring for disk writes (Linux only, requires io-uring feature)
+        #[arg(long)]
+        io_uring: bool,
+        /// Enable O_DIRECT for io_uring writes (implies --io-uring)
+        #[arg(long)]
+        direct_io: bool,
+        /// io_uring submission queue depth (default: 256)
+        #[arg(long)]
+        uring_sq_depth: Option<u32>,
     },
     /// Create a .torrent file
     Create {
@@ -110,6 +119,9 @@ fn main() {
             list: _,
             initial_peers: _,
             disable_trackers: _,
+            io_uring,
+            direct_io,
+            uring_sq_depth,
         } => {
             let mut settings = if let Some(ref config_path) = config {
                 let data = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
@@ -135,6 +147,18 @@ fn main() {
             }
             if no_pin_cores {
                 settings.pin_cores = false;
+            }
+            if io_uring || direct_io {
+                settings.storage_mode = torrent::core::StorageMode::IoUring;
+            }
+            if direct_io {
+                settings.io_uring_direct_io = true;
+            }
+            if let Some(depth) = uring_sq_depth {
+                settings.io_uring_sq_depth = depth;
+                if !io_uring && !direct_io {
+                    settings.storage_mode = torrent::core::StorageMode::IoUring;
+                }
             }
 
             let rt = download::build_runtime(&settings);

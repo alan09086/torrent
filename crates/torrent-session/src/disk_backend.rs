@@ -663,9 +663,25 @@ impl DiskIoBackend for MmapDiskIo {
 
 /// Create a disk I/O backend based on the storage mode in the configuration.
 ///
-/// Returns `MmapDiskIo` when `config.storage_mode` is `Mmap`, otherwise
-/// returns `PosixDiskIo` with unified buffer pool.
+/// Returns `IoUringDiskIo` when `config.storage_mode` is `IoUring` (Linux + `io-uring` feature),
+/// `MmapDiskIo` when `Mmap`, otherwise `PosixDiskIo` with unified buffer pool.
+/// If io_uring initialisation fails, falls back to `PosixDiskIo` with a warning.
 pub fn create_backend_from_config(config: &DiskConfig) -> Arc<dyn DiskIoBackend> {
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    if config.storage_mode == torrent_core::StorageMode::IoUring {
+        let uring_config = torrent_storage::IoUringConfig {
+            sq_depth: config.io_uring_sq_depth,
+            enable_direct_io: config.io_uring_direct_io,
+            batch_threshold: config.io_uring_batch_threshold,
+        };
+        match crate::io_uring_backend::IoUringDiskIo::new(config, uring_config) {
+            Ok(backend) => return Arc::new(backend),
+            Err(e) => {
+                tracing::warn!("io_uring init failed, falling back to posix: {e}");
+            }
+        }
+    }
+
     if config.storage_mode == torrent_core::StorageMode::Mmap {
         Arc::new(MmapDiskIo::new())
     } else {

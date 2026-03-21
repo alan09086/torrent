@@ -96,6 +96,12 @@ fn default_buffer_pool_capacity() -> usize {
 fn default_enable_mlock() -> bool {
     cfg!(unix)
 }
+fn default_io_uring_sq_depth() -> u32 {
+    256
+}
+fn default_io_uring_batch_threshold() -> usize {
+    4
+}
 fn default_disk_channel_capacity() -> usize {
     512
 }
@@ -470,6 +476,18 @@ pub struct Settings {
     /// if RLIMIT_MEMLOCK is exceeded.
     #[serde(default = "default_enable_mlock")]
     pub enable_mlock: bool,
+    /// io_uring submission queue depth (number of SQEs). Only used when
+    /// `storage_mode` is `IoUring`. Default: 256.
+    #[serde(default = "default_io_uring_sq_depth")]
+    pub io_uring_sq_depth: u32,
+    /// Enable O_DIRECT for io_uring writes, bypassing the kernel page cache.
+    /// Unaligned writes fall back to regular pwritev. Default: false.
+    #[serde(default)]
+    pub io_uring_direct_io: bool,
+    /// Minimum number of file segments to batch before using io_uring.
+    /// Below this threshold, pwritev may be cheaper. Default: 4.
+    #[serde(default = "default_io_uring_batch_threshold")]
+    pub io_uring_batch_threshold: usize,
     // ── Hashing & piece picking ──
     /// Number of concurrent piece hash verification threads (default: 2).
     #[serde(default = "default_hashing_threads")]
@@ -839,6 +857,9 @@ impl Default for Settings {
             disk_channel_capacity: 512,
             buffer_pool_capacity: 64 * 1024 * 1024,
             enable_mlock: cfg!(unix),
+            io_uring_sq_depth: 256,
+            io_uring_direct_io: false,
+            io_uring_batch_threshold: 4,
             // Hashing & piece picking
             hashing_threads: default_hashing_threads(),
             max_request_queue_depth: 250,
@@ -1112,6 +1133,9 @@ impl From<&Settings> for crate::disk::DiskConfig {
             buffer_pool_capacity: s.buffer_pool_capacity,
             enable_mlock: s.enable_mlock,
             lock_warn_threshold_ms: s.lock_warn_threshold_ms,
+            io_uring_sq_depth: s.io_uring_sq_depth,
+            io_uring_direct_io: s.io_uring_direct_io,
+            io_uring_batch_threshold: s.io_uring_batch_threshold,
         }
     }
 }

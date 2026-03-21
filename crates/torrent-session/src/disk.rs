@@ -166,6 +166,12 @@ pub struct DiskConfig {
     pub enable_mlock: bool,
     /// M120: Lock timing warning threshold in milliseconds (0 = disabled).
     pub lock_warn_threshold_ms: u64,
+    /// io_uring submission queue depth. Default: 256.
+    pub io_uring_sq_depth: u32,
+    /// Enable O_DIRECT for io_uring writes. Default: false.
+    pub io_uring_direct_io: bool,
+    /// Minimum segments to batch for io_uring. Default: 4.
+    pub io_uring_batch_threshold: usize,
 }
 
 impl Default for DiskConfig {
@@ -179,6 +185,9 @@ impl Default for DiskConfig {
             buffer_pool_capacity: 64 * 1024 * 1024,
             enable_mlock: cfg!(unix),
             lock_warn_threshold_ms: 50,
+            io_uring_sq_depth: 256,
+            io_uring_direct_io: false,
+            io_uring_batch_threshold: 4,
         }
     }
 }
