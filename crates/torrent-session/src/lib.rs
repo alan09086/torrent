@@ -56,6 +56,10 @@ pub(crate) mod super_seed;
 pub(crate) mod timed_lock;
 mod torrent;
 pub(crate) mod torrent_peer_handler;
+mod torrent_dispatch;
+mod torrent_peers;
+mod torrent_state;
+mod torrent_verify;
 pub(crate) mod tracker_manager;
 pub mod transport;
 pub(crate) mod url_guard;
@@ -89,5 +93,5 @@ pub use torrent::TorrentHandle;
 pub use transport::{BoxedStream, NetworkFactory, TransportListener};
 pub use types::{
     FileInfo, FileMode, FileStatus, PartialPieceInfo, PeerInfo, SessionStats, StorageFactory,
-    TorrentConfig, TorrentFlags, TorrentInfo, TorrentState, TorrentStats,
+    TorrentConfig, TorrentFlags, TorrentInfo, TorrentState, TorrentStats, TorrentSummary,
 };

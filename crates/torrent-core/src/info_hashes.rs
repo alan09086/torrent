@@ -4,12 +4,13 @@
 //! uses `InfoHashes`, which gracefully handles v1-only, v2-only, and hybrid torrents.
 
 use crate::hash::{Id20, Id32};
+use serde::Serialize;
 
 /// Holds optional v1 (SHA-1) and v2 (SHA-256) info hashes.
 ///
 /// At least one hash must be present. Used throughout the stack as the canonical
 /// way to identify a torrent regardless of protocol version.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct InfoHashes {
     /// v1 info hash (SHA-1 of the v1 info dict).
     pub v1: Option<Id20>,

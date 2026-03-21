@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::alert::{Alert, AlertKind, post_alert};
 use crate::disk::{DiskHandle, DiskJobFlags, DiskManagerHandle};
 use crate::piece_reservation::{
-    AtomicPieceStates, AvailabilitySnapshot, BlockMaps, PieceState, StealCandidates,
+    AtomicPieceStates, AvailabilitySnapshot, BlockMaps, StealCandidates,
 };
 
 use torrent_core::{
@@ -33,7 +33,6 @@ use torrent_storage::{Bitfield, ChunkTracker, MemoryStorage, TorrentStorage};
 use crate::choker::{Choker, PeerInfo as ChokerPeerInfo};
 use crate::end_game::EndGame;
 use crate::metadata::MetadataDownloader;
-use crate::peer::run_peer;
 use crate::peer_adder::{self, ConnectPeer};
 use crate::peer_scorer::PeerScorer;
 use crate::peer_state::{PeerSource, PeerState};
@@ -44,7 +43,7 @@ use crate::types::{
 };
 
 /// Shared global rate limiter bucket.
-type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
+pub(crate) type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
 
 /// Tribool result for piece hash verification in hybrid torrents.
 ///
@@ -52,7 +51,7 @@ type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
 /// verification. `NotApplicable` covers cases where verification cannot run
 /// (e.g. missing hash picker, disk error before any block is checked).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HashResult {
+pub(crate) enum HashResult {
     /// All hashes matched.
     Passed,
     /// At least one hash did not match.
@@ -66,7 +65,7 @@ enum HashResult {
 /// For each file, tries `rename` first (fast, same-filesystem), then falls
 /// back to copy + delete (cross-filesystem). Creates parent directories as
 /// needed. Returns error on the first failure.
-fn relocate_files(
+pub(crate) fn relocate_files(
     src_base: &std::path::Path,
     dst_base: &std::path::Path,
     file_paths: &[std::path::PathBuf],
@@ -109,7 +108,7 @@ fn relocate_files(
 }
 
 /// Current time as POSIX seconds (0 on clock error).
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -120,7 +119,7 @@ fn now_unix() -> i64 {
 ///
 /// Magnet links in `FetchingMetadata` state need fast peer discovery,
 /// so the initial delay is shortened from 60s to 5s.
-fn initial_dht_requery_delay(state: TorrentState) -> Duration {
+pub(crate) fn initial_dht_requery_delay(state: TorrentState) -> Duration {
     if state == TorrentState::FetchingMetadata {
         Duration::from_secs(5)
     } else {
@@ -133,7 +132,7 @@ fn initial_dht_requery_delay(state: TorrentState) -> Duration {
 /// During `FetchingMetadata`, the delay is capped at 5s regardless of
 /// responding node count. Once metadata is resolved, the adaptive
 /// scaling kicks in (1s for empty responses, linear ramp to 60s).
-fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> Duration {
+pub(crate) fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> Duration {
     if state == TorrentState::FetchingMetadata {
         Duration::from_secs(5)
     } else if responding_nodes == 0 {
@@ -150,14 +149,14 @@ fn adaptive_dht_requery_delay(state: TorrentState, responding_nodes: usize) -> D
 }
 
 /// M112: Cooldown period between holepunch attempts to the same address.
-const HOLEPUNCH_COOLDOWN: Duration = Duration::from_secs(120);
+pub(crate) const HOLEPUNCH_COOLDOWN: Duration = Duration::from_secs(120);
 
 /// M112: Maximum number of tracked holepunch cooldown entries to prevent unbounded growth.
-const HOLEPUNCH_MAX_TRACKED: usize = 256;
+pub(crate) const HOLEPUNCH_MAX_TRACKED: usize = 256;
 
 /// Returns true if the disconnect reason suggests the peer is behind NAT
 /// and a holepunch attempt might succeed.
-fn should_attempt_holepunch(reason: &str) -> bool {
+pub(crate) fn should_attempt_holepunch(reason: &str) -> bool {
     // Don't re-attempt holepunch for failures from a previous holepunch attempt
     if reason.contains("holepunch") {
         return false;
@@ -1504,21 +1503,21 @@ impl TorrentHandle {
 
 /// Pre-computed file metadata for zero-allocation piece completion checks.
 #[derive(Debug, Clone)]
-struct CachedFileEntry {
-    index: usize,
+pub(crate) struct CachedFileEntry {
+    pub(crate) index: usize,
     #[allow(dead_code)] // Used in tests; retained for future diagnostics
-    length: u64,
-    first_piece: u32,
-    last_piece: u32,
+    pub(crate) length: u64,
+    pub(crate) first_piece: u32,
+    pub(crate) last_piece: u32,
 }
 
 /// Cached file-to-piece mapping, computed once at torrent registration.
 #[derive(Debug, Clone)]
-struct CachedFileInfo {
-    entries: Vec<CachedFileEntry>,
+pub(crate) struct CachedFileInfo {
+    pub(crate) entries: Vec<CachedFileEntry>,
 }
 
-fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFileInfo {
+pub(crate) fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFileInfo {
     let piece_length = lengths.piece_length();
     let files = meta.info.files();
     let mut entries = Vec::with_capacity(files.len());
@@ -1545,272 +1544,272 @@ fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFile
 // TorrentActor — internal single-owner event loop
 // ---------------------------------------------------------------------------
 
-struct TorrentActor {
-    config: TorrentConfig,
+pub(crate) struct TorrentActor {
+    pub(crate) config: TorrentConfig,
     /// M120: Lock timing settings for hot-path diagnostics.
-    lock_timing: crate::timed_lock::LockTimingSettings,
-    info_hash: Id20,
-    our_peer_id: Id20,
-    state: TorrentState,
+    pub(crate) lock_timing: crate::timed_lock::LockTimingSettings,
+    pub(crate) info_hash: Id20,
+    pub(crate) our_peer_id: Id20,
+    pub(crate) state: TorrentState,
 
     // Disk I/O (None in magnet mode until metadata arrives)
-    disk: Option<DiskHandle>,
-    disk_manager: DiskManagerHandle,
-    chunk_tracker: Option<ChunkTracker>,
-    lengths: Option<Lengths>,
-    num_pieces: u32,
+    pub(crate) disk: Option<DiskHandle>,
+    pub(crate) disk_manager: DiskManagerHandle,
+    pub(crate) chunk_tracker: Option<ChunkTracker>,
+    pub(crate) lengths: Option<Lengths>,
+    pub(crate) num_pieces: u32,
 
     // Piece management
-    file_priorities: Vec<FilePriority>,
-    wanted_pieces: Bitfield,
-    end_game: EndGame,
+    pub(crate) file_priorities: Vec<FilePriority>,
+    pub(crate) wanted_pieces: Bitfield,
+    pub(crate) end_game: EndGame,
 
     // Streaming (M28)
-    streaming_pieces: BTreeSet<u32>,
-    time_critical_pieces: BTreeSet<u32>,
-    streaming_cursors: Vec<crate::streaming::StreamingCursor>,
-    piece_ready_tx: broadcast::Sender<u32>,
-    have_watch_tx: tokio::sync::watch::Sender<Bitfield>,
-    have_watch_rx: tokio::sync::watch::Receiver<Bitfield>,
-    stream_read_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) streaming_pieces: BTreeSet<u32>,
+    pub(crate) time_critical_pieces: BTreeSet<u32>,
+    pub(crate) streaming_cursors: Vec<crate::streaming::StreamingCursor>,
+    pub(crate) piece_ready_tx: broadcast::Sender<u32>,
+    pub(crate) have_watch_tx: tokio::sync::watch::Sender<Bitfield>,
+    pub(crate) have_watch_rx: tokio::sync::watch::Receiver<Bitfield>,
+    pub(crate) stream_read_semaphore: Arc<tokio::sync::Semaphore>,
 
     // Peer management
-    peers: HashMap<SocketAddr, PeerState>,
+    pub(crate) peers: HashMap<SocketAddr, PeerState>,
     /// Cached peer download rates for piece stealing decisions.
     /// Refreshed on each periodic tick (~1s) instead of rebuilding per block.
-    cached_peer_rates: FxHashMap<SocketAddr, f64>,
+    pub(crate) cached_peer_rates: FxHashMap<SocketAddr, f64>,
     /// Notify handle for reactive queue refill (legacy, unused in M73).
     #[allow(dead_code)]
-    refill_notify: Arc<tokio::sync::Notify>,
+    pub(crate) refill_notify: Arc<tokio::sync::Notify>,
     /// M93: Lock-free piece states (shared with peers via Arc).
-    atomic_states: Option<Arc<crate::piece_reservation::AtomicPieceStates>>,
+    pub(crate) atomic_states: Option<Arc<crate::piece_reservation::AtomicPieceStates>>,
     /// M103: Shared block-level request/received bitmaps.
-    block_maps: Option<Arc<BlockMaps>>,
+    pub(crate) block_maps: Option<Arc<BlockMaps>>,
     /// M103: Shared queue of stealable pieces.
-    steal_candidates: Option<Arc<StealCandidates>>,
+    pub(crate) steal_candidates: Option<Arc<StealCandidates>>,
     /// M120: Per-piece write guards to prevent steal/write races.
-    piece_write_guards: Option<Arc<crate::piece_reservation::PieceWriteGuards>>,
+    pub(crate) piece_write_guards: Option<Arc<crate::piece_reservation::PieceWriteGuards>>,
     /// M103: Dirty flag for reactive snapshot rebuild.
-    snapshot_dirty: bool,
+    pub(crate) snapshot_dirty: bool,
     /// M93: Current availability snapshot (shared with peers via Arc).
-    availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
+    pub(crate) availability_snapshot: Option<Arc<crate::piece_reservation::AvailabilitySnapshot>>,
     /// M93: Snapshot generation counter.
-    snapshot_generation: u64,
+    pub(crate) snapshot_generation: u64,
     /// M93: Maps piece index -> peer slab slot that owns it.
-    piece_owner: Vec<Option<u16>>,
+    pub(crate) piece_owner: Vec<Option<u16>>,
     /// M93: Arena-allocated peer tracking: slot <-> SocketAddr.
-    peer_slab: crate::piece_reservation::PeerSlab,
+    pub(crate) peer_slab: crate::piece_reservation::PeerSlab,
     /// M93: Per-piece availability count.
-    availability: Vec<u32>,
+    pub(crate) availability: Vec<u32>,
     /// M93: Priority pieces (streaming, time-critical).
-    priority_pieces: BTreeSet<u32>,
+    pub(crate) priority_pieces: BTreeSet<u32>,
     /// M93: Maximum in-flight pieces.
-    max_in_flight: usize,
+    pub(crate) max_in_flight: usize,
     /// Piece notify handle (for driver spawning).
-    reservation_notify: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) reservation_notify: Option<Arc<tokio::sync::Notify>>,
     /// M104: Per-peer exponential backoff for failed connections.
     /// Maps peer address → (earliest_retry_time, attempt_count).
     /// Shared with the peer adder task (M107).
-    connect_backoff: Arc<DashMap<SocketAddr, (std::time::Instant, u32)>>,
-    choker: Choker,
+    pub(crate) connect_backoff: Arc<DashMap<SocketAddr, (std::time::Instant, u32)>>,
+    pub(crate) choker: Choker,
     /// Per-torrent connection limit override (0 = use config.max_peers).
-    max_connections: usize,
+    pub(crate) max_connections: usize,
     /// M107: Channel sender to feed discovered peers to the adder task.
-    peer_tx: Option<mpsc::UnboundedSender<(SocketAddr, PeerSource)>>,
+    pub(crate) peer_tx: Option<mpsc::UnboundedSender<(SocketAddr, PeerSource)>>,
     /// M107: Semaphore that gates outbound+inbound peer connections.
-    peer_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) peer_semaphore: Arc<tokio::sync::Semaphore>,
     /// M107: Shared set of connected peer addresses (actor writes, adder reads).
-    peers_connected: Arc<DashMap<SocketAddr, ()>>,
+    pub(crate) peers_connected: Arc<DashMap<SocketAddr, ()>>,
     /// M107: Receiver for connect requests from the adder task.
-    connect_rx: Option<mpsc::Receiver<ConnectPeer>>,
+    pub(crate) connect_rx: Option<mpsc::Receiver<ConnectPeer>>,
 
     // Metadata (for magnet links)
-    metadata_downloader: Option<MetadataDownloader>,
+    pub(crate) metadata_downloader: Option<MetadataDownloader>,
 
     // Parsed torrent meta (for piece hash verification)
-    meta: Option<TorrentMetaV1>,
+    pub(crate) meta: Option<TorrentMetaV1>,
 
     /// M116: Pre-computed file->piece mapping for zero-alloc completion checks.
-    cached_files: Option<CachedFileInfo>,
+    pub(crate) cached_files: Option<CachedFileInfo>,
 
     // Stats
-    downloaded: u64,
-    uploaded: u64,
-    checking_progress: f32,
-    total_download: u64,
-    total_upload: u64,
-    total_failed_bytes: u64,
-    total_redundant_bytes: u64,
-    added_time: i64,
-    completed_time: i64,
-    last_download: i64,
-    last_upload: i64,
-    last_seen_complete: i64,
-    active_duration: i64,
-    finished_duration: i64,
-    seeding_duration: i64,
-    active_since: Option<std::time::Instant>,
-    state_duration_since: Option<std::time::Instant>,
+    pub(crate) downloaded: u64,
+    pub(crate) uploaded: u64,
+    pub(crate) checking_progress: f32,
+    pub(crate) total_download: u64,
+    pub(crate) total_upload: u64,
+    pub(crate) total_failed_bytes: u64,
+    pub(crate) total_redundant_bytes: u64,
+    pub(crate) added_time: i64,
+    pub(crate) completed_time: i64,
+    pub(crate) last_download: i64,
+    pub(crate) last_upload: i64,
+    pub(crate) last_seen_complete: i64,
+    pub(crate) active_duration: i64,
+    pub(crate) finished_duration: i64,
+    pub(crate) seeding_duration: i64,
+    pub(crate) active_since: Option<std::time::Instant>,
+    pub(crate) state_duration_since: Option<std::time::Instant>,
     #[allow(dead_code)] // M104: ConnectPhase removed; kept for future diagnostics
-    started_at: std::time::Instant,
-    moving_storage: bool,
-    has_incoming: bool,
-    need_save_resume: bool,
-    error: String,
-    error_file: i32,
+    pub(crate) started_at: std::time::Instant,
+    pub(crate) moving_storage: bool,
+    pub(crate) has_incoming: bool,
+    pub(crate) need_save_resume: bool,
+    pub(crate) error: String,
+    pub(crate) error_file: i32,
 
     // Channels
-    cmd_rx: mpsc::Receiver<TorrentCommand>,
-    event_tx: mpsc::Sender<PeerEvent>,
-    event_rx: mpsc::Receiver<PeerEvent>,
+    pub(crate) cmd_rx: mpsc::Receiver<TorrentCommand>,
+    pub(crate) event_tx: mpsc::Sender<PeerEvent>,
+    pub(crate) event_rx: mpsc::Receiver<PeerEvent>,
 
     // Async disk pipeline channels
-    write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
-    write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
-    verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
-    verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
+    pub(crate) write_error_rx: mpsc::Receiver<crate::disk::DiskWriteError>,
+    pub(crate) write_error_tx: mpsc::Sender<crate::disk::DiskWriteError>,
+    pub(crate) verify_result_rx: mpsc::Receiver<crate::disk::VerifyResult>,
+    pub(crate) verify_result_tx: mpsc::Sender<crate::disk::VerifyResult>,
     /// Pieces currently awaiting async verification — prevents duplicate
     /// verify tasks when end game or slow peers deliver duplicate blocks.
-    pending_verify: HashSet<u32>,
+    pub(crate) pending_verify: HashSet<u32>,
     /// Generation counter per piece — increments on release/re-reserve.
     /// Used to detect stale hash results from the HashPool (M96).
-    piece_generations: Vec<u64>,
+    pub(crate) piece_generations: Vec<u64>,
     /// Receiver for hash pool results (M96).
-    hash_result_rx: tokio::sync::mpsc::Receiver<crate::hash_pool::HashResult>,
+    pub(crate) hash_result_rx: tokio::sync::mpsc::Receiver<crate::hash_pool::HashResult>,
     /// Sender for hash pool results — cloned into DiskHandle (M96).
-    hash_result_tx: tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>,
+    pub(crate) hash_result_tx: tokio::sync::mpsc::Sender<crate::hash_pool::HashResult>,
 
     // TCP listener for incoming peer connections
-    listener: Option<Box<dyn crate::transport::TransportListener>>,
+    pub(crate) listener: Option<Box<dyn crate::transport::TransportListener>>,
 
     // uTP socket for outbound connections (shared with session, cloned)
-    utp_socket: Option<torrent_utp::UtpSocket>,
+    pub(crate) utp_socket: Option<torrent_utp::UtpSocket>,
     // IPv6 uTP socket for outbound connections to IPv6 peers
-    utp_socket_v6: Option<torrent_utp::UtpSocket>,
+    pub(crate) utp_socket_v6: Option<torrent_utp::UtpSocket>,
 
     // Tracker management
-    tracker_manager: TrackerManager,
+    pub(crate) tracker_manager: TrackerManager,
 
     // DHT handles (shared, optional)
-    dht: Option<DhtHandle>,
-    dht_v6: Option<DhtHandle>,
-    dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
-    dht_v6_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht: Option<DhtHandle>,
+    pub(crate) dht_v6: Option<DhtHandle>,
+    pub(crate) dht_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht_v6_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
     /// Consecutive times the V6 DHT returned an empty table.
     /// After 30 failures (~3s at 100ms), stop retrying to avoid log spam.
-    dht_v6_empty_count: u32,
+    pub(crate) dht_v6_empty_count: u32,
     /// Timestamp of last V6 DHT retry attempt (M97).
-    dht_v6_last_retry: Option<std::time::Instant>,
+    pub(crate) dht_v6_last_retry: Option<std::time::Instant>,
 
     // Alert system (M15)
-    alert_tx: broadcast::Sender<Alert>,
-    alert_mask: Arc<AtomicU32>,
+    pub(crate) alert_tx: broadcast::Sender<Alert>,
+    pub(crate) alert_mask: Arc<AtomicU32>,
 
     // Rate limiting (M14)
-    upload_bucket: crate::rate_limiter::TokenBucket,
-    download_bucket: crate::rate_limiter::TokenBucket,
-    global_upload_bucket: Option<SharedBucket>,
+    pub(crate) upload_bucket: crate::rate_limiter::TokenBucket,
+    pub(crate) download_bucket: crate::rate_limiter::TokenBucket,
+    pub(crate) global_upload_bucket: Option<SharedBucket>,
     #[allow(dead_code)] // M73: rate limiting deferred to M74
-    global_download_bucket: Option<SharedBucket>,
-    slot_tuner: crate::slot_tuner::SlotTuner,
-    upload_bytes_interval: u64,
+    pub(crate) global_download_bucket: Option<SharedBucket>,
+    pub(crate) slot_tuner: crate::slot_tuner::SlotTuner,
+    pub(crate) upload_bytes_interval: u64,
 
     /// Peak aggregate download rate observed (bytes/sec), for peer turnover cutoff.
-    peak_download_rate: u64,
+    pub(crate) peak_download_rate: u64,
 
     // Web seeding (M22)
-    web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
-    banned_web_seeds: HashSet<String>,
-    web_seed_in_flight: HashMap<u32, String>,
+    pub(crate) web_seeds: HashMap<String, mpsc::Sender<crate::web_seed::WebSeedCommand>>,
+    pub(crate) banned_web_seeds: HashSet<String>,
+    pub(crate) web_seed_in_flight: HashMap<u32, String>,
 
     // BEP 16 super seeding (M23)
-    super_seed: Option<crate::super_seed::SuperSeedState>,
+    pub(crate) super_seed: Option<crate::super_seed::SuperSeedState>,
     // M118: Broadcast channel for Have distribution (replaces HaveBuffer)
-    have_broadcast_tx: tokio::sync::broadcast::Sender<u32>,
+    pub(crate) have_broadcast_tx: tokio::sync::broadcast::Sender<u32>,
 
     /// M44: pieces we've suggested to each peer (avoid re-suggesting)
-    suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
+    pub(crate) suggested_to_peers: HashMap<SocketAddr, HashSet<u32>>,
 
     /// M44: pieces for which we've already sent predictive Have
-    predictive_have_sent: HashSet<u32>,
+    pub(crate) predictive_have_sent: HashSet<u32>,
 
     // Smart banning (M25)
-    ban_manager: crate::session::SharedBanManager,
-    piece_contributors: HashMap<u32, HashSet<std::net::IpAddr>>,
-    parole_pieces: HashMap<u32, crate::ban::ParoleState>,
+    pub(crate) ban_manager: crate::session::SharedBanManager,
+    pub(crate) piece_contributors: HashMap<u32, HashSet<std::net::IpAddr>>,
+    pub(crate) parole_pieces: HashMap<u32, crate::ban::ParoleState>,
 
     // IP filtering (M29)
-    ip_filter: crate::session::SharedIpFilter,
+    pub(crate) ip_filter: crate::session::SharedIpFilter,
 
     // BEP 40 peer priority (M32b)
-    external_ip: Option<std::net::IpAddr>,
+    pub(crate) external_ip: Option<std::net::IpAddr>,
 
     // Share mode (M32c): LRU tracker for in-memory piece relay.
     // Tracks which pieces are currently "live" (servable) in share mode.
     // Oldest pieces are evicted when capacity is reached.
-    share_lru: std::collections::VecDeque<u32>,
+    pub(crate) share_lru: std::collections::VecDeque<u32>,
     /// Max pieces to keep live in share mode (0 = share mode disabled).
-    share_max_pieces: usize,
+    pub(crate) share_max_pieces: usize,
 
     // Extension plugins (M32d)
-    plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
+    pub(crate) plugins: Arc<Vec<Box<dyn crate::extension::ExtensionPlugin>>>,
 
     // BEP 52 v2/hybrid support (M34-M35)
-    hash_picker: Option<torrent_core::HashPicker>,
-    version: torrent_core::TorrentVersion,
+    pub(crate) hash_picker: Option<torrent_core::HashPicker>,
+    pub(crate) version: torrent_core::TorrentVersion,
     #[allow(dead_code)] // stored for hybrid torrent re-serialization (M35 Task 5)
-    meta_v2: Option<torrent_core::TorrentMetaV2>,
+    pub(crate) meta_v2: Option<torrent_core::TorrentMetaV2>,
 
     /// Full info hashes for dual-swarm support (v1 + v2 for hybrid).
-    info_hashes: torrent_core::InfoHashes,
+    pub(crate) info_hashes: torrent_core::InfoHashes,
 
     /// Dual-swarm DHT peer receivers (v2 hash in hybrid torrents).
-    dht_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
-    dht_v6_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
+    pub(crate) dht_v6_v2_peers_rx: Option<mpsc::Receiver<Vec<SocketAddr>>>,
 
     /// BEP 53: deferred file selection from magnet `so=` parameter.
     /// Applied after metadata is received to set file priorities.
-    magnet_selected_files: Option<Vec<torrent_core::FileSelection>>,
+    pub(crate) magnet_selected_files: Option<Vec<torrent_core::FileSelection>>,
 
     /// I2P SAM session for anonymous peer connections (M41).
-    sam_session: Option<Arc<crate::i2p::SamSession>>,
+    pub(crate) sam_session: Option<Arc<crate::i2p::SamSession>>,
 
     /// Receiver for incoming I2P peer connections (M41).
-    i2p_accept_rx: Option<mpsc::Receiver<crate::i2p::SamStream>>,
+    pub(crate) i2p_accept_rx: Option<mpsc::Receiver<crate::i2p::SamStream>>,
 
     /// Counter for generating synthetic SocketAddr values for I2P peers (M41).
-    i2p_peer_counter: u32,
+    pub(crate) i2p_peer_counter: u32,
 
     /// Maps synthetic SocketAddr → I2pDestination for outbound I2P connects.
-    i2p_destinations: HashMap<SocketAddr, crate::i2p::I2pDestination>,
+    pub(crate) i2p_destinations: HashMap<SocketAddr, crate::i2p::I2pDestination>,
 
     /// SSL manager for SSL torrent certificate handling (M42).
-    ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
+    pub(crate) ssl_manager: Option<Arc<crate::ssl_manager::SslManager>>,
 
     /// Per-class rate limiting with mixed-mode (M45).
-    rate_limiter_set: crate::rate_limiter::RateLimiterSet,
+    pub(crate) rate_limiter_set: crate::rate_limiter::RateLimiterSet,
     /// Whether auto-sequential mode is currently active (hysteresis state).
-    auto_sequential_active: bool,
+    pub(crate) auto_sequential_active: bool,
     /// Network transport factory for TCP operations (M51).
-    factory: Arc<crate::transport::NetworkFactory>,
+    pub(crate) factory: Arc<crate::transport::NetworkFactory>,
     /// Shared hash pool for parallel piece verification (M96).
-    hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
+    pub(crate) hash_pool_ref: Option<std::sync::Arc<crate::hash_pool::HashPool>>,
     /// M106: Peer quality scorer for churn decisions.
-    scorer: PeerScorer,
+    pub(crate) scorer: PeerScorer,
     /// M107: Last DHT re-query response count (for adaptive sleep).
-    dht_requery_responding_nodes: usize,
+    pub(crate) dht_requery_responding_nodes: usize,
     /// M107: Channel to signal the adder task to clear its seen set.
-    adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
+    pub(crate) adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
     /// M108: Shared snapshot of connected peer addresses for PEX send tasks.
-    live_outgoing_peers: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<SocketAddr>>>,
+    pub(crate) live_outgoing_peers: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<SocketAddr>>>,
     /// M108: Total outbound connection attempts dispatched to peer adder.
-    connect_attempts: u64,
+    pub(crate) connect_attempts: u64,
     /// M108: Total connection failures (peers that disconnected).
-    connect_failures: u64,
+    pub(crate) connect_failures: u64,
     /// M112: Tracks recent holepunch attempts to prevent retry storms.
-    holepunch_cooldowns: HashMap<SocketAddr, Instant>,
+    pub(crate) holepunch_cooldowns: HashMap<SocketAddr, Instant>,
     /// M112: Buffer for holepunch attempts (disconnect_peer is sync, try_holepunch is async).
-    holepunch_pending: Vec<SocketAddr>,
+    pub(crate) holepunch_pending: Vec<SocketAddr>,
 }
 
 /// Maximum number of in-flight end-game requests per peer.
@@ -1819,96 +1818,11 @@ struct TorrentActor {
 /// End-game pipeline depth: match normal mode (128 slots per peer).
 /// Safe because the reactive per-block cascade was replaced with a 200ms
 /// batch refill tick — raising depth no longer amplifies picker invocations.
-const END_GAME_DEPTH: usize = 128;
+pub(crate) const END_GAME_DEPTH: usize = 128;
 
 /// Minimum free pipeline slots before invoking the full piece picker in
 /// `handle_piece_data()`.  Avoids running the 5-layer picker on every single
 impl TorrentActor {
-    /// Returns the effective maximum connection count for this torrent.
-    ///
-    /// If `max_connections > 0`, use that override; otherwise fall back to `config.max_peers`.
-    fn effective_max_connections(&self) -> usize {
-        if self.max_connections > 0 {
-            self.max_connections
-        } else {
-            self.config.max_peers
-        }
-    }
-
-    /// Transition to a new state, firing a StateChanged alert if different.
-    fn transition_state(&mut self, new_state: TorrentState) {
-        let prev = self.state;
-        if prev == new_state {
-            return;
-        }
-
-        let now = std::time::Instant::now();
-
-        // Accumulate durations for the state we're LEAVING
-        if let Some(since) = self.state_duration_since {
-            let elapsed = now.duration_since(since).as_secs() as i64;
-            match prev {
-                TorrentState::Seeding => {
-                    self.seeding_duration += elapsed;
-                    self.finished_duration += elapsed;
-                }
-                TorrentState::Complete => {
-                    self.finished_duration += elapsed;
-                }
-                _ => {}
-            }
-        }
-
-        // Handle active_duration on pause transitions
-        if new_state == TorrentState::Paused {
-            // Entering paused: accumulate active time and clear timer
-            if let Some(since) = self.active_since {
-                self.active_duration += now.duration_since(since).as_secs() as i64;
-            }
-            self.active_since = None;
-        } else if prev == TorrentState::Paused {
-            // Leaving paused: restart active timer
-            self.active_since = Some(now);
-        }
-
-        // Track first completion
-        if matches!(new_state, TorrentState::Complete | TorrentState::Seeding)
-            && !matches!(prev, TorrentState::Complete | TorrentState::Seeding)
-            && self.completed_time == 0
-        {
-            self.completed_time = now_unix();
-        }
-
-        // Update state duration tracking
-        self.state_duration_since = Some(now);
-        self.need_save_resume = true;
-
-        self.state = new_state;
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::StateChanged {
-                info_hash: self.info_hash,
-                prev_state: prev,
-                new_state,
-            },
-        );
-    }
-
-    /// Count connected peers by transport type.
-    fn transport_peer_counts(&self) -> (usize, usize) {
-        let mut tcp = 0;
-        let mut utp = 0;
-        for peer in self.peers.values() {
-            match peer.transport {
-                Some(crate::rate_limiter::PeerTransport::Tcp) => tcp += 1,
-                Some(crate::rate_limiter::PeerTransport::Utp) => utp += 1,
-                None => {}
-            }
-        }
-        (tcp, utp)
-    }
-
     /// Main event loop.
     async fn run(mut self) {
         // Verify existing pieces on startup (resume support)
@@ -2718,262 +2632,10 @@ impl TorrentActor {
 
     // ----- Command handlers -----
 
-    /// M107: Feed discovered peers into the adder task channel.
-    /// All filtering (ban, IP filter, dedup, backoff) is handled by the adder task.
-    fn handle_add_peers(&mut self, peers: Vec<SocketAddr>, source: PeerSource) {
-        if let Some(ref tx) = self.peer_tx {
-            for addr in peers {
-                let _ = tx.send((addr, source));
-            }
-        }
-    }
-
-    /// Handle MoveStorage: relocate data files, re-register storage.
-    async fn handle_move_storage(&mut self, new_path: std::path::PathBuf) -> crate::Result<()> {
-        self.moving_storage = true;
-
-        let meta = match self.meta.as_ref() {
-            Some(m) => m,
-            None => {
-                self.moving_storage = false;
-                return Err(crate::Error::Config(
-                    "cannot move storage: metadata not available".into(),
-                ));
-            }
-        };
-
-        let file_paths: Vec<std::path::PathBuf> = meta
-            .info
-            .files()
-            .iter()
-            .map(|f| f.path.iter().collect::<std::path::PathBuf>())
-            .collect();
-        let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
-        // files() already includes the torrent name as the first path component,
-        // so src/dst base is just the download directory — no extra join with name.
-        let src_base = self.config.download_dir.clone();
-        let dst_base = new_path.clone();
-
-        // Relocate files on a blocking thread to avoid starving the async runtime
-        let src = src_base.clone();
-        let dst = dst_base.clone();
-        let paths = file_paths.clone();
-        let result = tokio::task::spawn_blocking(move || relocate_files(&src, &dst, &paths))
-            .await
-            .map_err(|e| crate::Error::Io(std::io::Error::other(e)))
-            .and_then(|r| r.map_err(crate::Error::Io));
-        if let Err(e) = result {
-            self.moving_storage = false;
-            return Err(e);
-        }
-
-        // Unregister old storage
-        self.disk_manager.unregister_torrent(self.info_hash).await;
-
-        // Create new storage at destination
-        let lengths = match self.lengths.clone() {
-            Some(l) => l,
-            None => {
-                self.moving_storage = false;
-                return Err(crate::Error::Config("lengths not available".into()));
-            }
-        };
-        let prealloc_mode = self.config.preallocate_mode.unwrap_or_else(|| {
-            torrent_storage::PreallocateMode::from(
-                self.config.storage_mode == torrent_core::StorageMode::Full,
-            )
-        });
-        let storage: Arc<dyn TorrentStorage> = match torrent_storage::FilesystemStorage::new(
-            &new_path,
-            file_paths,
-            file_lengths,
-            lengths,
-            Some(&self.file_priorities),
-            prealloc_mode,
-        ) {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                self.moving_storage = false;
-                return Err(e.into());
-            }
-        };
-
-        // Re-register with disk manager
-        self.disk = Some(
-            self.disk_manager
-                .register_torrent(self.info_hash, storage)
-                .await,
-        );
-
-        // Update download dir
-        self.config.download_dir = new_path.clone();
-
-        // Fire alert
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::StorageMoved {
-                info_hash: self.info_hash,
-                new_path,
-            },
-        );
-
-        self.moving_storage = false;
-        Ok(())
-    }
-
-    /// Handle RenameFile: rename a single file within the torrent on disk.
-    async fn handle_rename_file(
-        &mut self,
-        file_index: usize,
-        new_name: String,
-    ) -> crate::Result<()> {
-        let meta = match self.meta.as_ref() {
-            Some(m) => m,
-            None => {
-                return Err(crate::Error::Config(
-                    "cannot rename file: metadata not available".into(),
-                ));
-            }
-        };
-
-        let files = meta.info.files();
-        if file_index >= files.len() {
-            return Err(crate::Error::Config(format!(
-                "file index {file_index} out of range (torrent has {} files)",
-                files.len()
-            )));
-        }
-
-        // Compute the old relative path (files() includes torrent name as first component)
-        let old_rel: std::path::PathBuf = files[file_index].path.iter().collect();
-        let old_path = self.config.download_dir.join(&old_rel);
-
-        // Build new relative path: same parent directory, new filename
-        let new_rel = if let Some(parent) = old_rel.parent() {
-            parent.join(&new_name)
-        } else {
-            std::path::PathBuf::from(&new_name)
-        };
-        let new_path = self.config.download_dir.join(&new_rel);
-
-        // Perform the rename on a blocking thread
-        let src = old_path.clone();
-        let dst = new_path.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::rename(&src, &dst)
-        })
-        .await
-        .map_err(|e| crate::Error::Io(std::io::Error::other(e)))
-        .and_then(|r| r.map_err(crate::Error::Io))?;
-
-        // Fire FileRenamed alert
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::FileRenamed {
-                info_hash: self.info_hash,
-                index: file_index,
-                new_path: new_path.clone(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Check if the just-completed piece finishes any file, and fire FileCompleted alerts.
-    ///
-    /// M116: Uses pre-computed `cached_files` mapping instead of allocating
-    /// `meta.info.files()` on every verified piece.
-    fn check_file_completion(&self, piece_index: u32) {
-        let cached = match self.cached_files.as_ref() {
-            Some(c) => c,
-            None => return,
-        };
-        let bitfield = match self.chunk_tracker.as_ref() {
-            Some(ct) => ct.bitfield(),
-            None => return,
-        };
-
-        for entry in &cached.entries {
-            // Skip files that don't contain this piece
-            if piece_index < entry.first_piece || piece_index > entry.last_piece {
-                continue;
-            }
-
-            // Check if ALL pieces for this file are complete
-            let all_complete = (entry.first_piece..=entry.last_piece).all(|p| bitfield.get(p));
-
-            if all_complete {
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::FileCompleted {
-                        info_hash: self.info_hash,
-                        file_index: entry.index,
-                    },
-                );
-            }
-        }
-    }
-
-    /// Compute download progress metrics.
-    ///
-    /// Returns `(total, total_done, total_wanted, total_wanted_done, progress, progress_ppm)`.
-    fn compute_progress(&self) -> (u64, u64, u64, u64, f32, u32) {
-        let lengths = match &self.lengths {
-            Some(l) => l,
-            None => return (0, 0, 0, 0, 0.0, 0),
-        };
-
-        let total = lengths.total_length();
-
-        let bitfield = self.chunk_tracker.as_ref().map(|ct| ct.bitfield());
-
-        let mut total_done: u64 = 0;
-        let mut total_wanted: u64 = 0;
-        let mut total_wanted_done: u64 = 0;
-
-        for idx in 0..self.num_pieces {
-            let piece_bytes = lengths.piece_size(idx) as u64;
-            let have = bitfield.as_ref().map(|bf| bf.get(idx)).unwrap_or(false);
-
-            if have {
-                total_done += piece_bytes;
-            }
-
-            if self.wanted_pieces.get(idx) {
-                total_wanted += piece_bytes;
-                if have {
-                    total_wanted_done += piece_bytes;
-                }
-            }
-        }
-
-        let progress = if total_wanted == 0 {
-            1.0
-        } else {
-            total_wanted_done as f32 / total_wanted as f32
-        };
-        let progress_ppm = (progress * 1_000_000.0) as u32;
-
-        (
-            total,
-            total_done,
-            total_wanted,
-            total_wanted_done,
-            progress,
-            progress_ppm,
-        )
-    }
-
     /// Compute distributed copy availability across the swarm.
     ///
     /// Returns `(full_copies, fraction, copies_float)` where `fraction` is in thousandths.
-    fn distributed_copies(&self) -> (u32, u32, f32) {
+    pub(crate) fn distributed_copies(&self) -> (u32, u32, f32) {
         if self.num_pieces == 0 || self.peers.is_empty() {
             return (0, 0, 0.0);
         }
@@ -2995,37 +2657,6 @@ impl TorrentActor {
         let copies_float = min_avail as f32 + fraction as f32 / 1000.0;
 
         (min_avail, fraction, copies_float)
-    }
-
-    fn build_peer_info(&self) -> Vec<PeerInfo> {
-        self.peers
-            .values()
-            .map(|peer| {
-                let client = peer
-                    .ext_handshake
-                    .as_ref()
-                    .and_then(|h| h.v.clone())
-                    .unwrap_or_default();
-                PeerInfo {
-                    addr: peer.addr,
-                    client,
-                    peer_choking: peer.peer_choking,
-                    peer_interested: peer.peer_interested,
-                    am_choking: peer.am_choking,
-                    am_interested: peer.am_interested,
-                    download_rate: peer.download_rate,
-                    upload_rate: peer.upload_rate,
-                    num_pieces: peer.bitfield.count_ones(),
-                    source: peer.source,
-                    supports_fast: peer.supports_fast,
-                    upload_only: peer.upload_only,
-                    snubbed: peer.snubbed,
-                    connected_duration_secs: peer.connected_at.elapsed().as_secs(),
-                    num_pending_requests: peer.pending_requests.len(),
-                    num_incoming_requests: peer.incoming_requests.len(),
-                }
-            })
-            .collect()
     }
 
     fn build_download_queue(&self) -> Vec<PartialPieceInfo> {
@@ -3289,86 +2920,6 @@ impl TorrentActor {
         disk.flush_cache().await.map_err(crate::Error::Storage)
     }
 
-    /// Clear the error state. If the torrent was paused and had an error, resume it.
-    async fn handle_clear_error(&mut self) {
-        let had_error = !self.error.is_empty();
-        self.error = String::new();
-        self.error_file = -1;
-        // If we were paused and had an error, resume
-        if had_error && self.state == TorrentState::Paused {
-            self.handle_resume().await;
-        }
-    }
-
-    /// Build per-file status based on the current torrent state.
-    fn build_file_status(&self) -> Vec<crate::types::FileStatus> {
-        let num_files = self.file_priorities.len();
-        let (open, mode) = match self.state {
-            TorrentState::Seeding => (true, crate::types::FileMode::ReadOnly),
-            TorrentState::Downloading
-            | TorrentState::Checking
-            | TorrentState::FetchingMetadata
-            | TorrentState::Complete
-            | TorrentState::Sharing => (true, crate::types::FileMode::ReadWrite),
-            TorrentState::Paused | TorrentState::Stopped => (false, crate::types::FileMode::Closed),
-        };
-        vec![crate::types::FileStatus { open, mode }; num_files]
-    }
-
-    /// Build the current TorrentFlags from actor state.
-    fn build_flags(&self) -> crate::types::TorrentFlags {
-        let mut flags = crate::types::TorrentFlags::empty();
-        if self.state == TorrentState::Paused {
-            flags |= crate::types::TorrentFlags::PAUSED;
-        }
-        // auto_managed is session-level; torrent actor doesn't track it.
-        // We leave AUTO_MANAGED unset at the torrent level.
-        if self.config.sequential_download {
-            flags |= crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD;
-        }
-        if self.config.super_seeding {
-            flags |= crate::types::TorrentFlags::SUPER_SEEDING;
-        }
-        if self.state == TorrentState::Seeding || matches!(self.state, TorrentState::Complete) {
-            flags |= crate::types::TorrentFlags::UPLOAD_ONLY;
-        }
-        flags
-    }
-
-    /// Apply set_flags: enable the specified flags.
-    async fn apply_set_flags(&mut self, flags: crate::types::TorrentFlags) {
-        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state != TorrentState::Paused
-        {
-            self.handle_pause().await;
-        }
-        if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
-            self.config.sequential_download = true;
-        }
-        if flags.contains(crate::types::TorrentFlags::SUPER_SEEDING) {
-            self.config.super_seeding = true;
-            if self.super_seed.is_none() {
-                self.super_seed = Some(crate::super_seed::SuperSeedState::new());
-            }
-        }
-        // AUTO_MANAGED and UPLOAD_ONLY are session-level; no-op at torrent level.
-    }
-
-    /// Apply unset_flags: disable the specified flags.
-    async fn apply_unset_flags(&mut self, flags: crate::types::TorrentFlags) {
-        if flags.contains(crate::types::TorrentFlags::PAUSED) && self.state == TorrentState::Paused
-        {
-            self.handle_resume().await;
-        }
-        if flags.contains(crate::types::TorrentFlags::SEQUENTIAL_DOWNLOAD) {
-            self.config.sequential_download = false;
-        }
-        if flags.contains(crate::types::TorrentFlags::SUPER_SEEDING) {
-            self.config.super_seeding = false;
-            self.super_seed = None;
-        }
-        // AUTO_MANAGED and UPLOAD_ONLY are session-level; no-op at torrent level.
-    }
-
     /// Immediately initiate a connection to the given peer address.
     fn handle_connect_peer(&mut self, addr: SocketAddr) {
         // Skip if already connected
@@ -3381,207 +2932,8 @@ impl TorrentActor {
         }
     }
 
-    fn make_stats(&self) -> TorrentStats {
-        // ── Single pass over peers ──
-        let mut num_seeds = 0usize;
-        let mut num_uploads = 0usize;
-        let mut download_rate_sum: u64 = 0;
-        let mut upload_rate_sum: u64 = 0;
-        let mut peers_by_source = std::collections::HashMap::new();
-
-        for peer in self.peers.values() {
-            *peers_by_source.entry(peer.source).or_insert(0) += 1;
-            download_rate_sum += peer.download_rate;
-            upload_rate_sum += peer.upload_rate;
-            if self.num_pieces > 0 && peer.bitfield.count_ones() == self.num_pieces {
-                num_seeds += 1;
-            }
-            if !peer.am_choking {
-                num_uploads += 1;
-            }
-        }
-
-        // ── Tracker info (scrape data + current tracker) ──
-        let tracker_list = self.tracker_manager.tracker_list();
-        let mut num_complete: i32 = -1;
-        let mut num_incomplete: i32 = -1;
-        let mut current_tracker = String::new();
-
-        for ti in &tracker_list {
-            if num_complete == -1
-                && let Some(s) = ti.seeders
-            {
-                num_complete = s as i32;
-            }
-            if num_incomplete == -1
-                && let Some(l) = ti.leechers
-            {
-                num_incomplete = l as i32;
-            }
-            if current_tracker.is_empty()
-                && matches!(ti.status, crate::tracker_manager::TrackerStatus::Working)
-            {
-                current_tracker = ti.url.clone();
-            }
-        }
-
-        // ── Progress ──
-        let pieces_have = self
-            .chunk_tracker
-            .as_ref()
-            .map(|ct| ct.bitfield().count_ones())
-            .unwrap_or(0);
-        let (total, total_done, total_wanted, total_wanted_done, progress, progress_ppm) =
-            self.compute_progress();
-
-        // ── Distributed copies ──
-        let (distributed_full_copies, distributed_fraction, distributed_copies) =
-            self.distributed_copies();
-
-        // ── Active duration (include current active stint) ──
-        let active_duration = self.active_duration
-            + self
-                .active_since
-                .map(|since| since.elapsed().as_secs() as i64)
-                .unwrap_or(0);
-
-        // ── Finished duration (include current stint if Complete or Seeding) ──
-        let finished_duration = self.finished_duration
-            + self
-                .state_duration_since
-                .filter(|_| matches!(self.state, TorrentState::Complete | TorrentState::Seeding))
-                .map(|since| since.elapsed().as_secs() as i64)
-                .unwrap_or(0);
-
-        // ── Seeding duration (include current stint if Seeding) ──
-        let seeding_duration = self.seeding_duration
-            + self
-                .state_duration_since
-                .filter(|_| self.state == TorrentState::Seeding)
-                .map(|since| since.elapsed().as_secs() as i64)
-                .unwrap_or(0);
-
-        // ── Name ──
-        let name = self
-            .meta
-            .as_ref()
-            .map(|m| m.info.name.clone())
-            .unwrap_or_default();
-
-        // ── Block size ──
-        let block_size = self
-            .lengths
-            .as_ref()
-            .map(|l| l.chunk_size())
-            .unwrap_or(16384);
-
-        TorrentStats {
-            // ── Original 9 fields (unchanged) ──
-            state: self.state,
-            downloaded: self.downloaded,
-            uploaded: self.uploaded,
-            pieces_have,
-            pieces_total: self.num_pieces,
-            peers_connected: self.peers.len(),
-            peers_available: 0, // M107: discovery pool is in adder task channel
-            checking_progress: self.checking_progress,
-            peers_by_source,
-
-            // ── Identity ──
-            info_hashes: self.info_hashes.clone(),
-            name,
-
-            // ── State flags ──
-            has_metadata: self.meta.is_some(),
-            is_seeding: self.state == TorrentState::Seeding,
-            is_finished: matches!(self.state, TorrentState::Complete | TorrentState::Seeding),
-            is_paused: self.state == TorrentState::Paused,
-            auto_managed: false, // session fills this
-            sequential_download: self.config.sequential_download,
-            super_seeding: self.config.super_seeding,
-            has_incoming: self.has_incoming,
-            need_save_resume: self.need_save_resume,
-            moving_storage: self.moving_storage,
-
-            // ── Progress ──
-            progress,
-            progress_ppm,
-            total_done,
-            total,
-            total_wanted_done,
-            total_wanted,
-            block_size,
-
-            // ── Transfer (session counters) ──
-            total_download: self.total_download,
-            total_upload: self.total_upload,
-            total_payload_download: self.downloaded,
-            total_payload_upload: self.uploaded,
-            total_failed_bytes: self.total_failed_bytes,
-            total_redundant_bytes: self.total_redundant_bytes,
-
-            // ── Transfer (all-time = session for now, no persistence yet) ──
-            all_time_download: self.total_download,
-            all_time_upload: self.total_upload,
-
-            // ── Rates ──
-            download_rate: download_rate_sum,
-            upload_rate: upload_rate_sum,
-            download_payload_rate: download_rate_sum,
-            upload_payload_rate: upload_rate_sum,
-
-            // ── Connection details ──
-            num_peers: self.peers.len(),
-            num_seeds,
-            num_complete,
-            num_incomplete,
-            list_seeds: num_seeds,
-            list_peers: self.peers.len(), // M107: discovery pool is in adder task
-            connect_candidates: 0,        // M107: discovery pool is in adder task
-            num_connections: self.peers.len(),
-            num_uploads,
-
-            // ── Limits ──
-            connections_limit: self.effective_max_connections(),
-            uploads_limit: self.choker.unchoke_slots(),
-
-            // ── Distributed copies ──
-            distributed_full_copies,
-            distributed_fraction,
-            distributed_copies,
-
-            // ── Tracker ──
-            current_tracker,
-            announcing_to_trackers: !tracker_list.is_empty(),
-            announcing_to_lsd: false, // LSD not yet implemented
-            announcing_to_dht: self.dht_peers_rx.is_some(),
-
-            // ── Timestamps ──
-            added_time: self.added_time,
-            completed_time: self.completed_time,
-            last_seen_complete: self.last_seen_complete,
-            last_upload: self.last_upload,
-            last_download: self.last_download,
-
-            // ── Durations ──
-            active_duration,
-            finished_duration,
-            seeding_duration,
-
-            // ── Storage ──
-            save_path: self.config.download_dir.to_string_lossy().into_owned(),
-
-            // ── Queue (session fills this) ──
-            queue_position: -1,
-
-            // ── Error ──
-            error: self.error.clone(),
-            error_file: self.error_file,
-        }
-    }
-
     /// Fire TrackerReply / TrackerError alerts from announce outcomes.
-    fn fire_tracker_alerts(&self, outcomes: &[crate::tracker_manager::TrackerOutcome]) {
+    pub(crate) fn fire_tracker_alerts(&self, outcomes: &[crate::tracker_manager::TrackerOutcome]) {
         for outcome in outcomes {
             match &outcome.result {
                 Ok(num_peers) => {
@@ -3611,7 +2963,7 @@ impl TorrentActor {
     }
 
     /// Calculate bytes remaining for tracker announce.
-    fn calculate_left(&self) -> u64 {
+    pub(crate) fn calculate_left(&self) -> u64 {
         match (&self.meta, &self.chunk_tracker) {
             (Some(meta), Some(ct)) => {
                 let total = meta.info.total_length();
@@ -3627,7 +2979,7 @@ impl TorrentActor {
         }
     }
 
-    async fn shutdown_peers(&mut self) {
+    pub(crate) async fn shutdown_peers(&mut self) {
         // Best-effort announce Stopped to trackers (with timeout to prevent hang)
         let left = self.calculate_left();
         let _ = tokio::time::timeout(
@@ -3643,439 +2995,9 @@ impl TorrentActor {
         }
     }
 
-    async fn handle_pause(&mut self) {
-        if self.state == TorrentState::Paused || self.state == TorrentState::Stopped {
-            return;
-        }
-        let prev_state = self.state;
-        self.transition_state(TorrentState::Paused);
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::TorrentPaused {
-                info_hash: self.info_hash,
-            },
-        );
-        // Disconnect all peers (non-blocking — peer may already be dead)
-        for peer in self.peers.values() {
-            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-        }
-        self.peers.clear();
-        // Announce Stopped to trackers (with timeout to prevent hang)
-        if prev_state == TorrentState::Downloading
-            || prev_state == TorrentState::Seeding
-            || prev_state == TorrentState::Complete
-        {
-            let left = self.calculate_left();
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                self.tracker_manager
-                    .announce_stopped(self.uploaded, self.downloaded, left),
-            )
-            .await;
-        }
-    }
-
-    async fn handle_resume(&mut self) {
-        if self.state != TorrentState::Paused {
-            return;
-        }
-        // Determine appropriate state
-        if self.config.share_mode {
-            self.transition_state(TorrentState::Sharing);
-        } else if let Some(ref ct) = self.chunk_tracker
-            && ct.bitfield().count_ones() == self.num_pieces
-        {
-            self.transition_state(TorrentState::Seeding);
-            self.choker.set_seed_mode(true);
-        } else {
-            self.transition_state(TorrentState::Downloading);
-            self.scorer.start_download();
-            self.choker.set_seed_mode(false);
-        }
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::TorrentResumed {
-                info_hash: self.info_hash,
-            },
-        );
-        // Re-announce Started
-        let left = self.calculate_left();
-        let result = self
-            .tracker_manager
-            .announce(
-                torrent_tracker::AnnounceEvent::Started,
-                self.uploaded,
-                self.downloaded,
-                left,
-            )
-            .await;
-        self.fire_tracker_alerts(&result.outcomes);
-        if !result.peers.is_empty() {
-            self.handle_add_peers(result.peers, PeerSource::Tracker);
-        }
-    }
-
     // ----- Event handlers -----
 
-    async fn handle_peer_event(&mut self, event: PeerEvent) {
-        match event {
-            PeerEvent::Bitfield {
-                peer_addr,
-                bitfield,
-            } => {
-                let ones = bitfield.count_ones();
-                let is_choking = self
-                    .peers
-                    .get(&peer_addr)
-                    .map(|p| p.peer_choking)
-                    .unwrap_or(true);
-                debug!(%peer_addr, ones, is_choking, state = ?self.state, "bitfield event received");
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.bitfield = bitfield;
-                    if self.num_pieces > 0 && peer.bitfield.count_ones() == self.num_pieces {
-                        self.last_seen_complete = now_unix();
-                    }
-                }
-                // M93: Update availability from peer bitfield
-                if let Some(peer) = self.peers.get(&peer_addr) {
-                    for piece in 0..self.num_pieces {
-                        if peer.bitfield.get(piece) {
-                            self.availability[piece as usize] += 1;
-                        }
-                    }
-                    let _slot = self.peer_slab.insert(peer_addr);
-                    self.recalc_max_in_flight();
-                    self.mark_snapshot_dirty();
-                }
-                // M75: Peer-integrated dispatch — no driver spawn needed here.
-                // The peer task's requester arm activates when unchoked + has reservation state.
-                // BEP 16: assign a piece in super-seed mode
-                self.assign_next_piece_for_peer(peer_addr).await;
-                // Check if we're interested in this peer
-                self.maybe_express_interest(peer_addr).await;
-            }
-            PeerEvent::Have { peer_addr, index } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr)
-                    && !peer.bitfield.get(index)
-                {
-                    peer.bitfield.set(index);
-                    // M93: Update availability for this piece
-                    if (index as usize) < self.availability.len() {
-                        self.availability[index as usize] += 1;
-                    }
-                    // M103: Mark snapshot dirty for reactive rebuild
-                    self.mark_snapshot_dirty();
-                }
-                // BEP 16: Have-back detection in super-seed mode
-                if let Some(ref mut ss) = self.super_seed
-                    && ss.peer_reported_have(peer_addr, index)
-                {
-                    self.assign_next_piece_for_peer(peer_addr).await;
-                }
-                self.maybe_express_interest(peer_addr).await;
-            }
-            PeerEvent::PieceData {
-                peer_addr,
-                index,
-                begin,
-                data,
-            } => {
-                self.handle_piece_data(peer_addr, index, begin, data).await;
-            }
-            PeerEvent::PeerChoking { peer_addr, choking } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.peer_choking = choking;
-                }
-                // M75: Peer-integrated dispatch — unchoke/choke tracked locally
-                // in the peer task via message interception. No driver to spawn/cancel.
-                // The peer task handles release_peer_pieces on choke.
-            }
-            PeerEvent::PeerInterested {
-                peer_addr,
-                interested,
-            } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.peer_interested = interested;
-                }
-            }
-            PeerEvent::ExtHandshake {
-                peer_addr,
-                handshake,
-            } => {
-                // In FetchingMetadata mode, if we learn the metadata_size, start requesting.
-                // M107: Request ALL missing pieces from this peer (full redundancy —
-                // every peer gets all pieces, first complete set wins).
-                if self.state == TorrentState::FetchingMetadata
-                    && let Some(size) = handshake.metadata_size
-                    && let Some(ref mut dl) = self.metadata_downloader
-                {
-                    if size > self.config.max_metadata_size {
-                        warn!(
-                            size,
-                            max = self.config.max_metadata_size,
-                            %peer_addr,
-                            "peer advertises metadata_size exceeding limit, ignoring"
-                        );
-                    } else {
-                        dl.set_total_size(size);
-                        let pieces = dl.request_all_from_peer(peer_addr);
-                        if let Some(peer) = self.peers.get(&peer_addr) {
-                            for piece in pieces {
-                                let _ = peer
-                                    .cmd_tx
-                                    .send(PeerCommand::RequestMetadata { piece })
-                                    .await;
-                            }
-                        }
-                    }
-                }
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    // BEP 21: mark upload-only peers
-                    peer.upload_only = handshake.is_upload_only();
-                    // BEP 55: detect holepunch support
-                    peer.supports_holepunch = handshake.ext_id("ut_holepunch").is_some();
-                    peer.appears_nated = peer.source != PeerSource::Incoming;
-                    peer.ext_handshake = Some(handshake);
-                }
-                // M108: Spawn PEX send task if peer supports ut_pex and PEX is enabled
-                if self.config.enable_pex
-                    && let Some(peer) = self.peers.get(&peer_addr)
-                    && let Some(ref hs) = peer.ext_handshake
-                    && hs.ext_id("ut_pex").is_some()
-                {
-                    let recipient_is_i2p = is_i2p_synthetic_addr(&peer_addr);
-                    tokio::spawn(crate::pex::pex_send_task(
-                        peer_addr,
-                        peer.cmd_tx.clone(),
-                        std::sync::Arc::clone(&self.live_outgoing_peers),
-                        self.config.allow_i2p_mixed,
-                        recipient_is_i2p,
-                    ));
-                }
-            }
-            PeerEvent::MetadataPiece {
-                peer_addr: _,
-                piece,
-                data,
-                total_size,
-            } => {
-                if let Some(ref mut dl) = self.metadata_downloader {
-                    dl.set_total_size(total_size);
-                    let complete = dl.piece_received(piece, data);
-                    if complete {
-                        self.try_assemble_metadata().await;
-                    }
-                }
-            }
-            PeerEvent::MetadataReject { peer_addr, piece } => {
-                if let Some(ref mut dl) = self.metadata_downloader {
-                    dl.mark_rejected(peer_addr);
-                    debug!(%peer_addr, piece, "peer rejected metadata request, blacklisted");
-                }
-            }
-            PeerEvent::PexPeers { new_peers } => {
-                if self.config.enable_pex {
-                    self.handle_add_peers(new_peers, PeerSource::Pex);
-                }
-            }
-            PeerEvent::TrackersReceived { tracker_urls } => {
-                for url in tracker_urls {
-                    if self
-                        .tracker_manager
-                        .add_tracker_url_validated(&url, &self.config.url_security)
-                    {
-                        debug!(url = %url, "added tracker from lt_trackers");
-                    }
-                }
-            }
-            PeerEvent::IncomingRequest {
-                peer_addr,
-                index,
-                begin,
-                length,
-            } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    if peer.incoming_requests.len() < self.config.max_outstanding_requests {
-                        peer.incoming_requests.push((index, begin, length));
-                    } else {
-                        debug!(
-                            %peer_addr,
-                            queue = peer.incoming_requests.len(),
-                            "dropping incoming request: max_outstanding_requests exceeded"
-                        );
-                    }
-                }
-                self.serve_incoming_requests().await;
-            }
-            PeerEvent::RejectRequest {
-                peer_addr,
-                index,
-                begin,
-                length: _,
-            } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.pending_requests.remove(index, begin);
-                    // M75: Permit returned by peer task on RejectRequest receipt
-                }
-                debug!(index, %peer_addr, "request rejected by peer");
-            }
-            PeerEvent::AllowedFast { peer_addr, index } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.allowed_fast.insert(index);
-                }
-            }
-            PeerEvent::SuggestPiece { peer_addr, index } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.suggested_pieces.insert(index);
-                }
-            }
-            PeerEvent::TransportIdentified {
-                peer_addr,
-                transport,
-            } => {
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    peer.transport = Some(transport);
-                }
-            }
-            PeerEvent::Disconnected { peer_addr, reason } => {
-                debug!(%peer_addr, ?reason, "peer disconnected");
-                // M108: Count every disconnection for connection success rate diagnostics.
-                self.connect_failures = self.connect_failures.saturating_add(1);
-                let reason_str = reason.as_deref().unwrap_or("peer disconnected");
-                // M106: Use extracted disconnect helper (handles super_seed,
-                // slab, availability, shutdown, alert, suggested_to_peers).
-                self.disconnect_peer(peer_addr, reason_str);
-                self.recalc_max_in_flight();
-                self.mark_snapshot_dirty();
-                if let Some(ref notify) = self.reservation_notify {
-                    notify.notify_waiters();
-                }
-                // M104: Per-peer exponential backoff — prevent hammering failed peers
-                let attempt = self
-                    .connect_backoff
-                    .get(&peer_addr)
-                    .map_or(0, |r| r.value().1);
-                let next_attempt = attempt.saturating_add(1);
-                let delay_ms = 200u64
-                    .saturating_mul(1u64 << next_attempt.min(10))
-                    .min(30_000);
-                let earliest_retry = std::time::Instant::now() + Duration::from_millis(delay_ms);
-                self.connect_backoff
-                    .insert(peer_addr, (earliest_retry, next_attempt));
-
-                self.i2p_destinations.remove(&peer_addr);
-            }
-            PeerEvent::WebSeedPieceData { url, index, data } => {
-                self.handle_web_seed_piece_data(url, index, data).await;
-            }
-            PeerEvent::WebSeedError {
-                url,
-                piece,
-                message,
-            } => {
-                self.handle_web_seed_error(url, piece, message);
-            }
-            PeerEvent::HashesReceived {
-                peer_addr,
-                request,
-                hashes,
-            } => {
-                self.handle_hashes_received(peer_addr, request, hashes)
-                    .await;
-            }
-            PeerEvent::HashRequestRejected { peer_addr, request } => {
-                if let Some(ref mut picker) = self.hash_picker {
-                    picker.hashes_rejected(&request);
-                }
-                debug!(peer = %peer_addr, file_root = %request.file_root, "v2 hash request rejected");
-            }
-            PeerEvent::IncomingHashRequest { peer_addr, request } => {
-                self.handle_incoming_hash_request(peer_addr, request).await;
-            }
-            PeerEvent::HolepunchRendezvous { peer_addr, target } => {
-                if self.config.enable_holepunch {
-                    self.handle_holepunch_rendezvous(peer_addr, target).await;
-                }
-            }
-            PeerEvent::HolepunchConnect {
-                peer_addr: _,
-                target,
-            } => {
-                if self.config.enable_holepunch {
-                    self.handle_holepunch_connect(target).await;
-                }
-            }
-            PeerEvent::HolepunchError {
-                peer_addr: _,
-                target,
-                error_code,
-            } => {
-                let message = torrent_wire::HolepunchError::from_u32(error_code)
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| format!("unknown error code {error_code}"));
-                debug!(%target, %error_code, %message, "holepunch rendezvous failed");
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::HolepunchFailed {
-                        info_hash: self.info_hash,
-                        addr: target,
-                        error_code: Some(error_code),
-                        message,
-                    },
-                );
-            }
-            PeerEvent::MseRetry { peer_addr, cmd_tx } => {
-                // MSE handshake failed, peer is retrying with plaintext.
-                // Update the peer state with the new command channel.
-                // M75: No driver to cancel — peer task's cmd_rx will be the new one.
-                // Re-send StartRequesting to the new cmd_tx so the peer task gets
-                // the reservation state on the retry connection.
-                if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                    debug!(%peer_addr, "MSE retry: updating cmd_tx for plaintext attempt");
-                    peer.cmd_tx = cmd_tx;
-                    // M93: Re-send lock-free dispatch state to the new peer task
-                    if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
-                        &self.atomic_states,
-                        &self.availability_snapshot,
-                        &self.reservation_notify,
-                    ) && let Some(ref lengths) = self.lengths
-                    {
-                        let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                            atomic_states: Arc::clone(atomic_states),
-                            availability_snapshot: Arc::clone(snapshot),
-                            piece_notify: Arc::clone(notify),
-                            disk_handle: self.disk.clone(),
-                            write_error_tx: self.write_error_tx.clone(),
-                            lengths: lengths.clone(),
-                            block_maps: self.block_maps.clone(),
-                            steal_candidates: self.steal_candidates.clone(),
-                            piece_write_guards: self.piece_write_guards.clone(),
-                        });
-                    }
-                }
-            }
-            PeerEvent::PieceReleased { peer_addr, piece } => {
-                // M93: Actor-side piece_owner cleanup after peer released a piece
-                if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr)
-                    && self.piece_owner.get(piece as usize) == Some(&Some(slab_idx))
-                {
-                    self.piece_owner[piece as usize] = None;
-                }
-                // Snapshot will be rebuilt on next timer tick; notify waiting peers now
-                if let Some(ref notify) = self.reservation_notify {
-                    notify.notify_one();
-                }
-            }
-            PeerEvent::PieceBlocksBatch { peer_addr, blocks } => {
-                self.handle_piece_blocks_batch(peer_addr, blocks).await;
-            }
-        }
-    }
-
-    async fn handle_piece_data(
+    pub(crate) async fn handle_piece_data(
         &mut self,
         peer_addr: SocketAddr,
         index: u32,
@@ -4232,7 +3154,7 @@ impl TorrentActor {
     /// Iterates blocks, calling `process_block_completion()` for each.
     /// Piece verifications are triggered inline as pieces complete
     /// (same as the former per-block path).
-    async fn handle_piece_blocks_batch(
+    pub(crate) async fn handle_piece_blocks_batch(
         &mut self,
         peer_addr: SocketAddr,
         blocks: Vec<crate::types::BlockEntry>,
@@ -4241,493 +3163,6 @@ impl TorrentActor {
             self.process_block_completion(peer_addr, block.index, block.begin, block.length)
                 .await;
         }
-    }
-
-    /// M92: Process a single block completion — extracted from `handle_chunk_written()`.
-    /// Called once per block in a batch. Returns `true` if this block completed a piece
-    /// and piece verification was triggered.
-    ///
-    /// IMPORTANT: This is a line-for-line extraction of `handle_chunk_written()`.
-    /// Every edge case (duplicate detection, end-game cancels, v2/hybrid verification,
-    /// predictive Have, smart banning) is preserved identically.
-    async fn process_block_completion(
-        &mut self,
-        peer_addr: SocketAddr,
-        index: u32,
-        begin: u32,
-        length: u32,
-    ) -> bool {
-        // Skip duplicate blocks — in end-game mode or after timeout re-requests,
-        // the same block may arrive from multiple peers. Writing it to the store
-        // buffer would overwrite valid data that's pending verification.
-        if let Some(ref ct) = self.chunk_tracker
-            && ct.has_chunk(index, begin)
-        {
-            self.total_download += length as u64 + 13;
-            // Remove from pending_requests to free pipeline slots. Without this,
-            // the peer accumulates phantom entries from already-verified pieces
-            // and eventually has zero available pipeline slots — permanent stall.
-            if let Some(peer) = self.peers.get_mut(&peer_addr) {
-                peer.pending_requests.remove(index, begin);
-            }
-            // Remove from end-game tracker so pick_block won't return this
-            // block again. The normal path calls block_received which does
-            // this, but we skip that path for duplicates.
-            if self.end_game.is_active() {
-                self.end_game.block_received(index, begin, peer_addr);
-            }
-            // Peer task already returned its permit on direct write
-            return false;
-        }
-
-        // NOTE: No disk write here — the peer task has already written to disk.
-
-        self.downloaded += length as u64;
-        self.total_download += length as u64 + 13; // payload + message header
-        self.last_download = now_unix();
-        self.need_save_resume = true;
-
-        // M93: Track piece ownership (actor learns about peer's CAS reservation via chunk arrival)
-        if let Some(slab_idx) = self.peer_slab.slot_of(&peer_addr)
-            && self.piece_owner.get(index as usize) == Some(&None)
-        {
-            self.piece_owner[index as usize] = Some(slab_idx);
-            // M103: Add to steal queue if piece has unrequested blocks
-            if let (Some(sc), Some(bm)) = (&self.steal_candidates, &self.block_maps)
-                && let Some(lengths) = &self.lengths
-            {
-                let total_blocks = lengths.chunks_in_piece(index);
-                if bm.next_unrequested(index, total_blocks).is_some() {
-                    sc.push(index);
-                }
-            }
-        }
-
-        // Smart banning: track which peers contribute to each piece
-        self.piece_contributors
-            .entry(index)
-            .or_default()
-            .insert(peer_addr.ip());
-
-        let now = std::time::Instant::now();
-        if let Some(peer) = self.peers.get_mut(&peer_addr) {
-            peer.pending_requests.remove(index, begin);
-            peer.download_bytes_window += length as u64;
-            // M106: Capture RTT from block receipt for scoring
-            if let Some(rtt) = peer.pipeline.block_received(index, begin, length, now) {
-                let rtt_secs = rtt.as_secs_f64();
-                peer.avg_rtt = Some(crate::peer_scorer::ewma_update(
-                    peer.avg_rtt.unwrap_or(rtt_secs),
-                    rtt_secs,
-                    crate::peer_scorer::RTT_EWMA_ALPHA,
-                ));
-            }
-            peer.blocks_completed = peer.blocks_completed.saturating_add(1);
-            peer.last_data_received = Some(now);
-            // Clear snub if snubbed
-            if peer.snubbed {
-                peer.snubbed = false;
-            }
-        }
-        // M104: Clear backoff — peer sent real data, so connection is healthy
-        self.connect_backoff.remove(&peer_addr);
-
-        // End-game: cancel this block on all other peers. The 200ms end-game
-        // refill tick will re-stock freed peers — no reactive cascade needed.
-        if self.end_game.is_active() {
-            let cancels = self.end_game.block_received(index, begin, peer_addr);
-            for (cancel_addr, ci, cb, cl) in cancels {
-                if let Some(cancel_peer) = self.peers.get_mut(&cancel_addr) {
-                    let _ = cancel_peer.cmd_tx.try_send(PeerCommand::Cancel {
-                        index: ci,
-                        begin: cb,
-                        length: cl,
-                    });
-                    cancel_peer.pending_requests.remove(ci, cb);
-                }
-            }
-        }
-
-        // Track chunk completion
-        let piece_complete = if let Some(ref mut ct) = self.chunk_tracker {
-            ct.chunk_received(index, begin)
-        } else {
-            false
-        };
-
-        if piece_complete && !self.pending_verify.contains(&index) {
-            // M44/M118: Predictive piece announce — broadcast Have before verification
-            if self.config.predictive_piece_announce_ms > 0
-                && !self.predictive_have_sent.contains(&index)
-            {
-                self.predictive_have_sent.insert(index);
-                let _ = self.have_broadcast_tx.send(index);
-            }
-
-            // M100: Flush deferred writes before verification — ensures all
-            // blocks are on disk so read_piece() sees complete data.
-            if let Some(ref disk) = self.disk {
-                disk.flush_piece_writes(index).await;
-            }
-
-            match self.version {
-                torrent_core::TorrentVersion::V1Only => {
-                    // Async: fire-and-forget, result via verify_result_rx
-                    if let Some(ref disk) = self.disk
-                        && let Some(expected) = self
-                            .meta
-                            .as_ref()
-                            .and_then(|m| m.info.piece_hash(index as usize))
-                    {
-                        self.pending_verify.insert(index);
-                        let generation = self
-                            .piece_generations
-                            .get(index as usize)
-                            .copied()
-                            .unwrap_or(0);
-                        disk.enqueue_verify(index, expected, generation, &self.verify_result_tx);
-                    }
-                }
-                torrent_core::TorrentVersion::V2Only => {
-                    // Blocking: needs mutable hash_picker for Merkle tree
-                    self.verify_and_mark_piece_v2(index).await;
-                }
-                torrent_core::TorrentVersion::Hybrid => {
-                    // Blocking: needs both v1+v2 decision matrix
-                    self.verify_and_mark_piece_hybrid(index).await;
-                }
-            }
-        }
-
-        // Peer task already returned its permit on direct write.
-        // End-game dispatch still happens here.
-        if self.end_game.is_active() {
-            self.request_end_game_block(peer_addr).await;
-        }
-
-        piece_complete
-    }
-
-    async fn verify_existing_pieces(&mut self) {
-        let disk = match &self.disk {
-            Some(d) => d.clone(),
-            None => return,
-        };
-        let meta = match self.meta.clone() {
-            Some(m) => m,
-            None => return,
-        };
-
-        self.transition_state(TorrentState::Checking);
-        self.checking_progress = 0.0;
-
-        let mut verified_count = 0u32;
-        let total = self.num_pieces;
-
-        if self.version == torrent_core::TorrentVersion::V2Only {
-            // V2Only: use SHA-256 Merkle block verification (sequential, needs &mut self)
-            for piece in 0..total {
-                let result = self.run_v2_block_verification(piece).await;
-                if matches!(result, HashResult::Passed) {
-                    if let Some(ref mut ct) = self.chunk_tracker {
-                        ct.mark_verified(piece);
-                    }
-                    verified_count += 1;
-                }
-
-                self.checking_progress = (piece + 1) as f32 / total as f32;
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::CheckingProgress {
-                        info_hash: self.info_hash,
-                        progress: self.checking_progress,
-                    },
-                );
-            }
-        } else {
-            // V1Only / Hybrid: use concurrent SHA-1 piece verification
-            let max_concurrent = self.config.hashing_threads.max(1);
-            let mut checked_count = 0u32;
-            let mut in_flight = tokio::task::JoinSet::new();
-            let mut next_piece = 0u32;
-
-            // Seed the pipeline
-            while next_piece < total && in_flight.len() < max_concurrent {
-                if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
-                    let d = disk.clone();
-                    let piece = next_piece;
-                    in_flight.spawn(async move {
-                        let valid = d
-                            .verify_piece(piece, expected, DiskJobFlags::empty())
-                            .await
-                            .unwrap_or(false);
-                        (piece, valid)
-                    });
-                }
-                next_piece += 1;
-            }
-
-            // Process completions, refill pipeline
-            while let Some(result) = in_flight.join_next().await {
-                if let Ok((piece, valid)) = result {
-                    checked_count += 1;
-                    if valid {
-                        if let Some(ref mut ct) = self.chunk_tracker {
-                            ct.mark_verified(piece);
-                        }
-                        verified_count += 1;
-                    }
-
-                    // Update progress
-                    self.checking_progress = checked_count as f32 / total as f32;
-                    post_alert(
-                        &self.alert_tx,
-                        &self.alert_mask,
-                        AlertKind::CheckingProgress {
-                            info_hash: self.info_hash,
-                            progress: self.checking_progress,
-                        },
-                    );
-                }
-
-                // Refill pipeline
-                while next_piece < total && in_flight.len() < max_concurrent {
-                    if let Some(expected) = meta.info.piece_hash(next_piece as usize) {
-                        let d = disk.clone();
-                        let piece = next_piece;
-                        in_flight.spawn(async move {
-                            let valid = d
-                                .verify_piece(piece, expected, DiskJobFlags::empty())
-                                .await
-                                .unwrap_or(false);
-                            (piece, valid)
-                        });
-                    }
-                    next_piece += 1;
-                }
-            }
-        }
-
-        // Fire TorrentChecked alert
-        self.checking_progress = 0.0;
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::TorrentChecked {
-                info_hash: self.info_hash,
-                pieces_have: verified_count,
-                pieces_total: total,
-            },
-        );
-
-        if verified_count > 0 {
-            info!(verified_count, total, "resumed with existing pieces");
-        }
-
-        if self.config.share_mode {
-            self.transition_state(TorrentState::Sharing);
-        } else if verified_count == self.num_pieces {
-            self.transition_state(TorrentState::Seeding);
-            self.choker.set_seed_mode(true);
-            info!("all pieces verified, starting as seeder");
-        } else {
-            self.transition_state(TorrentState::Downloading);
-            self.scorer.start_download();
-            self.choker.set_seed_mode(false);
-        }
-
-        // Fire FileCompleted alerts for any files that are fully verified
-        self.fire_file_completed_alerts();
-    }
-
-    /// Fire FileCompleted alerts for all files whose pieces are fully verified.
-    ///
-    /// Used after initial check or force-recheck to emit alerts for complete files.
-    fn fire_file_completed_alerts(&self) {
-        let meta = match self.meta.as_ref() {
-            Some(m) => m,
-            None => return,
-        };
-        let lengths = match self.lengths.as_ref() {
-            Some(l) => l,
-            None => return,
-        };
-        let bitfield = match self.chunk_tracker.as_ref() {
-            Some(ct) => ct.bitfield(),
-            None => return,
-        };
-
-        let files = meta.info.files();
-        let piece_length = lengths.piece_length();
-        let mut file_offset = 0u64;
-
-        for (file_idx, file_entry) in files.iter().enumerate() {
-            let file_end = file_offset + file_entry.length;
-            if file_entry.length == 0 {
-                file_offset = file_end;
-                continue;
-            }
-
-            let first_piece = (file_offset / piece_length) as u32;
-            let last_piece = ((file_end - 1) / piece_length) as u32;
-
-            let mut all_complete = true;
-            for p in first_piece..=last_piece {
-                if !bitfield.get(p) {
-                    all_complete = false;
-                    break;
-                }
-            }
-
-            if all_complete {
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::FileCompleted {
-                        info_hash: self.info_hash,
-                        file_index: file_idx,
-                    },
-                );
-            }
-
-            file_offset = file_end;
-        }
-    }
-
-    /// Handle a force recheck request: clear all piece state, re-verify,
-    /// transition to the appropriate post-check state, then send reply.
-    async fn handle_force_recheck(
-        &mut self,
-        reply: tokio::sync::oneshot::Sender<crate::Result<()>>,
-    ) {
-        // Disconnect all peers — they hold stale bitfield state (non-blocking)
-        for peer in self.peers.values() {
-            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-        }
-        self.peers.clear();
-
-        // Clear all piece completion state
-        if let Some(ref mut ct) = self.chunk_tracker {
-            ct.clear();
-        }
-
-        // Run the full verification pipeline (transitions through Checking)
-        self.verify_existing_pieces().await;
-
-        // M93: Rebuild atomic states after recheck
-        if let Some(ct) = &self.chunk_tracker {
-            let atomic_states = Arc::new(AtomicPieceStates::new(
-                self.num_pieces,
-                ct.bitfield(),
-                &self.wanted_pieces,
-            ));
-            self.atomic_states = Some(Arc::clone(&atomic_states));
-            self.piece_owner = vec![None; self.num_pieces as usize];
-            // M103: Rebuild block stealing state after recheck
-            if self.config.use_block_stealing {
-                if let Some(ref lengths) = self.lengths {
-                    self.block_maps = Some(Arc::new(BlockMaps::new(self.num_pieces, lengths)));
-                }
-                self.steal_candidates = Some(Arc::new(StealCandidates::new()));
-            }
-            // M120: Rebuild per-piece write guards
-            self.piece_write_guards = Some(Arc::new(
-                crate::piece_reservation::PieceWriteGuards::new(self.num_pieces),
-            ));
-            self.rebuild_availability_snapshot();
-        }
-
-        let _ = reply.send(Ok(()));
-    }
-
-    fn build_resume_data(&self) -> crate::Result<torrent_core::FastResumeData> {
-        let pieces_bytes = match &self.chunk_tracker {
-            Some(ct) => ct.bitfield().as_bytes().to_vec(),
-            None => Vec::new(),
-        };
-
-        let name = self
-            .meta
-            .as_ref()
-            .map(|m| m.info.name.clone())
-            .unwrap_or_default();
-
-        let save_path = self.config.download_dir.to_string_lossy().into_owned();
-
-        let mut rd =
-            torrent_core::FastResumeData::new(self.info_hash.as_bytes().to_vec(), name, save_path);
-
-        rd.pieces = pieces_bytes;
-
-        rd.total_uploaded = self.uploaded as i64;
-        rd.total_downloaded = self.downloaded as i64;
-
-        rd.paused = if self.state == TorrentState::Paused {
-            1
-        } else {
-            0
-        };
-        rd.seed_mode = if self.state == TorrentState::Seeding {
-            1
-        } else {
-            0
-        };
-        rd.super_seeding = if self.super_seed.is_some() { 1 } else { 0 };
-
-        // Collect tracker URLs from torrent metadata
-        if let Some(ref meta) = self.meta {
-            if let Some(ref announce_list) = meta.announce_list {
-                rd.trackers = announce_list.clone();
-            } else if let Some(ref announce) = meta.announce {
-                rd.trackers = vec![vec![announce.clone()]];
-            }
-            rd.url_seeds = meta.url_list.clone();
-            rd.http_seeds = meta.httpseeds.clone();
-        }
-
-        // Collect connected peer addresses as compact bytes
-        let peer_addrs: Vec<std::net::SocketAddr> = self.peers.keys().copied().collect();
-        rd.peers = torrent_tracker::compact::encode_compact_peers(&peer_addrs);
-        rd.peers6 = torrent_tracker::compact::encode_compact_peers6(&peer_addrs);
-
-        // Per-file priorities
-        rd.file_priority = self
-            .file_priorities
-            .iter()
-            .map(|&p| p as u8 as i64)
-            .collect();
-
-        Ok(rd)
-    }
-
-    fn handle_set_file_priority(
-        &mut self,
-        index: usize,
-        priority: FilePriority,
-    ) -> crate::Result<()> {
-        if index >= self.file_priorities.len() {
-            return Err(crate::Error::InvalidFileIndex {
-                index,
-                count: self.file_priorities.len(),
-            });
-        }
-
-        self.file_priorities[index] = priority;
-
-        // Rebuild wanted_pieces bitfield
-        if let Some(ref meta) = self.meta {
-            let file_lengths: Vec<u64> = meta.info.files().iter().map(|f| f.length).collect();
-            if let Some(ref lengths) = self.lengths {
-                self.wanted_pieces = crate::piece_selector::build_wanted_pieces(
-                    &self.file_priorities,
-                    &file_lengths,
-                    lengths,
-                );
-            }
-        }
-
-        Ok(())
     }
 
     fn handle_open_file(
@@ -4796,674 +3231,6 @@ impl TorrentActor {
         })
     }
 
-    async fn verify_and_mark_piece(&mut self, index: u32) {
-        match self.version {
-            torrent_core::TorrentVersion::V1Only => {
-                self.verify_and_mark_piece_v1(index).await;
-            }
-            torrent_core::TorrentVersion::V2Only => {
-                self.verify_and_mark_piece_v2(index).await;
-            }
-            torrent_core::TorrentVersion::Hybrid => {
-                self.verify_and_mark_piece_hybrid(index).await;
-            }
-        }
-    }
-
-    /// SHA-1 piece verification (v1 torrents).
-    async fn verify_and_mark_piece_v1(&mut self, index: u32) {
-        let expected_hash = self
-            .meta
-            .as_ref()
-            .and_then(|m| m.info.piece_hash(index as usize));
-
-        let verified = if let (Some(disk), Some(expected)) = (&self.disk, expected_hash) {
-            disk.verify_piece(index, expected, DiskJobFlags::empty())
-                .await
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        if verified {
-            self.on_piece_verified(index).await;
-        } else {
-            self.on_piece_hash_failed(index).await;
-        }
-    }
-
-    /// SHA-256 per-block Merkle verification (v2 torrents, BEP 52).
-    async fn verify_and_mark_piece_v2(&mut self, index: u32) {
-        let result = self.run_v2_block_verification(index).await;
-        match result {
-            HashResult::Passed => self.on_piece_verified(index).await,
-            HashResult::Failed => self.on_piece_hash_failed(index).await,
-            HashResult::NotApplicable => {
-                // Blocks stored, will resolve when piece-layer hashes arrive
-            }
-        }
-    }
-
-    /// Run SHA-256 per-block Merkle verification and return a `HashResult`
-    /// without triggering side effects (no `on_piece_verified`/`on_piece_hash_failed`).
-    ///
-    /// Extracted from `verify_and_mark_piece_v2` so it can be reused in hybrid
-    /// dual-verification without double-firing callbacks.
-    async fn run_v2_block_verification(&mut self, index: u32) -> HashResult {
-        let disk = match &self.disk {
-            Some(d) => d.clone(),
-            None => return HashResult::NotApplicable,
-        };
-
-        let lengths = match &self.lengths {
-            Some(l) => l.clone(),
-            None => return HashResult::NotApplicable,
-        };
-
-        // Flush write buffer before reading back for hashing
-        if let Err(e) = disk.flush_piece(index).await {
-            warn!(index, "failed to flush piece for v2 verification: {e}");
-            return HashResult::NotApplicable;
-        }
-
-        // Compute SHA-256 of each 16 KiB block and feed to Merkle tree
-        let num_chunks = lengths.chunks_in_piece(index);
-        let blocks_per_piece = (lengths.piece_length() as u32) / DEFAULT_CHUNK_SIZE;
-        let mut all_ok = true;
-
-        for chunk_idx in 0..num_chunks {
-            let (begin, length) = match lengths.chunk_info(index, chunk_idx) {
-                Some(info) => info,
-                None => continue,
-            };
-
-            let block_hash = match disk
-                .hash_block(index, begin, length, DiskJobFlags::empty())
-                .await
-            {
-                Ok(h) => h,
-                Err(e) => {
-                    warn!(index, chunk_idx, "failed to hash block: {e}");
-                    all_ok = false;
-                    break;
-                }
-            };
-
-            if let Some(ref mut picker) = self.hash_picker {
-                // Gap 6: single-file assumption — multi-file mapping deferred to M35
-                let file_index = 0;
-                let global_block = index * blocks_per_piece + chunk_idx;
-                // Gap 10: 3-arg set_block_hash (offset removed)
-                match picker.set_block_hash(file_index, global_block, block_hash) {
-                    torrent_core::SetBlockResult::Ok => {
-                        if let Some(ref mut ct) = self.chunk_tracker {
-                            ct.mark_block_verified(index, chunk_idx);
-                        }
-                    }
-                    torrent_core::SetBlockResult::Unknown => {
-                        // Piece-layer hash not yet available — stored for deferred verification
-                        debug!(
-                            index,
-                            chunk_idx, "block hash stored, awaiting piece-layer hashes"
-                        );
-                    }
-                    torrent_core::SetBlockResult::HashFailed => {
-                        warn!(index, chunk_idx, "block hash failed Merkle verification");
-                        return HashResult::Failed;
-                    }
-                }
-            }
-        }
-
-        if all_ok
-            && self
-                .chunk_tracker
-                .as_ref()
-                .is_some_and(|ct| ct.all_blocks_verified(index))
-        {
-            HashResult::Passed
-        } else {
-            // Either a disk error (all_ok = false) or blocks stored awaiting piece-layer hashes
-            HashResult::NotApplicable
-        }
-    }
-
-    /// Dual SHA-1 + SHA-256 verification for hybrid torrents.
-    ///
-    /// Runs both v1 (whole-piece SHA-1) and v2 (per-block SHA-256 Merkle)
-    /// verification. Decision matrix:
-    /// - Both Passed → piece verified
-    /// - Both Failed → piece hash failed (normal re-request / parole path)
-    /// - One Passed + one Failed → inconsistent hashes (fatal, pauses torrent)
-    /// - Any NotApplicable → deferred (v2 blocks stored, will resolve later)
-    async fn verify_and_mark_piece_hybrid(&mut self, index: u32) {
-        // ── v1 verification (SHA-1 whole-piece) ──
-        let v1_result = {
-            let expected_hash = self
-                .meta
-                .as_ref()
-                .and_then(|m| m.info.piece_hash(index as usize));
-
-            if let (Some(disk), Some(expected)) = (&self.disk, expected_hash) {
-                match disk
-                    .verify_piece(index, expected, DiskJobFlags::empty())
-                    .await
-                {
-                    Ok(true) => HashResult::Passed,
-                    Ok(false) => HashResult::Failed,
-                    Err(_) => HashResult::NotApplicable,
-                }
-            } else {
-                HashResult::NotApplicable
-            }
-        };
-
-        // ── v2 verification (SHA-256 per-block Merkle) ──
-        let v2_result = self.run_v2_block_verification(index).await;
-
-        // ── Decision matrix ──
-        match (v1_result, v2_result) {
-            // Both agree: piece is good
-            (HashResult::Passed, HashResult::Passed) => {
-                self.on_piece_verified(index).await;
-            }
-            // Both agree: piece is bad
-            (HashResult::Failed, HashResult::Failed) => {
-                self.on_piece_hash_failed(index).await;
-            }
-            // One passes, one fails: the .torrent metadata is inconsistent
-            (HashResult::Passed, HashResult::Failed) | (HashResult::Failed, HashResult::Passed) => {
-                self.on_inconsistent_hashes(index).await;
-            }
-            // v2 deferred (awaiting piece-layer hashes) but v1 passed: defer the whole thing.
-            // When piece-layer hashes arrive, handle_hashes_received will re-verify.
-            (HashResult::Passed, HashResult::NotApplicable) => {
-                debug!(
-                    index,
-                    "hybrid: v1 passed, v2 deferred — waiting for piece-layer hashes"
-                );
-            }
-            // v2 deferred but v1 failed: fail immediately (no point waiting for v2).
-            (HashResult::Failed, HashResult::NotApplicable) => {
-                self.on_piece_hash_failed(index).await;
-            }
-            // v1 not applicable (missing meta/disk): defer
-            (HashResult::NotApplicable, _) => {
-                debug!(index, "hybrid: v1 not applicable — deferring");
-            }
-        }
-    }
-
-    /// Common success path after a piece passes verification (v1 SHA-1 or v2 Merkle).
-    /// Handle a result from the HashPool (M96).
-    async fn handle_hash_result(&mut self, result: crate::hash_pool::HashResult) {
-        self.pending_verify.remove(&result.piece);
-
-        // Staleness check
-        let current_gen = self
-            .piece_generations
-            .get(result.piece as usize)
-            .copied()
-            .unwrap_or(0);
-        if result.generation != current_gen {
-            tracing::debug!(
-                piece = result.piece,
-                result_gen = result.generation,
-                current_gen,
-                "discarding stale hash result"
-            );
-            return;
-        }
-
-        // Guard: ignore results for already-verified pieces
-        let dominated = self
-            .chunk_tracker
-            .as_ref()
-            .map(|ct| ct.bitfield().get(result.piece))
-            .unwrap_or(false);
-        if dominated {
-            return;
-        }
-
-        if result.passed {
-            self.on_piece_verified(result.piece).await;
-        } else {
-            self.on_piece_hash_failed(result.piece).await;
-        }
-    }
-
-    async fn on_piece_verified(&mut self, index: u32) {
-        if let Some(ref mut ct) = self.chunk_tracker {
-            ct.mark_verified(index);
-        }
-        self.piece_contributors.remove(&index);
-        // Remove stale end-game blocks for this piece. Without this,
-        // pick_block() returns these blocks, peers request them, has_chunk
-        // rejects them, and register_request accumulates until every peer
-        // is registered for every stale block — permanent stall.
-        if self.end_game.is_active() {
-            self.end_game.remove_piece(index);
-        }
-        // M93: Mark piece complete atomically
-        if let Some(ref states) = self.atomic_states {
-            states.mark_complete(index);
-        }
-        // M103: Clean up block stealing state
-        if let Some(ref sc) = self.steal_candidates {
-            sc.remove(index);
-        }
-        if let (Some(bm), Some(lengths)) = (&self.block_maps, &self.lengths) {
-            bm.clear(index, lengths.chunks_in_piece(index));
-        }
-        self.piece_owner[index as usize] = None;
-        // M103: Mark snapshot dirty for reactive rebuild
-        self.mark_snapshot_dirty();
-        info!(index, "piece verified");
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::PieceFinished {
-                info_hash: self.info_hash,
-                piece: index,
-            },
-        );
-
-        // Notify FileStream consumers of piece completion
-        let _ = self.piece_ready_tx.send(index);
-        if let Some(ref ct) = self.chunk_tracker {
-            let _ = self.have_watch_tx.send(ct.bitfield().clone());
-        }
-
-        // Check if the completed piece finishes any file (FileCompleted alert)
-        self.check_file_completion(index);
-
-        // Handle parole success: the parole peer delivered a good piece,
-        // so the original contributors are the likely offenders.
-        if let Some(parole) = self.parole_pieces.remove(&index) {
-            self.apply_parole_success(index, parole).await;
-        }
-
-        // M118: Broadcast Have to all peers via broadcast channel (skip in super-seed mode).
-        // Per-peer filtering (skip if peer already has piece) is done receiver-side
-        // in PeerConnection via should_transmit_have().
-        if self.super_seed.is_none() {
-            let already_announced = self.predictive_have_sent.remove(&index);
-            if !already_announced {
-                let _ = self.have_broadcast_tx.send(index);
-            }
-        }
-
-        // M44: suggest newly-verified piece to peers that don't have it
-        if self.config.suggest_mode {
-            let max_suggest = self.config.max_suggest_pieces;
-            let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
-            for peer_addr in peer_addrs {
-                let already = self.suggested_to_peers.entry(peer_addr).or_default();
-                if already.len() >= max_suggest {
-                    continue;
-                }
-                let should_suggest = self
-                    .peers
-                    .get(&peer_addr)
-                    .is_some_and(|p| !p.bitfield.get(index));
-                if should_suggest
-                    && !already.contains(&index)
-                    && let Some(peer) = self.peers.get(&peer_addr)
-                {
-                    let _ = peer.cmd_tx.try_send(PeerCommand::SuggestPiece(index));
-                    already.insert(index);
-                }
-            }
-        }
-
-        // Share mode LRU: track piece, evict oldest if over capacity.
-        // In share mode, we never "finish" — we keep cycling pieces.
-        if self.share_max_pieces > 0 {
-            self.share_lru.push_back(index);
-            while self.share_lru.len() > self.share_max_pieces {
-                if let Some(evicted) = self.share_lru.pop_front() {
-                    if let Some(ref mut ct) = self.chunk_tracker {
-                        ct.clear_piece(evicted);
-                    }
-                    // Re-add to wanted so it can be re-downloaded later
-                    if evicted < self.wanted_pieces.len() {
-                        self.wanted_pieces.set(evicted);
-                    }
-                    debug!(evicted, "share mode: evicted piece from LRU");
-                }
-            }
-        }
-
-        // Check if download is complete (skip in share mode — never finishes)
-        if self.share_max_pieces == 0
-            && let Some(ref ct) = self.chunk_tracker
-            && ct.bitfield().count_ones() == self.num_pieces
-        {
-            info!("download complete, transitioning to seeding");
-            post_alert(
-                &self.alert_tx,
-                &self.alert_mask,
-                AlertKind::TorrentFinished {
-                    info_hash: self.info_hash,
-                },
-            );
-            self.end_game.deactivate();
-            self.transition_state(TorrentState::Seeding);
-            self.choker.set_seed_mode(true);
-            // BEP 21: broadcast upload-only status
-            if self.config.upload_only_announce {
-                let hs = torrent_wire::ExtHandshake::new_upload_only();
-                for peer in self.peers.values() {
-                    let _ = peer
-                        .cmd_tx
-                        .try_send(PeerCommand::SendExtHandshake(hs.clone()));
-                }
-            }
-            // Announce completion to trackers
-            let result = self
-                .tracker_manager
-                .announce_completed(self.uploaded, self.downloaded)
-                .await;
-            self.fire_tracker_alerts(&result.outcomes);
-        }
-    }
-
-    /// Common failure path after a piece fails hash verification.
-    async fn on_piece_hash_failed(&mut self, index: u32) {
-        let contributors: Vec<std::net::IpAddr> = self
-            .piece_contributors
-            .remove(&index)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-
-        warn!(
-            index,
-            contributors = contributors.len(),
-            "piece hash verification failed"
-        );
-
-        self.total_failed_bytes += self
-            .lengths
-            .as_ref()
-            .map(|l| l.piece_size(index) as u64)
-            .unwrap_or(0);
-
-        self.predictive_have_sent.remove(&index);
-
-        // Check if this is a parole failure
-        if let Some(parole) = self.parole_pieces.remove(&index) {
-            self.apply_parole_failure(index, parole);
-        } else {
-            // First failure: enter parole if enabled
-            self.enter_parole(index, contributors.clone());
-        }
-
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::HashFailed {
-                info_hash: self.info_hash,
-                piece: index,
-                contributors,
-            },
-        );
-        if let Some(ref mut ct) = self.chunk_tracker {
-            ct.mark_failed(index);
-        }
-        // M96: Increment generation to invalidate any in-flight hash for this piece
-        if let Some(g) = self.piece_generations.get_mut(index as usize) {
-            *g += 1;
-        }
-        // M93: Release piece back to Available
-        if let Some(ref states) = self.atomic_states {
-            states.release(index);
-        }
-        // M103: Clean up block stealing state on hash failure
-        if let Some(ref sc) = self.steal_candidates {
-            sc.remove(index);
-        }
-        if let (Some(bm), Some(lengths)) = (&self.block_maps, &self.lengths) {
-            bm.clear(index, lengths.chunks_in_piece(index));
-        }
-        self.piece_owner[index as usize] = None;
-        self.mark_snapshot_dirty();
-        if let Some(ref notify) = self.reservation_notify {
-            notify.notify_one();
-        }
-        // Hash failure in end-game: deactivate and resume normal mode
-        if self.end_game.is_active() {
-            self.end_game.deactivate();
-            info!(index, "end-game deactivated due to hash failure");
-            // M93: Transition Endgame pieces back
-            if let Some(ref atomic_states) = self.atomic_states {
-                for piece in 0..self.num_pieces {
-                    if atomic_states.get(piece) == PieceState::Endgame {
-                        if self.piece_owner[piece as usize].is_some() {
-                            atomic_states.force_reserved(piece);
-                        } else {
-                            atomic_states.release(piece);
-                        }
-                    }
-                }
-            }
-            if let Some(ref notify) = self.reservation_notify {
-                notify.notify_waiters();
-            }
-        }
-    }
-
-    /// Handle v1/v2 hash inconsistency — the torrent data itself is corrupt.
-    ///
-    /// Matching libtorrent: destroy hash picker, pause the torrent, post error alert.
-    async fn on_inconsistent_hashes(&mut self, piece: u32) {
-        let info_hash = self.info_hash;
-        error!(
-            piece,
-            info_hash = %info_hash,
-            "v1 and v2 hashes are inconsistent — torrent data is corrupt"
-        );
-
-        // Destroy hash picker (Merkle tree state is untrustworthy)
-        self.hash_picker = None;
-
-        // Post specific inconsistency alert
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::InconsistentHashes { info_hash, piece },
-        );
-
-        // Post generic error alert for broader consumers
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::TorrentError {
-                info_hash,
-                message: format!("v1 and v2 hashes do not describe the same data (piece {piece})"),
-            },
-        );
-
-        // Pause the torrent — transition state to Paused
-        self.transition_state(TorrentState::Paused);
-    }
-
-    // ── BEP 52 hash event handlers (M34) ────────────────────────────────
-
-    /// Process received piece-layer or block-layer hashes from a peer.
-    async fn handle_hashes_received(
-        &mut self,
-        peer_addr: SocketAddr,
-        request: torrent_core::HashRequest,
-        hashes: Vec<torrent_core::Id32>,
-    ) {
-        let Some(ref mut picker) = self.hash_picker else {
-            debug!(peer = %peer_addr, "received hashes but no hash picker (v1 torrent)");
-            return;
-        };
-
-        match picker.add_hashes(&request, &hashes) {
-            Ok(result) => {
-                if !result.valid {
-                    warn!(peer = %peer_addr, "received hashes failed Merkle proof validation");
-                    return;
-                }
-                for piece in result.hash_passed {
-                    self.on_piece_verified(piece).await;
-                }
-                for piece in result.hash_failed {
-                    warn!(piece, "piece failed after hash layer received");
-                    post_alert(
-                        &self.alert_tx,
-                        &self.alert_mask,
-                        AlertKind::HashFailed {
-                            info_hash: self.info_hash,
-                            piece,
-                            contributors: Vec::new(),
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(peer = %peer_addr, "invalid hashes: {e}");
-            }
-        }
-    }
-
-    /// Handle an incoming hash request from a peer (serve or reject).
-    async fn handle_incoming_hash_request(
-        &self,
-        peer_addr: SocketAddr,
-        request: torrent_core::HashRequest,
-    ) {
-        let peer = match self.peers.get(&peer_addr) {
-            Some(p) => p,
-            None => return,
-        };
-
-        match serve_hashes(
-            self.meta_v2.as_ref(),
-            self.version,
-            self.lengths.as_ref(),
-            &request,
-        ) {
-            Some(hashes) => {
-                let _ = peer
-                    .cmd_tx
-                    .try_send(PeerCommand::SendHashes { request, hashes });
-            }
-            None => {
-                let _ = peer.cmd_tx.try_send(PeerCommand::SendHashReject(request));
-            }
-        }
-    }
-
-    // ── Smart banning helpers (M25) ────────────────────────────────────
-
-    /// Enter parole mode for a failed piece: save the original contributors
-    /// and mark the piece for single-peer re-download.
-    fn enter_parole(&mut self, index: u32, contributors: Vec<std::net::IpAddr>) {
-        let use_parole = crate::timed_lock::TimedGuard::new(
-            self.ban_manager.read(),
-            &self.lock_timing,
-            "ban_manager",
-        )
-        .use_parole();
-        if !use_parole || contributors.is_empty() {
-            // Parole disabled or no contributors to blame — strike everyone
-            let mut mgr = self.ban_manager.write();
-            for &ip in &contributors {
-                if mgr.record_strike(ip) {
-                    info!(%ip, "peer banned (no parole, hash failure threshold)");
-                }
-            }
-            return;
-        }
-
-        info!(
-            index,
-            contributors = contributors.len(),
-            "entering parole mode"
-        );
-        self.parole_pieces.insert(
-            index,
-            crate::ban::ParoleState {
-                original_contributors: contributors.into_iter().collect(),
-                parole_peer: None,
-            },
-        );
-    }
-
-    /// Parole piece verified successfully — the original contributors sent bad data.
-    async fn apply_parole_success(&mut self, index: u32, parole: crate::ban::ParoleState) {
-        info!(index, "parole success — striking original contributors");
-        let mut banned_ips = Vec::new();
-        {
-            let mut mgr = self.ban_manager.write();
-            for ip in &parole.original_contributors {
-                if mgr.record_strike(*ip) {
-                    info!(%ip, "peer banned (parole confirmed bad data)");
-                    banned_ips.push(*ip);
-                }
-            }
-        }
-        // Disconnect and fire alerts for newly banned peers
-        for ip in banned_ips {
-            self.disconnect_banned_ip(ip).await;
-            post_alert(
-                &self.alert_tx,
-                &self.alert_mask,
-                AlertKind::PeerBanned {
-                    info_hash: self.info_hash,
-                    addr: std::net::SocketAddr::new(ip, 0),
-                },
-            );
-        }
-    }
-
-    /// Parole piece failed again — the parole peer itself sent bad data.
-    fn apply_parole_failure(&mut self, index: u32, parole: crate::ban::ParoleState) {
-        if let Some(parole_ip) = parole.parole_peer {
-            info!(index, %parole_ip, "parole failure — striking parole peer");
-            let mut mgr = self.ban_manager.write();
-            if mgr.record_strike(parole_ip) {
-                info!(%parole_ip, "parole peer banned");
-            }
-        }
-        // Don't re-enter parole for the same piece — ambiguous situation
-    }
-
-    /// Disconnect all peers matching a banned IP.
-    async fn disconnect_banned_ip(&mut self, ip: std::net::IpAddr) {
-        // Remove from connected peers
-        let addrs_to_remove: Vec<SocketAddr> = self
-            .peers
-            .keys()
-            .filter(|a| a.ip() == ip)
-            .copied()
-            .collect();
-        for addr in addrs_to_remove {
-            if let Some(peer) = self.peers.remove(&addr) {
-                let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-                self.peers_connected.remove(&addr);
-                // M108: Update live peers for PEX send tasks
-                self.live_outgoing_peers
-                    .write()
-                    .remove(&addr);
-                post_alert(
-                    &self.alert_tx,
-                    &self.alert_mask,
-                    AlertKind::PeerDisconnected {
-                        info_hash: self.info_hash,
-                        addr,
-                        reason: Some("banned".into()),
-                    },
-                );
-            }
-        }
-        // M107: No need to clean available_peers — adder task checks ban list on its own.
-    }
-
     /// M44: Suggest cached pieces to connected peers (BEP 6).
     async fn suggest_cached_pieces(&mut self) {
         if !self.config.suggest_mode {
@@ -5506,7 +3273,7 @@ impl TorrentActor {
         }
     }
 
-    async fn try_assemble_metadata(&mut self) {
+    pub(crate) async fn try_assemble_metadata(&mut self) {
         let assembled = if let Some(ref dl) = self.metadata_downloader {
             dl.assemble_and_verify()
         } else {
@@ -5955,7 +3722,7 @@ impl TorrentActor {
         }
     }
 
-    async fn handle_web_seed_piece_data(&mut self, url: String, index: u32, data: Bytes) {
+    pub(crate) async fn handle_web_seed_piece_data(&mut self, url: String, index: u32, data: Bytes) {
         self.web_seed_in_flight.remove(&index);
 
         // If peer already completed this piece, discard
@@ -6008,7 +3775,7 @@ impl TorrentActor {
         self.assign_pieces_to_web_seeds();
     }
 
-    fn handle_web_seed_error(&mut self, url: String, piece: u32, message: String) {
+    pub(crate) fn handle_web_seed_error(&mut self, url: String, piece: u32, message: String) {
         self.web_seed_in_flight.remove(&piece);
         warn!(%url, piece, %message, "web seed error");
         self.assign_pieces_to_web_seeds();
@@ -6052,240 +3819,6 @@ impl TorrentActor {
         }
     }
 
-    /// M103: Mark the availability snapshot as stale for deferred rebuild.
-    ///
-    /// The actual rebuild happens on the next 50ms snapshot tick, batching
-    /// multiple rapid events (bitfield, have, disconnect) into one rebuild.
-    fn mark_snapshot_dirty(&mut self) {
-        self.snapshot_dirty = true;
-    }
-
-    /// M93: Rebuild the availability snapshot and broadcast to all peers.
-    fn rebuild_availability_snapshot(&mut self) {
-        let Some(ref atomic_states) = self.atomic_states else {
-            return;
-        };
-        self.snapshot_generation += 1;
-        let snapshot = Arc::new(AvailabilitySnapshot::build(
-            &self.availability,
-            atomic_states,
-            &self.priority_pieces,
-            self.snapshot_generation,
-        ));
-        self.availability_snapshot = Some(Arc::clone(&snapshot));
-
-        // Broadcast new snapshot to all peer tasks
-        for peer in self.peers.values() {
-            let _ = peer.cmd_tx.try_send(PeerCommand::SnapshotUpdate {
-                snapshot: Arc::clone(&snapshot),
-            });
-        }
-    }
-
-    /// M93: Recalculate max_in_flight based on connected peer count.
-    fn recalc_max_in_flight(&mut self) {
-        let connected = self.peers.len();
-        let calculated = 512usize.max(connected.saturating_mul(4));
-        self.max_in_flight = calculated.min(self.num_pieces as usize / 2).max(512);
-    }
-
-    fn check_end_game_activation(&mut self) {
-        // M103: EndGame coexists with block stealing — stealing handles the
-        // bulk download (fast peers steal from slow peers' pieces), while
-        // EndGame handles the last-pieces problem (duplicate requests for the
-        // final few blocks when all pieces are reserved).
-        if self.end_game.is_active() || self.state != TorrentState::Downloading {
-            return;
-        }
-        let Some(ref ct) = self.chunk_tracker else {
-            return;
-        };
-        let have = ct.bitfield().count_ones();
-
-        let Some(ref atomic_states) = self.atomic_states else {
-            return;
-        };
-        let in_flight = atomic_states.in_flight_count();
-        if have + in_flight >= self.num_pieces && in_flight > 0 {
-            use std::collections::HashMap;
-            let mut per_peer: HashMap<SocketAddr, Vec<(u32, u32, u32)>> = HashMap::new();
-            // M93: Find in-flight pieces from atomic state (not piece_owner,
-            // which only tracks pieces after chunks arrive). Use the known
-            // owner if available, otherwise assign to a random unchoked peer
-            // so endgame can send duplicate requests.
-            let fallback_addr = self
-                .peers
-                .values()
-                .find(|p| !p.peer_choking)
-                .map(|p| p.addr);
-            for piece in 0..self.num_pieces {
-                let state = atomic_states.get(piece);
-                if state != PieceState::Reserved && state != PieceState::Endgame {
-                    continue;
-                }
-                let addr = self.piece_owner[piece as usize]
-                    .and_then(|slab_idx| self.peer_slab.get(slab_idx).copied())
-                    .or(fallback_addr);
-                if let Some(addr) = addr {
-                    let missing = ct.missing_chunks(piece);
-                    for (begin, length) in missing {
-                        per_peer
-                            .entry(addr)
-                            .or_default()
-                            .push((piece, begin, length));
-                    }
-                }
-            }
-
-            let pending: Vec<_> = per_peer.into_iter().collect();
-            self.end_game.activate(&pending);
-            info!(
-                blocks = self.end_game.block_count(),
-                "end-game mode activated"
-            );
-            // M93: Transition ALL in-flight pieces to Endgame state
-            for piece in 0..self.num_pieces {
-                let state = atomic_states.get(piece);
-                if state == PieceState::Reserved {
-                    atomic_states.transition_to_endgame(piece);
-                }
-            }
-        }
-    }
-
-    async fn request_end_game_block(&mut self, peer_addr: SocketAddr) {
-        let can_request = self
-            .peers
-            .get(&peer_addr)
-            .is_some_and(|p| !p.peer_choking && p.pending_requests.len() < END_GAME_DEPTH);
-        if !can_request {
-            return;
-        }
-
-        let peer_bitfield = match self.peers.get(&peer_addr) {
-            Some(p) => p.bitfield.clone(),
-            None => return,
-        };
-
-        // Fill up to END_GAME_DEPTH slots
-        let slots = END_GAME_DEPTH
-            - self
-                .peers
-                .get(&peer_addr)
-                .map(|p| p.pending_requests.len())
-                .unwrap_or(END_GAME_DEPTH);
-
-        for _ in 0..slots {
-            let block = if !self.streaming_pieces.is_empty() {
-                self.end_game.pick_block_streaming(
-                    peer_addr,
-                    &peer_bitfield,
-                    &self.streaming_pieces,
-                )
-            } else if self.config.strict_end_game {
-                self.end_game
-                    .pick_block_strict(peer_addr, &peer_bitfield, &[])
-            } else {
-                self.end_game.pick_block(peer_addr, &peer_bitfield)
-            };
-
-            if let Some((index, begin, length)) = block
-                && let Some(peer) = self.peers.get_mut(&peer_addr)
-                && peer
-                    .cmd_tx
-                    .try_send(PeerCommand::Request {
-                        index,
-                        begin,
-                        length,
-                    })
-                    .is_ok()
-            {
-                self.end_game.register_request(index, begin, peer_addr);
-                peer.pending_requests.insert(index, begin, length);
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn update_streaming_cursors(&mut self) {
-        // Remove cursors whose receiver has been dropped (FileStream dropped)
-        self.streaming_cursors
-            .retain(|c| c.cursor_rx.has_changed().is_ok());
-
-        self.streaming_pieces.clear();
-        for cursor in &mut self.streaming_cursors {
-            // Update cursor piece from position changes
-            if cursor.cursor_rx.has_changed().unwrap_or(false) {
-                let file_pos = *cursor.cursor_rx.borrow_and_update();
-                if let Some(ref lengths) = self.lengths {
-                    let abs = cursor.file_offset + file_pos;
-                    if abs < lengths.total_length() {
-                        cursor.cursor_piece = (abs / lengths.piece_length()) as u32;
-                    }
-                }
-            }
-
-            let end = cursor.cursor_piece + cursor.readahead_pieces;
-            for p in cursor.cursor_piece..end.min(self.num_pieces) {
-                self.streaming_pieces.insert(p);
-            }
-        }
-
-        // Build time_critical_pieces from first+last piece of High-priority files
-        self.time_critical_pieces.clear();
-        if let Some(ref meta) = self.meta
-            && let Some(ref lengths) = self.lengths
-        {
-            let mut offset = 0u64;
-            for (i, file) in meta.info.files().iter().enumerate() {
-                if self.file_priorities.get(i).copied() == Some(FilePriority::High)
-                    && let Some((first, last)) = lengths.file_pieces(offset, file.length)
-                {
-                    self.time_critical_pieces.insert(first);
-                    if last != first {
-                        self.time_critical_pieces.insert(last);
-                    }
-                }
-                offset += file.length;
-            }
-        }
-    }
-
-    async fn maybe_express_interest(&mut self, peer_addr: SocketAddr) {
-        if self.state != TorrentState::Downloading {
-            return;
-        }
-
-        let dominated = self.chunk_tracker.as_ref().map(|ct| {
-            let we_have = ct.bitfield();
-            if let Some(peer) = self.peers.get(&peer_addr) {
-                // Check if the peer has any piece we don't
-                peer.bitfield.ones().any(|i| !we_have.get(i))
-            } else {
-                false
-            }
-        });
-
-        if dominated == Some(true)
-            && let Some(peer) = self.peers.get_mut(&peer_addr)
-            && !peer.am_interested
-        {
-            debug!(%peer_addr, "sending Interested");
-            peer.am_interested = true;
-            let _ = peer.cmd_tx.try_send(PeerCommand::SetInterested(true));
-        } else {
-            let bf_ones = self
-                .peers
-                .get(&peer_addr)
-                .map(|p| p.bitfield.count_ones())
-                .unwrap_or(0);
-            if bf_ones > 0 {
-                debug!(%peer_addr, ?dominated, bf_ones, "not interested despite bitfield");
-            }
-        }
-    }
-
     // ----- Choking -----
 
     fn update_peer_rates(&mut self) {
@@ -6302,183 +3835,6 @@ impl TorrentActor {
         if aggregate_download > self.peak_download_rate {
             self.peak_download_rate = aggregate_download;
         }
-    }
-
-    /// M106: Extracted disconnect helper — consolidates all peer cleanup into one place.
-    ///
-    /// Performs: BEP 16 super-seed cleanup, peer removal, end-game cleanup,
-    /// slab/piece-owner release, availability decrement, cmd_tx shutdown,
-    /// PeerDisconnected alert, and suggested_to_peers cleanup.
-    fn disconnect_peer(&mut self, addr: SocketAddr, reason: &str) {
-        // BEP 55: attempt holepunch for NAT-related connection failures (M112)
-        if self.config.enable_holepunch && should_attempt_holepunch(reason) {
-            let now = Instant::now();
-            self.holepunch_cooldowns
-                .retain(|_, t| now.duration_since(*t) < HOLEPUNCH_COOLDOWN);
-            if self.holepunch_cooldowns.len() < HOLEPUNCH_MAX_TRACKED
-                && !self.holepunch_cooldowns.contains_key(&addr)
-            {
-                self.holepunch_cooldowns.insert(addr, now);
-                self.holepunch_pending.push(addr);
-            }
-        }
-
-        // BEP 16: clean up super-seed assignment
-        if let Some(ref mut ss) = self.super_seed {
-            ss.peer_disconnected(addr);
-        }
-        if let Some(peer) = self.peers.remove(&addr) {
-            // End-game cleanup
-            if self.end_game.is_active() {
-                self.end_game.peer_disconnected(addr);
-            }
-            // M93: Release all pieces owned by this peer
-            if let Some(slab_idx) = self.peer_slab.remove_by_addr(&addr) {
-                for piece in 0..self.num_pieces {
-                    if self.piece_owner[piece as usize] == Some(slab_idx) {
-                        self.piece_owner[piece as usize] = None;
-                        if let Some(ref states) = self.atomic_states {
-                            states.release(piece);
-                        }
-                    }
-                }
-            }
-            // Update availability
-            for piece in 0..self.num_pieces {
-                if peer.bitfield.get(piece) {
-                    self.availability[piece as usize] =
-                        self.availability[piece as usize].saturating_sub(1);
-                }
-            }
-            // Send shutdown command (non-blocking — peer may have a full channel)
-            let _ = peer.cmd_tx.try_send(PeerCommand::Shutdown);
-            // M107: Remove from shared connected set (wakes adder task via semaphore)
-            self.peers_connected.remove(&addr);
-            // M108: Update live peers for PEX send tasks
-            self.live_outgoing_peers
-                .write()
-                .remove(&addr);
-            post_alert(
-                &self.alert_tx,
-                &self.alert_mask,
-                AlertKind::PeerDisconnected {
-                    info_hash: self.info_hash,
-                    addr,
-                    reason: Some(reason.into()),
-                },
-            );
-        }
-        self.suggested_to_peers.remove(&addr);
-    }
-
-    /// M106: Score-based peer turnover — replaces rate-based run_peer_turnover().
-    ///
-    /// Runs on every 1s tick but actual churn is gated by `scorer.should_churn()`.
-    /// Snubbed low-score peers are fast-evicted regardless of the churn timer.
-    async fn run_scored_turnover(&mut self) {
-        if self.state != TorrentState::Downloading {
-            return;
-        }
-
-        // M107: Bypass scoring when disabled (A/B benchmarking)
-        if self.config.disable_peer_scoring {
-            return;
-        }
-
-        let now = std::time::Instant::now();
-
-        // Snub fast-path: evict snubbed peers below threshold regardless of churn timer
-        let snub_evict: Vec<SocketAddr> = self
-            .peers
-            .iter()
-            .filter(|(_, p)| p.snubbed && p.score < self.scorer.min_score_threshold())
-            .map(|(addr, _)| *addr)
-            .collect();
-        for addr in &snub_evict {
-            self.disconnect_peer(*addr, "snubbed low-score eviction");
-        }
-        if !snub_evict.is_empty() {
-            self.recalc_max_in_flight();
-            self.mark_snapshot_dirty();
-        }
-
-        // Regular churn gate
-        if !self.scorer.should_churn(now) {
-            return;
-        }
-        self.scorer.mark_churned(now);
-
-        // Skip during endgame
-        if self.end_game.is_active() {
-            return;
-        }
-
-        // Small swarm protection
-        let scored_count = self
-            .peers
-            .values()
-            .filter(|p| !self.scorer.is_in_probation(p.connected_at))
-            .count();
-        if scored_count < 10 {
-            return;
-        }
-
-        // Build swarm context for dampening
-        let ctx = PeerScorer::build_swarm_context(
-            self.peers
-                .values()
-                .filter(|p| !self.scorer.is_in_probation(p.connected_at))
-                .map(|p| (p.pipeline.ewma_rate(), p.avg_rtt, p.score)),
-        );
-        let churn_pct = self.scorer.churn_percent(ctx.median_score);
-
-        // Collect parole IPs
-        let parole_ips: std::collections::HashSet<std::net::IpAddr> = self
-            .parole_pieces
-            .values()
-            .filter_map(|p| p.parole_peer)
-            .collect();
-
-        // Build eligible set
-        let mut eligible: Vec<(SocketAddr, f64)> = self
-            .peers
-            .iter()
-            .filter(|(_, p)| {
-                !self.scorer.is_in_probation(p.connected_at)
-                    && p.bitfield.count_ones() != self.num_pieces
-                    && !parole_ips.contains(&p.addr.ip())
-            })
-            .filter(|(_, p)| p.score < self.scorer.min_score_threshold())
-            .map(|(addr, p)| (*addr, p.score))
-            .collect();
-
-        if eligible.is_empty() {
-            return;
-        }
-
-        eligible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let n = ((eligible.len() as f64 * churn_pct).floor() as usize).max(1);
-        let to_disconnect: Vec<SocketAddr> =
-            eligible.into_iter().take(n).map(|(addr, _)| addr).collect();
-
-        for addr in &to_disconnect {
-            self.disconnect_peer(*addr, "scored turnover");
-        }
-        self.recalc_max_in_flight();
-        self.mark_snapshot_dirty();
-
-        // M107: Replacement is now async via adder task — report 0 replaced here;
-        // the semaphore release from disconnect_peer will wake the adder naturally.
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::PeerTurnover {
-                info_hash: self.info_hash,
-                disconnected: to_disconnect.len(),
-                replaced: 0,
-            },
-        );
     }
 
     async fn run_choker(&mut self) {
@@ -6555,109 +3911,6 @@ impl TorrentActor {
         }
     }
 
-    async fn serve_incoming_requests(&mut self) {
-        let disk = match &self.disk {
-            Some(d) => d.clone(),
-            None => return,
-        };
-        let chunk_tracker = match &self.chunk_tracker {
-            Some(ct) => ct,
-            None => return,
-        };
-
-        // Collect servable requests: peer is unchoked and we have the piece.
-        // In share mode, also collect requests for evicted pieces to reject.
-        let mut to_serve: Vec<(SocketAddr, u32, u32, u32)> = Vec::new();
-        let mut to_reject: Vec<(SocketAddr, u32, u32, u32)> = Vec::new();
-        for peer in self.peers.values() {
-            if peer.am_choking {
-                continue;
-            }
-            for &(index, begin, length) in &peer.incoming_requests {
-                if chunk_tracker.has_piece(index) {
-                    to_serve.push((peer.addr, index, begin, length));
-                } else if self.share_max_pieces > 0 && self.config.enable_fast {
-                    // Share mode: reject requests for pieces we no longer have
-                    to_reject.push((peer.addr, index, begin, length));
-                }
-            }
-        }
-
-        // Send RejectRequest for evicted share mode pieces
-        for (addr, index, begin, length) in to_reject {
-            if let Some(peer) = self.peers.get_mut(&addr) {
-                peer.incoming_requests
-                    .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
-                let _ = peer.cmd_tx.try_send(PeerCommand::RejectRequest {
-                    index,
-                    begin,
-                    length,
-                });
-            }
-        }
-
-        for (addr, index, begin, length) in to_serve {
-            let chunk_size = length as u64;
-
-            // Check global upload budget (skip for local peers)
-            if !crate::rate_limiter::is_local_network(addr.ip())
-                && let Some(ref global) = self.global_upload_bucket
-                && !global.lock().try_consume(chunk_size)
-            {
-                break; // global budget exhausted, serve remaining next refill
-            }
-
-            // Check per-torrent upload budget
-            if !self.upload_bucket.try_consume(chunk_size) {
-                break; // per-torrent budget exhausted this cycle
-            }
-
-            match disk
-                .read_chunk(index, begin, length, DiskJobFlags::empty())
-                .await
-            {
-                Ok(data) => {
-                    if let Some(peer) = self.peers.get_mut(&addr) {
-                        peer.incoming_requests
-                            .retain(|&(i, b, l)| !(i == index && b == begin && l == length));
-                        let _ = peer
-                            .cmd_tx
-                            .try_send(PeerCommand::SendPiece { index, begin, data });
-                        self.uploaded += chunk_size;
-                        self.total_upload += chunk_size + 13; // payload + message header
-                        self.last_upload = now_unix();
-                        self.upload_bytes_interval += chunk_size;
-                        peer.upload_bytes_window += chunk_size;
-                    }
-                }
-                Err(e) => {
-                    warn!(index, begin, length, "failed to read chunk for upload: {e}");
-                }
-            }
-        }
-
-        if self.check_seed_ratio() {
-            self.shutdown_peers().await;
-        }
-    }
-
-    fn check_seed_ratio(&mut self) -> bool {
-        if self.state != TorrentState::Seeding {
-            return false;
-        }
-        if let Some(limit) = self.config.seed_ratio_limit
-            && self.downloaded > 0
-        {
-            let ratio = self.uploaded as f64 / self.downloaded as f64;
-            if ratio >= limit {
-                info!(ratio, limit, "seed ratio reached, stopping");
-                self.transition_state(TorrentState::Stopped);
-                return true;
-            }
-        }
-        false
-    }
-
     fn rotate_optimistic(&mut self) {
         let peer_infos: Vec<ChokerPeerInfo> = self
             .peers
@@ -6674,1106 +3927,6 @@ impl TorrentActor {
             .collect();
 
         self.choker.rotate_optimistic(&peer_infos);
-    }
-
-    /// BEP 16: assign the next super-seed piece to a peer.
-    async fn assign_next_piece_for_peer(&mut self, peer_addr: SocketAddr) {
-        let ss = match &mut self.super_seed {
-            Some(ss) => ss,
-            None => return,
-        };
-
-        if ss.has_assignment(&peer_addr) {
-            return;
-        }
-
-        let peer_bitfield = match self.peers.get(&peer_addr) {
-            Some(p) => p.bitfield.clone(),
-            None => return,
-        };
-
-        let availability = self.availability.clone();
-        if let Some(idx) =
-            ss.assign_piece(peer_addr, &peer_bitfield, &availability, self.num_pieces)
-            && let Some(peer) = self.peers.get(&peer_addr)
-        {
-            let _ = peer.cmd_tx.try_send(PeerCommand::Have(idx));
-        }
-    }
-
-    // ----- Peer connectivity -----
-
-    /// M107: Handle a connect request from the peer adder task.
-    /// The adder has already validated and acquired a semaphore permit.
-    fn handle_adder_connect(&mut self, connect_peer: ConnectPeer) {
-        // M108: Count every connect request that reaches the actor (before dedup).
-        self.connect_attempts = self.connect_attempts.saturating_add(1);
-
-        let ConnectPeer {
-            addr,
-            source,
-            permit,
-        } = connect_peer;
-
-        // Final check — peer might have connected between adder validation and here
-        if self.peers.contains_key(&addr) {
-            drop(permit);
-            return;
-        }
-
-        let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let bitfield = if self.super_seed.is_some() {
-            // Super seeding: send empty bitfield to hide our pieces
-            Bitfield::new(self.num_pieces)
-        } else {
-            self.chunk_tracker
-                .as_ref()
-                .map(|ct| ct.bitfield().clone())
-                .unwrap_or_else(|| Bitfield::new(self.num_pieces))
-        };
-
-        self.peers
-            .insert(addr, PeerState::new(addr, self.num_pieces, cmd_tx, source));
-        self.peers_connected.insert(addr, ());
-        // M108: Update live peers for PEX send tasks
-        self.live_outgoing_peers
-            .write()
-            .insert(addr);
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::PeerConnected {
-                info_hash: self.info_hash,
-                addr,
-            },
-        );
-        // M93: Send lock-free dispatch state to peer for integrated dispatch
-        if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
-            &self.atomic_states,
-            &self.availability_snapshot,
-            &self.reservation_notify,
-        ) && let Some(peer) = self.peers.get(&addr)
-            && let Some(ref lengths) = self.lengths
-        {
-            let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                atomic_states: Arc::clone(atomic_states),
-                availability_snapshot: Arc::clone(snapshot),
-                piece_notify: Arc::clone(notify),
-                disk_handle: self.disk.clone(),
-                write_error_tx: self.write_error_tx.clone(),
-                lengths: lengths.clone(),
-                block_maps: self.block_maps.clone(),
-                steal_candidates: self.steal_candidates.clone(),
-                piece_write_guards: self.piece_write_guards.clone(),
-            });
-        }
-
-        // I2P outbound: route through SAM instead of TCP/uTP
-        if let Some(i2p_dest) = self.i2p_destinations.get(&addr).cloned() {
-            if let Some(ref sam) = self.sam_session {
-                let sam = Arc::clone(sam);
-                let event_tx = self.event_tx.clone();
-                let info_hash = self.info_hash;
-                let peer_id = self.our_peer_id;
-                let num_pieces = self.num_pieces;
-                let enable_dht = self.config.enable_dht;
-                let enable_fast = self.config.enable_fast;
-                let anonymous_mode = self.config.anonymous_mode;
-                let max_message_size = self.config.max_message_size;
-                let peer_connect_timeout = self.config.peer_connect_timeout;
-                let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
-                let plugins = Arc::clone(&self.plugins);
-                let have_broadcast_tx = self.have_broadcast_tx.clone();
-
-                tokio::spawn(async move {
-                    let _permit = permit; // M107: hold for peer lifetime
-                    // Apply connect timeout consistent with TCP path
-                    let connect_result = if peer_connect_timeout > 0 {
-                        match tokio::time::timeout(
-                            Duration::from_secs(peer_connect_timeout),
-                            sam.connect(&i2p_dest),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => {
-                                debug!(%addr, timeout_secs = peer_connect_timeout, "I2P SAM connect timed out");
-                                let _ = event_tx
-                                    .send(PeerEvent::Disconnected {
-                                        peer_addr: addr,
-                                        reason: Some("I2P connect: timeout".into()),
-                                    })
-                                    .await;
-                                return;
-                            }
-                        }
-                    } else {
-                        sam.connect(&i2p_dest).await
-                    };
-
-                    match connect_result {
-                        Ok(sam_stream) => {
-                            let tcp_stream = sam_stream.into_inner();
-                            let _ = event_tx
-                                .send(PeerEvent::TransportIdentified {
-                                    peer_addr: addr,
-                                    transport: crate::rate_limiter::PeerTransport::Tcp,
-                                })
-                                .await;
-                            // I2P provides encryption; disable MSE
-                            match run_peer(
-                                addr,
-                                tcp_stream,
-                                info_hash,
-                                peer_id,
-                                bitfield,
-                                num_pieces,
-                                event_tx.clone(),
-                                cmd_rx,
-                                enable_dht,
-                                enable_fast,
-                                torrent_wire::mse::EncryptionMode::Disabled,
-                                true, // outbound
-                                anonymous_mode,
-                                info_bytes,
-                                plugins,
-                                false, // enable_holepunch — N/A for I2P
-                                max_message_size,
-                                have_broadcast_tx.subscribe(),
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    debug!(%addr, "I2P peer session ended normally");
-                                }
-                                Err(e) => {
-                                    let _ = event_tx
-                                        .send(PeerEvent::Disconnected {
-                                            peer_addr: addr,
-                                            reason: Some(e.to_string()),
-                                        })
-                                        .await;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            debug!(%addr, error = %e, "I2P SAM connect failed");
-                            let _ = event_tx
-                                .send(PeerEvent::Disconnected {
-                                    peer_addr: addr,
-                                    reason: Some(format!("I2P connect: {e}")),
-                                })
-                                .await;
-                        }
-                    }
-                });
-                return; // Skip TCP/uTP path
-            }
-            // No SAM session — can't connect to I2P peer, clean up
-            self.peers.remove(&addr);
-            self.peers_connected.remove(&addr);
-            // M108: Update live peers for PEX send tasks
-            self.live_outgoing_peers
-                .write()
-                .remove(&addr);
-            return;
-        }
-
-        let info_hash = self.info_hash;
-        let peer_id = self.our_peer_id;
-        let num_pieces = self.num_pieces;
-        let event_tx = self.event_tx.clone();
-        let enable_dht = self.config.enable_dht;
-        let enable_fast = self.config.enable_fast;
-        let encryption_mode = self.config.encryption_mode;
-        let enable_utp = self.config.enable_utp;
-        let proxy_config = self.config.proxy.clone();
-        let use_proxy = proxy_config.proxy_type != crate::proxy::ProxyType::None
-            && proxy_config.proxy_peer_connections;
-        let anonymous_mode = self.config.anonymous_mode;
-        let enable_holepunch = self.config.enable_holepunch;
-        let max_message_size = self.config.max_message_size;
-        let peer_connect_timeout = self.config.peer_connect_timeout;
-        let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
-        let factory = Arc::clone(&self.factory);
-        // Pick the uTP socket matching the peer's address family
-        let utp_socket = if addr.is_ipv6() {
-            self.utp_socket_v6.clone()
-        } else {
-            self.utp_socket.clone()
-        };
-        let plugins = Arc::clone(&self.plugins);
-        let have_broadcast_tx = self.have_broadcast_tx.clone();
-
-        // SSL torrent: pre-build client TLS config for outbound connections (M42).
-        // If ssl_cert is present in the torrent metadata and we have an ssl_manager,
-        // TCP connections will be wrapped in TLS.
-        let ssl_client_config = self
-            .meta
-            .as_ref()
-            .and_then(|m| m.ssl_cert.as_deref())
-            .and_then(|cert| {
-                self.ssl_manager
-                    .as_ref()
-                    .and_then(|mgr| match mgr.client_config(cert) {
-                        Ok(cfg) => Some(cfg),
-                        Err(e) => {
-                            warn!(%addr, error = %e, "failed to build SSL client config");
-                            None
-                        }
-                    })
-            });
-
-        tokio::spawn(async move {
-            let _permit = permit; // M107: hold for peer lifetime
-
-            // M107 Change 5: TCP+uTP race with 1s TCP head start.
-            //
-            // When uTP is available, we race TCP (starts immediately) against
-            // uTP (starts after 1s delay, or immediately if TCP fails first).
-            // First transport to connect wins; the loser is cancelled by select!.
-            //
-            // When uTP is unavailable (proxy active, disabled, or no socket),
-            // we fall through to the TCP-only path.
-            if enable_utp
-                && !use_proxy
-                && let Some(socket) = utp_socket
-            {
-                // Signal from TCP future: notify uTP to start early if TCP fails
-                let tcp_failed = Arc::new(tokio::sync::Notify::new());
-
-                let tcp_notify = Arc::clone(&tcp_failed);
-                let tcp_factory = Arc::clone(&factory);
-                // Note: use_proxy is guaranteed false here (checked above),
-                // so TCP connects directly via the transport factory.
-                let tcp_fut = async move {
-                    let result = if peer_connect_timeout > 0 {
-                        match tokio::time::timeout(
-                            Duration::from_secs(peer_connect_timeout),
-                            tcp_factory.connect_tcp(addr),
-                        )
-                        .await
-                        {
-                            Ok(r) => r,
-                            Err(_) => {
-                                debug!(%addr, timeout_secs = peer_connect_timeout, "TCP connect timed out");
-                                Err(std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    "connect timeout",
-                                ))
-                            }
-                        }
-                    } else {
-                        tcp_factory.connect_tcp(addr).await
-                    };
-                    if result.is_err() {
-                        tcp_notify.notify_one();
-                    }
-                    result
-                };
-
-                let utp_fut = async {
-                    // Wait for either: 1s head-start delay OR early TCP failure
-                    tokio::select! {
-                        biased;
-                        () = tcp_failed.notified() => {
-                            debug!(%addr, "TCP failed early, starting uTP immediately");
-                        }
-                        () = tokio::time::sleep(Duration::from_secs(1)) => {
-                            debug!(%addr, "1s head-start elapsed, starting uTP");
-                        }
-                    }
-                    socket.connect(addr).await
-                };
-
-                // Pin both futures for select!
-                tokio::pin!(tcp_fut);
-                tokio::pin!(utp_fut);
-
-                // Race the two transports. `biased` gives TCP slight priority
-                // when both complete in the same poll cycle (expected: TCP
-                // started first, so it should win ties).
-                tokio::select! {
-                    biased;
-                    tcp_result = &mut tcp_fut => {
-                        match tcp_result {
-                            Ok(stream) => {
-                                debug!(%addr, "TCP won the race");
-                                let _ = event_tx
-                                    .send(PeerEvent::TransportIdentified {
-                                        peer_addr: addr,
-                                        transport: crate::rate_limiter::PeerTransport::Tcp,
-                                    })
-                                    .await;
-                                // SSL torrent: wrap TCP stream in TLS (M42)
-                                if let Some(ref client_config) = ssl_client_config {
-                                    match torrent_wire::ssl::connect_tls(
-                                        stream,
-                                        info_hash,
-                                        Arc::clone(client_config),
-                                    )
-                                    .await
-                                    {
-                                        Ok(tls_stream) => {
-                                            debug!(%addr, "SSL/TLS connection established");
-                                            let _ = run_peer(
-                                                addr,
-                                                tls_stream,
-                                                info_hash,
-                                                peer_id,
-                                                bitfield,
-                                                num_pieces,
-                                                event_tx,
-                                                cmd_rx,
-                                                enable_dht,
-                                                enable_fast,
-                                                torrent_wire::mse::EncryptionMode::Disabled,
-                                                true, // outbound
-                                                anonymous_mode,
-                                                info_bytes,
-                                                plugins,
-                                                enable_holepunch,
-                                                max_message_size,
-                                                have_broadcast_tx.subscribe(),
-                                            )
-                                            .await;
-                                        }
-                                        Err(e) => {
-                                            debug!(%addr, error = %e, "SSL/TLS handshake failed");
-                                            let _ = event_tx
-                                                .send(PeerEvent::Disconnected {
-                                                    peer_addr: addr,
-                                                    reason: Some(format!("TLS handshake failed: {e}")),
-                                                })
-                                                .await;
-                                        }
-                                    }
-                                } else {
-                                    match run_peer(
-                                        addr,
-                                        stream,
-                                        info_hash,
-                                        peer_id,
-                                        bitfield.clone(),
-                                        num_pieces,
-                                        event_tx.clone(),
-                                        cmd_rx,
-                                        enable_dht,
-                                        enable_fast,
-                                        encryption_mode,
-                                        true, // outbound
-                                        anonymous_mode,
-                                        info_bytes.clone(),
-                                        Arc::clone(&plugins),
-                                        enable_holepunch,
-                                        max_message_size,
-                                        have_broadcast_tx.subscribe(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(()) => debug!(%addr, "TCP peer session ended normally"),
-                                        Err(e) => {
-                                            // MSE fallback for TCP
-                                            let retry_mode = match encryption_mode {
-                                                torrent_wire::mse::EncryptionMode::Enabled => {
-                                                    Some(torrent_wire::mse::EncryptionMode::Disabled)
-                                                }
-                                                torrent_wire::mse::EncryptionMode::PreferPlaintext => {
-                                                    Some(torrent_wire::mse::EncryptionMode::Enabled)
-                                                }
-                                                _ => None,
-                                            };
-                                            if let Some(fallback_mode) = retry_mode {
-                                                debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
-                                                if let Ok(tcp2) = factory.connect_tcp(addr).await {
-                                                    let (retry_tx, retry_rx) = mpsc::channel(256);
-                                                    let _ = event_tx
-                                                        .send(PeerEvent::MseRetry {
-                                                            peer_addr: addr,
-                                                            cmd_tx: retry_tx,
-                                                        })
-                                                        .await;
-                                                    match run_peer(
-                                                        addr,
-                                                        tcp2,
-                                                        info_hash,
-                                                        peer_id,
-                                                        bitfield,
-                                                        num_pieces,
-                                                        event_tx.clone(),
-                                                        retry_rx,
-                                                        enable_dht,
-                                                        enable_fast,
-                                                        fallback_mode,
-                                                        true,
-                                                        anonymous_mode,
-                                                        info_bytes,
-                                                        plugins,
-                                                        enable_holepunch,
-                                                        max_message_size,
-                                                        have_broadcast_tx.subscribe(),
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(()) => {
-                                                            debug!(%addr, "TCP fallback session ended normally")
-                                                        }
-                                                        Err(e2) => {
-                                                            debug!(%addr, error = %e2, "TCP fallback also failed");
-                                                            let _ = event_tx
-                                                                .send(PeerEvent::Disconnected {
-                                                                    peer_addr: addr,
-                                                                    reason: Some(e2.to_string()),
-                                                                })
-                                                                .await;
-                                                        }
-                                                    }
-                                                } else {
-                                                    debug!(%addr, "TCP fallback reconnect failed");
-                                                    let _ = event_tx
-                                                        .send(PeerEvent::Disconnected {
-                                                            peer_addr: addr,
-                                                            reason: Some(e.to_string()),
-                                                        })
-                                                        .await;
-                                                }
-                                            } else {
-                                                debug!(%addr, error = %e, "TCP peer session failed");
-                                                let _ = event_tx
-                                                    .send(PeerEvent::Disconnected {
-                                                        peer_addr: addr,
-                                                        reason: Some(e.to_string()),
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(tcp_err) => {
-                                // TCP failed; wait for uTP result (already unblocked
-                                // via Notify, so it should be connecting or will soon)
-                                debug!(%addr, error = %tcp_err, "TCP lost the race (failed)");
-                                match utp_fut.await {
-                                    Ok(stream) => {
-                                        debug!(%addr, "uTP connected after TCP failure");
-                                        let _ = event_tx
-                                            .send(PeerEvent::TransportIdentified {
-                                                peer_addr: addr,
-                                                transport: crate::rate_limiter::PeerTransport::Utp,
-                                            })
-                                            .await;
-                                        match run_peer(
-                                            addr,
-                                            stream,
-                                            info_hash,
-                                            peer_id,
-                                            bitfield.clone(),
-                                            num_pieces,
-                                            event_tx.clone(),
-                                            cmd_rx,
-                                            enable_dht,
-                                            enable_fast,
-                                            encryption_mode,
-                                            true, // outbound
-                                            anonymous_mode,
-                                            info_bytes.clone(),
-                                            Arc::clone(&plugins),
-                                            enable_holepunch,
-                                            max_message_size,
-                                            have_broadcast_tx.subscribe(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(()) => debug!(%addr, "uTP peer session ended normally"),
-                                            Err(e) => {
-                                                // MSE fallback for uTP
-                                                let retry_mode = match encryption_mode {
-                                                    torrent_wire::mse::EncryptionMode::Enabled => {
-                                                        Some(torrent_wire::mse::EncryptionMode::Disabled)
-                                                    }
-                                                    torrent_wire::mse::EncryptionMode::PreferPlaintext => {
-                                                        Some(torrent_wire::mse::EncryptionMode::Enabled)
-                                                    }
-                                                    _ => None,
-                                                };
-                                                if let Some(fallback_mode) = retry_mode {
-                                                    debug!(%addr, error = %e, ?fallback_mode, "uTP MSE failed, retrying with fallback");
-                                                    if let Ok(Ok(stream2)) = tokio::time::timeout(
-                                                        Duration::from_secs(5),
-                                                        socket.connect(addr),
-                                                    )
-                                                    .await
-                                                    {
-                                                        let (retry_tx, retry_rx) = mpsc::channel(256);
-                                                        let _ = event_tx
-                                                            .send(PeerEvent::MseRetry {
-                                                                peer_addr: addr,
-                                                                cmd_tx: retry_tx,
-                                                            })
-                                                            .await;
-                                                        match run_peer(
-                                                            addr,
-                                                            stream2,
-                                                            info_hash,
-                                                            peer_id,
-                                                            bitfield,
-                                                            num_pieces,
-                                                            event_tx.clone(),
-                                                            retry_rx,
-                                                            enable_dht,
-                                                            enable_fast,
-                                                            fallback_mode,
-                                                            true,
-                                                            anonymous_mode,
-                                                            info_bytes.clone(),
-                                                            Arc::clone(&plugins),
-                                                            enable_holepunch,
-                                                            max_message_size,
-                                                            have_broadcast_tx.subscribe(),
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(()) => {
-                                                                debug!(%addr, "uTP fallback session ended normally")
-                                                            }
-                                                            Err(e2) => {
-                                                                debug!(%addr, error = %e2, "uTP fallback also failed");
-                                                                let _ = event_tx
-                                                                    .send(PeerEvent::Disconnected {
-                                                                        peer_addr: addr,
-                                                                        reason: Some(e2.to_string()),
-                                                                    })
-                                                                    .await;
-                                                            }
-                                                        }
-                                                    } else {
-                                                        debug!(%addr, "uTP fallback reconnect failed");
-                                                        let _ = event_tx
-                                                            .send(PeerEvent::Disconnected {
-                                                                peer_addr: addr,
-                                                                reason: Some(e.to_string()),
-                                                            })
-                                                            .await;
-                                                    }
-                                                } else {
-                                                    debug!(%addr, error = %e, "uTP peer session failed");
-                                                    let _ = event_tx
-                                                        .send(PeerEvent::Disconnected {
-                                                            peer_addr: addr,
-                                                            reason: Some(e.to_string()),
-                                                        })
-                                                        .await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(utp_err) => {
-                                        // Both transports failed
-                                        debug!(
-                                            %addr,
-                                            tcp_error = %tcp_err,
-                                            utp_error = %utp_err,
-                                            "both TCP and uTP failed"
-                                        );
-                                        let _ = event_tx
-                                            .send(PeerEvent::Disconnected {
-                                                peer_addr: addr,
-                                                reason: Some(format!(
-                                                    "TCP: {tcp_err}; uTP: {utp_err}"
-                                                )),
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    utp_result = &mut utp_fut => {
-                        match utp_result {
-                            Ok(stream) => {
-                                debug!(%addr, "uTP won the race");
-                                let _ = event_tx
-                                    .send(PeerEvent::TransportIdentified {
-                                        peer_addr: addr,
-                                        transport: crate::rate_limiter::PeerTransport::Utp,
-                                    })
-                                    .await;
-                                match run_peer(
-                                    addr,
-                                    stream,
-                                    info_hash,
-                                    peer_id,
-                                    bitfield.clone(),
-                                    num_pieces,
-                                    event_tx.clone(),
-                                    cmd_rx,
-                                    enable_dht,
-                                    enable_fast,
-                                    encryption_mode,
-                                    true, // outbound
-                                    anonymous_mode,
-                                    info_bytes.clone(),
-                                    Arc::clone(&plugins),
-                                    enable_holepunch,
-                                    max_message_size,
-                                    have_broadcast_tx.subscribe(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => debug!(%addr, "uTP peer session ended normally"),
-                                    Err(e) => {
-                                        // MSE fallback for uTP
-                                        let retry_mode = match encryption_mode {
-                                            torrent_wire::mse::EncryptionMode::Enabled => {
-                                                Some(torrent_wire::mse::EncryptionMode::Disabled)
-                                            }
-                                            torrent_wire::mse::EncryptionMode::PreferPlaintext => {
-                                                Some(torrent_wire::mse::EncryptionMode::Enabled)
-                                            }
-                                            _ => None,
-                                        };
-                                        if let Some(fallback_mode) = retry_mode {
-                                            debug!(%addr, error = %e, ?fallback_mode, "uTP MSE failed, retrying with fallback");
-                                            if let Ok(Ok(stream2)) = tokio::time::timeout(
-                                                Duration::from_secs(5),
-                                                socket.connect(addr),
-                                            )
-                                            .await
-                                            {
-                                                let (retry_tx, retry_rx) = mpsc::channel(256);
-                                                let _ = event_tx
-                                                    .send(PeerEvent::MseRetry {
-                                                        peer_addr: addr,
-                                                        cmd_tx: retry_tx,
-                                                    })
-                                                    .await;
-                                                match run_peer(
-                                                    addr,
-                                                    stream2,
-                                                    info_hash,
-                                                    peer_id,
-                                                    bitfield,
-                                                    num_pieces,
-                                                    event_tx.clone(),
-                                                    retry_rx,
-                                                    enable_dht,
-                                                    enable_fast,
-                                                    fallback_mode,
-                                                    true,
-                                                    anonymous_mode,
-                                                    info_bytes.clone(),
-                                                    Arc::clone(&plugins),
-                                                    enable_holepunch,
-                                                    max_message_size,
-                                                    have_broadcast_tx.subscribe(),
-                                                )
-                                                .await
-                                                {
-                                                    Ok(()) => {
-                                                        debug!(%addr, "uTP fallback session ended normally")
-                                                    }
-                                                    Err(e2) => {
-                                                        debug!(%addr, error = %e2, "uTP fallback also failed");
-                                                        let _ = event_tx
-                                                            .send(PeerEvent::Disconnected {
-                                                                peer_addr: addr,
-                                                                reason: Some(e2.to_string()),
-                                                            })
-                                                            .await;
-                                                    }
-                                                }
-                                            } else {
-                                                debug!(%addr, "uTP fallback reconnect failed");
-                                                let _ = event_tx
-                                                    .send(PeerEvent::Disconnected {
-                                                        peer_addr: addr,
-                                                        reason: Some(e.to_string()),
-                                                    })
-                                                    .await;
-                                            }
-                                        } else {
-                                            debug!(%addr, error = %e, "uTP peer session failed");
-                                            let _ = event_tx
-                                                .send(PeerEvent::Disconnected {
-                                                    peer_addr: addr,
-                                                    reason: Some(e.to_string()),
-                                                })
-                                                .await;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(utp_err) => {
-                                // uTP finished first with error; TCP still running.
-                                // Wait for TCP result.
-                                debug!(%addr, error = %utp_err, "uTP lost the race (failed), waiting for TCP");
-                                match tcp_fut.await {
-                                    Ok(stream) => {
-                                        debug!(%addr, "TCP connected after uTP failure");
-                                        let _ = event_tx
-                                            .send(PeerEvent::TransportIdentified {
-                                                peer_addr: addr,
-                                                transport: crate::rate_limiter::PeerTransport::Tcp,
-                                            })
-                                            .await;
-                                        if let Some(ref client_config) = ssl_client_config {
-                                            match torrent_wire::ssl::connect_tls(
-                                                stream,
-                                                info_hash,
-                                                Arc::clone(client_config),
-                                            )
-                                            .await
-                                            {
-                                                Ok(tls_stream) => {
-                                                    debug!(%addr, "SSL/TLS connection established");
-                                                    let _ = run_peer(
-                                                        addr,
-                                                        tls_stream,
-                                                        info_hash,
-                                                        peer_id,
-                                                        bitfield,
-                                                        num_pieces,
-                                                        event_tx,
-                                                        cmd_rx,
-                                                        enable_dht,
-                                                        enable_fast,
-                                                        torrent_wire::mse::EncryptionMode::Disabled,
-                                                        true, // outbound
-                                                        anonymous_mode,
-                                                        info_bytes,
-                                                        plugins,
-                                                        enable_holepunch,
-                                                        max_message_size,
-                                                        have_broadcast_tx.subscribe(),
-                                                    )
-                                                    .await;
-                                                }
-                                                Err(e) => {
-                                                    debug!(%addr, error = %e, "SSL/TLS handshake failed");
-                                                    let _ = event_tx
-                                                        .send(PeerEvent::Disconnected {
-                                                            peer_addr: addr,
-                                                            reason: Some(format!("TLS handshake failed: {e}")),
-                                                        })
-                                                        .await;
-                                                }
-                                            }
-                                        } else {
-                                            match run_peer(
-                                                addr,
-                                                stream,
-                                                info_hash,
-                                                peer_id,
-                                                bitfield.clone(),
-                                                num_pieces,
-                                                event_tx.clone(),
-                                                cmd_rx,
-                                                enable_dht,
-                                                enable_fast,
-                                                encryption_mode,
-                                                true, // outbound
-                                                anonymous_mode,
-                                                info_bytes.clone(),
-                                                Arc::clone(&plugins),
-                                                enable_holepunch,
-                                                max_message_size,
-                                                have_broadcast_tx.subscribe(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(()) => debug!(%addr, "TCP peer session ended normally"),
-                                                Err(e) => {
-                                                    // MSE fallback for TCP
-                                                    let retry_mode = match encryption_mode {
-                                                        torrent_wire::mse::EncryptionMode::Enabled => {
-                                                            Some(torrent_wire::mse::EncryptionMode::Disabled)
-                                                        }
-                                                        torrent_wire::mse::EncryptionMode::PreferPlaintext => {
-                                                            Some(torrent_wire::mse::EncryptionMode::Enabled)
-                                                        }
-                                                        _ => None,
-                                                    };
-                                                    if let Some(fallback_mode) = retry_mode {
-                                                        debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
-                                                        if let Ok(tcp2) = factory.connect_tcp(addr).await {
-                                                            let (retry_tx, retry_rx) = mpsc::channel(256);
-                                                            let _ = event_tx
-                                                                .send(PeerEvent::MseRetry {
-                                                                    peer_addr: addr,
-                                                                    cmd_tx: retry_tx,
-                                                                })
-                                                                .await;
-                                                            match run_peer(
-                                                                addr,
-                                                                tcp2,
-                                                                info_hash,
-                                                                peer_id,
-                                                                bitfield,
-                                                                num_pieces,
-                                                                event_tx.clone(),
-                                                                retry_rx,
-                                                                enable_dht,
-                                                                enable_fast,
-                                                                fallback_mode,
-                                                                true,
-                                                                anonymous_mode,
-                                                                info_bytes,
-                                                                plugins,
-                                                                enable_holepunch,
-                                                                max_message_size,
-                                                                have_broadcast_tx.subscribe(),
-                                                            )
-                                                            .await
-                                                            {
-                                                                Ok(()) => {
-                                                                    debug!(%addr, "TCP fallback session ended normally")
-                                                                }
-                                                                Err(e2) => {
-                                                                    debug!(%addr, error = %e2, "TCP fallback also failed");
-                                                                    let _ = event_tx
-                                                                        .send(PeerEvent::Disconnected {
-                                                                            peer_addr: addr,
-                                                                            reason: Some(e2.to_string()),
-                                                                        })
-                                                                        .await;
-                                                                }
-                                                            }
-                                                        } else {
-                                                            debug!(%addr, "TCP fallback reconnect failed");
-                                                            let _ = event_tx
-                                                                .send(PeerEvent::Disconnected {
-                                                                    peer_addr: addr,
-                                                                    reason: Some(e.to_string()),
-                                                                })
-                                                                .await;
-                                                        }
-                                                    } else {
-                                                        debug!(%addr, error = %e, "TCP peer session failed");
-                                                        let _ = event_tx
-                                                            .send(PeerEvent::Disconnected {
-                                                                peer_addr: addr,
-                                                                reason: Some(e.to_string()),
-                                                            })
-                                                            .await;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(tcp_err) => {
-                                        // Both transports failed
-                                        debug!(
-                                            %addr,
-                                            tcp_error = %tcp_err,
-                                            utp_error = %utp_err,
-                                            "both TCP and uTP failed"
-                                        );
-                                        let _ = event_tx
-                                            .send(PeerEvent::Disconnected {
-                                                peer_addr: addr,
-                                                reason: Some(format!(
-                                                    "TCP: {tcp_err}; uTP: {utp_err}"
-                                                )),
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                return;
-            }
-
-            // TCP-only path — uTP unavailable (proxy active, disabled, or no socket)
-            let tcp_result = if use_proxy {
-                crate::proxy::connect_through_proxy(&proxy_config, addr)
-                    .await
-                    .map(crate::transport::BoxedStream::new)
-            } else if peer_connect_timeout > 0 {
-                match tokio::time::timeout(
-                    Duration::from_secs(peer_connect_timeout),
-                    factory.connect_tcp(addr),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        debug!(%addr, timeout_secs = peer_connect_timeout, "TCP connect timed out");
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "connect timeout",
-                        ))
-                    }
-                }
-            } else {
-                factory.connect_tcp(addr).await
-            };
-            match tcp_result {
-                Ok(stream) => {
-                    let _ = event_tx
-                        .send(PeerEvent::TransportIdentified {
-                            peer_addr: addr,
-                            transport: crate::rate_limiter::PeerTransport::Tcp,
-                        })
-                        .await;
-                    // SSL torrent: wrap TCP stream in TLS (M42)
-                    if let Some(ref client_config) = ssl_client_config {
-                        match torrent_wire::ssl::connect_tls(
-                            stream,
-                            info_hash,
-                            Arc::clone(client_config),
-                        )
-                        .await
-                        {
-                            Ok(tls_stream) => {
-                                debug!(%addr, "SSL/TLS connection established");
-                                // TLS provides encryption; disable MSE
-                                let _ = run_peer(
-                                    addr,
-                                    tls_stream,
-                                    info_hash,
-                                    peer_id,
-                                    bitfield,
-                                    num_pieces,
-                                    event_tx,
-                                    cmd_rx,
-                                    enable_dht,
-                                    enable_fast,
-                                    torrent_wire::mse::EncryptionMode::Disabled,
-                                    true, // outbound
-                                    anonymous_mode,
-                                    info_bytes,
-                                    plugins,
-                                    enable_holepunch,
-                                    max_message_size,
-                                    have_broadcast_tx.subscribe(),
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                debug!(%addr, error = %e, "SSL/TLS handshake failed");
-                                let _ = event_tx
-                                    .send(PeerEvent::Disconnected {
-                                        peer_addr: addr,
-                                        reason: Some(format!("TLS handshake failed: {e}")),
-                                    })
-                                    .await;
-                            }
-                        }
-                    } else {
-                        match run_peer(
-                            addr,
-                            stream,
-                            info_hash,
-                            peer_id,
-                            bitfield.clone(),
-                            num_pieces,
-                            event_tx.clone(),
-                            cmd_rx,
-                            enable_dht,
-                            enable_fast,
-                            encryption_mode,
-                            true, // outbound
-                            anonymous_mode,
-                            info_bytes.clone(),
-                            Arc::clone(&plugins),
-                            enable_holepunch,
-                            max_message_size,
-                            have_broadcast_tx.subscribe(),
-                        )
-                        .await
-                        {
-                            Ok(()) => debug!(%addr, "TCP peer session ended normally"),
-                            Err(e) => {
-                                // MSE fallback for TCP: determine retry mode.
-                                let retry_mode = match encryption_mode {
-                                    torrent_wire::mse::EncryptionMode::Enabled => {
-                                        Some(torrent_wire::mse::EncryptionMode::Disabled)
-                                    }
-                                    torrent_wire::mse::EncryptionMode::PreferPlaintext => {
-                                        Some(torrent_wire::mse::EncryptionMode::Enabled)
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(fallback_mode) = retry_mode {
-                                    debug!(%addr, error = %e, ?fallback_mode, "TCP MSE failed, retrying with fallback");
-                                    if let Ok(tcp2) = factory.connect_tcp(addr).await {
-                                        let (retry_tx, retry_rx) = mpsc::channel(256);
-                                        let _ = event_tx
-                                            .send(PeerEvent::MseRetry {
-                                                peer_addr: addr,
-                                                cmd_tx: retry_tx,
-                                            })
-                                            .await;
-                                        match run_peer(
-                                            addr,
-                                            tcp2,
-                                            info_hash,
-                                            peer_id,
-                                            bitfield,
-                                            num_pieces,
-                                            event_tx.clone(),
-                                            retry_rx,
-                                            enable_dht,
-                                            enable_fast,
-                                            fallback_mode,
-                                            true,
-                                            anonymous_mode,
-                                            info_bytes,
-                                            plugins,
-                                            enable_holepunch,
-                                            max_message_size,
-                                            have_broadcast_tx.subscribe(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(()) => {
-                                                debug!(%addr, "TCP fallback session ended normally")
-                                            }
-                                            Err(e2) => {
-                                                debug!(%addr, error = %e2, "TCP fallback also failed");
-                                                let _ = event_tx
-                                                    .send(PeerEvent::Disconnected {
-                                                        peer_addr: addr,
-                                                        reason: Some(e2.to_string()),
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                    } else {
-                                        debug!(%addr, "TCP fallback reconnect failed");
-                                        let _ = event_tx
-                                            .send(PeerEvent::Disconnected {
-                                                peer_addr: addr,
-                                                reason: Some(e.to_string()),
-                                            })
-                                            .await;
-                                    }
-                                } else {
-                                    debug!(%addr, error = %e, "TCP peer session failed");
-                                    let _ = event_tx
-                                        .send(PeerEvent::Disconnected {
-                                            peer_addr: addr,
-                                            reason: Some(e.to_string()),
-                                        })
-                                        .await;
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = event_tx
-                        .send(PeerEvent::Disconnected {
-                            peer_addr: addr,
-                            reason: Some(e.to_string()),
-                        })
-                        .await;
-                }
-            }
-        });
     }
 
     /// Handle an incoming I2P peer connection (M41).
@@ -7850,526 +4003,6 @@ pub(crate) fn is_i2p_synthetic_addr(addr: &SocketAddr) -> bool {
     }
 }
 
-impl TorrentActor {
-    /// Spawn a peer task from an already-connected stream (for incoming connections and tests).
-    fn spawn_peer_from_stream(
-        &mut self,
-        addr: SocketAddr,
-        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    ) {
-        self.has_incoming = true;
-        self.spawn_peer_from_stream_with_mode(addr, stream, None);
-    }
-
-    /// Spawn a peer task with an optional encryption mode override.
-    ///
-    /// When `mode_override` is `Some`, that mode is used instead of the torrent config's
-    /// encryption mode. This is used for uTP inbound peers where MSE has already been
-    /// ruled out by the session routing layer.
-    fn spawn_peer_from_stream_with_mode(
-        &mut self,
-        addr: SocketAddr,
-        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-        mode_override: Option<torrent_wire::mse::EncryptionMode>,
-    ) {
-        if self.peers.contains_key(&addr) {
-            return;
-        }
-        // M107: Acquire semaphore permit for inbound peer (non-blocking)
-        let permit = match self.peer_semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                debug!(%addr, "rejected inbound peer: at connection capacity");
-                return;
-            }
-        };
-
-        // Reject banned incoming peers
-        if crate::timed_lock::TimedGuard::new(
-            self.ban_manager.read(),
-            &self.lock_timing,
-            "ban_manager",
-        )
-        .is_banned(&addr.ip())
-        {
-            debug!(%addr, "rejected banned incoming peer");
-            return;
-        }
-
-        // Reject IP-filtered incoming peers
-        if crate::timed_lock::TimedGuard::new(
-            self.ip_filter.read(),
-            &self.lock_timing,
-            "ip_filter",
-        )
-        .is_blocked(addr.ip())
-        {
-            debug!(%addr, "rejected IP-filtered incoming peer");
-            post_alert(
-                &self.alert_tx,
-                &self.alert_mask,
-                AlertKind::PeerBlocked { addr },
-            );
-            return;
-        }
-
-        let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let bitfield = if self.super_seed.is_some() {
-            // Super seeding: send empty bitfield to hide our pieces
-            Bitfield::new(self.num_pieces)
-        } else {
-            self.chunk_tracker
-                .as_ref()
-                .map(|ct| ct.bitfield().clone())
-                .unwrap_or_else(|| Bitfield::new(self.num_pieces))
-        };
-
-        self.peers.insert(
-            addr,
-            PeerState::new(addr, self.num_pieces, cmd_tx, PeerSource::Incoming),
-        );
-        self.peers_connected.insert(addr, ());
-        // M108: Update live peers for PEX send tasks
-        self.live_outgoing_peers
-            .write()
-            .insert(addr);
-        // Identify transport for incoming peers (M45)
-        let transport = if mode_override.is_some() {
-            crate::rate_limiter::PeerTransport::Utp
-        } else {
-            crate::rate_limiter::PeerTransport::Tcp
-        };
-        if let Some(peer) = self.peers.get_mut(&addr) {
-            peer.transport = Some(transport);
-        }
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::PeerConnected {
-                info_hash: self.info_hash,
-                addr,
-            },
-        );
-        // M93: Send lock-free dispatch state to peer for integrated dispatch
-        if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
-            &self.atomic_states,
-            &self.availability_snapshot,
-            &self.reservation_notify,
-        ) && let Some(peer) = self.peers.get(&addr)
-            && let Some(ref lengths) = self.lengths
-        {
-            let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                atomic_states: Arc::clone(atomic_states),
-                availability_snapshot: Arc::clone(snapshot),
-                piece_notify: Arc::clone(notify),
-                disk_handle: self.disk.clone(),
-                write_error_tx: self.write_error_tx.clone(),
-                lengths: lengths.clone(),
-                block_maps: self.block_maps.clone(),
-                steal_candidates: self.steal_candidates.clone(),
-                piece_write_guards: self.piece_write_guards.clone(),
-            });
-        }
-
-        let info_hash = self.info_hash;
-        let peer_id = self.our_peer_id;
-        let num_pieces = self.num_pieces;
-        let event_tx = self.event_tx.clone();
-        let enable_dht = self.config.enable_dht;
-        let enable_fast = self.config.enable_fast;
-        let encryption_mode = mode_override.unwrap_or(self.config.encryption_mode);
-        let anonymous_mode = self.config.anonymous_mode;
-        let enable_holepunch = self.config.enable_holepunch;
-        let max_message_size = self.config.max_message_size;
-        let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
-        let plugins = Arc::clone(&self.plugins);
-        let have_broadcast_tx = self.have_broadcast_tx.clone();
-
-        tokio::spawn(async move {
-            let _permit = permit; // M107: hold for peer lifetime
-            let _ = run_peer(
-                addr,
-                stream,
-                info_hash,
-                peer_id,
-                bitfield,
-                num_pieces,
-                event_tx,
-                cmd_rx,
-                enable_dht,
-                enable_fast,
-                encryption_mode,
-                false, // inbound
-                anonymous_mode,
-                info_bytes,
-                plugins,
-                enable_holepunch,
-                max_message_size,
-                have_broadcast_tx.subscribe(),
-            )
-            .await;
-        });
-    }
-
-    // ── BEP 55 Holepunch (M40) ──
-
-    /// Handle a Rendezvous request from an initiator peer.
-    ///
-    /// We act as relay: validate the request, then forward Connect messages to
-    /// both the initiator and the target so they can perform simultaneous open.
-    async fn handle_holepunch_rendezvous(
-        &mut self,
-        initiator_addr: SocketAddr,
-        target: SocketAddr,
-    ) {
-        use torrent_wire::HolepunchMessage;
-
-        debug!(%initiator_addr, %target, "holepunch: processing rendezvous request");
-
-        // Cannot relay to ourselves
-        if target == initiator_addr {
-            debug!(%initiator_addr, "holepunch: rendezvous target == initiator (NoSelf)");
-            if let Some(peer) = self.peers.get(&initiator_addr) {
-                let _ = peer
-                    .cmd_tx
-                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
-                        target,
-                        torrent_wire::HolepunchError::NoSelf,
-                    )));
-            }
-            return;
-        }
-
-        // Target must be connected to us
-        let target_peer = match self.peers.get(&target) {
-            Some(p) => p,
-            None => {
-                debug!(%initiator_addr, %target, "holepunch: target not connected (NotConnected)");
-                if let Some(peer) = self.peers.get(&initiator_addr) {
-                    let _ =
-                        peer.cmd_tx
-                            .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
-                                target,
-                                torrent_wire::HolepunchError::NotConnected,
-                            )));
-                }
-                return;
-            }
-        };
-
-        // Target must support holepunch
-        if !target_peer.supports_holepunch {
-            debug!(%initiator_addr, %target, "holepunch: target doesn't support holepunch (NoSupport)");
-            if let Some(peer) = self.peers.get(&initiator_addr) {
-                let _ = peer
-                    .cmd_tx
-                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::error(
-                        target,
-                        torrent_wire::HolepunchError::NoSupport,
-                    )));
-            }
-            return;
-        }
-
-        // Forward Connect to target: "connect to the initiator"
-        let _ = target_peer
-            .cmd_tx
-            .try_send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
-                initiator_addr,
-            )));
-
-        // Forward Connect to initiator: "connect to the target"
-        if let Some(initiator) = self.peers.get(&initiator_addr) {
-            let _ =
-                initiator
-                    .cmd_tx
-                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::connect(
-                        target,
-                    )));
-        }
-
-        debug!(%initiator_addr, %target, "holepunch: relayed connect to both peers");
-    }
-
-    /// Handle a Connect message from the relay — initiate simultaneous open
-    /// by connecting to the target via uTP (preferred) then TCP fallback.
-    async fn handle_holepunch_connect(&mut self, target: SocketAddr) {
-        debug!(%target, "holepunch: received connect, initiating simultaneous open");
-
-        // Don't connect if we're already connected to the target
-        if self.peers.contains_key(&target) {
-            debug!(%target, "holepunch: already connected to target, ignoring");
-            return;
-        }
-
-        // Check peer limit
-        if self.peers.len() >= self.effective_max_connections() {
-            debug!(%target, "holepunch: at max peers, ignoring connect");
-            return;
-        }
-
-        // Skip banned/filtered peers
-        if crate::timed_lock::TimedGuard::new(
-            self.ban_manager.read(),
-            &self.lock_timing,
-            "ban_manager",
-        )
-        .is_banned(&target.ip())
-        {
-            debug!(%target, "holepunch: target is banned");
-            return;
-        }
-        if crate::timed_lock::TimedGuard::new(
-            self.ip_filter.read(),
-            &self.lock_timing,
-            "ip_filter",
-        )
-        .is_blocked(target.ip())
-        {
-            debug!(%target, "holepunch: target is IP-filtered");
-            post_alert(
-                &self.alert_tx,
-                &self.alert_mask,
-                AlertKind::PeerBlocked { addr: target },
-            );
-            return;
-        }
-
-        // Set up peer state and channels (same pattern as try_connect_peers)
-        let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let bitfield = if self.super_seed.is_some() {
-            Bitfield::new(self.num_pieces)
-        } else {
-            self.chunk_tracker
-                .as_ref()
-                .map(|ct| ct.bitfield().clone())
-                .unwrap_or_else(|| Bitfield::new(self.num_pieces))
-        };
-
-        self.peers.insert(
-            target,
-            PeerState::new(target, self.num_pieces, cmd_tx, PeerSource::Pex),
-        );
-        post_alert(
-            &self.alert_tx,
-            &self.alert_mask,
-            AlertKind::PeerConnected {
-                info_hash: self.info_hash,
-                addr: target,
-            },
-        );
-        // M93: Send lock-free dispatch state to peer for integrated dispatch
-        if let (Some(atomic_states), Some(snapshot), Some(notify)) = (
-            &self.atomic_states,
-            &self.availability_snapshot,
-            &self.reservation_notify,
-        ) && let Some(peer) = self.peers.get(&target)
-            && let Some(ref lengths) = self.lengths
-        {
-            let _ = peer.cmd_tx.try_send(PeerCommand::StartRequesting {
-                atomic_states: Arc::clone(atomic_states),
-                availability_snapshot: Arc::clone(snapshot),
-                piece_notify: Arc::clone(notify),
-                disk_handle: self.disk.clone(),
-                write_error_tx: self.write_error_tx.clone(),
-                lengths: lengths.clone(),
-                block_maps: self.block_maps.clone(),
-                steal_candidates: self.steal_candidates.clone(),
-                piece_write_guards: self.piece_write_guards.clone(),
-            });
-        }
-
-        // Capture variables for the spawned task (mirrors try_connect_peers)
-        let info_hash = self.info_hash;
-        let peer_id = self.our_peer_id;
-        let num_pieces = self.num_pieces;
-        let event_tx = self.event_tx.clone();
-        let alert_tx = self.alert_tx.clone();
-        let alert_mask = Arc::clone(&self.alert_mask);
-        let enable_dht = self.config.enable_dht;
-        let enable_fast = self.config.enable_fast;
-        let encryption_mode = self.config.encryption_mode;
-        let enable_utp = self.config.enable_utp;
-        let anonymous_mode = self.config.anonymous_mode;
-        let enable_holepunch = self.config.enable_holepunch;
-        let max_message_size = self.config.max_message_size;
-        let info_bytes = self.meta.as_ref().and_then(|m| m.info_bytes.clone());
-        let utp_socket = if target.is_ipv6() {
-            self.utp_socket_v6.clone()
-        } else {
-            self.utp_socket.clone()
-        };
-        let plugins = Arc::clone(&self.plugins);
-        let factory = Arc::clone(&self.factory);
-        let have_broadcast_tx = self.have_broadcast_tx.clone();
-
-        tokio::spawn(async move {
-            // Try uTP first (5s timeout) — preferred for holepunch as NAT traversal
-            // works better with UDP-based protocols
-            if enable_utp && let Some(socket) = utp_socket {
-                match tokio::time::timeout(Duration::from_secs(5), socket.connect(target)).await {
-                    Ok(Ok(stream)) => {
-                        debug!(%target, "holepunch: uTP connection established");
-                        post_alert(
-                            &alert_tx,
-                            &alert_mask,
-                            AlertKind::HolepunchSucceeded {
-                                info_hash,
-                                addr: target,
-                            },
-                        );
-                        let _ = run_peer(
-                            target,
-                            stream,
-                            info_hash,
-                            peer_id,
-                            bitfield,
-                            num_pieces,
-                            event_tx,
-                            cmd_rx,
-                            enable_dht,
-                            enable_fast,
-                            encryption_mode,
-                            true, // outbound
-                            anonymous_mode,
-                            info_bytes,
-                            plugins,
-                            enable_holepunch,
-                            max_message_size,
-                            have_broadcast_tx.subscribe(),
-                        )
-                        .await;
-                        return; // uTP succeeded — don't fall through to TCP
-                    }
-                    Ok(Err(e)) => {
-                        debug!(%target, error = %e, "holepunch: uTP connect failed, trying TCP");
-                    }
-                    Err(_) => {
-                        debug!(%target, "holepunch: uTP connect timed out, trying TCP");
-                    }
-                }
-            }
-
-            // TCP fallback — only reached if uTP didn't succeed
-            match tokio::time::timeout(Duration::from_secs(10), factory.connect_tcp(target)).await {
-                Ok(Ok(stream)) => {
-                    debug!(%target, "holepunch: TCP connection established");
-                    post_alert(
-                        &alert_tx,
-                        &alert_mask,
-                        AlertKind::HolepunchSucceeded {
-                            info_hash,
-                            addr: target,
-                        },
-                    );
-                    let _ = run_peer(
-                        target,
-                        stream,
-                        info_hash,
-                        peer_id,
-                        bitfield,
-                        num_pieces,
-                        event_tx,
-                        cmd_rx,
-                        enable_dht,
-                        enable_fast,
-                        encryption_mode,
-                        true, // outbound
-                        anonymous_mode,
-                        info_bytes,
-                        plugins,
-                        enable_holepunch,
-                        max_message_size,
-                        have_broadcast_tx.subscribe(),
-                    )
-                    .await;
-                }
-                Ok(Err(e)) => {
-                    let message = format!("TCP connect failed: {e}");
-                    debug!(%target, %message, "holepunch: connection failed");
-                    post_alert(
-                        &alert_tx,
-                        &alert_mask,
-                        AlertKind::HolepunchFailed {
-                            info_hash,
-                            addr: target,
-                            error_code: None,
-                            message,
-                        },
-                    );
-                    let _ = event_tx
-                        .send(PeerEvent::Disconnected {
-                            peer_addr: target,
-                            reason: Some(format!("holepunch TCP connect failed: {e}")),
-                        })
-                        .await;
-                }
-                Err(_) => {
-                    let message = "TCP connect timed out".to_string();
-                    debug!(%target, "holepunch: TCP connect timed out");
-                    post_alert(
-                        &alert_tx,
-                        &alert_mask,
-                        AlertKind::HolepunchFailed {
-                            info_hash,
-                            addr: target,
-                            error_code: None,
-                            message,
-                        },
-                    );
-                    let _ = event_tx
-                        .send(PeerEvent::Disconnected {
-                            peer_addr: target,
-                            reason: Some("holepunch TCP connect timed out".to_string()),
-                        })
-                        .await;
-                }
-            }
-        });
-    }
-
-    /// Try to initiate a holepunch connection to `target` via a connected relay peer.
-    ///
-    /// Finds a relay peer that supports holepunch and sends a Rendezvous message
-    /// asking the relay to broker a connection to `target`.
-    async fn try_holepunch(&mut self, target: SocketAddr) {
-        use torrent_wire::HolepunchMessage;
-
-        if !self.config.enable_holepunch {
-            return;
-        }
-
-        // Don't holepunch if already connected
-        if self.peers.contains_key(&target) {
-            return;
-        }
-
-        // Find a relay: a connected peer that supports holepunch and has completed
-        // the extension handshake (and isn't the target itself)
-        let relay_addr = self
-            .peers
-            .iter()
-            .find(|(addr, peer)| {
-                **addr != target && peer.supports_holepunch && peer.ext_handshake.is_some()
-            })
-            .map(|(addr, _)| *addr);
-
-        let Some(relay_addr) = relay_addr else {
-            debug!(%target, "holepunch: no suitable relay found");
-            return;
-        };
-
-        debug!(%target, %relay_addr, "holepunch: sending rendezvous via relay");
-        if let Some(relay) = self.peers.get(&relay_addr) {
-            let _ =
-                relay
-                    .cmd_tx
-                    .try_send(PeerCommand::SendHolepunch(HolepunchMessage::rendezvous(
-                        target,
-                    )));
-        }
-    }
-}
 
 /// Helper to accept a connection from an optional transport listener.
 /// Returns `pending` if no listener is bound, so the `select!` branch is skipped.
@@ -8403,7 +4036,7 @@ async fn accept_i2p(
 /// Only serves piece-layer hashes (the layer stored in `piece_layers`).
 /// Block-layer or other layer requests are rejected since we don't store
 /// the full Merkle tree.
-fn serve_hashes(
+pub(crate) fn serve_hashes(
     meta_v2: Option<&torrent_core::TorrentMetaV2>,
     version: torrent_core::TorrentVersion,
     lengths: Option<&Lengths>,

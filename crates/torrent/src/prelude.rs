@@ -9,7 +9,7 @@ pub use crate::client::{AddTorrentParams, ClientBuilder};
 // Session management
 pub use crate::session::{
     Alert, AlertCategory, AlertKind, AlertStream, SessionHandle, TorrentHandle, TorrentInfo,
-    TorrentState, TorrentStats,
+    TorrentState, TorrentStats, TorrentSummary,
 };
 
 // Core types
