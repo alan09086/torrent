@@ -15,6 +15,9 @@ mod error;
 pub mod file_map;
 /// Disk-backed torrent storage using regular file I/O.
 pub mod filesystem;
+/// io_uring storage helpers (config + fd management).
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub mod io_uring_backend;
 /// In-memory torrent storage for testing.
 pub mod memory;
 /// Memory-mapped torrent storage.
@@ -30,6 +33,8 @@ pub use chunk_tracker::ChunkTracker;
 pub use error::{Error, Result};
 pub use file_map::{FileMap, FileSegment};
 pub use filesystem::{FilesystemStorage, PreallocateMode};
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub use io_uring_backend::{IoUringConfig, IoUringStorageState};
 pub use memory::MemoryStorage;
 pub use mmap::MmapStorage;
 pub use storage::TorrentStorage;
