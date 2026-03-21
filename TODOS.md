@@ -1,17 +1,32 @@
 # TODOS
 
-## Next: io_uring Full Backend (M122)
+## Next: HTTP API (M123)
 
-M119 shipped the io_uring scaffold: `TorrentStorageAsync` trait behind the
-`io-uring` feature flag, `pwritev(2)` vectored writes, and `fallocate`
-sparse file pre-allocation. M122 will complete the full async I/O backend:
+- REST API for session/torrent management (list, add, remove, stats)
+- WebSocket event stream for real-time progress updates
+- Foundation for future GUI/TUI clients
 
-- **`io_uring` submission queue** — batched async pwrite/pread via io_uring SQ
-- **`O_DIRECT`** — bypass page cache for large sequential writes (reduces memory pressure)
-- **Configurable queue depth** — tune submission queue depth per workload
-- **Async read path** — complement the existing async write path
+## Completed: io_uring Full Backend (M122)
 
-## Decomposition / API (M121, in progress)
+io_uring write-path backend implemented as a decorator around PosixDiskIo:
+
+- **`IoUringDiskIo`** wraps PosixDiskIo, overrides only `write_block_direct()`
+- **`Writev` SQEs** via shared `Mutex<IoUring>` ring per session
+- **`IoUringStorageState`** — pre-opened `RawFd` per file via `libc::open()`
+- **`O_DIRECT` support** — optional, with automatic fallback for unaligned writes
+- **Configurable** — `--io-uring`, `--direct-io`, `--uring-sq-depth` CLI flags
+- **Graceful fallback** — to PosixDiskIo on old kernels or init failure
+- **16 new tests**, zero regression on existing 1709
+
+### Future io_uring work
+
+- Async read path via io_uring (currently write-only)
+- SQPOLL mode (requires CAP_SYS_NICE)
+- Registered buffers for zero-copy submission
+- Batch write accumulation across multiple blocks
+- Per-worker ring sharding if lock contention exceeds 5%
+
+## Completed: Decomposition / API (M121)
 
 - TorrentActor decomposed into 4 sub-modules (state, peers, dispatch, verify)
 - `TorrentSummary` + `SessionHandle` convenience API for future HTTP endpoints (M123+)
