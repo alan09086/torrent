@@ -56,6 +56,7 @@ pub(crate) mod super_seed;
 pub(crate) mod timed_lock;
 mod torrent;
 pub(crate) mod torrent_peer_handler;
+mod torrent_dispatch;
 mod torrent_peers;
 mod torrent_state;
 pub(crate) mod tracker_manager;
