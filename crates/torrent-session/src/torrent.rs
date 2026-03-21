@@ -44,7 +44,7 @@ use crate::types::{
 };
 
 /// Shared global rate limiter bucket.
-type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
+type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
 
 /// Tribool result for piece hash verification in hybrid torrents.
 ///
@@ -447,6 +447,9 @@ impl TorrentHandle {
         let cached_files = Some(build_cached_file_info(&meta, &lengths));
 
         let actor = TorrentActor {
+            lock_timing: crate::timed_lock::LockTimingSettings::from_ms(
+                config.lock_warn_threshold_ms,
+            ),
             config,
             info_hash: meta.info_hash,
             our_peer_id,
@@ -472,6 +475,7 @@ impl TorrentHandle {
             atomic_states: None,
             block_maps: None,
             steal_candidates: None,
+            piece_write_guards: None,
             snapshot_dirty: false,
             availability_snapshot: None,
             snapshot_generation: 0,
@@ -487,7 +491,7 @@ impl TorrentHandle {
             peer_tx: None,
             peer_semaphore: Arc::new(tokio::sync::Semaphore::new(0)),
             peers_connected: Arc::new(DashMap::new()),
-            live_outgoing_peers: std::sync::Arc::new(std::sync::RwLock::new(
+            live_outgoing_peers: std::sync::Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
             connect_rx: None,
@@ -769,6 +773,9 @@ impl TorrentHandle {
         );
 
         let actor = TorrentActor {
+            lock_timing: crate::timed_lock::LockTimingSettings::from_ms(
+                config.lock_warn_threshold_ms,
+            ),
             config,
             info_hash: magnet.info_hash(),
             our_peer_id,
@@ -794,6 +801,7 @@ impl TorrentHandle {
             atomic_states: None,
             block_maps: None,
             steal_candidates: None,
+            piece_write_guards: None,
             snapshot_dirty: false,
             availability_snapshot: None,
             snapshot_generation: 0,
@@ -809,7 +817,7 @@ impl TorrentHandle {
             peer_tx: None,
             peer_semaphore: Arc::new(tokio::sync::Semaphore::new(0)),
             peers_connected: Arc::new(DashMap::new()),
-            live_outgoing_peers: std::sync::Arc::new(std::sync::RwLock::new(
+            live_outgoing_peers: std::sync::Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
             connect_rx: None,
@@ -1539,6 +1547,8 @@ fn build_cached_file_info(meta: &TorrentMetaV1, lengths: &Lengths) -> CachedFile
 
 struct TorrentActor {
     config: TorrentConfig,
+    /// M120: Lock timing settings for hot-path diagnostics.
+    lock_timing: crate::timed_lock::LockTimingSettings,
     info_hash: Id20,
     our_peer_id: Id20,
     state: TorrentState,
@@ -1578,6 +1588,8 @@ struct TorrentActor {
     block_maps: Option<Arc<BlockMaps>>,
     /// M103: Shared queue of stealable pieces.
     steal_candidates: Option<Arc<StealCandidates>>,
+    /// M120: Per-piece write guards to prevent steal/write races.
+    piece_write_guards: Option<Arc<crate::piece_reservation::PieceWriteGuards>>,
     /// M103: Dirty flag for reactive snapshot rebuild.
     snapshot_dirty: bool,
     /// M93: Current availability snapshot (shared with peers via Arc).
@@ -1790,7 +1802,7 @@ struct TorrentActor {
     /// M107: Channel to signal the adder task to clear its seen set.
     adder_clear_seen_tx: Option<tokio::sync::watch::Sender<u64>>,
     /// M108: Shared snapshot of connected peer addresses for PEX send tasks.
-    live_outgoing_peers: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<SocketAddr>>>,
+    live_outgoing_peers: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<SocketAddr>>>,
     /// M108: Total outbound connection attempts dispatched to peer adder.
     connect_attempts: u64,
     /// M108: Total connection failures (peers that disconnected).
@@ -1922,6 +1934,10 @@ impl TorrentActor {
                 }
                 self.steal_candidates = Some(Arc::new(StealCandidates::new()));
             }
+            // M120: Per-piece write guards
+            self.piece_write_guards = Some(Arc::new(
+                crate::piece_reservation::PieceWriteGuards::new(self.num_pieces),
+            ));
 
             let snapshot = Arc::new(AvailabilitySnapshot::build(
                 &self.availability,
@@ -4036,6 +4052,7 @@ impl TorrentActor {
                             lengths: lengths.clone(),
                             block_maps: self.block_maps.clone(),
                             steal_candidates: self.steal_candidates.clone(),
+                            piece_write_guards: self.piece_write_guards.clone(),
                         });
                     }
                 }
@@ -4614,6 +4631,10 @@ impl TorrentActor {
                 }
                 self.steal_candidates = Some(Arc::new(StealCandidates::new()));
             }
+            // M120: Rebuild per-piece write guards
+            self.piece_write_guards = Some(Arc::new(
+                crate::piece_reservation::PieceWriteGuards::new(self.num_pieces),
+            ));
             self.rebuild_availability_snapshot();
         }
 
@@ -5342,10 +5363,15 @@ impl TorrentActor {
     /// Enter parole mode for a failed piece: save the original contributors
     /// and mark the piece for single-peer re-download.
     fn enter_parole(&mut self, index: u32, contributors: Vec<std::net::IpAddr>) {
-        let use_parole = self.ban_manager.read().unwrap().use_parole();
+        let use_parole = crate::timed_lock::TimedGuard::new(
+            self.ban_manager.read(),
+            &self.lock_timing,
+            "ban_manager",
+        )
+        .use_parole();
         if !use_parole || contributors.is_empty() {
             // Parole disabled or no contributors to blame — strike everyone
-            let mut mgr = self.ban_manager.write().unwrap();
+            let mut mgr = self.ban_manager.write();
             for &ip in &contributors {
                 if mgr.record_strike(ip) {
                     info!(%ip, "peer banned (no parole, hash failure threshold)");
@@ -5373,7 +5399,7 @@ impl TorrentActor {
         info!(index, "parole success — striking original contributors");
         let mut banned_ips = Vec::new();
         {
-            let mut mgr = self.ban_manager.write().unwrap();
+            let mut mgr = self.ban_manager.write();
             for ip in &parole.original_contributors {
                 if mgr.record_strike(*ip) {
                     info!(%ip, "peer banned (parole confirmed bad data)");
@@ -5399,7 +5425,7 @@ impl TorrentActor {
     fn apply_parole_failure(&mut self, index: u32, parole: crate::ban::ParoleState) {
         if let Some(parole_ip) = parole.parole_peer {
             info!(index, %parole_ip, "parole failure — striking parole peer");
-            let mut mgr = self.ban_manager.write().unwrap();
+            let mut mgr = self.ban_manager.write();
             if mgr.record_strike(parole_ip) {
                 info!(%parole_ip, "parole peer banned");
             }
@@ -5423,7 +5449,6 @@ impl TorrentActor {
                 // M108: Update live peers for PEX send tasks
                 self.live_outgoing_peers
                     .write()
-                    .unwrap_or_else(|e| e.into_inner())
                     .remove(&addr);
                 post_alert(
                     &self.alert_tx,
@@ -5681,6 +5706,10 @@ impl TorrentActor {
                                 }
                                 self.steal_candidates = Some(Arc::new(StealCandidates::new()));
                             }
+                            // M120: Per-piece write guards
+                            self.piece_write_guards = Some(Arc::new(
+                                crate::piece_reservation::PieceWriteGuards::new(self.num_pieces),
+                            ));
 
                             let snapshot = Arc::new(AvailabilitySnapshot::build(
                                 &self.availability,
@@ -5750,6 +5779,7 @@ impl TorrentActor {
                                     lengths: lengths.clone(),
                                     block_maps: self.block_maps.clone(),
                                     steal_candidates: self.steal_candidates.clone(),
+                                    piece_write_guards: self.piece_write_guards.clone(),
                                 });
                             }
                         }
@@ -6327,7 +6357,6 @@ impl TorrentActor {
             // M108: Update live peers for PEX send tasks
             self.live_outgoing_peers
                 .write()
-                .unwrap_or_else(|e| e.into_inner())
                 .remove(&addr);
             post_alert(
                 &self.alert_tx,
@@ -6573,7 +6602,7 @@ impl TorrentActor {
             // Check global upload budget (skip for local peers)
             if !crate::rate_limiter::is_local_network(addr.ip())
                 && let Some(ref global) = self.global_upload_bucket
-                && !global.lock().unwrap().try_consume(chunk_size)
+                && !global.lock().try_consume(chunk_size)
             {
                 break; // global budget exhausted, serve remaining next refill
             }
@@ -6709,7 +6738,6 @@ impl TorrentActor {
         // M108: Update live peers for PEX send tasks
         self.live_outgoing_peers
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .insert(addr);
         post_alert(
             &self.alert_tx,
@@ -6736,6 +6764,7 @@ impl TorrentActor {
                 lengths: lengths.clone(),
                 block_maps: self.block_maps.clone(),
                 steal_candidates: self.steal_candidates.clone(),
+                piece_write_guards: self.piece_write_guards.clone(),
             });
         }
 
@@ -6846,7 +6875,6 @@ impl TorrentActor {
             // M108: Update live peers for PEX send tasks
             self.live_outgoing_peers
                 .write()
-                .unwrap_or_else(|e| e.into_inner())
                 .remove(&addr);
             return;
         }
@@ -7857,13 +7885,25 @@ impl TorrentActor {
         };
 
         // Reject banned incoming peers
-        if self.ban_manager.read().unwrap().is_banned(&addr.ip()) {
+        if crate::timed_lock::TimedGuard::new(
+            self.ban_manager.read(),
+            &self.lock_timing,
+            "ban_manager",
+        )
+        .is_banned(&addr.ip())
+        {
             debug!(%addr, "rejected banned incoming peer");
             return;
         }
 
         // Reject IP-filtered incoming peers
-        if self.ip_filter.read().unwrap().is_blocked(addr.ip()) {
+        if crate::timed_lock::TimedGuard::new(
+            self.ip_filter.read(),
+            &self.lock_timing,
+            "ip_filter",
+        )
+        .is_blocked(addr.ip())
+        {
             debug!(%addr, "rejected IP-filtered incoming peer");
             post_alert(
                 &self.alert_tx,
@@ -7892,7 +7932,6 @@ impl TorrentActor {
         // M108: Update live peers for PEX send tasks
         self.live_outgoing_peers
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .insert(addr);
         // Identify transport for incoming peers (M45)
         let transport = if mode_override.is_some() {
@@ -7928,6 +7967,7 @@ impl TorrentActor {
                 lengths: lengths.clone(),
                 block_maps: self.block_maps.clone(),
                 steal_candidates: self.steal_candidates.clone(),
+                piece_write_guards: self.piece_write_guards.clone(),
             });
         }
 
@@ -8069,11 +8109,23 @@ impl TorrentActor {
         }
 
         // Skip banned/filtered peers
-        if self.ban_manager.read().unwrap().is_banned(&target.ip()) {
+        if crate::timed_lock::TimedGuard::new(
+            self.ban_manager.read(),
+            &self.lock_timing,
+            "ban_manager",
+        )
+        .is_banned(&target.ip())
+        {
             debug!(%target, "holepunch: target is banned");
             return;
         }
-        if self.ip_filter.read().unwrap().is_blocked(target.ip()) {
+        if crate::timed_lock::TimedGuard::new(
+            self.ip_filter.read(),
+            &self.lock_timing,
+            "ip_filter",
+        )
+        .is_blocked(target.ip())
+        {
             debug!(%target, "holepunch: target is IP-filtered");
             post_alert(
                 &self.alert_tx,
@@ -8123,6 +8175,7 @@ impl TorrentActor {
                 lengths: lengths.clone(),
                 block_maps: self.block_maps.clone(),
                 steal_candidates: self.steal_candidates.clone(),
+                piece_write_guards: self.piece_write_guards.clone(),
             });
         }
 
@@ -8545,6 +8598,7 @@ mod tests {
             max_in_flight_pieces: 20,
             use_block_stealing: true,
             fixed_pipeline_depth: 128,
+            lock_warn_threshold_ms: 0, // disabled in tests
         }
     }
 
@@ -8574,13 +8628,13 @@ mod tests {
     }
 
     fn test_ban_manager() -> crate::session::SharedBanManager {
-        Arc::new(std::sync::RwLock::new(crate::ban::BanManager::new(
+        Arc::new(parking_lot::RwLock::new(crate::ban::BanManager::new(
             crate::ban::BanConfig::default(),
         )))
     }
 
     fn test_ip_filter() -> crate::session::SharedIpFilter {
-        Arc::new(std::sync::RwLock::new(crate::ip_filter::IpFilter::new()))
+        Arc::new(parking_lot::RwLock::new(crate::ip_filter::IpFilter::new()))
     }
 
     fn test_disk_manager() -> (DiskManagerHandle, tokio::task::JoinHandle<()>) {
@@ -11478,7 +11532,7 @@ mod tests {
 
         // Pre-ban an IP
         let banned_ip: std::net::IpAddr = "192.168.1.100".parse().unwrap();
-        ban_mgr.write().unwrap().ban(banned_ip);
+        ban_mgr.write().ban(banned_ip);
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
@@ -11826,7 +11880,7 @@ mod tests {
                 "203.0.113.255".parse().unwrap(),
                 1,
             );
-            Arc::new(std::sync::RwLock::new(f))
+            Arc::new(parking_lot::RwLock::new(f))
         };
 
         let (atx, amask) = test_alert_channel();
@@ -11890,7 +11944,7 @@ mod tests {
 
         // Start with empty filter (everything allowed)
         let ip_filter: crate::session::SharedIpFilter =
-            Arc::new(std::sync::RwLock::new(crate::ip_filter::IpFilter::new()));
+            Arc::new(parking_lot::RwLock::new(crate::ip_filter::IpFilter::new()));
 
         let (atx, amask) = test_alert_channel();
         let (dh, dm, _dj) = test_register_disk(meta.info_hash, storage).await;
@@ -11939,7 +11993,7 @@ mod tests {
 
         // Now update the shared filter to block that IP range
         {
-            let mut f = ip_filter.write().unwrap();
+            let mut f = ip_filter.write();
             f.add_rule(
                 "198.51.100.0".parse().unwrap(),
                 "198.51.100.255".parse().unwrap(),
@@ -11951,14 +12005,12 @@ mod tests {
         assert!(
             ip_filter
                 .read()
-                .unwrap()
                 .is_blocked("198.51.100.1".parse().unwrap())
         );
         // Verify a different public IP is still allowed
         assert!(
             !ip_filter
                 .read()
-                .unwrap()
                 .is_blocked("203.0.113.1".parse().unwrap())
         );
     }

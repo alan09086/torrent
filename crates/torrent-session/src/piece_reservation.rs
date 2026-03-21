@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
@@ -233,6 +233,8 @@ pub(crate) struct PeerDispatchState {
     block_maps: Option<Arc<BlockMaps>>,
     /// Shared queue of pieces available for block-level stealing.
     steal_candidates: Option<Arc<StealCandidates>>,
+    /// M120: Per-piece write guards to prevent steal/write races.
+    piece_write_guards: Option<Arc<PieceWriteGuards>>,
 }
 
 /// Tracks block-by-block progress within a single piece.
@@ -252,6 +254,7 @@ impl PeerDispatchState {
             lengths,
             block_maps: None,
             steal_candidates: None,
+            piece_write_guards: None,
         }
     }
 
@@ -263,6 +266,11 @@ impl PeerDispatchState {
     /// Set the shared steal candidates queue.
     pub fn set_steal_candidates(&mut self, sc: Arc<StealCandidates>) {
         self.steal_candidates = Some(sc);
+    }
+
+    /// Set the per-piece write guards for steal/write race prevention.
+    pub fn set_piece_write_guards(&mut self, pwg: Arc<PieceWriteGuards>) {
+        self.piece_write_guards = Some(pwg);
     }
 
     /// Update the snapshot reference. Resets cursor if generation changed.
@@ -349,6 +357,14 @@ impl PeerDispatchState {
                 let state = atomic_states.get(piece);
                 if state == PieceState::Complete || state == PieceState::Unwanted {
                     continue; // don't put back — it's done
+                }
+
+                // M120: Skip if a write is in-flight for this piece.
+                if let Some(ref pwg) = self.piece_write_guards
+                    && !pwg.try_write(piece)
+                {
+                    sc.push(piece); // put back — write in progress
+                    continue;
                 }
 
                 let total_blocks = self.lengths.chunks_in_piece(piece);
@@ -620,11 +636,12 @@ impl BlockMaps {
 /// for stealing (e.g., original owner disconnected mid-piece), it is pushed
 /// here. Peer tasks pop from the front to find steal work.
 ///
-/// Uses `std::sync::Mutex` (not tokio) because the lock is never held across
+/// Uses `parking_lot::Mutex` (not tokio) because the lock is never held across
 /// an await point — operations are trivially fast (push/pop/linear scan).
 #[derive(Debug)]
 pub(crate) struct StealCandidates {
     inner: Mutex<VecDeque<u32>>,
+    timing: crate::timed_lock::LockTimingSettings,
 }
 
 #[allow(dead_code)]
@@ -633,12 +650,25 @@ impl StealCandidates {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(VecDeque::new()),
+            timing: crate::timed_lock::LockTimingSettings::default(),
+        }
+    }
+
+    /// Create an empty steal queue with custom lock timing.
+    pub fn with_timing(timing: crate::timed_lock::LockTimingSettings) -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::new()),
+            timing,
         }
     }
 
     /// Add a piece to the back of the steal queue (no-op if already present).
     pub fn push(&self, piece: u32) {
-        let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
+        let mut guard = crate::timed_lock::TimedGuard::new(
+            self.inner.lock(),
+            &self.timing,
+            "steal_candidates",
+        );
         if !guard.contains(&piece) {
             guard.push_back(piece);
         }
@@ -646,7 +676,11 @@ impl StealCandidates {
 
     /// Take a piece from the front of the steal queue.
     pub fn pop(&self) -> Option<u32> {
-        let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
+        let mut guard = crate::timed_lock::TimedGuard::new(
+            self.inner.lock(),
+            &self.timing,
+            "steal_candidates",
+        );
         guard.pop_front()
     }
 
@@ -655,10 +689,62 @@ impl StealCandidates {
     /// This is O(n) but acceptable because the steal queue is small — it only
     /// contains pieces that are partially downloaded and available for stealing.
     pub fn remove(&self, piece: u32) {
-        let mut guard = self.inner.lock().expect("steal candidates lock poisoned");
+        let mut guard = crate::timed_lock::TimedGuard::new(
+            self.inner.lock(),
+            &self.timing,
+            "steal_candidates",
+        );
         if let Some(pos) = guard.iter().position(|&p| p == piece) {
             guard.remove(pos);
         }
+    }
+}
+
+/// Per-piece write guards to prevent steal/write races.
+///
+/// The write path (synchronous pwrite in `on_piece_sync`) acquires a **read**
+/// lock on the piece being written — multiple concurrent block writes to the
+/// same piece are fine since they target different offsets.
+///
+/// The steal path (`next_block` Phase 3) uses `try_write()` — if any write
+/// is in-flight for a piece, the exclusive lock fails and the steal skips it.
+///
+/// This inverted usage (read = active writes, write = steal exclusion check)
+/// is intentional: it allows N concurrent block writes while giving the steal
+/// path an O(1) way to detect and skip busy pieces.
+#[derive(Debug)]
+pub(crate) struct PieceWriteGuards {
+    locks: Vec<parking_lot::RwLock<()>>,
+}
+
+impl PieceWriteGuards {
+    /// Create guards for `num_pieces` pieces.
+    pub fn new(num_pieces: u32) -> Self {
+        Self {
+            locks: (0..num_pieces)
+                .map(|_| parking_lot::RwLock::new(()))
+                .collect(),
+        }
+    }
+
+    /// Acquire a read guard for the given piece (used by write path).
+    ///
+    /// Multiple concurrent block writes to the same piece are allowed.
+    /// Returns `None` if piece index is out of bounds.
+    #[inline]
+    pub fn read(&self, piece: u32) -> Option<parking_lot::RwLockReadGuard<'_, ()>> {
+        self.locks.get(piece as usize).map(|lock| lock.read())
+    }
+
+    /// Try to acquire an exclusive write lock (used by steal path).
+    ///
+    /// Returns `true` if no writes are in-flight for this piece (safe to steal).
+    /// Returns `false` if any read guard is held (write in progress — skip).
+    #[inline]
+    pub fn try_write(&self, piece: u32) -> bool {
+        self.locks
+            .get(piece as usize)
+            .is_some_and(|lock| lock.try_write().is_some())
     }
 }
 
@@ -2233,5 +2319,85 @@ mod tests {
             2,
             "only pieces 0 (Endgame) and 3 (Available) should be dispatched"
         );
+    }
+
+    // ── M120: PieceWriteGuards tests ────────────────────────────────────
+
+    #[test]
+    fn per_piece_lock_blocks_steal_during_write() {
+        let guards = PieceWriteGuards::new(4);
+        // Simulate a write in progress on piece 1
+        let _read_guard = guards.read(1).expect("piece 1 should exist");
+        // Steal path should fail
+        assert!(
+            !guards.try_write(1),
+            "try_write should fail when read guard is held"
+        );
+        // Other pieces should be unaffected
+        assert!(
+            guards.try_write(0),
+            "piece 0 should be stealable"
+        );
+        assert!(
+            guards.try_write(2),
+            "piece 2 should be stealable"
+        );
+    }
+
+    #[test]
+    fn per_piece_lock_allows_steal_when_idle() {
+        let guards = PieceWriteGuards::new(4);
+        // No read guards held — all pieces stealable
+        for piece in 0..4 {
+            assert!(
+                guards.try_write(piece),
+                "piece {piece} should be stealable when idle"
+            );
+        }
+        // Out of bounds returns false
+        assert!(
+            !guards.try_write(99),
+            "out-of-bounds piece should return false"
+        );
+    }
+
+    #[test]
+    fn per_piece_lock_concurrent_writes_allowed() {
+        let guards = PieceWriteGuards::new(4);
+        // Multiple read guards on the same piece should succeed
+        let _g1 = guards.read(2).expect("first read guard");
+        let _g2 = guards.read(2).expect("second read guard");
+        let _g3 = guards.read(2).expect("third read guard");
+        // All held simultaneously — simulates 3 concurrent block writes
+        // to the same piece (different offsets)
+        assert!(
+            !guards.try_write(2),
+            "steal should be blocked with 3 concurrent writes"
+        );
+        // Drop one — still 2 read guards
+        drop(_g3);
+        assert!(
+            !guards.try_write(2),
+            "steal should still be blocked with 2 concurrent writes"
+        );
+    }
+
+    #[test]
+    fn steal_candidates_no_poison_after_panic() {
+        // parking_lot Mutex does not poison — usable after a panic.
+        let sc = StealCandidates::new();
+        sc.push(42);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = sc.inner.lock();
+            panic!("intentional panic while holding lock");
+        }));
+        assert!(result.is_err(), "should have panicked");
+
+        // Lock should still be usable after panic
+        sc.push(99);
+        assert_eq!(sc.pop(), Some(42));
+        assert_eq!(sc.pop(), Some(99));
+        assert_eq!(sc.pop(), None);
     }
 }

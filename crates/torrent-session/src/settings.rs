@@ -254,6 +254,9 @@ fn default_runtime_worker_threads() -> usize {
         .map(|n| n.get().min(8))
         .unwrap_or(4)
 }
+fn default_lock_warn_threshold_ms() -> u64 {
+    50
+}
 
 // ── Settings ─────────────────────────────────────────────────────────
 
@@ -749,6 +752,14 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub pin_cores: bool,
 
+    // ── Lock diagnostics (M120) ──
+    /// Warning threshold in milliseconds for lock hold duration.
+    /// When a hot-path lock is held longer than this, a tracing warning is
+    /// emitted. Set to 0 to disable timing entirely (zero overhead).
+    /// Default: 50.
+    #[serde(default = "default_lock_warn_threshold_ms")]
+    pub lock_warn_threshold_ms: u64,
+
     // ── DHT bootstrap (M56) ──
     /// Previously saved DHT routing table nodes for fast bootstrap.
     /// These are prepended to the bootstrap node list on startup so that
@@ -911,6 +922,8 @@ impl Default for Settings {
             // Runtime tuning (M95)
             runtime_worker_threads: default_runtime_worker_threads(),
             pin_cores: true,
+            // Lock diagnostics (M120)
+            lock_warn_threshold_ms: 50,
             // DHT bootstrap (M56)
             dht_saved_nodes: Vec::new(),
             dht_node_id: None,
@@ -1098,6 +1111,7 @@ impl From<&Settings> for crate::disk::DiskConfig {
             channel_capacity: s.disk_channel_capacity,
             buffer_pool_capacity: s.buffer_pool_capacity,
             enable_mlock: s.enable_mlock,
+            lock_warn_threshold_ms: s.lock_warn_threshold_ms,
         }
     }
 }

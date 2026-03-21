@@ -125,7 +125,7 @@ impl HashPool {
         });
 
         // Spawn worker threads
-        let worker_rx = std::sync::Arc::new(std::sync::Mutex::new(worker_rx));
+        let worker_rx = std::sync::Arc::new(parking_lot::Mutex::new(worker_rx));
         let mut workers = Vec::with_capacity(num_workers);
         for id in 0..num_workers {
             let rx = worker_rx.clone();
@@ -152,11 +152,11 @@ impl HashPool {
 
     fn worker_loop(
         id: usize,
-        rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<WorkerMsg>>>,
+        rx: std::sync::Arc<parking_lot::Mutex<std::sync::mpsc::Receiver<WorkerMsg>>>,
     ) {
         loop {
             let msg = {
-                let rx = rx.lock().unwrap();
+                let rx = rx.lock();
                 match rx.recv() {
                     Ok(msg) => msg,
                     Err(_) => break, // Channel closed

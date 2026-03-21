@@ -151,6 +151,7 @@ where
                             lengths,
                             block_maps,
                             steal_candidates,
+                            piece_write_guards,
                         }) => {
                             self.handler.on_start_requesting(
                                 atomic_states,
@@ -161,6 +162,7 @@ where
                                 lengths,
                                 block_maps,
                                 steal_candidates,
+                                piece_write_guards,
                             );
                         }
                         Some(PeerCommand::UpdateNumPieces(n)) => {

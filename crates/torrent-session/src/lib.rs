@@ -53,6 +53,7 @@ pub(crate) mod ssl_manager;
 pub mod stats;
 pub mod streaming;
 pub(crate) mod super_seed;
+pub(crate) mod timed_lock;
 mod torrent;
 pub(crate) mod torrent_peer_handler;
 pub(crate) mod tracker_manager;

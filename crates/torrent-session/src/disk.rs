@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use bitflags::bitflags;
 use bytes::Bytes;
@@ -62,6 +64,8 @@ pub(crate) struct DiskWriteState {
     pending: Mutex<HashMap<u32, u32>>,
     /// Signalled whenever any piece's pending count hits zero.
     notify: tokio::sync::Notify,
+    /// M120: Lock timing diagnostics for the pending mutex.
+    lock_timing: crate::timed_lock::LockTimingSettings,
 }
 
 pub(crate) enum DiskJob {
@@ -160,6 +164,8 @@ pub struct DiskConfig {
     pub buffer_pool_capacity: usize,
     /// Lock cached piece data in physical memory. Default: true on Unix.
     pub enable_mlock: bool,
+    /// M120: Lock timing warning threshold in milliseconds (0 = disabled).
+    pub lock_warn_threshold_ms: u64,
 }
 
 impl Default for DiskConfig {
@@ -172,6 +178,7 @@ impl Default for DiskConfig {
             channel_capacity: 512,
             buffer_pool_capacity: 64 * 1024 * 1024,
             enable_mlock: cfg!(unix),
+            lock_warn_threshold_ms: 50,
         }
     }
 }
@@ -290,6 +297,7 @@ impl DiskManagerHandle {
             tx: write_tx,
             pending: Mutex::new(HashMap::new()),
             notify: tokio::sync::Notify::new(),
+            lock_timing: crate::timed_lock::LockTimingSettings::default(),
         });
 
         // Spawn the per-torrent writer task.
@@ -323,7 +331,11 @@ impl DiskManagerHandle {
 
                 // Decrement pending counts for all jobs in batch, notify once.
                 {
-                    let mut pending = writer_state.pending.lock().expect("pending lock poisoned");
+                    let mut pending = crate::timed_lock::TimedGuard::new(
+                        writer_state.pending.lock(),
+                        &writer_state.lock_timing,
+                        "disk_pending",
+                    );
                     for piece in &pieces {
                         if let Some(count) = pending.get_mut(piece) {
                             *count = count.saturating_sub(1);
@@ -751,7 +763,11 @@ impl DiskHandle {
 
         // Increment pending count before sending.
         {
-            let mut pending = write_state.pending.lock().expect("pending lock poisoned");
+            let mut pending = crate::timed_lock::TimedGuard::new(
+                write_state.pending.lock(),
+                &write_state.lock_timing,
+                "disk_pending",
+            );
             *pending.entry(piece).or_insert(0) += 1;
         }
 
@@ -777,7 +793,11 @@ impl DiskHandle {
                     }
                 }
                 // Decrement pending + notify.
-                let mut pending = write_state.pending.lock().expect("pending lock poisoned");
+                let mut pending = crate::timed_lock::TimedGuard::new(
+                    write_state.pending.lock(),
+                    &write_state.lock_timing,
+                    "disk_pending",
+                );
                 if let Some(count) = pending.get_mut(&piece) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -789,7 +809,11 @@ impl DiskHandle {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 // Writer task gone — decrement pending to avoid stuck waiters.
-                let mut pending = write_state.pending.lock().expect("pending lock poisoned");
+                let mut pending = crate::timed_lock::TimedGuard::new(
+                    write_state.pending.lock(),
+                    &write_state.lock_timing,
+                    "disk_pending",
+                );
                 if let Some(count) = pending.get_mut(&piece) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -837,7 +861,11 @@ impl DiskHandle {
 
         loop {
             {
-                let pending = write_state.pending.lock().expect("pending lock poisoned");
+                let pending = crate::timed_lock::TimedGuard::new(
+                    write_state.pending.lock(),
+                    &write_state.lock_timing,
+                    "disk_pending",
+                );
                 if !pending.contains_key(&piece) {
                     return;
                 }

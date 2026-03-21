@@ -153,6 +153,8 @@ pub struct TorrentConfig {
     pub use_block_stealing: bool,
     /// M104: Fixed per-peer pipeline depth (concurrent requests per peer).
     pub fixed_pipeline_depth: usize,
+    /// M120: Lock timing warning threshold in milliseconds (0 = disabled).
+    pub lock_warn_threshold_ms: u64,
 }
 
 impl Default for TorrentConfig {
@@ -230,6 +232,7 @@ impl Default for TorrentConfig {
             max_in_flight_pieces: 512,
             use_block_stealing: true,
             fixed_pipeline_depth: 128,
+            lock_warn_threshold_ms: 50,
         }
     }
 }
@@ -304,6 +307,7 @@ impl From<&crate::settings::Settings> for TorrentConfig {
             max_in_flight_pieces: s.max_in_flight_pieces,
             use_block_stealing: s.use_block_stealing,
             fixed_pipeline_depth: s.fixed_pipeline_depth,
+            lock_warn_threshold_ms: s.lock_warn_threshold_ms,
         }
     }
 }
@@ -824,6 +828,8 @@ pub(crate) enum PeerCommand {
         block_maps: Option<std::sync::Arc<crate::piece_reservation::BlockMaps>>,
         /// M103: Shared queue of pieces available for block stealing.
         steal_candidates: Option<std::sync::Arc<crate::piece_reservation::StealCandidates>>,
+        /// M120: Per-piece write guards to prevent steal/write races.
+        piece_write_guards: Option<std::sync::Arc<crate::piece_reservation::PieceWriteGuards>>,
     },
     /// Actor sends an updated availability snapshot to the peer task.
     SnapshotUpdate {

@@ -26,16 +26,16 @@ use crate::types::{
 };
 
 /// Shared global rate limiter bucket.
-type SharedBucket = Arc<std::sync::Mutex<crate::rate_limiter::TokenBucket>>;
+type SharedBucket = Arc<parking_lot::Mutex<crate::rate_limiter::TokenBucket>>;
 
 /// Function signature for queue move operations (move_up, move_down, etc.).
 type QueueMoveFn = fn(&mut [crate::queue::QueueEntry], Id20) -> Vec<(Id20, i32, i32)>;
 
 /// Shared session-wide ban manager, accessed by TorrentActors via `Arc`.
-pub(crate) type SharedBanManager = Arc<std::sync::RwLock<crate::ban::BanManager>>;
+pub(crate) type SharedBanManager = Arc<parking_lot::RwLock<crate::ban::BanManager>>;
 
 /// Shared session-wide IP filter, accessed by TorrentActors via `Arc`.
-pub(crate) type SharedIpFilter = Arc<std::sync::RwLock<crate::ip_filter::IpFilter>>;
+pub(crate) type SharedIpFilter = Arc<parking_lot::RwLock<crate::ip_filter::IpFilter>>;
 
 /// Entry for a torrent managed by the session.
 struct TorrentEntry {
@@ -515,10 +515,10 @@ impl SessionHandle {
             (None, None)
         };
 
-        let global_upload_bucket = Arc::new(std::sync::Mutex::new(
+        let global_upload_bucket = Arc::new(parking_lot::Mutex::new(
             crate::rate_limiter::TokenBucket::new(settings.upload_rate_limit),
         ));
-        let global_download_bucket = Arc::new(std::sync::Mutex::new(
+        let global_download_bucket = Arc::new(parking_lot::Mutex::new(
             crate::rate_limiter::TokenBucket::new(settings.download_rate_limit),
         ));
 
@@ -687,12 +687,12 @@ impl SessionHandle {
         };
 
         let ban_config = crate::ban::BanConfig::from(&settings);
-        let ban_manager: SharedBanManager = Arc::new(std::sync::RwLock::new(
+        let ban_manager: SharedBanManager = Arc::new(parking_lot::RwLock::new(
             crate::ban::BanManager::new(ban_config),
         ));
 
         let ip_filter: SharedIpFilter =
-            Arc::new(std::sync::RwLock::new(crate::ip_filter::IpFilter::new()));
+            Arc::new(parking_lot::RwLock::new(crate::ip_filter::IpFilter::new()));
 
         let disk_config = crate::disk::DiskConfig::from(&settings);
         let spawner = crate::blocking_spawner::BlockingSpawner::new(settings.max_blocking_threads);
@@ -2036,24 +2036,24 @@ impl SessionActor {
                             let _ = reply.send(result);
                         }
                         Some(SessionCommand::BanPeer { ip, reply }) => {
-                            self.ban_manager.write().unwrap().ban(ip);
+                            self.ban_manager.write().ban(ip);
                             let _ = reply.send(());
                         }
                         Some(SessionCommand::UnbanPeer { ip, reply }) => {
-                            let was_banned = self.ban_manager.write().unwrap().unban(&ip);
+                            let was_banned = self.ban_manager.write().unban(&ip);
                             let _ = reply.send(was_banned);
                         }
                         Some(SessionCommand::BannedPeers { reply }) => {
-                            let list: Vec<IpAddr> = self.ban_manager.read().unwrap()
+                            let list: Vec<IpAddr> = self.ban_manager.read()
                                 .banned_list().iter().copied().collect();
                             let _ = reply.send(list);
                         }
                         Some(SessionCommand::SetIpFilter { filter, reply }) => {
-                            *self.ip_filter.write().unwrap() = filter;
+                            *self.ip_filter.write() = filter;
                             let _ = reply.send(());
                         }
                         Some(SessionCommand::GetIpFilter { reply }) => {
-                            let filter = self.ip_filter.read().unwrap().clone();
+                            let filter = self.ip_filter.read().clone();
                             let _ = reply.send(filter);
                         }
                         Some(SessionCommand::GetSettings { reply }) => {
@@ -2471,8 +2471,8 @@ impl SessionActor {
                 // Global rate limiter refill (100ms)
                 _ = refill_interval.tick() => {
                     let elapsed = std::time::Duration::from_millis(100);
-                    self.global_upload_bucket.lock().unwrap().refill(elapsed);
-                    self.global_download_bucket.lock().unwrap().refill(elapsed);
+                    self.global_upload_bucket.lock().refill(elapsed);
+                    self.global_download_bucket.lock().refill(elapsed);
                 }
                 // Auto-manage queue evaluation
                 _ = auto_manage_interval.tick() => {
@@ -2898,7 +2898,7 @@ impl SessionActor {
         c.set(DHT_NODES_V6, self.dht_v6.is_some() as i64);
 
         // Ban count
-        let ban_count = self.ban_manager.read().unwrap().banned_list().len() as i64;
+        let ban_count = self.ban_manager.read().banned_list().len() as i64;
         c.set(PEER_NUM_BANNED, ban_count);
     }
 
@@ -2991,7 +2991,7 @@ impl SessionActor {
 
         // Serialize smart ban state (scoped to drop RwLockReadGuard before awaits)
         let (banned_peers, peer_strikes) = {
-            let ban_mgr = self.ban_manager.read().unwrap();
+            let ban_mgr = self.ban_manager.read();
             let banned_peers: Vec<String> = ban_mgr
                 .banned_list()
                 .iter()
@@ -3051,13 +3051,11 @@ impl SessionActor {
         if new.upload_rate_limit != self.settings.upload_rate_limit {
             self.global_upload_bucket
                 .lock()
-                .unwrap()
                 .set_rate(new.upload_rate_limit);
         }
         if new.download_rate_limit != self.settings.download_rate_limit {
             self.global_download_bucket
                 .lock()
-                .unwrap()
                 .set_rate(new.download_rate_limit);
         }
 

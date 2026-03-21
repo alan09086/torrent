@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 use torrent_core::Lengths;
@@ -155,8 +155,8 @@ impl FilesystemStorage {
     }
 
     /// Open (or return cached) file handle for the given file index.
-    fn open_file(&self, index: usize) -> Result<std::sync::MutexGuard<'_, Option<File>>> {
-        let mut guard = self.files[index].lock().unwrap();
+    fn open_file(&self, index: usize) -> Result<parking_lot::MutexGuard<'_, Option<File>>> {
+        let mut guard = self.files[index].lock();
         if guard.is_none() {
             let full = self.base_dir.join(&self.file_paths[index]);
             let f = File::options().read(true).write(true).open(&full)?;

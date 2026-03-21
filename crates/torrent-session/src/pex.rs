@@ -175,7 +175,7 @@ pub(crate) fn build_pex_message(added: &[SocketAddr], dropped: &[SocketAddr]) ->
 pub(crate) async fn pex_send_task(
     peer_addr: SocketAddr,
     cmd_tx: tokio::sync::mpsc::Sender<crate::types::PeerCommand>,
-    live_peers: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<SocketAddr>>>,
+    live_peers: std::sync::Arc<parking_lot::RwLock<std::collections::HashSet<SocketAddr>>>,
     allow_mixed_i2p: bool,
     recipient_is_i2p: bool,
 ) {
@@ -192,7 +192,6 @@ pub(crate) async fn pex_send_task(
 
         let live: HashSet<SocketAddr> = live_peers
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .clone();
 
         // Compute diff: new peers and dropped peers.
@@ -560,13 +559,13 @@ mod tests {
     #[tokio::test]
     async fn pex_send_task_exits_on_disconnect() {
         use std::collections::HashSet;
-        use std::sync::{Arc, RwLock};
+        use std::sync::Arc;
+        use parking_lot::RwLock;
 
         let live_peers: Arc<RwLock<HashSet<SocketAddr>>> =
             Arc::new(RwLock::new(HashSet::new()));
         live_peers
             .write()
-            .unwrap()
             .insert("1.2.3.4:6881".parse().unwrap());
 
         // Create a channel and immediately drop the receiver

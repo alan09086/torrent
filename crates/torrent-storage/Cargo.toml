@@ -19,6 +19,7 @@ memmap2 = "0.9"
 rustc-hash = "2"
 serde = { workspace = true }
 smallvec = "1"
+parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

@@ -11,7 +11,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -111,7 +112,7 @@ impl SimNetwork {
     ///
     /// Panics if more than 254 nodes are added (IP octet overflow).
     pub fn add_node(&self) -> IpAddr {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let octet = inner.next_ip;
         assert!(octet != 0, "node IP octet overflow: too many nodes");
         inner.next_ip = octet
@@ -125,13 +126,13 @@ impl SimNetwork {
     /// This override applies only in one direction. To configure both
     /// directions, call this twice with swapped arguments.
     pub fn set_link_config(&self, from: IpAddr, to: IpAddr, config: LinkConfig) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.link_configs.insert((from, to), config);
     }
 
     /// Set the default link config used when no per-link override exists.
     pub fn set_default_config(&self, config: LinkConfig) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.default_config = config;
     }
 
@@ -140,19 +141,19 @@ impl SimNetwork {
     /// Traffic between nodes in `group_a` and nodes in `group_b` will be
     /// blocked in both directions. Traffic within a group is unaffected.
     pub fn partition(&self, group_a: Vec<IpAddr>, group_b: Vec<IpAddr>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.partitions.push((group_a, group_b));
     }
 
     /// Remove all partitions, restoring full connectivity.
     pub fn heal_partitions(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.partitions.clear();
     }
 
     /// Check if traffic from `from` to `to` is blocked by a partition.
     pub fn is_partitioned(&self, from: IpAddr, to: IpAddr) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         for (group_a, group_b) in &inner.partitions {
             let a_has_from = group_a.contains(&from);
             let a_has_to = group_a.contains(&to);
@@ -173,7 +174,7 @@ impl SimNetwork {
     /// remote nodes connect to this address.
     pub(crate) fn register_listener(&self, addr: SocketAddr) -> mpsc::Receiver<SimConnection> {
         let (tx, rx) = mpsc::channel(64);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.listeners.insert(addr, tx);
         rx
     }
@@ -181,7 +182,7 @@ impl SimNetwork {
     /// Remove a TCP listener registration.
     #[allow(dead_code)] // Used in tests; will be used by SimTransport drop logic
     pub(crate) fn unregister_listener(&self, addr: &SocketAddr) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.listeners.remove(addr);
     }
 
@@ -211,7 +212,7 @@ impl SimNetwork {
 
         // Look up listener and get a clone of the sender
         let sender = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.listeners.get(&to_addr).cloned().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::ConnectionRefused,
@@ -411,7 +412,7 @@ mod tests {
         net.set_link_config(ip1, ip2, config.clone());
 
         // Verify it was stored (via internal access for testing)
-        let inner = net.inner.lock().unwrap();
+        let inner = net.inner.lock();
         let stored = inner.link_configs.get(&(ip1, ip2)).unwrap();
         assert_eq!(stored.latency, Duration::from_millis(50));
         assert_eq!(stored.bandwidth, 1_000_000);

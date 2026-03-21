@@ -5,7 +5,8 @@
 //! operations reference this clock, enabling deterministic test scenarios
 //! that don't depend on real elapsed time.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A shared virtual clock that can be manually advanced.
@@ -37,7 +38,7 @@ impl SimClock {
 
     /// Current virtual time as [`Duration`] since clock creation.
     pub fn now(&self) -> Duration {
-        self.inner.lock().unwrap().elapsed
+        self.inner.lock().elapsed
     }
 
     /// Advance the clock by the given duration.
@@ -45,7 +46,7 @@ impl SimClock {
     /// Multiple advances accumulate — calling `advance(1s)` twice results
     /// in `now()` returning `2s`.
     pub fn advance(&self, duration: Duration) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.elapsed += duration;
     }
 }

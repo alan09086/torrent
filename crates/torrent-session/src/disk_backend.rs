@@ -5,7 +5,9 @@
 //! [`DisabledDiskIo`] is a no-op backend useful for network throughput benchmarking.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 
 use bytes::Bytes;
 use torrent_core::{Id20, Id32};
@@ -250,7 +252,6 @@ impl PosixDiskIo {
     fn get_storage(&self, info_hash: Id20) -> crate::Result<Arc<dyn TorrentStorage>> {
         self.storages
             .read()
-            .unwrap()
             .get(&info_hash)
             .cloned()
             .ok_or_else(|| {
@@ -268,12 +269,12 @@ impl DiskIoBackend for PosixDiskIo {
     }
 
     fn register(&self, info_hash: Id20, storage: Arc<dyn TorrentStorage>) {
-        self.storages.write().unwrap().insert(info_hash, storage);
+        self.storages.write().insert(info_hash, storage);
     }
 
     fn unregister(&self, info_hash: Id20) {
-        self.storages.write().unwrap().remove(&info_hash);
-        self.pool.lock().unwrap().clear_torrent(info_hash);
+        self.storages.write().remove(&info_hash);
+        self.pool.lock().clear_torrent(info_hash);
     }
 
     fn write_chunk(
@@ -289,7 +290,7 @@ impl DiskIoBackend for PosixDiskIo {
         if flush {
             let storage = self.get_storage(info_hash)?;
             storage.write_chunk(piece, begin, &data)?;
-            self.stats.lock().unwrap().write_bytes += len as u64;
+            self.stats.lock().write_bytes += len as u64;
             return Ok(());
         }
 
@@ -297,8 +298,8 @@ impl DiskIoBackend for PosixDiskIo {
         // it here — completion detection is handled by ChunkTracker in
         // torrent.rs, not by the buffer pool.
         let key = (info_hash, piece);
-        self.pool.lock().unwrap().write_block(key, begin, data, 0);
-        self.stats.lock().unwrap().write_bytes += len as u64;
+        self.pool.lock().write_block(key, begin, data, 0);
+        self.stats.lock().write_bytes += len as u64;
         Ok(())
     }
 
@@ -314,14 +315,14 @@ impl DiskIoBackend for PosixDiskIo {
 
         // 1. Check buffer pool (Writing entries + Cached entries)
         if !volatile {
-            let mut pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock();
             if let Some(data) = pool.read_block(key, begin, length as usize) {
                 drop(pool);
-                self.stats.lock().unwrap().cache_hits += 1;
+                self.stats.lock().cache_hits += 1;
                 return Ok(data);
             }
         }
-        self.stats.lock().unwrap().cache_misses += 1;
+        self.stats.lock().cache_misses += 1;
 
         // 2. Read full piece from storage and cache it (unless volatile)
         let storage = self.get_storage(info_hash)?;
@@ -329,9 +330,9 @@ impl DiskIoBackend for PosixDiskIo {
             match storage.read_piece(piece) {
                 Ok(piece_data) => {
                     let piece_bytes = Bytes::from(piece_data);
-                    self.stats.lock().unwrap().read_bytes += piece_bytes.len() as u64;
+                    self.stats.lock().read_bytes += piece_bytes.len() as u64;
 
-                    let mut pool = self.pool.lock().unwrap();
+                    let mut pool = self.pool.lock();
                     pool.prefetch_piece(key, piece_bytes.clone());
                     drop(pool);
 
@@ -352,7 +353,7 @@ impl DiskIoBackend for PosixDiskIo {
         // 3. Volatile path or fallback: read just the requested chunk
         let data = storage.read_chunk(piece, begin, length)?;
         let bytes = Bytes::from(data);
-        self.stats.lock().unwrap().read_bytes += bytes.len() as u64;
+        self.stats.lock().read_bytes += bytes.len() as u64;
         Ok(bytes)
     }
 
@@ -360,7 +361,7 @@ impl DiskIoBackend for PosixDiskIo {
         self.flush_piece(info_hash, piece)?;
         let storage = self.get_storage(info_hash)?;
         let data = storage.read_piece(piece)?;
-        self.stats.lock().unwrap().read_bytes += data.len() as u64;
+        self.stats.lock().read_bytes += data.len() as u64;
         Ok(data)
     }
 
@@ -372,7 +373,7 @@ impl DiskIoBackend for PosixDiskIo {
         // hash_piece is only called after ChunkTracker confirms the piece is
         // complete, so all blocks should be present.
         let cached_data = {
-            let mut pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock();
             pool.take_all_blocks(key)
         };
 
@@ -382,9 +383,9 @@ impl DiskIoBackend for PosixDiskIo {
                 // Hash pass: flush to disk + promote to read cache.
                 let storage = self.get_storage(info_hash)?;
                 storage.write_chunk(piece, 0, &data)?;
-                self.stats.lock().unwrap().write_bytes += data.len() as u64;
+                self.stats.lock().write_bytes += data.len() as u64;
 
-                let mut pool = self.pool.lock().unwrap();
+                let mut pool = self.pool.lock();
                 pool.promote_to_cached(key, Bytes::from(data));
                 return Ok(true);
             }
@@ -403,7 +404,7 @@ impl DiskIoBackend for PosixDiskIo {
 
         // Try hash from cache (same pattern as hash_piece but SHA-256).
         let cached_data = {
-            let mut pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock();
             pool.take_all_blocks(key)
         };
 
@@ -412,9 +413,9 @@ impl DiskIoBackend for PosixDiskIo {
             if hash == *expected {
                 let storage = self.get_storage(info_hash)?;
                 storage.write_chunk(piece, 0, &data)?;
-                self.stats.lock().unwrap().write_bytes += data.len() as u64;
+                self.stats.lock().write_bytes += data.len() as u64;
 
-                let mut pool = self.pool.lock().unwrap();
+                let mut pool = self.pool.lock();
                 pool.promote_to_cached(key, Bytes::from(data));
                 return Ok(true);
             }
@@ -439,12 +440,12 @@ impl DiskIoBackend for PosixDiskIo {
     }
 
     fn clear_piece(&self, info_hash: Id20, piece: u32) {
-        self.pool.lock().unwrap().clear_piece((info_hash, piece));
+        self.pool.lock().clear_piece((info_hash, piece));
     }
 
     fn flush_piece(&self, info_hash: Id20, piece: u32) -> crate::Result<()> {
         let blocks = {
-            let mut pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock();
             match pool.flush_piece((info_hash, piece)) {
                 Some(b) => b,
                 None => return Ok(()),
@@ -459,7 +460,7 @@ impl DiskIoBackend for PosixDiskIo {
 
     fn flush_all(&self) -> crate::Result<()> {
         let all_blocks = {
-            let mut pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock();
             pool.flush_all()
         };
         for ((info_hash, piece), blocks) in all_blocks {
@@ -472,13 +473,13 @@ impl DiskIoBackend for PosixDiskIo {
     }
 
     fn cached_pieces(&self, info_hash: Id20) -> Vec<u32> {
-        let pool = self.pool.lock().unwrap();
+        let pool = self.pool.lock();
         pool.hot_pieces(info_hash)
     }
 
     fn stats(&self) -> DiskIoStats {
-        let mut s = self.stats.lock().unwrap().clone();
-        let pool = self.pool.lock().unwrap();
+        let mut s = self.stats.lock().clone();
+        let pool = self.pool.lock();
         let ps = pool.stats();
         s.write_buffer_bytes = ps.write_buffer_bytes;
         s.read_cache_bytes = ps.read_cache_bytes;
@@ -500,7 +501,7 @@ impl DiskIoBackend for PosixDiskIo {
         let storage = self.get_storage(info_hash)?;
         storage.write_chunk_vectored(piece, begin, s0, s1)?;
         let total = (s0.len() + s1.len()) as u64;
-        self.stats.lock().unwrap().write_bytes += total;
+        self.stats.lock().write_bytes += total;
         Ok(())
     }
 }
@@ -530,7 +531,6 @@ impl MmapDiskIo {
     fn get_storage(&self, info_hash: Id20) -> crate::Result<Arc<dyn TorrentStorage>> {
         self.storages
             .read()
-            .unwrap()
             .get(&info_hash)
             .cloned()
             .ok_or_else(|| {
@@ -554,11 +554,11 @@ impl DiskIoBackend for MmapDiskIo {
     }
 
     fn register(&self, info_hash: Id20, storage: Arc<dyn TorrentStorage>) {
-        self.storages.write().unwrap().insert(info_hash, storage);
+        self.storages.write().insert(info_hash, storage);
     }
 
     fn unregister(&self, info_hash: Id20) {
-        self.storages.write().unwrap().remove(&info_hash);
+        self.storages.write().remove(&info_hash);
     }
 
     fn write_chunk(
@@ -572,7 +572,7 @@ impl DiskIoBackend for MmapDiskIo {
         let len = data.len();
         let storage = self.get_storage(info_hash)?;
         storage.write_chunk(piece, begin, &data)?;
-        self.stats.lock().unwrap().write_bytes += len as u64;
+        self.stats.lock().write_bytes += len as u64;
         Ok(())
     }
 
@@ -587,14 +587,14 @@ impl DiskIoBackend for MmapDiskIo {
         let storage = self.get_storage(info_hash)?;
         let data = storage.read_chunk(piece, begin, length)?;
         let bytes = Bytes::from(data);
-        self.stats.lock().unwrap().read_bytes += bytes.len() as u64;
+        self.stats.lock().read_bytes += bytes.len() as u64;
         Ok(bytes)
     }
 
     fn read_piece(&self, info_hash: Id20, piece: u32) -> crate::Result<Vec<u8>> {
         let storage = self.get_storage(info_hash)?;
         let data = storage.read_piece(piece)?;
-        self.stats.lock().unwrap().read_bytes += data.len() as u64;
+        self.stats.lock().read_bytes += data.len() as u64;
         Ok(data)
     }
 
@@ -638,7 +638,7 @@ impl DiskIoBackend for MmapDiskIo {
     }
 
     fn stats(&self) -> DiskIoStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().clone()
     }
 
     fn write_block_direct(
@@ -652,7 +652,7 @@ impl DiskIoBackend for MmapDiskIo {
         let storage = self.get_storage(info_hash)?;
         storage.write_chunk_vectored(piece, begin, s0, s1)?;
         let total = (s0.len() + s1.len()) as u64;
-        self.stats.lock().unwrap().write_bytes += total;
+        self.stats.lock().write_bytes += total;
         Ok(())
     }
 }

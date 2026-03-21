@@ -153,6 +153,7 @@ pub(crate) trait PeerConnectionHandler: Send + 'static {
         lengths: torrent_core::Lengths,
         block_maps: Option<Arc<crate::piece_reservation::BlockMaps>>,
         steal_candidates: Option<Arc<crate::piece_reservation::StealCandidates>>,
+        piece_write_guards: Option<Arc<crate::piece_reservation::PieceWriteGuards>>,
     );
 
     /// Handle `UpdateNumPieces` — resizes bitfield and replays deferred

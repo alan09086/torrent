@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use memmap2::MmapMut;
 
@@ -63,8 +63,8 @@ impl MmapStorage {
     }
 
     /// Open (or return cached) mmap for the given file index.
-    fn open_mmap(&self, index: usize) -> Result<std::sync::MutexGuard<'_, Option<MmapMut>>> {
-        let mut guard = self.mmaps[index].lock().unwrap();
+    fn open_mmap(&self, index: usize) -> Result<parking_lot::MutexGuard<'_, Option<MmapMut>>> {
+        let mut guard = self.mmaps[index].lock();
         if guard.is_none() {
             let full = self.base_dir.join(&self.file_paths[index]);
             let f = File::options().read(true).write(true).open(&full)?;

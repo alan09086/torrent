@@ -80,7 +80,6 @@ pub(crate) async fn peer_adder_task(
         }
         if ban_manager
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .is_banned(&addr.ip())
         {
             trace!(%addr, "peer_adder: banned, skipping");
@@ -88,7 +87,6 @@ pub(crate) async fn peer_adder_task(
         }
         if ip_filter
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .is_blocked(addr.ip())
         {
             trace!(%addr, "peer_adder: IP-filtered, skipping");
@@ -143,13 +141,13 @@ mod tests {
     use crate::ip_filter::IpFilter;
 
     fn test_ban_manager() -> SharedBanManager {
-        Arc::new(std::sync::RwLock::new(
+        Arc::new(parking_lot::RwLock::new(
             BanManager::new(BanConfig::default()),
         ))
     }
 
     fn test_ip_filter() -> SharedIpFilter {
-        Arc::new(std::sync::RwLock::new(IpFilter::new()))
+        Arc::new(parking_lot::RwLock::new(IpFilter::new()))
     }
 
     fn test_addr(port: u16) -> SocketAddr {
@@ -276,7 +274,7 @@ mod tests {
         let (peer_tx, mut connect_rx, _, _, ban_manager, ..) = spawn_adder(sem);
 
         let addr = test_addr(6881);
-        ban_manager.write().unwrap().ban(addr.ip());
+        ban_manager.write().ban(addr.ip());
         peer_tx.send((addr, PeerSource::Tracker)).unwrap();
 
         let result = tokio::time::timeout(Duration::from_millis(100), connect_rx.recv()).await;
@@ -316,7 +314,7 @@ mod tests {
 
         let addr = test_addr(6881);
         // Block the IP range
-        ip_filter.write().unwrap().add_rule(
+        ip_filter.write().add_rule(
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 255)),
             1,

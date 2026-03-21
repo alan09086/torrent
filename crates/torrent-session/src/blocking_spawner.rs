@@ -115,15 +115,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_spawner_semaphore_backpressure() {
         let spawner = BlockingSpawner::new(1);
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
         let s1 = spawner.clone();
         let o1 = Arc::clone(&order);
         let h1 = tokio::spawn(async move {
             s1.block_in_place(|| {
-                o1.lock().unwrap().push("first-start");
+                o1.lock().push("first-start");
                 std::thread::sleep(Duration::from_millis(80));
-                o1.lock().unwrap().push("first-end");
+                o1.lock().push("first-end");
             })
             .await;
         });
@@ -135,7 +135,7 @@ mod tests {
         let o2 = Arc::clone(&order);
         let h2 = tokio::spawn(async move {
             s2.block_in_place(|| {
-                o2.lock().unwrap().push("second-start");
+                o2.lock().push("second-start");
             })
             .await;
         });
@@ -143,7 +143,7 @@ mod tests {
         h1.await.unwrap();
         h2.await.unwrap();
 
-        let log = order.lock().unwrap();
+        let log = order.lock();
         // first-end must come before second-start (serialized by semaphore)
         let first_end = log.iter().position(|s| *s == "first-end").unwrap();
         let second_start = log.iter().position(|s| *s == "second-start").unwrap();

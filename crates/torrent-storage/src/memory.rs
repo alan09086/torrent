@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 use torrent_core::Lengths;
 
@@ -29,7 +29,7 @@ impl MemoryStorage {
 impl TorrentStorage for MemoryStorage {
     fn write_chunk(&self, piece: u32, begin: u32, data: &[u8]) -> Result<()> {
         let offset = self.lengths.piece_offset(piece) + begin as u64;
-        let mut buf = self.data.write().unwrap();
+        let mut buf = self.data.write();
 
         let start = offset as usize;
         let end = start + data.len();
@@ -47,7 +47,7 @@ impl TorrentStorage for MemoryStorage {
 
     fn read_chunk(&self, piece: u32, begin: u32, length: u32) -> Result<Vec<u8>> {
         let offset = self.lengths.piece_offset(piece) + begin as u64;
-        let buf = self.data.read().unwrap();
+        let buf = self.data.read();
 
         let start = offset as usize;
         let end = start + length as usize;

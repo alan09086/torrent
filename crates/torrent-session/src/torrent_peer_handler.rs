@@ -22,7 +22,8 @@ use crate::peer_codec::PeerWriter;
 use crate::peer_handler::{PeerConnectionHandler, PieceAction};
 use crate::pex::PexMessage;
 use crate::piece_reservation::{
-    AtomicPieceStates, AvailabilitySnapshot, BlockMaps, PeerDispatchState, StealCandidates,
+    AtomicPieceStates, AvailabilitySnapshot, BlockMaps, PeerDispatchState, PieceWriteGuards,
+    StealCandidates,
 };
 use crate::types::{BlockEntry, PeerCommand, PeerEvent};
 
@@ -155,6 +156,8 @@ pub(crate) struct TorrentPeerHandler {
 
     // Block maps for steal visibility
     peer_block_maps: Option<Arc<BlockMaps>>,
+    /// M120: Per-piece write guards to prevent steal/write races.
+    piece_write_guards: Option<Arc<PieceWriteGuards>>,
     block_length: u32,
 
     // Local copy of the peer's bitfield (avoids shared state lookup)
@@ -217,6 +220,7 @@ impl TorrentPeerHandler {
             dispatch_state: None,
             pending_snapshot: None,
             peer_block_maps: None,
+            piece_write_guards: None,
             block_length: torrent_core::DEFAULT_CHUNK_SIZE,
             local_bitfield: Bitfield::new(num_pieces),
             in_flight: 0,
@@ -829,6 +833,13 @@ impl PeerConnectionHandler for TorrentPeerHandler {
             bm.mark_received(index, block_idx);
         }
 
+        // M120: Acquire per-piece read guard to prevent steal during write.
+        // The guard is held for the duration of the pwrite and dropped after.
+        let _write_guard = self
+            .piece_write_guards
+            .as_ref()
+            .and_then(|pwg| pwg.read(index));
+
         // M110: Direct pwrite from ring buffer slices — no clone, no channel.
         if let Some((_, _, Some(ref disk), ref write_err_tx)) = self.reservation_state
             && let Err(e) = disk.write_block_direct(index, begin, data_0, data_1)
@@ -1058,6 +1069,7 @@ impl PeerConnectionHandler for TorrentPeerHandler {
         lengths: Lengths,
         block_maps: Option<Arc<BlockMaps>>,
         steal_candidates: Option<Arc<StealCandidates>>,
+        piece_write_guards: Option<Arc<PieceWriteGuards>>,
     ) {
         self.reservation_state = Some((atomic_states, piece_notify, disk_handle, write_error_tx));
         let mut ds = PeerDispatchState::new(availability_snapshot, lengths.clone());
@@ -1068,6 +1080,11 @@ impl PeerConnectionHandler for TorrentPeerHandler {
         }
         if let Some(sc) = steal_candidates {
             ds.set_steal_candidates(sc);
+        }
+        // M120: Wire up per-piece write guards
+        if let Some(pwg) = piece_write_guards {
+            self.piece_write_guards = Some(pwg.clone());
+            ds.set_piece_write_guards(pwg);
         }
         self.block_length = lengths.chunk_size();
         self.dispatch_state = Some(ds);
@@ -1376,6 +1393,7 @@ mod tests {
                 lengths,
                 None, // no block maps
                 None, // no steal candidates
+                None, // no piece write guards
             );
         }
 
