@@ -59,6 +59,7 @@ pub(crate) mod torrent_peer_handler;
 mod torrent_dispatch;
 mod torrent_peers;
 mod torrent_state;
+mod torrent_verify;
 pub(crate) mod tracker_manager;
 pub mod transport;
 pub(crate) mod url_guard;
