@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1709-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1725-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.121.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.122.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,709 tests. Zero clippy warnings.
+12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,725 tests. Zero clippy warnings.
 
 ---
 
@@ -181,6 +181,7 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.122.0 | io_uring full backend -- `IoUringDiskIo` wraps `PosixDiskIo`, overrides `write_block_direct()` with `Writev` SQEs via shared `Mutex<IoUring>` ring, pre-opened `RawFd` per file via `IoUringStorageState`, O_DIRECT support, `--io-uring`/`--direct-io`/`--uring-sq-depth` CLI flags, graceful fallback to `PosixDiskIo` | +16 tests (1725 total) |
 | 0.121.0 | TorrentActor decomposition + SessionHandle API surface -- 14,680-line torrent.rs split into `torrent_state.rs` (19 methods), `torrent_peers.rs` (14 methods), `torrent_dispatch.rs` (9 methods), `torrent_verify.rs` (15 methods); `TorrentSummary` type, `Serialize` on `InfoHashes`/`TorrentStats`, `SessionHandle::list_torrent_summaries()`/`add_magnet_uri()`/`add_torrent_bytes()` | +5 tests (1709 total), 60.5 MB/s mean (no regression) |
 | 0.120.0 | parking_lot migration -- replaced all `std::sync::Mutex`/`RwLock` with parking_lot in torrent-session/storage/sim (~100 sites), eliminated all poison handling; `TimedGuard<G>` diagnostic wrapper logging hot-path locks held longer than threshold (13 locks); `PieceWriteGuards` per-piece `RwLock<()>` array preventing steal/write races; `lock_warn_threshold_ms` setting (default 50ms, 0 = disabled) | +8 tests (1704 total), 57.9 MB/s mean, 60.3 MB/s median, 33 MiB RSS |
 | 0.119.0 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold -- `pwritev(2)` replaces seek+write_all in `write_chunk_vectored` (single atomic syscall, no seek), `PreallocateMode` enum (None/Sparse/Full) with `FALLOC_FL_KEEP_SIZE` for SSD-friendly extent reservation, `TorrentStorageAsync` trait behind `io-uring` feature flag (M122 scaffold) | +6 tests (1696 total) |
@@ -216,7 +217,8 @@ The performance work spans 24 milestones of profiler-driven optimization:
 
 | Version | Avg Speed | CPU Time | RSS | Ctx Switches | Page Faults | Notes |
 |---------|-----------|----------|-----|:------------:|:-----------:|-------|
-| **0.121.0** | 60.5 MB/s | — | — | — | — | TorrentActor decomposition, SessionHandle API surface |
+| **0.122.0** | — | — | — | — | — | io_uring full backend, IoUringDiskIo, O_DIRECT, CLI flags |
+| 0.121.0 | 60.5 MB/s | — | — | — | — | TorrentActor decomposition, SessionHandle API surface |
 | 0.120.0 | 57.9 MB/s | — | 33 MiB | — | — | parking_lot migration, TimedGuard, PieceWriteGuards |
 | 0.101.0 | 42.4 MB/s | 8.7s | 51 MiB | 131K | 44K | SmallVec, batch writer, streaming verify |
 | 0.100.0 | 36.4 MB/s | 17.9s | 46-73 MiB | 633K | 118K | Direct pwrite, deferred queue |
@@ -295,7 +297,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M121) focuses on performance optimization, DHT reliability, wire-level efficiency, and session architecture. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M122) focuses on performance optimization, DHT reliability, wire-level efficiency, session architecture, and io_uring I/O. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -324,6 +326,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | I/O Optimization | M119 | pwritev vectored writes, fallocate sparse files, io_uring async trait scaffold | Done |
 | Lock Hygiene | M120 | parking_lot migration (~100 sites), TimedGuard diagnostics, PieceWriteGuards | Done |
 | Actor Decomposition | M121 | TorrentActor split into 4 sub-modules, TorrentSummary type, SessionHandle API additions | Done |
+| io_uring Backend | M122 | IoUringDiskIo wraps PosixDiskIo, Writev SQEs, pre-opened RawFd, O_DIRECT, CLI flags, graceful fallback | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -332,7 +335,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,709 tests
+cargo test --workspace                      # 1,725 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 

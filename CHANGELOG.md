@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.122.0 | M122 | io_uring full backend — `IoUringDiskIo` wraps `PosixDiskIo`, overrides `write_block_direct()` with `Writev` SQEs via `Mutex<IoUring>`, pre-opened `RawFd` per file, O_DIRECT support, `--io-uring`/`--direct-io`/`--uring-sq-depth` CLI flags, graceful fallback to `PosixDiskIo` |
 | 0.121.0 | M121 | TorrentActor decomposition (14,680-line torrent.rs → 4 sub-modules: state/peers/dispatch/verify) + SessionHandle API surface (`TorrentSummary`, `Serialize` on `InfoHashes`/`TorrentStats`, `list_torrent_summaries()`/`add_magnet_uri()`/`add_torrent_bytes()`) — 60.5 MB/s mean, no regression |
 | 0.120.0 | M120 | parking_lot migration (~100 lock sites in session/storage/sim), `TimedGuard<G>` diagnostic wrapper (13 hot-path locks), `PieceWriteGuards` per-piece RwLock array, `lock_warn_threshold_ms` setting — 57.9 MB/s mean, 33 MiB RSS |
 | 0.119.0 | M119 | pwritev vectored writes + fallocate sparse files + io_uring async trait scaffold — `pwritev(2)` replaces seek+write_all, `PreallocateMode` enum with `FALLOC_FL_KEEP_SIZE`, `TorrentStorageAsync` trait behind feature flag |
@@ -75,6 +76,25 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 | 0.51.0 | M1–M51 | Full libtorrent-rasterbar parity — 27 BEPs, 12 crates |
 
 ## [Unreleased]
+
+## [0.122.0] - 2026-03-21
+
+### Added
+- io_uring disk I/O backend (`IoUringDiskIo`) wrapping `PosixDiskIo` — overrides
+  `write_block_direct()` with `Writev` SQEs via shared `Mutex<IoUring>` ring
+- `IoUringConfig` (sq_depth, enable_direct_io, batch_threshold) and
+  `IoUringStorageState` (pre-opened `RawFd` per file via `libc::open()`)
+- `TorrentStorage::filesystem_info()` trait method for io_uring fd management
+- `StorageMode::IoUring` variant (not cfg-gated — always available as config)
+- `--io-uring`, `--direct-io`, `--uring-sq-depth` CLI flags
+- Settings: `io_uring_sq_depth`, `io_uring_direct_io`, `io_uring_batch_threshold`
+- Factory integration: `create_backend_from_config()` tries io_uring when
+  `StorageMode::IoUring` is set, with graceful fallback to `PosixDiskIo`
+- 16 new tests (config, ring creation, write paths, delegation, stats, factory fallback)
+
+### Changed
+- `io-uring` feature flag propagated through torrent-storage → torrent-session →
+  torrent → torrent-cli (io-uring crate 0.7)
 
 ## [0.121.0] — 2026-03-20
 
