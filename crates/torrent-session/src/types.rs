@@ -1556,4 +1556,83 @@ mod tests {
         let cfg = TorrentConfig::from(&s);
         assert_eq!(cfg.peer_dscp, 0x2E);
     }
+
+    // ── M121: TorrentSummary and Serialize tests ──
+
+    #[test]
+    fn summary_from_stats() {
+        let v1_hash =
+            torrent_core::Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let mut stats = TorrentStats::default();
+        stats.info_hashes = torrent_core::InfoHashes::v1_only(v1_hash);
+        stats.name = "test torrent".to_string();
+        stats.state = TorrentState::Downloading;
+        stats.progress = 0.75;
+        stats.download_rate = 1_000_000;
+        stats.upload_rate = 500_000;
+        stats.total = 100_000_000;
+        stats.num_peers = 42;
+        stats.added_time = 1710900000;
+
+        let summary = super::TorrentSummary::from(&stats);
+        assert_eq!(summary.info_hash, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
+        assert_eq!(summary.name, "test torrent");
+        assert_eq!(summary.state, TorrentState::Downloading);
+        assert!((summary.progress - 0.75).abs() < f64::EPSILON);
+        assert_eq!(summary.download_rate, 1_000_000);
+        assert_eq!(summary.upload_rate, 500_000);
+        assert_eq!(summary.total_size, 100_000_000);
+        assert_eq!(summary.num_peers, 42);
+        assert_eq!(summary.added_time, 1710900000);
+    }
+
+    #[test]
+    fn summary_from_stats_v2_only() {
+        let v2_hash = torrent_core::Id32::from_hex(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .unwrap();
+        let mut stats = TorrentStats::default();
+        stats.info_hashes = torrent_core::InfoHashes::v2_only(v2_hash);
+        stats.name = "v2 torrent".to_string();
+
+        let summary = super::TorrentSummary::from(&stats);
+        // v2-only torrents have no v1 hash, so info_hash is empty
+        assert_eq!(summary.info_hash, "");
+        assert_eq!(summary.name, "v2 torrent");
+    }
+
+    #[test]
+    fn stats_serializable() {
+        let stats = TorrentStats::default();
+        let json = serde_json::to_string(&stats).expect("TorrentStats should serialize to JSON");
+        assert!(json.contains("\"state\""));
+        assert!(json.contains("\"info_hashes\""));
+        assert!(json.contains("\"download_rate\""));
+    }
+
+    #[test]
+    fn info_hashes_serializable() {
+        let v1 =
+            torrent_core::Id20::from_hex("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d").unwrap();
+        let ih = torrent_core::InfoHashes::v1_only(v1);
+        let json = serde_json::to_string(&ih).expect("InfoHashes should serialize to JSON");
+        // Id20 serializes as raw bytes (not hex) — verify JSON structure
+        assert!(json.contains("\"v1\""));
+        assert!(json.contains("\"v2\":null"));
+    }
+
+    #[test]
+    fn summary_serializable() {
+        let mut stats = TorrentStats::default();
+        stats.name = "serialize test".to_string();
+        stats.state = TorrentState::Seeding;
+        stats.progress = 1.0;
+        let summary = super::TorrentSummary::from(&stats);
+        let json =
+            serde_json::to_string(&summary).expect("TorrentSummary should serialize to JSON");
+        assert!(json.contains("\"name\":\"serialize test\""));
+        assert!(json.contains("\"state\":\"Seeding\""));
+        assert!(json.contains("\"progress\":1.0"));
+    }
 }
