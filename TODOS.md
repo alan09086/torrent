@@ -1,13 +1,17 @@
 # TODOS
 
-## Next: io_uring / Direct I/O (M101+)
+## Next: io_uring Full Backend (M122)
 
-With M100's deferred write queue in place, the next performance frontier is
-kernel-bypass I/O:
+M119 shipped the io_uring scaffold: `TorrentStorageAsync` trait behind the
+`io-uring` feature flag, `pwritev(2)` vectored writes, and `fallocate`
+sparse file pre-allocation. M122 will complete the full async I/O backend:
 
-- **`io_uring`** backend for Linux — batched async pwrite/pread, zero syscall overhead
+- **`io_uring` submission queue** — batched async pwrite/pread via io_uring SQ
 - **`O_DIRECT`** — bypass page cache for large sequential writes (reduces memory pressure)
-- **Configurable queue depth** — currently hard-coded at 512, tune per-workload
+- **Configurable queue depth** — tune submission queue depth per workload
+- **Async read path** — complement the existing async write path
 
-These build on the M100 architecture where each block is written via
-`storage.write_chunk()` from a dedicated writer task.
+## Decomposition / API (M121, in progress)
+
+- TorrentActor decomposed into 4 sub-modules (state, peers, dispatch, verify)
+- `TorrentSummary` + `SessionHandle` convenience API for future HTTP endpoints (M123+)
