@@ -2,13 +2,13 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1725-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1756-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.122.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.123.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
-12-crate modular workspace. 26 BEPs. ~78K lines of Rust. 1,725 tests. Zero clippy warnings.
+13-crate modular workspace. 26 BEPs. ~80K lines of Rust. 1,756 tests. Zero clippy warnings.
 
 ---
 
@@ -81,9 +81,11 @@ torrent-nat           PCP / NAT-PMP / UPnP IGD with auto-renewal
     |
 torrent               Public facade: ClientBuilder + prelude + unified Error
     |
+torrent-api           HTTP REST API (axum 0.8): 19 endpoints, JSON error mapping
+    |
 torrent-sim           In-process network simulation: SimNetwork, SimSwarm, virtual clock
     |
-torrent-cli           CLI binary: download, create, info subcommands
+torrent-cli           CLI binary: download, create, info subcommands (--api-port)
 ```
 
 ### Crate Details
@@ -100,8 +102,9 @@ torrent-cli           CLI binary: download, create, info subcommands
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD auto port mapping | 20 |
 | `torrent` | `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module | 59 |
+| `torrent-api` | HTTP REST API (axum 0.8): 19 endpoints, JSON errors, RFC 7396 settings merge-patch | 47 |
 | `torrent-sim` | SimClock, SimNetwork, SimTransport, SimSwarm for deterministic testing | 30 |
-| `torrent-cli` | CLI binary with progress display, SIGTERM handling, DHT persistence | 10 |
+| `torrent-cli` | CLI binary with progress display, SIGTERM handling, DHT persistence, `--api-port` | 10 |
 
 ### Session Features (`torrent-session`)
 
