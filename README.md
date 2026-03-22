@@ -21,6 +21,7 @@ A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** fe
 - **106-field runtime config** -- unified `Settings` struct with presets, JSON serialization, and live hot-reload
 - **In-process simulation** -- deterministic swarm testing via `SimNetwork` with virtual clock and configurable link properties
 - **Extension plugin system** -- trait-based BEP 10 extension interface
+- **HTTP REST API** -- 19-endpoint axum server for remote GUI/TUI control (`--api-port`)
 
 ---
 
@@ -43,9 +44,13 @@ torrent info my-file.torrent
 
 # List contents without downloading
 torrent download ./ubuntu.torrent --list
+
+# Download with HTTP API enabled on port 8080
+torrent download "magnet:?xt=urn:btih:..." -o /tmp/downloads --api-port 8080
+# Then: curl http://127.0.0.1:8080/api/v1/torrents
 ```
 
-**CLI flags:** `--seed`, `--no-dht`, `--quiet`, `--port`, `--workers`, `--no-pin-cores`, `--overwrite`, `--config` (JSON settings), `--initial-peers`, `--disable-trackers`, `--log-level`.
+**CLI flags:** `--seed`, `--no-dht`, `--quiet`, `--port`, `--workers`, `--no-pin-cores`, `--overwrite`, `--config` (JSON settings), `--initial-peers`, `--disable-trackers`, `--log-level`, `--api-port`, `--api-bind`.
 
 ### Library
 
@@ -178,12 +183,13 @@ Page f:  44K avg
 
 CPU parity with rqbit. Context switches reduced 63% (from 3x gap to 1.1x). Speed variance is DHT bootstrap latency, not a regression -- the 53.6 MB/s peak exceeds v0.100.0's average.
 
-### Optimization Stack (M85--M109)
+### Milestone History (M85--M123)
 
-The performance work spans 24 milestones of profiler-driven optimization:
+The post-parity work spans profiler-driven optimization, architecture improvements, and HTTP API:
 
 | Version | Optimization | Impact |
 |---------|-------------|--------|
+| 0.123.0 | HTTP REST API -- new `torrent-api` crate (axum 0.8), 19 endpoints (torrent CRUD, session stats/settings/shutdown, peers/trackers/files/ban), `ApiError`→HTTP status mapping, RFC 7396 JSON merge-patch for settings, CLI `--api-port`/`--api-bind` flags, `Serialize` on `PeerInfo`/`TorrentInfo`/`FileInfo`/`TrackerInfo`/etc. | +47 tests (1756 total) |
 | 0.122.0 | io_uring full backend -- `IoUringDiskIo` wraps `PosixDiskIo`, overrides `write_block_direct()` with `Writev` SQEs via shared `Mutex<IoUring>` ring, pre-opened `RawFd` per file via `IoUringStorageState`, O_DIRECT support, `--io-uring`/`--direct-io`/`--uring-sq-depth` CLI flags, graceful fallback to `PosixDiskIo` | +16 tests (1725 total) |
 | 0.121.0 | TorrentActor decomposition + SessionHandle API surface -- 14,680-line torrent.rs split into `torrent_state.rs` (19 methods), `torrent_peers.rs` (14 methods), `torrent_dispatch.rs` (9 methods), `torrent_verify.rs` (15 methods); `TorrentSummary` type, `Serialize` on `InfoHashes`/`TorrentStats`, `SessionHandle::list_torrent_summaries()`/`add_magnet_uri()`/`add_torrent_bytes()` | +5 tests (1709 total), 60.5 MB/s mean (no regression) |
 | 0.120.0 | parking_lot migration -- replaced all `std::sync::Mutex`/`RwLock` with parking_lot in torrent-session/storage/sim (~100 sites), eliminated all poison handling; `TimedGuard<G>` diagnostic wrapper logging hot-path locks held longer than threshold (13 locks); `PieceWriteGuards` per-piece `RwLock<()>` array preventing steal/write races; `lock_warn_threshold_ms` setting (default 50ms, 0 = disabled) | +8 tests (1704 total), 57.9 MB/s mean, 60.3 MB/s median, 33 MiB RSS |
@@ -300,7 +306,7 @@ The default crypto backend is **AWS-LC** (`aws-lc-rs`). Alternative backends can
 
 ## Roadmap
 
-All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M122) focuses on performance optimization, DHT reliability, wire-level efficiency, session architecture, and io_uring I/O. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
+All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M55--M123) focuses on performance optimization, DHT reliability, wire-level efficiency, session architecture, io_uring I/O, and HTTP API. See [docs/plans/](docs/plans/) for the full roadmap and per-milestone implementation plans.
 
 | Phase | Milestones | Focus | Status |
 |-------|-----------|-------|:------:|
@@ -330,6 +336,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Lock Hygiene | M120 | parking_lot migration (~100 sites), TimedGuard diagnostics, PieceWriteGuards | Done |
 | Actor Decomposition | M121 | TorrentActor split into 4 sub-modules, TorrentSummary type, SessionHandle API additions | Done |
 | io_uring Backend | M122 | IoUringDiskIo wraps PosixDiskIo, Writev SQEs, pre-opened RawFd, O_DIRECT, CLI flags, graceful fallback | Done |
+| HTTP REST API | M123 | `torrent-api` crate (axum 0.8), 19 endpoints, JSON errors, RFC 7396 merge-patch, `--api-port` CLI | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
@@ -338,7 +345,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 ## Testing
 
 ```bash
-cargo test --workspace                      # 1,725 tests
+cargo test --workspace                      # 1,756 tests
 cargo clippy --workspace -- -D warnings     # Zero warnings
 ```
 

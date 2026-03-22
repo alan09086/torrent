@@ -78,6 +78,31 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 ## [Unreleased]
 
+## [0.123.0] - 2026-03-21
+
+### Added
+- New `torrent-api` crate — HTTP REST API (axum 0.8) with 19 endpoints for remote
+  GUI/TUI control of the engine
+- Torrent CRUD endpoints: GET/POST `/torrents`, GET/DELETE `/torrents/{hash}`,
+  POST `/torrents/{hash}/pause`, POST `/torrents/{hash}/resume`
+- Session endpoints: GET `/session/stats`, GET `/session/counters` (70-entry metric
+  array), GET/PATCH `/session/settings`, POST `/session/shutdown`
+- Extended endpoints: GET `/torrents/{hash}/info`, `/peers`, `/trackers`,
+  POST `/torrents/{hash}/reannounce`, PATCH file priority, peer ban/unban
+- `ApiError` type with automatic `From<session::Error>` mapping to HTTP status codes
+  (404/409/400/503/500) and consistent `{"error", "code"}` JSON responses
+- RFC 7396 JSON Merge Patch for PATCH `/session/settings`
+- `ApiServer` with `bind()`/`run()`/`local_addr()` lifecycle
+- `ApiConfig` struct (port + bind address) — separate from session `Settings`
+- CLI flags: `--api-port` (default 0 = disabled), `--api-bind` (default 127.0.0.1)
+- `api` feature flag on `torrent-cli` (default on, gating `torrent-api` dep)
+- `Serialize` derive added to `PeerInfo`, `TorrentInfo`, `FileInfo`, `PartialPieceInfo`,
+  `FileStatus`, `FileMode`, `TrackerInfo`, `TrackerStatus` in torrent-session
+- 25 integration tests (Router::oneshot, no TCP server), 21 unit tests, 1 doctest
+
+### Changed
+- Workspace now has 13 crates (was 12)
+
 ## [0.122.0] - 2026-03-21
 
 ### Added
