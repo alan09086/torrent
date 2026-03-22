@@ -1,5 +1,6 @@
 //! HTTP route definitions for the torrent REST API.
 
+pub mod session;
 pub mod torrents;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ pub fn build_router(session: SessionHandle) -> Router {
     let state: AppState = Arc::new(session);
 
     Router::new()
+        // -- Torrent routes --
         .route(
             "/api/v1/torrents",
             get(torrents::list_torrents).post(torrents::add_torrent),
@@ -35,5 +37,13 @@ pub fn build_router(session: SessionHandle) -> Router {
             "/api/v1/torrents/{hash}/resume",
             post(torrents::resume_torrent),
         )
+        // -- Session routes --
+        .route("/api/v1/session/stats", get(session::get_stats))
+        .route("/api/v1/session/counters", get(session::get_counters))
+        .route(
+            "/api/v1/session/settings",
+            get(session::get_settings).patch(session::patch_settings),
+        )
+        .route("/api/v1/session/shutdown", post(session::shutdown))
         .with_state(state)
 }
