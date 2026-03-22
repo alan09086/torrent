@@ -5,10 +5,14 @@
 //! with optional query parameters to configure the alert category mask and
 //! stats heartbeat interval.
 
-use axum::extract::ws::{WebSocket, WebSocketUpgrade};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
-use torrent::session::{MetricKind, SessionHandle, session_stats_metrics};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time::{Duration, interval};
+use torrent::session::{AlertCategory, MetricKind, SessionHandle, session_stats_metrics};
 
 use super::AppState;
 
@@ -102,7 +106,10 @@ pub fn parse_mask(s: &str) -> Option<u32> {
         return None;
     }
 
-    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         u32::from_str_radix(hex, 16).ok()
     } else if trimmed.chars().all(|c| c.is_ascii_hexdigit())
         && trimmed.chars().any(|c| c.is_ascii_alphabetic())
@@ -126,9 +133,9 @@ pub fn build_counters_map(session: &SessionHandle) -> serde_json::Map<String, se
     let mut map = serde_json::Map::with_capacity(metrics.len());
     for (metric, &value) in metrics.iter().zip(values.iter()) {
         let json_value = match metric.kind {
-            MetricKind::Counter | MetricKind::Gauge => serde_json::Value::Number(
-                serde_json::Number::from(value),
-            ),
+            MetricKind::Counter | MetricKind::Gauge => {
+                serde_json::Value::Number(serde_json::Number::from(value))
+            }
         };
         map.insert(metric.name.to_owned(), json_value);
     }
@@ -171,13 +178,150 @@ pub async fn ws_events(
     ws.on_upgrade(move |socket| handle_ws(socket, session, mask, interval_ms))
 }
 
-/// WebSocket connection handler (stub — full implementation in Task 2).
-async fn handle_ws(
-    _socket: WebSocket,
-    _session: AppState,
-    _mask: u32,
-    _interval_ms: u64,
-) {
-    // Stub: connection is accepted and immediately dropped.
-    // The full event-forwarding loop will be implemented in Task 2.
+/// Outcome of a single `select!` iteration.
+///
+/// Separating the decision from the I/O lets us avoid holding `&mut socket`
+/// across await points inside the `select!` macro.
+enum LoopAction {
+    /// Serialize and send a [`WsMessage`] to the client.
+    Send(WsMessage),
+    /// Continue the loop without sending anything.
+    Continue,
+    /// Terminate the loop (client disconnected or broadcast closed).
+    Break,
+}
+
+/// WebSocket connection handler.
+///
+/// Runs a three-arm `select!` loop that:
+/// 1. Forwards session alerts matching the client's category mask.
+/// 2. Sends periodic stats heartbeats (if enabled).
+/// 3. Processes client commands (`set_mask`, `get_stats`).
+///
+/// The loop terminates when the client sends a close frame, the
+/// connection errors, or the session's broadcast channel is closed.
+async fn handle_ws(mut socket: WebSocket, session: AppState, initial_mask: u32, interval_ms: u64) {
+    let mut alert_rx = session.subscribe();
+
+    let mask = AtomicU32::new(initial_mask);
+
+    // Use u64::MAX duration when heartbeat is disabled (interval_ms == 0).
+    // The `if interval_ms > 0` guard on the select! arm prevents it from
+    // ever firing, but we still need a valid Interval instance.
+    let mut heartbeat = interval(if interval_ms > 0 {
+        Duration::from_millis(interval_ms)
+    } else {
+        Duration::from_millis(u64::MAX)
+    });
+    // Consume the immediate first tick so the first heartbeat fires
+    // after one full interval.
+    heartbeat.tick().await;
+
+    tracing::debug!(
+        initial_mask = format_args!("0x{initial_mask:X}"),
+        interval_ms,
+        "websocket event stream connected",
+    );
+
+    loop {
+        let action = tokio::select! {
+            alert_result = alert_rx.recv() => {
+                match alert_result {
+                    Ok(alert) => {
+                        let current_mask = mask.load(Ordering::Relaxed);
+                        let filter = AlertCategory::from_bits_truncate(current_mask);
+                        if alert.category().intersects(filter) {
+                            let category = format_category(alert.category());
+                            LoopAction::Send(WsMessage::Alert { alert, category })
+                        } else {
+                            LoopAction::Continue
+                        }
+                    }
+                    Err(RecvError::Lagged(dropped)) => {
+                        tracing::debug!(dropped, "websocket client lagged");
+                        LoopAction::Send(WsMessage::Lagged { dropped })
+                    }
+                    Err(RecvError::Closed) => {
+                        tracing::debug!("alert broadcast closed, terminating websocket");
+                        LoopAction::Break
+                    }
+                }
+            }
+
+            _ = heartbeat.tick(), if interval_ms > 0 => {
+                let counters = build_counters_map(&session);
+                LoopAction::Send(WsMessage::Stats { counters })
+            }
+
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_client_text(&text, &mask, &session)
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::debug!("websocket client disconnected");
+                        LoopAction::Break
+                    }
+                    Some(Ok(_)) => {
+                        // Binary, Ping, Pong — ignore (pings are auto-responded by axum).
+                        LoopAction::Continue
+                    }
+                    Some(Err(err)) => {
+                        tracing::debug!(%err, "websocket receive error");
+                        LoopAction::Break
+                    }
+                }
+            }
+        };
+
+        match action {
+            LoopAction::Send(ws_msg) => {
+                let json = match serde_json::to_string(&ws_msg) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        tracing::debug!(%err, "failed to serialize websocket message");
+                        continue;
+                    }
+                };
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    // Send failed — client disconnected.
+                    break;
+                }
+            }
+            LoopAction::Continue => {}
+            LoopAction::Break => break,
+        }
+    }
+}
+
+/// Process a text message from the client as a [`WsCommand`].
+///
+/// Returns the appropriate [`LoopAction`] — either a stats response
+/// for `GetStats`, a mask update for `SetMask`, or a no-op if parsing fails.
+fn handle_client_text(text: &str, mask: &AtomicU32, session: &SessionHandle) -> LoopAction {
+    match serde_json::from_str::<WsCommand>(text) {
+        Ok(WsCommand::SetMask { mask: new_mask_str }) => {
+            if let Some(new_mask) = parse_mask(&new_mask_str) {
+                mask.store(new_mask, Ordering::Relaxed);
+                tracing::debug!(
+                    mask = format_args!("0x{new_mask:X}"),
+                    "websocket mask updated",
+                );
+            } else {
+                tracing::debug!(
+                    raw = %new_mask_str,
+                    "websocket set_mask: invalid mask value",
+                );
+            }
+            LoopAction::Continue
+        }
+        Ok(WsCommand::GetStats) => {
+            let counters = build_counters_map(session);
+            LoopAction::Send(WsMessage::Stats { counters })
+        }
+        Err(err) => {
+            tracing::debug!(%err, "websocket: ignoring unparseable client message");
+            LoopAction::Continue
+        }
+    }
 }
