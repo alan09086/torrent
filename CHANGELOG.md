@@ -8,6 +8,7 @@ Versioning: `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
 | Version | Milestone | Description |
 |---------|-----------|-------------|
+| 0.124.0 | M124 | WebSocket Event Stream — `WS /api/v1/events` endpoint streams session alerts and stats heartbeats via JSON-framed WebSocket, `AlertCategory` hex bitmask filtering (query param + runtime `set_mask` command), configurable heartbeat interval, `get_stats` on-demand command, broadcast lag notification, 12 new tests |
 | 0.123.0 | M123 | HTTP REST API — new `torrent-api` crate (axum 0.8), 19 endpoints (torrent CRUD, session stats/settings/shutdown, peers/trackers/files/ban), JSON error mapping, RFC 7396 settings merge-patch, CLI `--api-port`/`--api-bind` flags, 47 new tests |
 | 0.122.0 | M122 | io_uring full backend — `IoUringDiskIo` wraps `PosixDiskIo`, overrides `write_block_direct()` with `Writev` SQEs via `Mutex<IoUring>`, pre-opened `RawFd` per file, O_DIRECT support, `--io-uring`/`--direct-io`/`--uring-sq-depth` CLI flags, graceful fallback to `PosixDiskIo` |
 | 0.121.0 | M121 | TorrentActor decomposition (14,680-line torrent.rs → 4 sub-modules: state/peers/dispatch/verify) + SessionHandle API surface (`TorrentSummary`, `Serialize` on `InfoHashes`/`TorrentStats`, `list_torrent_summaries()`/`add_magnet_uri()`/`add_torrent_bytes()`) — 60.5 MB/s mean, no regression |

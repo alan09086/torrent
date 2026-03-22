@@ -2,9 +2,9 @@
 
 A from-scratch Rust BitTorrent engine targeting full **libtorrent-rasterbar** feature parity.
 
-[![Tests](https://img.shields.io/badge/tests-1756-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1768-brightgreen)](#testing)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-0.123.0-blue)](#versioning)
+[![Version](https://img.shields.io/badge/version-0.124.0-blue)](#versioning)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-orange)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-red)](#building)
 
@@ -86,7 +86,7 @@ torrent-nat           PCP / NAT-PMP / UPnP IGD with auto-renewal
     |
 torrent               Public facade: ClientBuilder + prelude + unified Error
     |
-torrent-api           HTTP REST API (axum 0.8): 19 endpoints, JSON error mapping
+torrent-api           HTTP REST API (axum 0.8): 19 endpoints + WebSocket event stream
     |
 torrent-sim           In-process network simulation: SimNetwork, SimSwarm, virtual clock
     |
@@ -107,7 +107,7 @@ torrent-cli           CLI binary: download, create, info subcommands (--api-port
 | `torrent-utp` | uTP (BEP 29) with LEDBAT congestion, SACK, retransmission | 24 |
 | `torrent-nat` | PCP (RFC 6887) / NAT-PMP (RFC 6886) / UPnP IGD auto port mapping | 20 |
 | `torrent` | `ClientBuilder` fluent API, `AddTorrentParams`, unified `Error`, `prelude` module | 59 |
-| `torrent-api` | HTTP REST API (axum 0.8): 19 endpoints, JSON errors, RFC 7396 settings merge-patch | 47 |
+| `torrent-api` | HTTP REST API (axum 0.8): 19 endpoints + WebSocket event stream, JSON errors, RFC 7396 settings merge-patch | 59 |
 | `torrent-sim` | SimClock, SimNetwork, SimTransport, SimSwarm for deterministic testing | 30 |
 | `torrent-cli` | CLI binary with progress display, SIGTERM handling, DHT persistence, `--api-port` | 10 |
 
@@ -226,7 +226,8 @@ The post-parity work spans profiler-driven optimization, architecture improvemen
 
 | Version | Avg Speed | CPU Time | RSS | Ctx Switches | Page Faults | Notes |
 |---------|-----------|----------|-----|:------------:|:-----------:|-------|
-| **0.122.0** | — | — | — | — | — | io_uring full backend, IoUringDiskIo, O_DIRECT, CLI flags |
+| **0.124.0** | — | — | — | — | — | WebSocket event stream, alert filtering, stats heartbeat |
+| 0.122.0 | — | — | — | — | — | io_uring full backend, IoUringDiskIo, O_DIRECT, CLI flags |
 | 0.121.0 | 60.5 MB/s | — | — | — | — | TorrentActor decomposition, SessionHandle API surface |
 | 0.120.0 | 57.9 MB/s | — | 33 MiB | — | — | parking_lot migration, TimedGuard, PieceWriteGuards |
 | 0.101.0 | 42.4 MB/s | 8.7s | 51 MiB | 131K | 44K | SmallVec, batch writer, streaming verify |
@@ -337,6 +338,7 @@ All 51 libtorrent-rasterbar parity milestones are complete. Post-parity work (M5
 | Actor Decomposition | M121 | TorrentActor split into 4 sub-modules, TorrentSummary type, SessionHandle API additions | Done |
 | io_uring Backend | M122 | IoUringDiskIo wraps PosixDiskIo, Writev SQEs, pre-opened RawFd, O_DIRECT, CLI flags, graceful fallback | Done |
 | HTTP REST API | M123 | `torrent-api` crate (axum 0.8), 19 endpoints, JSON errors, RFC 7396 merge-patch, `--api-port` CLI | Done |
+| WebSocket Events | M124 | Real-time alert stream via WebSocket, category mask filtering, stats heartbeat, runtime `set_mask` | Done |
 
 **Versioning:** `0.X.0` = milestone MX. Non-milestone patches use `0.X.1`.
 
