@@ -14,7 +14,8 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-default = ["crypto-aws-lc"]
+default = ["crypto-aws-lc", "api"]
+api = ["dep:torrent-api"]
 crypto-ring = ["torrent/crypto-ring"]
 crypto-openssl = ["torrent/crypto-openssl"]
 crypto-aws-lc = ["torrent/crypto-aws-lc"]
@@ -22,6 +23,7 @@ io-uring = ["torrent/io-uring"]
 
 [dependencies]
 torrent = { path = "../torrent", default-features = false }
+torrent-api = { path = "../torrent-api", optional = true }
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 tokio = { workspace = true }

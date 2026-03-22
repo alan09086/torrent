@@ -16,6 +16,8 @@ pub struct DownloadOpts<'a> {
     pub port: u16,
     pub quiet: bool,
     pub settings: torrent::session::Settings,
+    pub api_port: u16,
+    pub api_bind: String,
 }
 
 pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
@@ -27,6 +29,8 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
         port,
         quiet,
         settings,
+        api_port,
+        api_bind,
     } = opts;
 
     let state_path = state_file_path();
@@ -54,6 +58,32 @@ pub async fn run(opts: DownloadOpts<'_>) -> anyhow::Result<()> {
 
     let session = builder.start().await?;
     let mut alerts = session.subscribe();
+
+    // Start HTTP API if configured
+    #[cfg(feature = "api")]
+    let _api_handle = if api_port > 0 {
+        let addr: std::net::SocketAddr = format!("{api_bind}:{api_port}")
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid API bind address: {e}"))?;
+        let server = torrent_api::ApiServer::bind(addr, session.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to bind API server: {e}"))?;
+        if !quiet {
+            eprintln!("API listening on http://{}", server.local_addr());
+        }
+        let handle = tokio::spawn(async move {
+            if let Err(e) = server.run().await {
+                eprintln!("API server error: {e}");
+            }
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
+    // Suppress unused-variable warning when the `api` feature is disabled.
+    #[cfg(not(feature = "api"))]
+    let _ = (&api_port, &api_bind);
 
     // Add torrent
     let info_hash = if source.starts_with("magnet:") {

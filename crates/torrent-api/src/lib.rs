@@ -24,6 +24,24 @@ pub mod routes;
 
 use std::net::SocketAddr;
 
+/// Configuration for the HTTP API server.
+#[derive(Debug, Clone)]
+pub struct ApiConfig {
+    /// TCP port to listen on (0 = disabled).
+    pub port: u16,
+    /// Bind address (default: `"127.0.0.1"`).
+    pub bind_address: String,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            bind_address: "127.0.0.1".to_string(),
+        }
+    }
+}
+
 use axum::Router;
 use tokio::net::TcpListener;
 use torrent::session::SessionHandle;

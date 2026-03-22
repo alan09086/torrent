@@ -68,6 +68,12 @@ enum Command {
         /// io_uring submission queue depth (default: 256)
         #[arg(long)]
         uring_sq_depth: Option<u32>,
+        /// HTTP API port (0 = disabled)
+        #[arg(long, default_value_t = 0)]
+        api_port: u16,
+        /// HTTP API bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        api_bind: String,
     },
     /// Create a .torrent file
     Create {
@@ -122,6 +128,8 @@ fn main() {
             io_uring,
             direct_io,
             uring_sq_depth,
+            api_port,
+            api_bind,
         } => {
             let mut settings = if let Some(ref config_path) = config {
                 let data = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
@@ -170,6 +178,8 @@ fn main() {
                 port,
                 quiet,
                 settings,
+                api_port,
+                api_bind,
             }));
 
             // Force-shutdown the runtime like rqbit does — kills any dangling
