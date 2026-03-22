@@ -1104,7 +1104,7 @@ pub(crate) enum TorrentCommand {
 }
 
 /// Per-peer details exported for client UI introspection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PeerInfo {
     /// Remote peer address (IP + port).
     pub addr: SocketAddr,
@@ -1141,7 +1141,7 @@ pub struct PeerInfo {
 }
 
 /// In-flight piece download status for the download queue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PartialPieceInfo {
     /// Index of the piece being downloaded.
     pub piece_index: u32,
@@ -1152,7 +1152,7 @@ pub struct PartialPieceInfo {
 }
 
 /// Info about a file within a torrent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileInfo {
     /// Relative path of the file within the torrent.
     pub path: PathBuf,
@@ -1161,7 +1161,7 @@ pub struct FileInfo {
 }
 
 /// Metadata about a torrent (available after metadata is fetched).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TorrentInfo {
     /// SHA-1 info hash of the torrent.
     pub info_hash: torrent_core::Id20,
@@ -1193,7 +1193,7 @@ pub struct SessionStats {
 }
 
 /// Whether a file in a torrent is open and its I/O access mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FileMode {
     /// File is open for reading only (e.g. seeding).
     ReadOnly,
@@ -1204,7 +1204,7 @@ pub enum FileMode {
 }
 
 /// Status of a single file within a torrent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileStatus {
     /// Whether the file is currently open.
     pub open: bool,

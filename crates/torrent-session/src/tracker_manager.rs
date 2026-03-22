@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tracing::{debug, warn};
 
 use torrent_core::{Id20, InfoHashes, TorrentMetaV1};
@@ -54,7 +55,7 @@ struct TrackerEntry {
 }
 
 /// Public tracker status (simplified view of internal TrackerState).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TrackerStatus {
     /// Tracker has not been contacted yet.
     NotContacted,
@@ -65,7 +66,7 @@ pub enum TrackerStatus {
 }
 
 /// Public info about a single tracker.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TrackerInfo {
     /// Tracker announce URL.
     pub url: String,
