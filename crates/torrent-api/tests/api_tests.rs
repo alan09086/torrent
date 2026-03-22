@@ -3,9 +3,14 @@
 //! Each test creates its own isolated session (no TCP server needed) and
 //! exercises the full request-response cycle via `Router::oneshot()`.
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tower::ServiceExt; // for oneshot()
 
 use torrent_api::routes::build_router;
@@ -637,4 +642,184 @@ async fn test_add_torrent_bytes_duplicate() {
 
     let v = json(&body);
     assert_eq!(v["code"], "DUPLICATE_TORRENT");
+}
+
+// ---------------------------------------------------------------------------
+// 6. WebSocket event stream
+// ---------------------------------------------------------------------------
+
+/// Start a real TCP-backed test server (needed for WebSocket tests).
+async fn start_test_server() -> (std::net::SocketAddr, torrent::session::SessionHandle) {
+    let session = test_session().await;
+    let server = torrent_api::ApiServer::bind(
+        "127.0.0.1:0".parse().expect("parse bind address"),
+        session.clone(),
+    )
+    .await
+    .expect("bind test server");
+    let addr = server.local_addr();
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+    (addr, session)
+}
+
+#[tokio::test]
+async fn test_ws_connect() {
+    let (addr, _session) = start_test_server().await;
+    let (ws, _response) =
+        connect_async(format!("ws://{addr}/api/v1/events?interval=0"))
+            .await
+            .expect("websocket upgrade should succeed");
+    drop(ws);
+}
+
+#[tokio::test]
+async fn test_ws_get_stats_command() {
+    let (addr, _session) = start_test_server().await;
+    let (mut ws, _response) =
+        connect_async(format!("ws://{addr}/api/v1/events?interval=0"))
+            .await
+            .expect("websocket connect");
+
+    // Send get_stats command.
+    ws.send(TungsteniteMessage::Text(
+        r#"{"type":"get_stats"}"#.into(),
+    ))
+    .await
+    .expect("send get_stats");
+
+    // Read the stats response.
+    let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for stats")
+        .expect("stream ended")
+        .expect("websocket error");
+
+    let text = msg.into_text().expect("expected text message");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+    assert_eq!(v["type"], "stats");
+    let counters = v["counters"].as_object().expect("counters should be object");
+    assert_eq!(counters.len(), 70, "should have exactly 70 counters");
+}
+
+#[tokio::test]
+async fn test_ws_heartbeat() {
+    let (addr, _session) = start_test_server().await;
+    let (mut ws, _response) =
+        connect_async(format!("ws://{addr}/api/v1/events?interval=100"))
+            .await
+            .expect("websocket connect");
+
+    // Heartbeat should arrive within 200ms (interval=100ms + margin).
+    let msg = tokio::time::timeout(Duration::from_millis(500), ws.next())
+        .await
+        .expect("timed out waiting for heartbeat")
+        .expect("stream ended")
+        .expect("websocket error");
+
+    let text = msg.into_text().expect("expected text message");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+    assert_eq!(v["type"], "stats", "heartbeat should be a stats message");
+}
+
+#[tokio::test]
+async fn test_ws_alert_delivery() {
+    let (addr, session) = start_test_server().await;
+    let (mut ws, _response) =
+        connect_async(format!("ws://{addr}/api/v1/events?interval=0"))
+            .await
+            .expect("websocket connect");
+
+    // Add a magnet URI which triggers TorrentAdded alert (STATUS category).
+    session
+        .add_magnet_uri("magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test")
+        .await
+        .expect("add magnet");
+
+    // Read messages until we find an alert or time out.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut found_alert = false;
+    while tokio::time::Instant::now() < deadline {
+        let result = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
+        match result {
+            Ok(Some(Ok(msg))) => {
+                if let Ok(text) = msg.into_text()
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+                    && v["type"] == "alert"
+                {
+                    found_alert = true;
+                    assert!(
+                        v.get("alert").is_some(),
+                        "alert message should have 'alert' field"
+                    );
+                    assert!(
+                        v.get("category").is_some(),
+                        "alert message should have 'category' field"
+                    );
+                    break;
+                }
+            }
+            Ok(Some(Err(e))) => panic!("websocket error: {e}"),
+            Ok(None) => panic!("stream ended before alert"),
+            Err(_) => break, // timeout
+        }
+    }
+    assert!(found_alert, "should have received a TorrentAdded alert");
+}
+
+#[tokio::test]
+async fn test_ws_mask_filters() {
+    let (addr, session) = start_test_server().await;
+    // Connect with PEER-only mask (0x004). STATUS alerts should be filtered.
+    let (mut ws, _response) =
+        connect_async(format!("ws://{addr}/api/v1/events?interval=0&mask=0x004"))
+            .await
+            .expect("websocket connect");
+
+    // Add a torrent — produces STATUS alert, which should be filtered.
+    session
+        .add_magnet_uri("magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test")
+        .await
+        .expect("add magnet");
+
+    // Should NOT receive any message within 300ms.
+    let result = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    assert!(
+        result.is_err(),
+        "should have timed out — STATUS alert should be filtered by PEER-only mask"
+    );
+}
+
+#[tokio::test]
+async fn test_ws_set_mask() {
+    let (addr, session) = start_test_server().await;
+    // Connect with ALL mask but disable heartbeats.
+    let (mut ws, _response) =
+        connect_async(format!("ws://{addr}/api/v1/events?interval=0&mask=0xFFF"))
+            .await
+            .expect("websocket connect");
+
+    // Send set_mask to PEER-only (0x004), filtering out STATUS.
+    ws.send(TungsteniteMessage::Text(
+        r#"{"type":"set_mask","mask":"0x004"}"#.into(),
+    ))
+    .await
+    .expect("send set_mask");
+
+    // Give the server a moment to process the set_mask command.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Add a torrent — produces STATUS alert which should now be filtered.
+    session
+        .add_magnet_uri("magnet:?xt=urn:btih:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d&dn=test")
+        .await
+        .expect("add magnet");
+
+    // Should NOT receive the STATUS alert.
+    let result = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    assert!(
+        result.is_err(),
+        "should have timed out — STATUS alert should be filtered after set_mask to PEER-only"
+    );
 }

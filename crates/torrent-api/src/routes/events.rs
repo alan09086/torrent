@@ -325,3 +325,52 @@ fn handle_client_text(text: &str, mask: &AtomicU32, session: &SessionHandle) -> 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mask_hex() {
+        assert_eq!(parse_mask("0xFFF"), Some(4095));
+    }
+
+    #[test]
+    fn parse_mask_hex_upper() {
+        assert_eq!(parse_mask("0X041"), Some(65));
+    }
+
+    #[test]
+    fn parse_mask_decimal() {
+        assert_eq!(parse_mask("4095"), Some(4095));
+    }
+
+    #[test]
+    fn parse_mask_invalid() {
+        assert_eq!(parse_mask("xyz"), None);
+    }
+
+    #[tokio::test]
+    async fn build_counters_map_has_70_entries() {
+        let session = torrent::ClientBuilder::new()
+            .listen_port(0)
+            .download_dir("/tmp")
+            .enable_dht(false)
+            .enable_lsd(false)
+            .enable_upnp(false)
+            .enable_natpmp(false)
+            .start()
+            .await
+            .expect("failed to start test session");
+        let map = build_counters_map(&session);
+        assert_eq!(map.len(), 70, "should have exactly 70 metric entries");
+    }
+
+    #[test]
+    fn lagged_serializes_correctly() {
+        let msg = WsMessage::Lagged { dropped: 42 };
+        let json = serde_json::to_value(&msg).expect("serialize WsMessage::Lagged");
+        assert_eq!(json["type"], "lagged");
+        assert_eq!(json["dropped"], 42);
+    }
+}
