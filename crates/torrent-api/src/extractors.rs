@@ -17,8 +17,10 @@ use crate::error::{ApiError, ApiResult};
 ///
 /// # Errors
 ///
-/// Returns [`ApiError`] (400 Bad Request) if the string is not valid hex,
-/// has an unexpected length, or is a 64-char SHA-256 hash (not yet supported).
+/// Returns [`ApiError`] (400 Bad Request) if the string is not valid hex or
+/// has an unexpected length.  Returns 501 Not Implemented for a well-formed
+/// 64-char SHA-256 hash, as session lookup from `Id32` to `Id20` is not yet
+/// supported.
 pub fn parse_info_hash(hash: &str) -> ApiResult<Id20> {
     match hash.len() {
         40 => Id20::from_hex(hash)
@@ -28,7 +30,7 @@ pub fn parse_info_hash(hash: &str) -> ApiResult<Id20> {
             // an Id32 to an Id20 without a session lookup.
             Id32::from_hex(hash)
                 .map_err(|_| ApiError::bad_request(format!("invalid SHA-256 info hash: {hash}")))?;
-            Err(ApiError::bad_request(
+            Err(ApiError::not_implemented(
                 "SHA-256 info hash lookup not yet supported",
             ))
         }
@@ -59,10 +61,10 @@ mod tests {
     }
 
     #[test]
-    fn valid_sha256_hex_returns_unsupported() {
+    fn valid_sha256_hex_returns_not_implemented() {
         let hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let err = parse_info_hash(hex).unwrap_err();
-        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.status, axum::http::StatusCode::NOT_IMPLEMENTED);
         assert!(err.message.contains("not yet supported"));
     }
 

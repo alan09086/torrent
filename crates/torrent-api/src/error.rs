@@ -45,6 +45,37 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    /// Create a 404 Not Found error.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "NOT_FOUND",
+            message: message.into(),
+        }
+    }
+
+    /// Create a 501 Not Implemented error.
+    ///
+    /// Use this when a valid request targets a feature that exists in the
+    /// protocol but has not yet been implemented (e.g. SHA-256 info hash
+    /// lookup).
+    pub fn not_implemented(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            code: "NOT_IMPLEMENTED",
+            message: message.into(),
+        }
+    }
+
+    /// Create a 500 Internal Server Error.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR",
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -69,6 +100,7 @@ impl From<torrent::session::Error> for ApiError {
             }
             Error::MetadataNotReady(_) => (StatusCode::NOT_FOUND, "METADATA_NOT_READY"),
             Error::Shutdown => (StatusCode::SERVICE_UNAVAILABLE, "SHUTTING_DOWN"),
+            Error::SessionAtCapacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "SESSION_AT_CAPACITY"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
 
