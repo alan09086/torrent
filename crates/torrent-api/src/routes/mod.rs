@@ -51,10 +51,7 @@ pub fn build_router(session: SessionHandle) -> Router {
             "/api/v1/torrents/{hash}/info",
             get(extended::get_torrent_info),
         )
-        .route(
-            "/api/v1/torrents/{hash}/peers",
-            get(extended::get_peers),
-        )
+        .route("/api/v1/torrents/{hash}/peers", get(extended::get_peers))
         .route(
             "/api/v1/torrents/{hash}/trackers",
             get(extended::get_trackers),
