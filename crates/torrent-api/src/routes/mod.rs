@@ -1,5 +1,6 @@
 //! HTTP route definitions for the torrent REST API.
 
+pub mod events;
 pub mod extended;
 pub mod session;
 pub mod torrents;
@@ -7,7 +8,7 @@ pub mod torrents;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{any, delete, get, patch, post};
 use torrent::session::SessionHandle;
 
 /// Shared application state passed to every handler via axum's `State` extractor.
@@ -68,5 +69,7 @@ pub fn build_router(session: SessionHandle) -> Router {
         .route("/api/v1/peers/banned", get(extended::get_banned_peers))
         .route("/api/v1/peers/ban", post(extended::ban_peer))
         .route("/api/v1/peers/ban/{ip}", delete(extended::unban_peer))
+        // -- WebSocket event stream --
+        .route("/api/v1/events", any(events::ws_events))
         .with_state(state)
 }
